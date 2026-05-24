@@ -459,9 +459,9 @@ An undocumented public function is a bug.
 Directive: Keep public behavior documented as part of the interface contract.
 
 Quick ref:
-- Keep public behavior documented as part of the interface contract.
-- An undocumented public function is a bug.
-- Documentation requirements should be machine-checked where practical.
+- Public docs must not include mailbox data, local machine paths, private credentials, OAuth client IDs, or production DSNs.
+- Source files must keep MIT SPDX headers with Blackcat Informatics copyright.
+- Runtime config examples must stay sanitized and loadable.
 
 #### Overview
 An undocumented public function is a bug. Docstrings are not optional
@@ -533,6 +533,9 @@ integrity when those rules are part of the engineering contract.
 If a repo has doc coverage or docstring hooks, they are authoritative,
 not
 advisory.
+
+#### Repo Addendum
+Gmeow is prepared for public release and future PyPI publication. Documentation, examples, generated agent surfaces, and test fixtures are part of the public contract and must remain free of personal mailbox data and local-only credentials.
 
 ## Output Discipline
 When explaining a fix, name the ETHOS principle, the concrete code change, and the verification evidence. Do not recommend weakening lint config or adding suppressions unless the ETHOS policy explicitly allows it.

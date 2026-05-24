@@ -1,0 +1,177 @@
+# SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
+# SPDX-License-Identifier: MIT
+
+style:
+  line_length: 140
+
+repo:
+  kind: python-service
+  profiles: []
+  protected_branch_work:
+    enabled: true
+  license:
+    spdx_identifier: MIT
+    copyright: 2026 Blackcat Informatics® Inc.
+    license_file: LICENSE
+    extensions:
+      - .py
+    exempt_prefixes:
+      - .git/
+      - .venv/
+      - coding-ethos/
+      - data/
+      - dist/
+      - build/
+    exempt_basenames: []
+    scan_lines: 5
+
+hooks:
+  output_format: auto
+  success_output: silent
+  parallel_groups: true
+  tool_timeout_seconds: 900
+  enabled_groups:
+    - syntax
+    - python-policy
+    - python-static
+    - docs
+    - security
+    - shell
+    - workflow
+    - python-quality
+    - ai
+    - commit-msg
+
+generated_config:
+  ci:
+    github_actions:
+      enabled: true
+      coding_ethos_path: coding-ethos
+      repo_root: .
+      gate_command: make check
+      sarif_path: coding-ethos.sarif
+      artifact_name: coding-ethos-audit
+      standalone_triggers: false
+      timeout_minutes: 30
+      sarif_category: policy
+    gitlab:
+      enabled: false
+
+code_intel:
+  exclude_paths:
+    - ".git/**"
+    - ".venv/**"
+    - "coding-ethos/**"
+    - "data/**"
+    - "dist/**"
+    - "build/**"
+    - ".coding-ethos/**"
+
+filesystem:
+  required_ignores:
+    enabled: true
+    paths:
+      - .code-ethos/cache/
+      - .coding-ethos/cache/
+      - .coding-ethos/code-intel.db
+      - .coding-ethos/hook-runs/
+      - .coding-ethos/lint-runs/
+      - .coding-ethos/prune-runs/
+      - .coding-ethos/state/
+      - config.toml
+      - data/
+      - dist/
+  pii_scrubber:
+    enabled: true
+    patterns:
+      - '/(home|Users)/[A-Za-z0-9._-]+/'
+      - '/tmp/tmp\.[A-Za-z0-9._-]+'
+    literals:
+      - "real-user@example.com"
+      - "real-project-gmail@"
+      - "real-hostname"
+      - "real-google-subject-id"
+      - "real-production-password"
+    exempt_prefixes:
+      - .git/
+      - coding-ethos/
+      - .coding-ethos/
+
+git:
+  signed_operations:
+    enabled: false
+  hook_bypass:
+    enabled: true
+  history_rewrite_prevention:
+    enabled: true
+  stash_blocked:
+    enabled: true
+  protected_submodule_update:
+    enabled: true
+    paths:
+      - coding-ethos
+  staged_admin_files:
+    enabled: true
+    basenames:
+      - Makefile
+      - pyproject.toml
+      - repo_config.yaml
+      - repo_ethos.yml
+    dirs:
+      - .github
+
+python:
+  uv_exclude_newer:
+    enabled: false
+  source_paths:
+    - src/gmeow
+    - scripts
+    - migrations
+    - main.py
+  test_paths:
+    - tests
+  stub_paths: []
+  extra_paths:
+    - src
+  venv_path: .
+  venv: .venv
+  module_docs:
+    source_docs_path: docs/SOURCE_DOCS.md
+    banned_doc_filenames: []
+  catch_and_silence:
+    enabled: true
+  security_patterns:
+    secret_patterns:
+      - sk-
+      - hf_
+      - token_
+      - "-----BEGIN PRIVATE KEY-----"
+    test_file_markers:
+      - tests
+
+shell:
+  dangerous_command:
+    enabled: true
+  background_git:
+    enabled: true
+  github_admin:
+    enabled: true
+  best_practices:
+    enabled: true
+    require_common_for_prefixes:
+      - scripts/
+
+proxy:
+  output_compression:
+    max_lines: 100
+    head_lines: 40
+    tail_lines: 40
+    max_tokens: 3000
+    head_tokens: 1200
+    tail_tokens: 1200
+    max_diagnostics: 20
+
+similarity:
+  enabled: true
+  structural_threshold: 0.82
+  min_symbol_lines: 8

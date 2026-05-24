@@ -1,0 +1,239 @@
+# SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
+# SPDX-License-Identifier: MIT
+
+repo:
+  name: Gmeow
+  overview: Local Gmail MCP and REST intelligence server with durable cache, semantic search, attachment CAS, and knowledge graph tooling.
+  commands:
+    install:
+      - make install
+    test:
+      - make test
+    lint:
+      - make -C coding-ethos parent-lint
+    check:
+      - make check
+  paths:
+    source: src/gmeow/
+    tests: tests/
+  notes:
+    - Treat `config.toml`, SOPS files, mailbox exports, and `data/` as local-only secrets/runtime data.
+    - Gmail actions are intentionally limited; do not add send, draft, trash, delete, or filter mutation endpoints without an explicit product decision.
+    - MCP responses default to TOON; JSON is an explicit agent choice.
+
+agent_notes:
+  codex:
+    - Prefer `make check` or narrower Makefile targets over direct tool invocations.
+    - Do not run tests against the production PostgreSQL database.
+    - Keep public examples sanitized and run `make release-check` after touching docs/config.
+  claude:
+    - Use compact MCP/thread outputs by default and request attachments only when needed.
+  gemini:
+    - Review graph, semantic-search, and archive changes for data-quality regressions and privacy leaks.
+
+principles:
+  overrides:
+    documentation-as-contract:
+      quick_ref:
+        - Public docs must not include mailbox data, local machine paths, private credentials, OAuth client IDs, or production DSNs.
+        - Source files must keep MIT SPDX headers with Blackcat Informatics copyright.
+        - Runtime config examples must stay sanitized and loadable.
+      append: |
+        Gmeow is prepared for public release and future PyPI publication. Documentation, examples, generated agent surfaces, and test fixtures are part of the public contract and must remain free of personal mailbox data and local-only credentials.
+    static-analysis-is-the-first-line-of-defense:
+      quick_ref:
+        - Use `make release-audit` for the full local gate.
+        - Use `make -C coding-ethos parent-lint` for coding-ethos policy lint.
+        - Keep parent lint scoped to production code; tests are verified by pytest.
+      append: |
+        Gmeow uses project-local Makefile targets as the stable command surface for agents and CI. Prefer those targets so uv, pytest, build, and release hygiene checks remain consistent.
+  additional:
+    - id: local-first-mailbox-authority
+      order: 910
+      title: Local-First Mailbox Authority
+      summary: Gmeow is a trusted local authority over one user's Gmail archive, not a hosted multi-tenant service.
+      directive: Preserve loopback-first operation, explicit local trust boundaries, and clear operator control over every authenticated Gmail capability.
+      tags:
+        - architecture
+        - security
+        - gmail
+        - mcp
+      quick_ref:
+        - Default to loopback-only unauthenticated access; require an explicit product decision before exposing remote access.
+        - Keep Gmail mutation capabilities narrow and visible.
+        - Do not add send, draft, trash, delete, or filter mutation endpoints as incidental helper work.
+        - Treat agents as powerful local operators whose access should be ergonomic but obvious.
+      merge_topics:
+        - local-first architecture
+        - Gmail authority
+        - MCP safety
+      agent_hints:
+        codex: Check `src/gmeow/app.py`, `src/gmeow/mcp_server.py`, and `src/gmeow/gmail.py` before changing exposed authority.
+        claude: Prefer read/search improvements over new mailbox mutations unless the requested operation is explicit.
+        gemini: Review endpoint changes for accidental remote exposure or new destructive Gmail capabilities.
+      sections:
+        - id: trust-boundary
+          kind: overview
+          title: Trust Boundary
+          summary: Local access is intentionally powerful.
+          body: |
+            Gmeow intentionally gives local agents broad read/search access to an authenticated Gmail mailbox. That tradeoff depends on the host being a trusted single-user system. Any change that weakens loopback binding, expands Gmail mutation, or hides mailbox authority from operators changes the security model and must be treated as product design, not plumbing.
+
+    - id: archive-fidelity-over-convenience
+      order: 920
+      title: Archive Fidelity Over Convenience
+      summary: Cached mail and objects must preserve source truth before adding derived intelligence.
+      directive: Store canonical Gmail JSON, RFC822 bytes, headers, MIME structure, content objects, and sidecar provenance without lossy shortcuts.
+      tags:
+        - archive
+        - storage
+        - data-integrity
+      quick_ref:
+        - Preserve canonical source artifacts before deriving markdown, embeddings, graph nodes, or summaries.
+        - Keep attachment blobs content-addressed and deduplicated while preserving per-message attachment references.
+        - Treat corrupt or malformed messages as ingest issues with retained raw evidence.
+        - Do not duplicate large bodies across storage layers when references can point to CAS objects.
+      merge_topics:
+        - object storage
+        - PostgreSQL catalog
+        - archive completeness
+        - attachment sidecars
+      agent_hints:
+        codex: Favor `ObjectStore`, `PgCache`, and Alembic-backed schema changes over ad hoc filesystem/database writes.
+        claude: When reading messages, prefer cached/analyzed data and include provenance where useful.
+        gemini: Audit storage changes for object loss, duplicate body storage, and missing source metadata.
+      sections:
+        - id: canonical-before-derived
+          kind: overview
+          title: Canonical Before Derived
+          summary: Derived intelligence is rebuildable; source artifacts are not.
+          body: |
+            Embeddings, graph triples, categories, summaries, markdown, OCR, and sidecar enrichments must be rebuildable from durable source artifacts. New features should never require throwing away Gmail JSON, RFC822, headers, MIME relationships, or attachment source metadata.
+
+    - id: cache-always-earns-trust
+      order: 930
+      title: Cache Always Earns Trust
+      summary: Cached answers should be fast, complete enough to explain themselves, and honest about freshness.
+      directive: Return cached/analyzed data whenever available, hydrate missing live Gmail results on demand, and expose status that lets agents calibrate corpus coverage.
+      tags:
+        - cache
+        - search
+        - sync
+        - agents
+      quick_ref:
+        - If Gmail returns a message ID already in cache, use the cached analyzed record.
+        - Keep sync as freshness maintenance, not the only path to archive search.
+        - Date-bounded local search must apply filters before limits.
+        - Status tools should report corpus size, date ranges, sync cursors, and index health.
+      merge_topics:
+        - Gmail search hydration
+        - history sync
+        - priority sync
+        - MCP results
+      agent_hints:
+        codex: Search and MCP changes should preserve compact defaults, date filtering, and analyzed metadata inclusion.
+        claude: Use `gmail_status` or REST status endpoints before making claims about corpus completeness.
+        gemini: Review search changes for silently dropping valid cached results.
+      sections:
+        - id: freshness-and-coverage
+          kind: overview
+          title: Freshness And Coverage
+          summary: Sync keeps the cache fresh; search may expand it.
+          body: |
+            The cache should become more useful over time. Priority/history sync keeps recent and important mail fresh, while live Gmail search can hydrate older or uncached results. User-facing tools should be clear about whether data came from cache, live hydration, or derived analysis.
+
+    - id: intelligence-is-provenance-backed
+      order: 940
+      title: Intelligence Is Provenance-Backed
+      summary: Semantic search, categories, sidecar analysis, and graph extraction must remain traceable to source mail and objects.
+      directive: Every derived entity, edge, embedding, category, and sidecar claim should have enough provenance for an agent to explain why it exists.
+      tags:
+        - knowledge-graph
+        - semantic-search
+        - categories
+        - provenance
+      quick_ref:
+        - Store graph/source relationships, not just extracted labels.
+        - Keep noisy operational alerts categorized rather than globally hidden.
+        - Use ontology mappings such as FOAF, SIOC, schema.org, SKOS, PROV-O, and DOAP where they add interoperability.
+        - Make graph and sidecar data available by default in compact MCP reads, while keeping blobs separate.
+      merge_topics:
+        - graph extraction
+        - sidecar KG
+        - semantic chunks
+        - category learning
+      agent_hints:
+        codex: Favor explicit provenance columns/triples and refresh jobs over one-off extraction paths.
+        claude: Ask for graph/sidecar context before inferring entities from body text alone.
+        gemini: Review ontology changes for noise, duplicate entities, and ungrounded relationships.
+      sections:
+        - id: explainable-intelligence
+          kind: overview
+          title: Explainable Intelligence
+          summary: Agents need reasons, not just labels.
+          body: |
+            Gmeow is useful when agents can inspect why a message matched, why an entity is related, where a category came from, and which attachment or sidecar field supplied evidence. Derived intelligence without provenance becomes another opaque search index and should be avoided.
+
+    - id: privacy-is-a-release-gate
+      order: 950
+      title: Privacy Is A Release Gate
+      summary: Mailbox data, credentials, local paths, and production identifiers must stay out of public artifacts.
+      directive: Treat privacy scanning and release hygiene as blocking checks for any public-facing change.
+      tags:
+        - privacy
+        - release
+        - security
+        - documentation
+      quick_ref:
+        - Keep `config.toml`, SOPS files, `data/`, exports, and credential files ignored.
+        - Public examples must use synthetic names, domains, addresses, phone numbers, and message content.
+        - Add new private terms to `scripts/public_release_check.py` when discovered.
+        - Run `make release-check` after touching docs, config, tests, examples, or MCP help text.
+      merge_topics:
+        - public release
+        - PII hygiene
+        - SOPS config
+        - test fixtures
+      agent_hints:
+        codex: Before finalizing docs/tests/examples, run the release checker and a targeted PII `rg`.
+        claude: Do not paste real mailbox snippets into issues, docs, or examples.
+        gemini: Treat fixture realism as a risk if names/domains/phone numbers look non-synthetic.
+      sections:
+        - id: public-artifact-standard
+          kind: overview
+          title: Public Artifact Standard
+          summary: Anything tracked may become public.
+          body: |
+            This repository is being prepared for public GitHub and future PyPI publication. Tracked files must be safe to publish even while the repo is still private. Local convenience is not a reason to commit private mailbox details, real credentials, production DSNs, or machine-specific paths.
+
+    - id: operational-resilience-is-product-behavior
+      order: 960
+      title: Operational Resilience Is Product Behavior
+      summary: Long-running sync, analysis, and archive tasks must be observable, retryable, and self-recovering.
+      directive: Background work should use durable jobs, leases, checkpoints, dead letters, operational events, and repair/status surfaces.
+      tags:
+        - resilience
+        - maintenance
+        - jobs
+        - operations
+      quick_ref:
+        - Prefer resumable jobs over in-request bulk work.
+        - Record operational events and expose status for degraded components.
+        - Do not advance sync cursors past unprocessed Gmail changes.
+        - Make repair and retry operations dry-run by default unless explicitly applying changes.
+      merge_topics:
+        - maintenance scheduler
+        - intelligence worker
+        - sync checkpoints
+        - repair APIs
+      agent_hints:
+        codex: Check failure modes around process interruption, retries, and cursor advancement.
+        claude: Use status/repair tools before recommending manual database edits.
+        gemini: Review async loops for lease expiry, idempotence, and partial failure recovery.
+      sections:
+        - id: observable-recovery
+          kind: overview
+          title: Observable Recovery
+          summary: Operators and agents need to see and repair degraded state.
+          body: |
+            Gmeow is expected to run for a long time against a large mailbox. Failures are normal. The product behavior should make failures visible, preserve enough evidence to recover, and provide bounded repair actions that can be safely retried.

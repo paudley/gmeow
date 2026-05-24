@@ -15,7 +15,7 @@ reports = no
 score = no
 
 [FORMAT]
-max-line-length = 88
+max-line-length = 140
 
 [DESIGN]
 max-args = 6

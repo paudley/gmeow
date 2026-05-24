@@ -53,10 +53,9 @@ before the code ever runs.
 Directive: Make ruff and mypy blocking quality gates rather than advisory tools.
 
 Quick ref:
-- Make ruff and mypy blocking quality gates rather than advisory tools.
-- We rely on linters (ruff) and type checkers (mypy) to catch errors
-before the code ever runs.
-- Treat repo hook and CI gates as authoritative, not optional reminders.
+- Use `make release-audit` for the full local gate.
+- Use `make -C coding-ethos parent-lint` for coding-ethos policy lint.
+- Keep parent lint scoped to production code; tests are verified by pytest.
 
 #### Overview
 We rely on linters (ruff) and type checkers (mypy) to catch errors
@@ -82,6 +81,9 @@ tribal knowledge.
 * Passing the current local gate matters more than saying a previous
   run was
   green.
+
+#### Repo Addendum
+Gmeow uses project-local Makefile targets as the stable command surface for agents and CI. Prefer those targets so uv, pytest, build, and release hygiene checks remain consistent.
 ### Validation at the Gate
 
 Configuration, schema, and extension availability are validated

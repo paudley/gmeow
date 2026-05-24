@@ -9,7 +9,7 @@ rules:
   line-length:
     allow-non-breakable-inline-mappings: true
     allow-non-breakable-words: true
-    max: 88
+    max: 140
   truthy:
     allowed-values:
       - 'true'

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 target-version = "py313"
-line-length = 88
+line-length = 140
 exclude = [".git", ".venv", ".mypy_cache", ".ruff_cache", "__pycache__", "tests", "**/tests/**", "**/*_test.py", "**/test_*.py", "*.egg-info", ".eggs", "build", "dist", "node_modules"]
 
 [lint]

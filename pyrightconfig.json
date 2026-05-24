@@ -1,8 +1,10 @@
 {
     "typeCheckingMode": "strict",
     "include": [
-        "coding_ethos",
-        "pre-commit/hooks"
+        "src/gmeow",
+        "scripts",
+        "migrations",
+        "main.py"
     ],
     "exclude": [
         "**/tests/**",
@@ -11,8 +13,7 @@
         "**/.venv/**"
     ],
     "extraPaths": [
-        ".",
-        "pre-commit/hooks"
+        "src"
     ],
     "venvPath": ".",
     "venv": ".venv",

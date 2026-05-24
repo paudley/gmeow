@@ -1,6 +1,6 @@
 {
   "contextFileName": "GEMINI.md",
-  "description": "ETHOS skills for gmeow: conditional-imports, lint-remediation, safe-git-workflow, managed-toolchain, agent-operating-discipline",
+  "description": "ETHOS skills for Gmeow: conditional-imports, lint-remediation, safe-git-workflow, managed-toolchain, agent-operating-discipline",
   "name": "coding-ethos",
   "version": "1.0.0"
 }

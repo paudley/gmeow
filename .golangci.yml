@@ -165,7 +165,7 @@ linters:
       exclude-forbidden: false
     lll:
       tab-width: 1
-      line-length: 88
+      line-length: 140
     nestif:
       min-complexity: 4
     revive:
