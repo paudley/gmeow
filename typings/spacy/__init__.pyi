@@ -1,6 +1,0 @@
-from _typeshed import Incomplete
-
-from . import language as language
-
-def load(name: str, **kwargs: Incomplete) -> Incomplete: ...
-def blank(name: str) -> Incomplete: ...

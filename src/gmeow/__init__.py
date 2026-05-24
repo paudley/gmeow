@@ -8,6 +8,7 @@ MCP, IMAP, and CLI. See ``MODULE.md`` for the package layout and external tool p
 
 See Also:
     MODULE.md: Package contract, layout, and integration test prerequisites.
+
 """
 
 __all__ = ["__version__"]
