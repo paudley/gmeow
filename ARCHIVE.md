@@ -212,7 +212,7 @@ Verified on 2026-05-23 against the local server at `http://127.0.0.1:8765`.
 
 33. Partition-readiness plan
 
-   Verified: `docs/POSTGRES_PARTITION_READINESS.md` records future partition-compatible schema choices while explicitly excluding full-archive backfill.
+   Verified: `docs/POSTGRES_PARTITION_READINESS.md` records future partition-compatible schema choices.
 
 34. Timed server maintenance tasks
 
@@ -233,7 +233,3 @@ Verified on 2026-05-23 against the local server at `http://127.0.0.1:8765`.
 38. Long-term archive and read-only IMAP foundations
 
    Verified: archive completeness requires Gmail JSON plus canonical RFC822; CAS writes are atomic and verified; object verification records manifest status; attachment sidecar metadata is versioned in CAS; retention policies default to tombstone with SPAM/TRASH purge policies; manifested archive export/verify/restore workflows exist; read-only IMAP exposes Gmail labels as folders with stable UIDs and serves RFC822 from CAS. Live checks completed one bounded archive completion, verified object integrity, exported and verified a manifested CAS bundle, and smoke-tested IMAP LOGIN/SELECT/UID SEARCH/UID FETCH.
-
-## Not Archived
-
-- Full-archive backfill remains out of scope and must not be planned.

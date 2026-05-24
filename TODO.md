@@ -1,9 +1,5 @@
 # Gmeow Active TODO
 
-## Scope Constraint
-
-Full-archive backfill is not in scope and is not part of the current consideration list. On-demand hydration and freshness sync are allowed; full-archive backfill must not be planned, implemented, optimized, or prioritized.
-
 ## Active Queue
 
 - [x] Public release prep: add MIT license, SPDX headers, sanitized docs, GitHub community/security files, CI, Dependabot, and release hygiene checks.

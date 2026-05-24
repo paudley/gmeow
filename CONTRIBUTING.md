@@ -24,4 +24,3 @@ uv run python scripts/public_release_check.py
 - Do not commit `config.toml`, secrets, mailbox exports, or runtime data.
 - Add or update tests for behavior changes.
 - Update `README.md` or docs when public behavior changes.
-- Keep the full-archive backfill constraint intact unless project maintainers explicitly change that policy.

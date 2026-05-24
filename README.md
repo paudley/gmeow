@@ -20,10 +20,6 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Token-Oriented Object Notation by default for MCP responses, with JSON available on request.
 - Read-only IMAP service backed by cached RFC822 archive objects.
 
-## Project Constraint
-
-Full-archive backfill is not in scope and is not part of the current consideration list. Gmeow may hydrate messages on demand through live search and may keep the cache fresh with priority/history sync, but full-archive backfill work should not be planned, implemented, optimized, or prioritized.
-
 ## Install
 
 ```bash
@@ -124,7 +120,7 @@ By default, local data is ignored by git and stored under `data/`:
 
 ## Archive and IMAP
 
-Archive-complete messages require both Gmail full JSON and canonical raw RFC822 bytes. New Gmail hydrations fetch RFC822 automatically. Existing cached messages can be completed in bounded batches without starting a full backfill:
+Archive-complete messages require both Gmail full JSON and canonical raw RFC822 bytes. New Gmail hydrations fetch RFC822 automatically. Existing cached messages can be completed in bounded batches:
 
 ```bash
 uv run gmeow complete-archive --limit 25

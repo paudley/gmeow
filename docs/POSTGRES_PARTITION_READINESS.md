@@ -21,4 +21,3 @@ Backfill is out of scope. This plan exists only to keep future schema choices co
 
 - Creating partitions.
 - Moving existing cached rows between partitions.
-- Full-archive backfill or backfill planning.

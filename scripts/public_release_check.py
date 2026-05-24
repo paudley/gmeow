@@ -100,7 +100,7 @@ def _needs_spdx(rel: str) -> bool:
 
 
 def _skip_text_scan(rel: str) -> bool:
-    return rel in {"uv.lock", "scripts/public_release_check.py"}
+    return rel in {".gitmodules", "uv.lock", "scripts/public_release_check.py"}
 
 
 def _read_text(path: Path, default: str | None = None) -> str | None:

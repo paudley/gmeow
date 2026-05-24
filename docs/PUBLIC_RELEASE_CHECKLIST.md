@@ -16,4 +16,3 @@ Manual checks:
 - No service-account keys, OAuth client IDs, mailbox addresses, local home paths, production database credentials, or mailbox data are tracked.
 - Wheel and sdist do not include runtime data or local secrets.
 - GitHub secret scanning, push protection, Dependabot, and code scanning are enabled in repository settings where available.
-- Full-archive backfill remains out of scope in public docs.
