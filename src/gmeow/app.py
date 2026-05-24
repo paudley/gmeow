@@ -29,6 +29,7 @@ from .maintenance import MaintenanceScheduler
 from .mcp_server import build_mcp_app
 from .object_store import CasAttachmentStore, ObjectStore
 from .pg_cache import PgCache
+from .protocols import IntelligenceGraph, NoGraph
 from .resilience import degraded_status, readiness, startup_self_check
 from .semantic_pg import PgSemanticIndex
 from .sync import MissingGmailClient, SyncService
@@ -130,7 +131,7 @@ class RetentionRequest(BaseModel):
     dry_run: bool = True
 
 
-def build_services(config: GmeowConfig) -> tuple[PgCache, CasAttachmentStore, PgSemanticIndex, object, SyncService]:
+def build_services(config: GmeowConfig) -> tuple[PgCache, CasAttachmentStore, PgSemanticIndex, IntelligenceGraph, SyncService]:
     """Build services."""
     config.ensure_dirs()
     objects = ObjectStore(config.object_store_dir)
@@ -141,7 +142,7 @@ def build_services(config: GmeowConfig) -> tuple[PgCache, CasAttachmentStore, Pg
     semantic = PgSemanticIndex(
         postgres_dsn, config.embedding_model, config.embedding_endpoint, config.semantic_chunk_size, config.semantic_chunk_overlap
     )
-    graph = cast(object, None)
+    graph: IntelligenceGraph = NoGraph()
     gmail: GmailClient = MissingGmailClient()
     service_account_info = config.service_account_info()
     user_credentials_info = config.user_credentials_info()

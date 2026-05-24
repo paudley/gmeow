@@ -356,26 +356,34 @@ def _refresh_sidecars(app: _AppLike) -> int:
     return refreshed
 
 
+def _attachment_gmail_section(attachment: dict[str, object]) -> dict[str, object]:
+    return {
+        "message_id": attachment["message_id"],
+        "part_id": attachment.get("part_id"),
+        "attachment_id": attachment.get("gmail_attachment_id"),
+        "filename": attachment.get("filename"),
+        "mime_type": attachment.get("mime_type"),
+        "size": attachment.get("size"),
+    }
+
+
+def _attachment_message_section(message: dict[str, object]) -> dict[str, object]:
+    return {
+        "thread_id": message.get("thread_id"),
+        "subject": message.get("subject"),
+        "from": message.get("sender"),
+        "to": message.get("recipients"),
+        "date": message.get("message_date"),
+        "labels": message.get("label_ids", []),
+    }
+
+
 def _attachment_source_metadata(app: _AppLike, attachment: dict[str, object]) -> dict[str, object]:
     message_id = str(attachment["message_id"])
     message = cast(dict[str, object], app.state.cache.get_message(message_id) or {})
     return {
-        "gmail": {
-            "message_id": attachment["message_id"],
-            "part_id": attachment.get("part_id"),
-            "attachment_id": attachment.get("gmail_attachment_id"),
-            "filename": attachment.get("filename"),
-            "mime_type": attachment.get("mime_type"),
-            "size": attachment.get("size"),
-        },
-        "message": {
-            "thread_id": message.get("thread_id"),
-            "subject": message.get("subject"),
-            "from": message.get("sender"),
-            "to": message.get("recipients"),
-            "date": message.get("message_date"),
-            "labels": message.get("label_ids", []),
-        },
+        "gmail": _attachment_gmail_section(attachment),
+        "message": _attachment_message_section(message),
     }
 
 
@@ -529,32 +537,44 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
 }
 
 
-def run_doctor(config: GmeowConfig) -> None:
-    """Run doctor."""
+def _print_doctor_config(config: GmeowConfig) -> None:
     print(f"auth_mode: {config.auth_mode}")
     print(f"subject: {config.subject or '(none)'}")
     print(f"sops_secrets_file: {config.secrets.file or '(none)'} exists={bool(config.secrets.file and config.secrets.file.exists())}")
     print(f"service_account_configured: {bool(config.service_account_info() or config.service_account_file.exists())}")
     print(f"user_credentials_configured: {bool(config.user_credentials_info() or config.user_credentials_file.exists())}")
-    try:
-        app = cast(_AppLike, create_app(config))
-        labels: list[dict[str, object]] = (
-            cast(list[dict[str, object]], app.state.sync.gmail.list_labels()) if app.state.sync.gmail_available() else []
+
+
+def _print_refresh_error_remediation(config: GmeowConfig) -> None:
+    if config.auth_mode == "service_account":
+        client_id = service_account_client_id(config)
+        print("required_admin_console_grant:")
+        print("  url: https://admin.google.com/ac/owl/domainwidedelegation")
+        print(f"  client_id: {client_id or '(unknown; run gcloud iam service-accounts describe)'}")
+        print("  scopes: https://www.googleapis.com/auth/gmail.modify")
+    elif config.auth_mode == "user_oauth":
+        print("required_local_oauth_command:")
+        print(
+            "  gcloud auth application-default login --scopes=https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/cloud-platform"
         )
+
+
+def _probe_gmail_access(config: GmeowConfig) -> list[dict[str, object]]:
+    app = cast(_AppLike, create_app(config))
+    if not app.state.sync.gmail_available():
+        return []
+    return cast(list[dict[str, object]], app.state.sync.gmail.list_labels())
+
+
+def run_doctor(config: GmeowConfig) -> None:
+    """Run doctor."""
+    _print_doctor_config(config)
+    try:
+        labels = _probe_gmail_access(config)
     except RefreshError as exc:
         print("gmail_access: failed")
         print(f"error: {exc}")
-        if config.auth_mode == "service_account":
-            client_id = service_account_client_id(config)
-            print("required_admin_console_grant:")
-            print("  url: https://admin.google.com/ac/owl/domainwidedelegation")
-            print(f"  client_id: {client_id or '(unknown; run gcloud iam service-accounts describe)'}")
-            print("  scopes: https://www.googleapis.com/auth/gmail.modify")
-        elif config.auth_mode == "user_oauth":
-            print("required_local_oauth_command:")
-            print(
-                "  gcloud auth application-default login --scopes=https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/cloud-platform"
-            )
+        _print_refresh_error_remediation(config)
         raise SystemExit(1) from exc
     except Exception as exc:
         print("gmail_access: failed")

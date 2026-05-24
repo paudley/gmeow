@@ -84,11 +84,11 @@ STOP_ENTITY_VALUES = {
 @lru_cache(maxsize=1)
 def _nlp() -> spacy.language.Language:
     try:
-        return cast(spacy.language.Language, spacy.load("en_core_web_sm"))
+        return spacy.load("en_core_web_sm")
     except OSError:
         nlp = spacy.blank("en")
         nlp.add_pipe("sentencizer")
-        return cast(spacy.language.Language, nlp)
+        return nlp
 
 
 def extract_message_kg(message_id: str, text: str) -> list[Triple]:
