@@ -1,0 +1,3156 @@
+# SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
+# SPDX-License-Identifier: MIT
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import socket
+from datetime import datetime, timezone
+from email.utils import getaddresses, parseaddr
+from pathlib import Path
+from typing import Any
+
+import blake3
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+from .cache import (
+    DEFAULT_EXCLUDED_CATEGORIES,
+    _attachment_text_from_metadata,
+    _best_contact_name,
+    _filter_by_date,
+    _graph_node_kind,
+    _graph_node_label,
+    _graph_node_profile,
+    _noisy_graph_node,
+    _parse_local_query,
+    _parse_message_date,
+    _person_key,
+    _title_category,
+    categorize_message,
+)
+from .db import run_migrations
+from .object_store import ObjectStore, StoredObject
+from .parser import ParsedMessage
+from .text_index import TantivyMessageIndex
+
+
+class PgCache:
+    def __init__(self, dsn: str, objects: ObjectStore, text_index: TantivyMessageIndex):
+        self.dsn = dsn
+        self.objects = objects
+        self.text_index = text_index
+        run_migrations(dsn)
+        self._ensure_age_graph()
+        self.ensure_default_categories()
+
+    def _connect(self):
+        return psycopg.connect(self.dsn, row_factory=dict_row)
+
+    def close(self) -> None:
+        return None
+
+    def _ensure_age_graph(self) -> None:
+        try:
+            with self._connect() as conn:
+                conn.execute("SET search_path=ag_catalog, public")
+                exists = conn.execute("SELECT 1 FROM ag_graph WHERE name = 'gmeow_graph'").fetchone()
+                if not exists:
+                    conn.execute("SELECT create_graph('gmeow_graph')")
+        except Exception:
+            # Relational triples remain authoritative; AGE mirror is best-effort.
+            return
+
+    def age_status(self) -> dict[str, Any]:
+        try:
+            with self._connect() as conn:
+                conn.execute("SET search_path=ag_catalog, public")
+                graph = conn.execute("SELECT graphid, name FROM ag_graph WHERE name = 'gmeow_graph'").fetchone()
+                if not graph:
+                    return {"available": False, "graph": "gmeow_graph", "nodes": None, "error": "graph is not created"}
+                row = conn.execute(_age_sql("MATCH (n) RETURN count(n)", "nodes agtype")).fetchone()
+                return {"available": True, "graph": graph["name"], "graphid": graph["graphid"], "nodes": str(row["nodes"]) if row else "0"}
+        except Exception as exc:
+            return {"available": False, "graph": "gmeow_graph", "nodes": None, "error": repr(exc)}
+
+    def age_cypher(self, query: str, columns: str = "value agtype", limit: int = 100) -> list[dict[str, Any]]:
+        if not _read_only_cypher(query):
+            raise ValueError("Only read-only MATCH/RETURN Cypher queries are allowed.")
+        query = query.strip().rstrip(";")
+        if " limit " not in f" {query.lower()} ":
+            query = f"{query} LIMIT {max(1, min(limit, 1000))}"
+        with self._connect() as conn:
+            conn.execute("SET search_path=ag_catalog, public")
+            rows = conn.execute(_age_sql(query, columns)).fetchall()
+            return [{key: str(value) for key, value in dict(row).items()} for row in rows]
+
+    def _record_object(self, stored: StoredObject) -> None:
+        with self._connect() as conn:
+            self._record_object_conn(conn, stored)
+
+    def _record_object_conn(self, conn, stored: StoredObject) -> None:
+        conn.execute(
+            """
+            INSERT INTO content_objects(digest, path, media_type, compression, original_size, stored_size, verification_status, verified_at)
+            VALUES(%s, %s, %s, %s, %s, %s, 'ok', now())
+            ON CONFLICT(digest) DO UPDATE SET
+              path=excluded.path,
+              media_type=excluded.media_type,
+              compression=excluded.compression,
+              original_size=excluded.original_size,
+              stored_size=excluded.stored_size,
+              verification_status='ok',
+              verification_error=NULL,
+              verified_at=now()
+            """,
+            (stored.digest, str(stored.path), stored.media_type, stored.compression, stored.original_size, stored.stored_size),
+        )
+
+    def _upsert_content_ref_conn(self, conn, digest: str | None, ref_table: str, ref_pk: str, ref_column: str, ref_kind: str) -> None:
+        if not digest:
+            return
+        conn.execute(
+            """
+            INSERT INTO content_object_refs(digest, ref_table, ref_pk, ref_column, ref_kind, updated_at)
+            VALUES(%s, %s, %s, %s, %s, now())
+            ON CONFLICT(digest, ref_table, ref_pk, ref_column) DO UPDATE SET
+              ref_kind=excluded.ref_kind,
+              updated_at=now()
+            """,
+            (digest, ref_table, ref_pk, ref_column, ref_kind),
+        )
+
+    def _stored_text(self, digest: str | None) -> str:
+        if not digest:
+            return ""
+        row = self._object_row(digest)
+        return self.objects.get_text(digest, compression=row["compression"]) if row else ""
+
+    def _stored_json(self, digest: str | None) -> Any:
+        text = self._stored_text(digest)
+        return json.loads(text) if text else {}
+
+    def _stored_bytes(self, digest: str | None) -> bytes | None:
+        if not digest:
+            return None
+        row = self._object_row(digest)
+        return self.objects.get(digest, compression=row["compression"]) if row else None
+
+    def _object_row(self, digest: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            return conn.execute("SELECT * FROM content_objects WHERE digest = %s", (digest,)).fetchone()
+
+    def upsert_label(self, label: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO labels(id, name, type, raw_json) VALUES(%s, %s, %s, %s)
+                ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, raw_json=excluded.raw_json
+                """,
+                (label["id"], label.get("name", label["id"]), label.get("type"), Jsonb(label)),
+            )
+
+    def list_labels(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT id, name, type FROM labels ORDER BY name")]
+
+    def label_name(self, label_id: str) -> str:
+        with self._connect() as conn:
+            row = conn.execute("SELECT name FROM labels WHERE id = %s", (label_id,)).fetchone()
+        return row["name"] if row else label_id
+
+    def upsert_thread(self, thread: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO threads(id, snippet, raw_json) VALUES(%s, %s, %s)
+                ON CONFLICT(id) DO UPDATE SET snippet=excluded.snippet, raw_json=excluded.raw_json, updated_at=now()
+                """,
+                (thread["id"], thread.get("snippet", ""), Jsonb(thread)),
+            )
+
+    def upsert_message(self, message: ParsedMessage, raw_json: dict[str, Any], markdown: str, hydrated: bool) -> None:
+        raw_obj = self.objects.put_json(raw_json)
+        text_obj = self.objects.put_text(message.text)
+        markdown_obj = self.objects.put_text(markdown, media_type="text/markdown; charset=utf-8")
+        history_id = raw_json.get("historyId")
+        search_fields = _message_search_fields(message.sender, message.recipients, message.date)
+        search_text = _message_search_text(
+            subject=message.subject,
+            sender=message.sender,
+            recipients=message.recipients,
+            snippet=message.snippet,
+            text_body=message.text,
+            markdown=markdown,
+            headers=message.headers,
+            label_ids=message.label_ids,
+        )
+        with self._connect() as conn:
+            for stored in [raw_obj, text_obj, markdown_obj]:
+                self._record_object_conn(conn, stored)
+            conn.execute("DELETE FROM content_object_refs WHERE ref_table = 'messages' AND ref_pk = %s", (message.gmail_id,))
+            conn.execute("DELETE FROM content_object_refs WHERE ref_table = 'message_parts' AND ref_pk LIKE %s", (f"{message.gmail_id}:%",))
+            conn.execute(
+                """
+                INSERT INTO messages(id, thread_id, subject, sender, recipients, message_date, snippet, label_ids,
+                  headers_json, raw_json_digest, text_body_digest, markdown_digest, hydrated, history_id,
+                  message_ts, sender_addr, sender_domain, recipient_addrs, recipient_domains, search_tsv)
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, to_tsvector('simple', %s))
+                ON CONFLICT(id) DO UPDATE SET
+                  thread_id=excluded.thread_id, subject=excluded.subject, sender=excluded.sender,
+                  recipients=excluded.recipients, message_date=excluded.message_date, snippet=excluded.snippet,
+                  label_ids=excluded.label_ids, headers_json=excluded.headers_json,
+                  raw_json_digest=excluded.raw_json_digest, text_body_digest=excluded.text_body_digest,
+                  markdown_digest=excluded.markdown_digest, hydrated=excluded.hydrated,
+                  history_id=excluded.history_id, message_ts=excluded.message_ts,
+                  sender_addr=excluded.sender_addr, sender_domain=excluded.sender_domain,
+                  recipient_addrs=excluded.recipient_addrs, recipient_domains=excluded.recipient_domains,
+                  search_tsv=excluded.search_tsv, updated_at=now()
+                """,
+                (
+                    message.gmail_id,
+                    message.thread_id,
+                    message.subject,
+                    message.sender,
+                    message.recipients,
+                    message.date,
+                    message.snippet,
+                    Jsonb(message.label_ids),
+                    Jsonb(message.headers),
+                    raw_obj.digest,
+                    text_obj.digest,
+                    markdown_obj.digest,
+                    hydrated,
+                    int(history_id) if str(history_id or "").isdigit() else None,
+                    search_fields["message_ts"],
+                    search_fields["sender_addr"],
+                    search_fields["sender_domain"],
+                    search_fields["recipient_addrs"],
+                    search_fields["recipient_domains"],
+                    search_text,
+                ),
+            )
+            self._upsert_content_ref_conn(conn, raw_obj.digest, "messages", message.gmail_id, "raw_json_digest", "raw_json")
+            self._upsert_content_ref_conn(conn, text_obj.digest, "messages", message.gmail_id, "text_body_digest", "text_body")
+            self._upsert_content_ref_conn(conn, markdown_obj.digest, "messages", message.gmail_id, "markdown_digest", "markdown")
+            conn.execute("DELETE FROM message_parts WHERE message_id = %s", (message.gmail_id,))
+            for part in message.parts:
+                body_digest = None
+                if part.body_text is not None:
+                    body_obj = self.objects.put_text(part.body_text, media_type=part.mime_type)
+                    self._record_object_conn(conn, body_obj)
+                    body_digest = body_obj.digest
+                    self._upsert_content_ref_conn(conn, body_digest, "message_parts", f"{message.gmail_id}:{part.part_id}", "body_text_digest", "part_body")
+                conn.execute(
+                    """
+                    INSERT INTO message_parts(message_id, part_id, mime_type, filename, body_text_digest, attachment_id, size, headers_json)
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (message.gmail_id, part.part_id, part.mime_type, part.filename, body_digest, part.attachment_id, part.size, Jsonb(part.headers)),
+                )
+            self._update_archive_state_conn(conn, message.gmail_id)
+        self.text_index.upsert_message(
+            {
+                "id": message.gmail_id,
+                "subject": message.subject,
+                "sender": message.sender,
+                "recipients": message.recipients,
+                "snippet": message.snippet,
+                "text_body": message.text,
+                "markdown": markdown,
+                "headers_text": json.dumps(message.headers, sort_keys=True),
+                "label_ids": message.label_ids,
+                "categories": [item["category"] for item in self.message_category_assignments(message.gmail_id)],
+            }
+        )
+
+    def set_raw_rfc822(self, message_id: str, raw: bytes) -> None:
+        stored = self.objects.put(raw, media_type="message/rfc822")
+        with self._connect() as conn:
+            self._record_object_conn(conn, stored)
+            self._upsert_content_ref_conn(conn, stored.digest, "messages", message_id, "raw_rfc822_digest", "raw_rfc822")
+            conn.execute("UPDATE messages SET raw_rfc822_digest = %s, updated_at = now() WHERE id = %s", (stored.digest, message_id))
+            self._update_archive_state_conn(conn, message_id)
+
+    def raw_rfc822(self, message_id: str) -> bytes | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT raw_rfc822_digest FROM messages WHERE id = %s", (message_id,)).fetchone()
+        return self._stored_bytes(row["raw_rfc822_digest"]) if row else None
+
+    def add_attachment(self, record: dict[str, Any]) -> None:
+        digest = record.get("digest") or record["sha1"]
+        stored = StoredObject(
+            digest=digest,
+            path=record["path"],
+            media_type=record.get("mime_type") or "application/octet-stream",
+            compression=record.get("compression") or (record.get("metadata") or {}).get("compression") or "identity",
+            original_size=int(record.get("size", 0)),
+            stored_size=int(record.get("stored_size", record.get("size", 0))),
+        )
+        with self._connect() as conn:
+            self._record_object_conn(conn, stored)
+            conn.execute(
+                """
+                INSERT INTO messages(id, label_ids, headers_json, hydrated)
+                VALUES(%s, '[]'::jsonb, '{}'::jsonb, false)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (record["message_id"],),
+            )
+            conn.execute(
+                """
+                DELETE FROM attachments
+                WHERE message_id = %s
+                  AND COALESCE(part_id, '') = COALESCE(%s, '')
+                  AND sha1 = %s
+                """,
+                (record["message_id"], record.get("part_id"), record["sha1"]),
+            )
+            conn.execute(
+                """
+                INSERT INTO attachments(sha1, digest, message_id, part_id, gmail_attachment_id, filename, mime_type, size, metadata_json, path, compression)
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(message_id, COALESCE(part_id, ''), sha1) DO UPDATE SET
+                  digest=excluded.digest,
+                  gmail_attachment_id=excluded.gmail_attachment_id,
+                  filename=excluded.filename,
+                  mime_type=excluded.mime_type,
+                  size=excluded.size,
+                  metadata_json=excluded.metadata_json,
+                  path=excluded.path,
+                  compression=excluded.compression,
+                  updated_at=now()
+                """,
+                (
+                    record["sha1"],
+                    digest,
+                    record["message_id"],
+                    record.get("part_id"),
+                    record.get("gmail_attachment_id"),
+                    record.get("filename"),
+                    record.get("mime_type"),
+                    int(record.get("size", 0)),
+                    Jsonb(record.get("metadata", {})),
+                    str(record["path"]),
+                    stored.compression,
+                ),
+            )
+            self._upsert_content_ref_conn(conn, digest, "attachments", f"{record['message_id']}:{record.get('part_id') or ''}:{record['sha1']}", "digest", "attachment")
+            metadata_obj = self.objects.put_json(record.get("metadata", {}))
+            self._record_object_conn(conn, metadata_obj)
+            conn.execute(
+                """
+                INSERT INTO attachment_metadata_versions(digest, metadata_digest, source)
+                VALUES(%s, %s, %s)
+                ON CONFLICT(digest, metadata_digest) DO NOTHING
+                """,
+                (digest, metadata_obj.digest, "attachment_sidecar"),
+            )
+
+    def _update_archive_state_conn(self, conn, message_id: str) -> None:
+        conn.execute(
+            """
+            UPDATE messages
+            SET archive_state = CASE
+                  WHEN archive_state IN ('tombstoned', 'purge_pending', 'purged') THEN archive_state
+                  WHEN raw_json_digest IS NOT NULL AND raw_rfc822_digest IS NOT NULL THEN 'complete'
+                  ELSE 'incomplete'
+                END,
+                archive_error = CASE
+                  WHEN raw_json_digest IS NOT NULL AND raw_rfc822_digest IS NOT NULL THEN NULL
+                  ELSE 'archive completeness requires raw Gmail JSON and canonical RFC822'
+                END,
+                archive_checked_at = now(),
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (message_id,),
+        )
+
+    def list_attachments(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, sha1, digest, message_id, part_id, gmail_attachment_id, filename, mime_type, size, metadata_json, path, compression FROM attachments ORDER BY sha1, message_id, part_id")
+            return [self._attachment_row(row) for row in rows]
+
+    def attachments_for_message(self, message_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, sha1, digest, message_id, part_id, gmail_attachment_id, filename, mime_type, size, metadata_json, path, compression
+                FROM attachments WHERE message_id = %s ORDER BY filename, sha1
+                """,
+                (message_id,),
+            )
+            return [self._attachment_row(row, drop_path=True) for row in rows]
+
+    def _attachment_row(self, row: dict[str, Any], drop_path: bool = False) -> dict[str, Any]:
+        item = dict(row)
+        item["metadata"] = item.pop("metadata_json") or {}
+        if drop_path:
+            item.pop("path", None)
+        return item
+
+    def attachment_text_for_message(self, message_id: str, include_metadata: bool = True) -> list[dict[str, Any]]:
+        attachments = self.attachments_for_message(message_id)
+        for attachment in attachments:
+            text = _attachment_text_from_metadata(attachment.get("metadata", {}))
+            if text:
+                attachment["text"] = text
+        if not include_metadata:
+            for attachment in attachments:
+                attachment.pop("metadata", None)
+        return attachments
+
+    def attachment_text_search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        needle = (query or "").lower()
+        results = []
+        for attachment in self.list_attachments():
+            haystack = json.dumps(attachment.get("metadata", {}), sort_keys=True).lower()
+            if needle in haystack or needle in (attachment.get("filename") or "").lower():
+                results.append(attachment)
+            if len(results) >= limit:
+                break
+        return results
+
+    def get_message(self, message_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM messages WHERE id = %s", (message_id,)).fetchone()
+        return self._message_row(row) if row else None
+
+    def list_messages(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM messages ORDER BY COALESCE(message_date, updated_at::text) DESC LIMIT %s OFFSET %s",
+                (limit, offset),
+            ).fetchall()
+        return [self._message_row(row) for row in rows]
+
+    def iter_messages(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM messages ORDER BY id").fetchall()
+        return [self._message_row(row) for row in rows]
+
+    def _message_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        data = dict(row)
+        data.pop("search_tsv", None)
+        data["label_ids"] = list(data.get("label_ids") or [])
+        data["labels"] = [self.label_name(label_id) for label_id in data["label_ids"]]
+        data["headers"] = data.pop("headers_json") or {}
+        data["raw"] = self._stored_json(data.pop("raw_json_digest", None))
+        data["text_body"] = self._stored_text(data.pop("text_body_digest", None))
+        data["markdown"] = self._stored_text(data.pop("markdown_digest", None))
+        data["has_raw_rfc822"] = bool(data.pop("raw_rfc822_digest", None))
+        data["hydrated"] = bool(data["hydrated"])
+        data["message_date_iso"] = _parse_message_date(data.get("message_date"))
+        data["date"] = data["message_date_iso"]
+        data["from"] = data.get("sender")
+        data["to"] = data.get("recipients")
+        assignments = self.message_category_assignments(data["id"])
+        if assignments:
+            data["category_details"] = assignments
+            data["categories"] = [assignment["category"] for assignment in assignments]
+        else:
+            data["categories"] = categorize_message(data)
+            data["category_details"] = [
+                {"category": category, "confidence": 1.0, "source": "computed", "reason": "deterministic fallback", "top_terms": []}
+                for category in data["categories"]
+            ]
+        return data
+
+    def refresh_message_search_columns(self, limit: int | None = None) -> dict[str, int]:
+        sql = """
+            SELECT id, subject, sender, recipients, message_date, snippet, label_ids, headers_json,
+                   text_body_digest, markdown_digest
+            FROM messages
+            ORDER BY updated_at DESC
+        """
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = (limit,)
+        updated = 0
+        skipped = 0
+        with self._connect() as conn:
+            rows = [dict(row) for row in conn.execute(sql, params)]
+            for row in rows:
+                fields = _message_search_fields(row.get("sender"), row.get("recipients"), row.get("message_date"))
+                search_text = _message_search_text(
+                    subject=row.get("subject"),
+                    sender=row.get("sender"),
+                    recipients=row.get("recipients"),
+                    snippet=row.get("snippet"),
+                    text_body=self._stored_text(row.get("text_body_digest")),
+                    markdown=self._stored_text(row.get("markdown_digest")),
+                    headers=row.get("headers_json") or {},
+                    label_ids=list(row.get("label_ids") or []),
+                )
+                if not search_text.strip():
+                    skipped += 1
+                    continue
+                conn.execute(
+                    """
+                    UPDATE messages
+                    SET message_ts = %s,
+                        sender_addr = %s,
+                        sender_domain = %s,
+                        recipient_addrs = %s,
+                        recipient_domains = %s,
+                        search_tsv = to_tsvector('simple', %s),
+                        updated_at = updated_at
+                    WHERE id = %s
+                    """,
+                    (
+                        fields["message_ts"],
+                        fields["sender_addr"],
+                        fields["sender_domain"],
+                        fields["recipient_addrs"],
+                        fields["recipient_domains"],
+                        search_text,
+                        row["id"],
+                    ),
+                )
+                updated += 1
+        return {"updated": updated, "skipped": skipped}
+
+    def compact_message(self, message: dict[str, Any], body_chars: int = 500) -> dict[str, Any]:
+        text = " ".join((message.get("text_body") or message.get("snippet") or "").split())
+        if len(text) > body_chars:
+            text = text[:body_chars].rstrip() + "..."
+        return {
+            "id": message["id"],
+            "thread_id": message.get("thread_id"),
+            "subject": message.get("subject"),
+            "from": message.get("sender"),
+            "to": message.get("recipients"),
+            "sender": message.get("sender"),
+            "recipients": message.get("recipients"),
+            "message_date": message.get("message_date"),
+            "message_date_iso": message.get("message_date_iso"),
+            "date": message.get("message_date_iso"),
+            "snippet": message.get("snippet"),
+            "text": text,
+            "label_ids": message.get("label_ids", []),
+            "labels": message.get("labels", []),
+            "categories": message.get("categories", []),
+            "hydrated": message.get("hydrated", False),
+        }
+
+    def compact_messages(self, messages: list[dict[str, Any]], body_chars: int = 500) -> list[dict[str, Any]]:
+        return [self.compact_message(message, body_chars=body_chars) for message in messages]
+
+    def get_thread(self, thread_id: str, compact: bool = False) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            thread = conn.execute("SELECT * FROM threads WHERE id = %s", (thread_id,)).fetchone()
+            message_rows = conn.execute("SELECT * FROM messages WHERE thread_id = %s", (thread_id,)).fetchall()
+        messages = [self._message_row(row) for row in message_rows]
+        messages.sort(key=lambda message: message.get("message_date_iso") or message.get("message_date") or "")
+        if not thread and not messages:
+            return None
+        if compact:
+            messages = self.compact_messages(messages, body_chars=500)
+        return {"id": thread_id, "snippet": thread["snippet"] if thread else "", "messages": messages}
+
+    def list_threads(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT id, snippet, updated_at FROM threads ORDER BY updated_at DESC LIMIT %s OFFSET %s", (limit, offset))]
+
+    def text_search(
+        self,
+        query: str,
+        limit: int = 20,
+        after: str | None = None,
+        before: str | None = None,
+        include_categories: list[str] | None = None,
+        exclude_categories: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        parsed = _parse_local_query(query)
+        if after:
+            parsed["after"] = after
+        if before:
+            parsed["before"] = before
+        where = ["true"]
+        params: list[Any] = []
+        rank_sql = "0.0"
+        sql_text_query = _sql_text_query(parsed["fts"])
+        if sql_text_query:
+            where.append("search_tsv @@ websearch_to_tsquery('simple', %s)")
+            params.append(sql_text_query)
+            rank_sql = "ts_rank_cd(search_tsv, websearch_to_tsquery('simple', %s))"
+            params.append(sql_text_query)
+        for value in parsed["from"]:
+            address, domain = _address_filter_value(value)
+            if address:
+                where.append("(sender_addr = %s OR sender ILIKE %s)")
+                params.extend([address, f"%{value}%"])
+            elif domain:
+                where.append("(sender_domain = %s OR sender ILIKE %s)")
+                params.extend([domain, f"%{value}%"])
+            else:
+                where.append("sender ILIKE %s")
+                params.append(f"%{value}%")
+        for value in parsed["to"]:
+            address, domain = _address_filter_value(value)
+            if address:
+                where.append("(%s = ANY(recipient_addrs) OR recipients ILIKE %s)")
+                params.extend([address, f"%{value}%"])
+            elif domain:
+                where.append("(%s = ANY(recipient_domains) OR recipients ILIKE %s)")
+                params.extend([domain, f"%{value}%"])
+            else:
+                where.append("recipients ILIKE %s")
+                params.append(f"%{value}%")
+        for value in parsed["subject"]:
+            where.append("subject ILIKE %s")
+            params.append(f"%{value}%")
+        for label in parsed["label"]:
+            where.append("label_ids ? %s")
+            params.append(label)
+        after_dt = _query_datetime(parsed["after"])
+        before_dt = _query_datetime(parsed["before"])
+        if after_dt is not None:
+            where.append("message_ts >= %s")
+            params.append(after_dt)
+        if before_dt is not None:
+            where.append("message_ts <= %s")
+            params.append(before_dt)
+        if include_categories:
+            where.append("EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
+            params.append(include_categories)
+        elif exclude_categories is not None:
+            where.append("NOT EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
+            params.append(exclude_categories)
+        else:
+            excluded = list(self.default_excluded_categories())
+            if excluded:
+                where.append("NOT EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
+                params.append(excluded)
+        where_sql = " AND ".join(where) if where else "true"
+        sql = f"""
+            SELECT *, {rank_sql} AS search_rank
+            FROM messages
+            WHERE {where_sql}
+            ORDER BY search_rank DESC, message_ts DESC NULLS LAST, updated_at DESC
+            LIMIT %s
+        """
+        query_params = (*params, limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, query_params).fetchall()
+        messages = [self._message_row(row) for row in rows]
+        if after_dt is None or before_dt is None:
+            messages = _filter_by_date(messages, parsed["after"], parsed["before"])
+        return messages[:limit]
+
+    def address_messages(self, address: str, limit: int = 50, include_categories: list[str] | None = None, exclude_categories: list[str] | None = None) -> list[dict[str, Any]]:
+        parsed_address, parsed_domain = _address_filter_value(address)
+        where = []
+        params: list[Any] = []
+        if parsed_address:
+            where.append("(sender_addr = %s OR %s = ANY(recipient_addrs) OR sender ILIKE %s OR recipients ILIKE %s)")
+            params.extend([parsed_address, parsed_address, f"%{address}%", f"%{address}%"])
+        elif parsed_domain:
+            where.append("(sender_domain = %s OR %s = ANY(recipient_domains) OR sender ILIKE %s OR recipients ILIKE %s)")
+            params.extend([parsed_domain, parsed_domain, f"%{address}%", f"%{address}%"])
+        else:
+            where.append("(sender ILIKE %s OR recipients ILIKE %s)")
+            params.extend([f"%{address}%", f"%{address}%"])
+        if include_categories:
+            where.append("EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
+            params.append(include_categories)
+        elif exclude_categories is not None:
+            where.append("NOT EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
+            params.append(exclude_categories)
+        else:
+            excluded = list(self.default_excluded_categories())
+            if excluded:
+                where.append("NOT EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
+                params.append(excluded)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM messages
+                WHERE {' AND '.join(where)}
+                ORDER BY message_ts DESC NULLS LAST, updated_at DESC
+                LIMIT %s
+                """,
+                (*params, limit),
+            ).fetchall()
+        return [self._message_row(row) for row in rows]
+
+    def contacts(self, limit: int = 100, min_messages: int = 1) -> list[dict[str, Any]]:
+        contacts: dict[str, dict[str, Any]] = {}
+        for message in self.iter_messages():
+            for role, raw_value in [("from", message.get("sender") or ""), ("to", message.get("recipients") or "")]:
+                for name, address in getaddresses([raw_value]):
+                    address = address.lower().strip()
+                    if not address:
+                        continue
+                    contact = contacts.setdefault(address, {"address": address, "display_name": "", "names": set(), "messages": 0, "from_messages": 0, "to_messages": 0, "latest_message_date": None, "latest_message_id": None})
+                    if name:
+                        contact["names"].add(name)
+                    contact["messages"] += 1
+                    contact[f"{role}_messages"] += 1
+                    date = message.get("message_date_iso")
+                    if date and (contact["latest_message_date"] is None or date > contact["latest_message_date"]):
+                        contact["latest_message_date"] = date
+                        contact["latest_message_id"] = message["id"]
+        rows = []
+        for contact in contacts.values():
+            names = sorted(contact.pop("names"))
+            contact["names"] = names
+            contact["display_name"] = _best_contact_name(names, contact["address"])
+            if contact["messages"] >= min_messages:
+                rows.append(contact)
+        rows.sort(key=lambda item: (-item["messages"], item["address"]))
+        return rows[:limit]
+
+    def people(self, limit: int = 100, min_messages: int = 1) -> list[dict[str, Any]]:
+        aliases = self.people_aliases()
+        people: dict[str, dict[str, Any]] = {}
+        for contact in self.contacts(limit=10_000, min_messages=1):
+            alias = aliases.get(contact["address"])
+            name_key = _person_key(contact["display_name"])
+            key = alias["person_key"] if alias else name_key if name_key and "@" not in name_key else contact["address"]
+            person = people.setdefault(key, {"key": key, "name": alias.get("display_name") if alias and alias.get("display_name") else contact["display_name"], "addresses": [], "names": set(), "messages": 0, "latest_message_date": None, "latest_message_id": None})
+            person["addresses"].append(contact["address"])
+            person["names"].update(contact["names"])
+            person["messages"] += contact["messages"]
+            if contact["latest_message_date"] and (person["latest_message_date"] is None or contact["latest_message_date"] > person["latest_message_date"]):
+                person["latest_message_date"] = contact["latest_message_date"]
+                person["latest_message_id"] = contact["latest_message_id"]
+        rows = []
+        for person in people.values():
+            person["addresses"] = sorted(set(person["addresses"]))
+            person["names"] = sorted(person["names"])
+            if person["messages"] >= min_messages:
+                rows.append(person)
+        rows.sort(key=lambda item: (-item["messages"], item["name"].lower()))
+        return rows[:limit]
+
+    def upsert_people_alias(self, address: str, person_key: str, display_name: str | None = None, note: str | None = None) -> None:
+        address = address.lower().strip()
+        key = _person_key(person_key) or address
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO people_aliases(address, person_key, display_name, note)
+                VALUES(%s, %s, %s, %s)
+                ON CONFLICT(address) DO UPDATE SET person_key=excluded.person_key, display_name=excluded.display_name, note=excluded.note, updated_at=now()
+                """,
+                (address, key, display_name, note),
+            )
+
+    def people_aliases(self) -> dict[str, dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT address, person_key, display_name, note, updated_at FROM people_aliases ORDER BY person_key, address")
+            return {row["address"]: dict(row) for row in rows}
+
+    def enqueue_intelligence_job(self, kind: str, target_id: str, payload: dict[str, Any] | None = None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO intelligence_jobs(kind, target_id, status, next_run_at, payload_json)
+                VALUES(%s, %s, 'pending', now(), %s)
+                ON CONFLICT(kind, target_id) DO UPDATE
+                SET status='pending',
+                    last_error=NULL,
+                    locked_by=NULL,
+                    locked_at=NULL,
+                    next_run_at=now(),
+                    dead_lettered_at=NULL,
+                    payload_json=CASE WHEN excluded.payload_json = '{}'::jsonb THEN intelligence_jobs.payload_json ELSE excluded.payload_json END,
+                    updated_at=now()
+                """,
+                (kind, target_id, Jsonb(payload or {})),
+            )
+        self.record_operational_event("job.enqueued", "info", "intelligence", target_id, f"Enqueued {kind} intelligence job.", {"kind": kind})
+
+    def enqueue_all_intelligence_jobs(self) -> dict[str, int]:
+        messages = attachments = 0
+        with self._connect() as conn:
+            for row in conn.execute("SELECT id FROM messages"):
+                conn.execute("INSERT INTO intelligence_jobs(kind, target_id, status, next_run_at) VALUES('message', %s, 'pending', now()) ON CONFLICT(kind, target_id) DO UPDATE SET status='pending', next_run_at=now(), dead_lettered_at=NULL, locked_by=NULL, locked_at=NULL", (row["id"],))
+                messages += 1
+            for row in conn.execute("SELECT DISTINCT sha1 FROM attachments"):
+                conn.execute("INSERT INTO intelligence_jobs(kind, target_id, status, next_run_at) VALUES('attachment', %s, 'pending', now()) ON CONFLICT(kind, target_id) DO UPDATE SET status='pending', next_run_at=now(), dead_lettered_at=NULL, locked_by=NULL, locked_at=NULL", (row["sha1"],))
+                attachments += 1
+        self.record_operational_event("job.bulk_enqueued", "info", "intelligence", None, "Enqueued all intelligence jobs.", {"messages": messages, "attachments": attachments})
+        return {"messages": messages, "attachments": attachments}
+
+    def reclaim_stale_intelligence_jobs(self, stale_after_seconds: int = 900) -> dict[str, int]:
+        with self._connect() as conn:
+            result = conn.execute(
+                """
+                UPDATE intelligence_jobs
+                SET status='pending',
+                    locked_by=NULL,
+                    locked_at=NULL,
+                    next_run_at=now(),
+                    last_error=COALESCE(last_error, 'reclaimed stale running job'),
+                    updated_at=now()
+                WHERE status='running'
+                  AND locked_at < now() - (%s || ' seconds')::interval
+                """,
+                (stale_after_seconds,),
+            )
+            reclaimed = int(result.rowcount or 0)
+        if reclaimed:
+            self.record_operational_event("job.reclaimed", "warning", "intelligence", None, "Reclaimed stale running intelligence jobs.", {"count": reclaimed, "stale_after_seconds": stale_after_seconds})
+        return {"reclaimed": reclaimed}
+
+    def claim_next_intelligence_job(self, worker_id: str | None = None) -> dict[str, Any] | None:
+        worker_id = worker_id or _worker_id()
+        self.reclaim_stale_intelligence_jobs()
+        with self._connect() as conn:
+            with conn.transaction():
+                row = conn.execute(
+                    """
+                    SELECT id, kind, target_id, attempts, max_attempts, payload_json
+                    FROM intelligence_jobs
+                    WHERE status = 'pending'
+                      AND next_run_at <= now()
+                    ORDER BY next_run_at, created_at, id
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                    """
+                ).fetchone()
+                if row is None:
+                    return None
+                conn.execute(
+                    """
+                    UPDATE intelligence_jobs
+                    SET status='running',
+                        attempts=attempts+1,
+                        locked_by=%s,
+                        locked_at=now(),
+                        updated_at=now()
+                    WHERE id = %s
+                    """,
+                    (worker_id, row["id"]),
+                )
+                item = dict(row)
+                item["locked_by"] = worker_id
+                return item
+
+    def complete_intelligence_job(self, job_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE intelligence_jobs
+                SET status='done',
+                    last_error=NULL,
+                    locked_by=NULL,
+                    locked_at=NULL,
+                    completed_at=now(),
+                    updated_at=now()
+                WHERE id = %s
+                """,
+                (job_id,),
+            )
+        self.record_operational_event("job.completed", "info", "intelligence", str(job_id), "Completed intelligence job.", {"job_id": job_id})
+
+    def fail_intelligence_job(self, job_id: int, error: str) -> None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, kind, target_id, attempts, max_attempts, payload_json FROM intelligence_jobs WHERE id = %s",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                return
+            attempts = int(row["attempts"] or 0)
+            max_attempts = int(row["max_attempts"] or 5)
+            if attempts >= max_attempts:
+                conn.execute(
+                    """
+                    INSERT INTO dead_letter_jobs(source_table, source_id, kind, target_id, attempts, last_error, payload_json)
+                    VALUES('intelligence_jobs', %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(source_table, source_id) DO UPDATE
+                    SET attempts=excluded.attempts,
+                        last_error=excluded.last_error,
+                        payload_json=excluded.payload_json,
+                        requeued_at=NULL,
+                        cleared_at=NULL
+                    """,
+                    (job_id, row["kind"], row["target_id"], attempts, error[:2000], Jsonb(row["payload_json"] or {})),
+                )
+                conn.execute(
+                    """
+                    UPDATE intelligence_jobs
+                    SET status='dead',
+                        last_error=%s,
+                        locked_by=NULL,
+                        locked_at=NULL,
+                        failed_at=now(),
+                        dead_lettered_at=now(),
+                        updated_at=now()
+                    WHERE id = %s
+                    """,
+                    (error[:2000], job_id),
+                )
+                dead = True
+            else:
+                delay = min(3600, 2 ** max(0, attempts - 1) * 30)
+                conn.execute(
+                    """
+                    UPDATE intelligence_jobs
+                    SET status='pending',
+                        last_error=%s,
+                        locked_by=NULL,
+                        locked_at=NULL,
+                        next_run_at=now() + (%s || ' seconds')::interval,
+                        failed_at=now(),
+                        updated_at=now()
+                    WHERE id = %s
+                    """,
+                    (error[:2000], delay, job_id),
+                )
+                dead = False
+        self.record_operational_event(
+            "job.dead_lettered" if dead else "job.retry_scheduled",
+            "error" if dead else "warning",
+            "intelligence",
+            str(job_id),
+            error[:2000],
+            {"job_id": job_id, "attempts": attempts, "max_attempts": max_attempts},
+        )
+
+    def intelligence_job_status(self) -> dict[str, int]:
+        with self._connect() as conn:
+            return {row["status"]: row["count"] for row in conn.execute("SELECT status, COUNT(*) AS count FROM intelligence_jobs GROUP BY status")}
+
+    def list_intelligence_jobs(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        where = "WHERE status = %s" if status else ""
+        params: tuple[Any, ...] = (status, limit) if status else (limit,)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, kind, target_id, status, attempts, max_attempts, locked_by, locked_at, next_run_at,
+                       last_error, created_at, updated_at, completed_at, failed_at, dead_lettered_at
+                FROM intelligence_jobs
+                {where}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            return [dict(row) for row in rows]
+
+    def list_dead_letter_jobs(self, limit: int = 50, include_closed: bool = False) -> list[dict[str, Any]]:
+        where = "" if include_closed else "WHERE requeued_at IS NULL AND cleared_at IS NULL"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, source_table, source_id, kind, target_id, attempts, last_error, payload_json,
+                       created_at, requeued_at, cleared_at
+                FROM dead_letter_jobs
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [dict(row) for row in rows]
+
+    def retry_dead_letter_jobs(self, limit: int | None = None) -> dict[str, int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, source_id FROM dead_letter_jobs
+                WHERE requeued_at IS NULL AND cleared_at IS NULL
+                ORDER BY created_at, id
+                LIMIT %s
+                """,
+                (limit or 10_000,),
+            )
+            items = [dict(row) for row in rows]
+            if not items:
+                return {"requeued": 0}
+            ids = [item["id"] for item in items]
+            source_ids = [item["source_id"] for item in items]
+            conn.execute(
+                """
+                UPDATE intelligence_jobs
+                SET status='pending',
+                    locked_by=NULL,
+                    locked_at=NULL,
+                    next_run_at=now(),
+                    dead_lettered_at=NULL,
+                    last_error=NULL,
+                    updated_at=now()
+                WHERE id = ANY(%s)
+                """,
+                (source_ids,),
+            )
+            conn.execute("UPDATE dead_letter_jobs SET requeued_at=now() WHERE id = ANY(%s)", (ids,))
+        self.record_operational_event("dead_letter.requeued", "warning", "intelligence", None, "Requeued dead-letter intelligence jobs.", {"count": len(items)})
+        return {"requeued": len(items)}
+
+    def clear_dead_letter_job(self, dead_letter_id: int) -> dict[str, Any]:
+        with self._connect() as conn:
+            result = conn.execute("UPDATE dead_letter_jobs SET cleared_at=now() WHERE id = %s AND cleared_at IS NULL RETURNING id", (dead_letter_id,)).fetchone()
+        cleared = bool(result)
+        if cleared:
+            self.record_operational_event("dead_letter.cleared", "info", "intelligence", str(dead_letter_id), "Cleared dead-letter job.", {"id": dead_letter_id})
+        return {"cleared": cleared, "id": dead_letter_id}
+
+    def ensure_default_categories(self) -> None:
+        defaults = [
+            ("camera_alert", "Camera Alert", "system", True, "UniFi Protect and similar camera/event alert noise"),
+            ("machine_notification", "Machine Notification", "system", True, "High-volume automated machine status notifications"),
+            ("bulk_status_noise", "Bulk Status Noise", "system", True, "Low-value repeated operational status messages"),
+            ("security_admin", "Security/Admin", "system", False, "Security, identity, and admin console alerts"),
+            ("financial_statement", "Financial Statement", "system", False, "Banking, broker, statement, and financial account mail"),
+            ("dev_activity", "Development Activity", "system", True, "GitHub/GitLab repository activity"),
+            ("dev_review", "Development Review", "system", True, "Code review comments and requested reviews"),
+            ("dev_ci", "Development CI", "system", False, "CI, pipeline, build, and workflow status"),
+            ("call_notice", "Call Notice", "system", True, "Phone call and voicemail notifications"),
+            ("mailing_list", "Mailing List", "system", True, "Mailing list conversations"),
+            ("newsletter", "Newsletter", "system", False, "Newsletters and periodic digests"),
+            ("promotion", "Promotion", "system", False, "Marketing and promotional mail"),
+            ("social", "Social", "system", False, "Social network and community notifications"),
+            ("personal", "Personal", "system", False, "Personal correspondence"),
+            ("work", "Work", "system", False, "Work-related correspondence"),
+            ("primary", "Primary", "system", False, "General uncategorized visible mail"),
+            ("update", "Update", "system", False, "Gmail Updates category mail"),
+            ("news_alert", "News Alert", "system", False, "Google Alerts and similar news alerts"),
+            ("admin_alert", "Admin Alert", "system", False, "Administrative alert messages"),
+            ("real_estate", "Real Estate", "system", False, "Real estate transaction mail"),
+            ("corporate_filing", "Corporate Filing", "system", False, "Corporate registry and filing mail"),
+            ("legal", "Legal", "system", False, "Legal, strata, and formal matter mail"),
+            ("family", "Family", "system", False, "Family/couple correspondence"),
+            ("health_appointment", "Health Appointment", "system", False, "Appointment and health scheduling mail"),
+            ("home_services", "Home Services", "system", False, "Household service and vendor mail"),
+        ]
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO categories(id, name, source, default_hidden, description)
+                    VALUES(%s, %s, %s, %s, %s)
+                    ON CONFLICT(id) DO NOTHING
+                    """,
+                    defaults,
+                )
+
+    def upsert_category(self, category: str, name: str | None = None, source: str = "manual", default_hidden: bool = False, enabled: bool = True, description: str | None = None, profile: dict[str, Any] | None = None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO categories(id, name, source, default_hidden, enabled, description, profile_json)
+                VALUES(%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(id) DO UPDATE SET name=excluded.name, source=excluded.source, default_hidden=excluded.default_hidden, enabled=excluded.enabled, description=excluded.description, profile_json=excluded.profile_json, updated_at=now()
+                """,
+                (category, name or _title_category(category), source, default_hidden, enabled, description, Jsonb(profile or {})),
+            )
+
+    def list_categories(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.*, COUNT(mc.message_id) AS messages
+                FROM categories c
+                LEFT JOIN message_categories mc ON mc.category = c.id
+                GROUP BY c.id
+                ORDER BY c.default_hidden DESC, c.source, c.id
+                """
+            )
+            return [self._category_row(row) for row in rows]
+
+    def _category_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        item["default_hidden"] = bool(item["default_hidden"])
+        item["enabled"] = bool(item["enabled"])
+        item["profile"] = item.pop("profile_json") or {}
+        return item
+
+    def default_excluded_categories(self) -> set[str]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id FROM categories WHERE default_hidden = true AND enabled = true")
+            return {row["id"] for row in rows} or set(DEFAULT_EXCLUDED_CATEGORIES)
+
+    def replace_message_categories(self, message_id: str, assignments: list[dict[str, Any]], sources: tuple[str, ...] = ("system", "learned", "manual_rule")) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM message_categories WHERE message_id = %s AND source = ANY(%s)", (message_id, list(sources)))
+            for assignment in assignments:
+                conn.execute(
+                    """
+                    INSERT INTO categories(id, name, source, default_hidden, enabled)
+                    VALUES(%s, %s, %s, %s, %s)
+                    ON CONFLICT(id) DO NOTHING
+                    """,
+                    (assignment["category"], _title_category(assignment["category"]), assignment.get("source", "system"), assignment["category"] in DEFAULT_EXCLUDED_CATEGORIES, assignment.get("enabled", True)),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO message_categories(message_id, category, confidence, source, reason, top_terms_json)
+                    VALUES(%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(message_id, category) DO UPDATE SET confidence=excluded.confidence, source=excluded.source, reason=excluded.reason, top_terms_json=excluded.top_terms_json, updated_at=now()
+                    """,
+                    (message_id, assignment["category"], float(assignment.get("confidence", 1.0)), assignment.get("source", "system"), assignment.get("reason"), Jsonb(assignment.get("top_terms", []))),
+                )
+            self._apply_category_overrides_conn(conn, message_id)
+
+    def apply_category(self, message_id: str, category: str, action: str = "include", reason: str | None = None) -> None:
+        self.upsert_category(category, source="manual")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO category_overrides(message_id, category, action, reason)
+                VALUES(%s, %s, %s, %s)
+                ON CONFLICT(message_id, category) DO UPDATE SET action=excluded.action, reason=excluded.reason, updated_at=now()
+                """,
+                (message_id, category, action, reason),
+            )
+            self._apply_category_overrides_conn(conn, message_id)
+
+    def _apply_category_overrides_conn(self, conn, message_id: str) -> None:
+        for row in conn.execute("SELECT category, action, reason FROM category_overrides WHERE message_id = %s", (message_id,)):
+            if row["action"] == "exclude":
+                conn.execute("DELETE FROM message_categories WHERE message_id = %s AND category = %s", (message_id, row["category"]))
+                continue
+            conn.execute(
+                """
+                INSERT INTO message_categories(message_id, category, confidence, source, reason, top_terms_json)
+                VALUES(%s, %s, 1.0, 'manual', %s, '[]'::jsonb)
+                ON CONFLICT(message_id, category) DO UPDATE SET confidence=1.0, source='manual', reason=excluded.reason, updated_at=now()
+                """,
+                (message_id, row["category"], row["reason"] or row["action"]),
+            )
+
+    def upsert_category_rule(self, category: str, rule: dict[str, Any], enabled: bool = True) -> int:
+        self.upsert_category(category, source="manual", default_hidden=category in DEFAULT_EXCLUDED_CATEGORIES)
+        with self._connect() as conn:
+            row = conn.execute(
+                "INSERT INTO category_rules(category, rule_json, enabled) VALUES(%s, %s, %s) RETURNING id",
+                (category, Jsonb(rule), enabled),
+            ).fetchone()
+            return int(row["id"])
+
+    def list_category_rules(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, category, rule_json, enabled, created_at, updated_at FROM category_rules ORDER BY category, id")
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["rule"] = item.pop("rule_json") or {}
+                item["enabled"] = bool(item["enabled"])
+                result.append(item)
+            return result
+
+    def message_category_assignments(self, message_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT category, confidence, source, reason, top_terms_json, updated_at
+                FROM message_categories
+                WHERE message_id = %s
+                ORDER BY confidence DESC, category
+                """,
+                (message_id,),
+            )
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["top_terms"] = item.pop("top_terms_json") or []
+                result.append(item)
+            return result
+
+    def store_learned_category_run(self, run: dict[str, Any]) -> int:
+        with self._connect() as conn:
+            row = conn.execute("INSERT INTO learned_category_runs(run_json) VALUES(%s) RETURNING id", (Jsonb(run),)).fetchone()
+            return int(row["id"])
+
+    def learned_category_runs(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            return [{"id": row["id"], "created_at": row["created_at"], "run": row["run_json"]} for row in conn.execute("SELECT id, run_json, created_at FROM learned_category_runs ORDER BY id DESC LIMIT %s", (limit,))]
+
+    def category_stats(self, after: str | None = None, before: str | None = None) -> dict[str, Any]:
+        messages = _filter_by_date(self.iter_messages(), after, before)
+        counts: dict[str, int] = {}
+        for message in messages:
+            for category in message.get("categories", []):
+                counts[category] = counts.get(category, 0) + 1
+        return {"messages": len(messages), "categories": dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))), "default_excluded": sorted(self.default_excluded_categories())}
+
+    def upsert_rule(self, name: str, priority: int, rule: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO priority_rules(name, rule_json, priority) VALUES(%s, %s, %s)
+                ON CONFLICT(name) DO UPDATE SET rule_json=excluded.rule_json, priority=excluded.priority
+                """,
+                (name, Jsonb(rule), priority),
+            )
+
+    def set_state(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO sync_state(key, value) VALUES(%s, %s)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=now()
+                """,
+                (key, value),
+            )
+
+    def get_state(self, key: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM sync_state WHERE key = %s", (key,)).fetchone()
+            return row["value"] if row else None
+
+    def record_operational_event(
+        self,
+        event_type: str,
+        severity: str,
+        component: str,
+        subject_id: str | None = None,
+        detail: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> int | None:
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    INSERT INTO operational_events(event_type, severity, component, subject_id, detail, metadata_json)
+                    VALUES(%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (event_type, severity, component, subject_id, detail, Jsonb(metadata or {})),
+                ).fetchone()
+                return int(row["id"]) if row else None
+        except Exception:
+            return None
+
+    def operational_events(self, limit: int = 100, component: str | None = None, severity: str | None = None) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if component:
+            where.append("component = %s")
+            params.append(component)
+        if severity:
+            where.append("severity = %s")
+            params.append(severity)
+        where_sql = "WHERE " + " AND ".join(where) if where else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, event_type, severity, component, subject_id, detail, metadata_json, created_at
+                FROM operational_events
+                {where_sql}
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (*params, limit),
+            )
+            return [dict(row) for row in rows]
+
+    def start_sync_run(self, run_kind: str, start_cursor: str | None = None, request: dict[str, Any] | None = None) -> int | None:
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    INSERT INTO sync_runs(run_kind, status, start_cursor, request_json)
+                    VALUES(%s, 'running', %s, %s)
+                    RETURNING id
+                    """,
+                    (run_kind, start_cursor, Jsonb(request or {})),
+                ).fetchone()
+                run_id = int(row["id"]) if row else None
+            self.record_operational_event("sync.started", "info", "sync", str(run_id) if run_id else None, f"Started {run_kind} sync.", {"run_kind": run_kind, "start_cursor": start_cursor})
+            return run_id
+        except Exception:
+            return None
+
+    def finish_sync_run(self, run_id: int | None, status: str, end_cursor: str | None = None, result: dict[str, Any] | None = None, error: str | None = None) -> None:
+        if run_id is None:
+            return
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE sync_runs
+                    SET status=%s,
+                        end_cursor=%s,
+                        result_json=%s,
+                        error=%s,
+                        finished_at=now()
+                    WHERE id = %s
+                    """,
+                    (status, end_cursor, Jsonb(result or {}), error, run_id),
+                )
+            self.record_operational_event("sync." + status, "error" if status == "failed" else "info", "sync", str(run_id), error or f"Finished sync run {run_id}.", result or {})
+        except Exception:
+            return
+
+    def sync_runs(self, limit: int = 50, run_kind: str | None = None) -> list[dict[str, Any]]:
+        where = "WHERE run_kind = %s" if run_kind else ""
+        params: tuple[Any, ...] = (run_kind, limit) if run_kind else (limit,)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, run_kind, status, start_cursor, end_cursor, request_json, result_json, error, started_at, finished_at
+                FROM sync_runs
+                {where}
+                ORDER BY started_at DESC, id DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            return [dict(row) for row in rows]
+
+    def latest_history_id(self) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT MAX(history_id) AS history_id FROM messages").fetchone()
+            return str(row["history_id"]) if row and row["history_id"] is not None else None
+
+    def sync_status(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            counts = {}
+            for table in ["content_objects", "content_object_refs", "labels", "threads", "messages", "attachments", "graph_triples", "graph_node_profiles", "graph_edge_stats", "summary_items", "embedding_chunks", "ingest_issues", "dead_letter_jobs", "operational_events", "sync_runs", "retention_policies", "imap_mailboxes", "imap_message_uids", "archive_exports"]:
+                counts[table] = conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
+            state = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM sync_state")}
+            rows = conn.execute("SELECT message_date FROM messages WHERE message_date IS NOT NULL")
+            iso_dates = sorted(date for row in rows if (date := _parse_message_date(row["message_date"])))
+            archive_states = {row["archive_state"]: row["count"] for row in conn.execute("SELECT archive_state, COUNT(*) AS count FROM messages GROUP BY archive_state")}
+        return {
+            "counts": counts,
+            "state": state,
+            "intelligence_jobs": self.intelligence_job_status(),
+            "archive_states": archive_states,
+            "date_range": {"earliest": iso_dates[0] if iso_dates else None, "latest": iso_dates[-1] if iso_dates else None},
+            "age": self.age_status(),
+            "maintenance": self.maintenance_status(),
+        }
+
+    def refresh_archive_states(self, limit: int | None = None) -> dict[str, int]:
+        sql = "SELECT id FROM messages ORDER BY updated_at DESC"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = (limit,)
+        updated = 0
+        with self._connect() as conn:
+            for row in conn.execute(sql, params):
+                self._update_archive_state_conn(conn, row["id"])
+                updated += 1
+        return {"updated": updated}
+
+    def archive_status(self, message_id: str | None = None, limit: int = 50) -> dict[str, Any]:
+        with self._connect() as conn:
+            states = {row["archive_state"]: row["count"] for row in conn.execute("SELECT archive_state, COUNT(*) AS count FROM messages GROUP BY archive_state ORDER BY archive_state")}
+            if message_id:
+                rows = conn.execute(
+                    """
+                    SELECT id, thread_id, subject, archive_state, archive_checked_at, archive_error, raw_json_digest,
+                           raw_rfc822_digest, tombstoned_at, purged_at, deletion_policy
+                    FROM messages WHERE id = %s
+                    """,
+                    (message_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, thread_id, subject, archive_state, archive_checked_at, archive_error, raw_json_digest,
+                           raw_rfc822_digest, tombstoned_at, purged_at, deletion_policy
+                    FROM messages
+                    WHERE archive_state != 'complete'
+                    ORDER BY updated_at DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                ).fetchall()
+            messages = []
+            for row in rows:
+                item = dict(row)
+                item["has_raw_json"] = bool(item.pop("raw_json_digest"))
+                item["has_raw_rfc822"] = bool(item.pop("raw_rfc822_digest"))
+                messages.append(item)
+        return {"states": states, "messages": messages}
+
+    def archive_incomplete_message_ids(self, limit: int = 50) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM messages
+                WHERE archive_state = 'incomplete'
+                  AND raw_json_digest IS NOT NULL
+                  AND raw_rfc822_digest IS NULL
+                ORDER BY updated_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [row["id"] for row in rows]
+
+    def retention_policies(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT id, name, match_kind, match_value, action, enabled, created_at, updated_at FROM retention_policies ORDER BY name")]
+
+    def retention_preview(self, message_id: str) -> dict[str, Any]:
+        message = self.get_message(message_id)
+        if not message:
+            raise KeyError(message_id)
+        labels = set(message.get("label_ids", [])) | set(message.get("labels", []))
+        categories = set(message.get("categories", []))
+        matched = []
+        action = "tombstone"
+        for policy in self.retention_policies():
+            if not policy.get("enabled"):
+                continue
+            if policy["match_kind"] == "label" and policy["match_value"] in labels:
+                matched.append(policy)
+            if policy["match_kind"] == "category" and policy["match_value"] in categories:
+                matched.append(policy)
+        if any(policy["action"] == "purge" for policy in matched):
+            action = "purge"
+        return {"message_id": message_id, "action": action, "labels": sorted(labels), "categories": sorted(categories), "matched_policies": matched}
+
+    def apply_retention_policy(self, message_id: str, source: str = "operator", dry_run: bool = True) -> dict[str, Any]:
+        preview = self.retention_preview(message_id)
+        if dry_run:
+            return {"dry_run": True, **preview}
+        state = "purge_pending" if preview["action"] == "purge" else "tombstoned"
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE messages
+                SET archive_state=%s,
+                    deletion_source=%s,
+                    deletion_policy=%s,
+                    deleted_label_ids=%s,
+                    tombstoned_at=CASE WHEN %s = 'tombstoned' THEN now() ELSE tombstoned_at END,
+                    archive_checked_at=now(),
+                    updated_at=now()
+                WHERE id=%s
+                """,
+                (state, source, preview["action"], Jsonb(preview["labels"]), state, message_id),
+            )
+        self.record_operational_event("retention.applied", "warning", "archive", message_id, f"Applied retention action {preview['action']}.", preview)
+        return {"dry_run": False, "archive_state": state, **preview}
+
+    def verify_objects(self, limit: int | None = None) -> dict[str, Any]:
+        sql = "SELECT digest, compression, path FROM content_objects ORDER BY created_at"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = (limit,)
+        ok = missing = corrupt = error = 0
+        with self._connect() as conn:
+            rows = [dict(row) for row in conn.execute(sql, params)]
+            for row in rows:
+                status = "ok"
+                detail = None
+                try:
+                    if not os.path.exists(row["path"]):
+                        status = "missing"
+                    else:
+                        self.objects.get(row["digest"], compression=row["compression"])
+                except IOError as exc:
+                    status = "corrupt"
+                    detail = repr(exc)
+                except Exception as exc:
+                    status = "error"
+                    detail = repr(exc)
+                conn.execute(
+                    """
+                    UPDATE content_objects
+                    SET verification_status=%s, verification_error=%s, verified_at=now()
+                    WHERE digest=%s
+                    """,
+                    (status, detail, row["digest"]),
+                )
+                if status == "ok":
+                    ok += 1
+                elif status == "missing":
+                    missing += 1
+                elif status == "corrupt":
+                    corrupt += 1
+                else:
+                    error += 1
+        return {"checked": ok + missing + corrupt + error, "ok": ok, "missing": missing, "corrupt": corrupt, "error": error}
+
+    def export_archive(self, target: str) -> dict[str, Any]:
+        target_path = Path(target)
+        objects_dir = target_path / "objects"
+        target_path.mkdir(parents=True, exist_ok=True)
+        objects_dir.mkdir(parents=True, exist_ok=True)
+        export_id: int | None = None
+        try:
+            with self._connect() as conn:
+                row = conn.execute("INSERT INTO archive_exports(export_path) VALUES(%s) RETURNING id", (str(target_path),)).fetchone()
+                export_id = int(row["id"]) if row else None
+                tables = {}
+                for table in [
+                    "labels",
+                    "threads",
+                    "messages",
+                    "message_parts",
+                    "attachments",
+                    "content_objects",
+                    "content_object_refs",
+                    "retention_policies",
+                    "imap_mailboxes",
+                    "imap_message_uids",
+                ]:
+                    tables[table] = [dict(item) for item in conn.execute(f"SELECT * FROM {table}")]
+            copied = 0
+            for obj in tables["content_objects"]:
+                source = Path(obj["path"])
+                relative = Path("blake3") / obj["digest"][:2] / obj["digest"][2:4] / source.name
+                destination = objects_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if source.exists():
+                    shutil.copy2(source, destination)
+                    copied += 1
+                obj["export_relative_path"] = str(Path("objects") / relative)
+            manifest = {
+                "format": "gmeow.archive.v1",
+                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "object_count": len(tables["content_objects"]),
+                "message_count": len(tables["messages"]),
+                "tables": tables,
+            }
+            manifest_path = target_path / "manifest.json"
+            manifest_text = json.dumps(manifest, indent=2, sort_keys=True, default=str)
+            manifest_path.write_text(manifest_text)
+            digest = blake3_digest(manifest_text.encode())
+            with self._connect() as conn:
+                if export_id is not None:
+                    conn.execute(
+                        """
+                        UPDATE archive_exports
+                        SET status='complete', manifest_digest=%s, object_count=%s, message_count=%s, finished_at=now()
+                        WHERE id=%s
+                        """,
+                        (digest, len(tables["content_objects"]), len(tables["messages"]), export_id),
+                    )
+            self.record_operational_event("archive.exported", "info", "archive", str(export_id) if export_id else None, "Exported archive manifest.", {"target": str(target_path), "objects_copied": copied})
+            return {"id": export_id, "target": str(target_path), "manifest": str(manifest_path), "manifest_digest": digest, "objects": len(tables["content_objects"]), "objects_copied": copied, "messages": len(tables["messages"])}
+        except Exception as exc:
+            if export_id is not None:
+                with self._connect() as conn:
+                    conn.execute("UPDATE archive_exports SET status='failed', error=%s, finished_at=now() WHERE id=%s", (repr(exc), export_id))
+            raise
+
+    def verify_archive_export(self, source: str) -> dict[str, Any]:
+        root = Path(source)
+        manifest_path = root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        missing = []
+        corrupt = []
+        for obj in manifest.get("tables", {}).get("content_objects", []):
+            path = root / obj.get("export_relative_path", "")
+            if not path.exists():
+                missing.append(obj["digest"])
+                continue
+            try:
+                content = path.read_bytes()
+                if obj.get("compression") == "zstd":
+                    import zstandard as zstd
+
+                    content = zstd.ZstdDecompressor().decompress(content)
+                if blake3_digest(content) != obj["digest"]:
+                    corrupt.append(obj["digest"])
+            except Exception:
+                corrupt.append(obj["digest"])
+        return {"source": str(root), "objects": len(manifest.get("tables", {}).get("content_objects", [])), "messages": len(manifest.get("tables", {}).get("messages", [])), "missing": missing, "corrupt": corrupt, "ok": not missing and not corrupt}
+
+    def restore_archive(self, source: str, dry_run: bool = True) -> dict[str, Any]:
+        root = Path(source)
+        manifest = json.loads((root / "manifest.json").read_text())
+        tables = manifest.get("tables", {})
+        if dry_run:
+            return {"dry_run": True, "messages": len(tables.get("messages", [])), "objects": len(tables.get("content_objects", []))}
+        for obj in tables.get("content_objects", []):
+            exported = root / obj.get("export_relative_path", "")
+            destination = self.objects.path_for_digest(obj["digest"], compression=obj["compression"])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if exported.exists() and not destination.exists():
+                shutil.copy2(exported, destination)
+        with self._connect() as conn:
+            for row in tables.get("content_objects", []):
+                conn.execute(
+                    """
+                    INSERT INTO content_objects(digest, path, media_type, compression, original_size, stored_size, verification_status, verified_at, metadata_json)
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(digest) DO UPDATE SET path=excluded.path, media_type=excluded.media_type, compression=excluded.compression,
+                      original_size=excluded.original_size, stored_size=excluded.stored_size, verification_status=excluded.verification_status,
+                      verified_at=excluded.verified_at, metadata_json=excluded.metadata_json
+                    """,
+                    (
+                        row["digest"],
+                        str(self.objects.path_for_digest(row["digest"], compression=row["compression"])),
+                        row["media_type"],
+                        row["compression"],
+                        row["original_size"],
+                        row["stored_size"],
+                        row.get("verification_status", "unverified"),
+                        row.get("verified_at"),
+                        Jsonb(row.get("metadata_json") or {}),
+                    ),
+                )
+            for row in tables.get("labels", []):
+                conn.execute("INSERT INTO labels(id, name, type, raw_json) VALUES(%s, %s, %s, %s) ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, raw_json=excluded.raw_json", (row["id"], row["name"], row.get("type"), Jsonb(row.get("raw_json") or {})))
+            for row in tables.get("threads", []):
+                conn.execute("INSERT INTO threads(id, snippet, raw_json, updated_at) VALUES(%s, %s, %s, %s) ON CONFLICT(id) DO UPDATE SET snippet=excluded.snippet, raw_json=excluded.raw_json, updated_at=excluded.updated_at", (row["id"], row.get("snippet"), Jsonb(row.get("raw_json") or {}), row.get("updated_at")))
+            for row in tables.get("messages", []):
+                keys = [key for key in row.keys() if key != "search_tsv"]
+                values = [row[key] for key in keys]
+                placeholders = ", ".join(["%s"] * len(keys))
+                columns = ", ".join(keys)
+                updates = ", ".join(f"{key}=excluded.{key}" for key in keys if key != "id")
+                conn.execute(f"INSERT INTO messages({columns}) VALUES({placeholders}) ON CONFLICT(id) DO UPDATE SET {updates}", tuple(Jsonb(v) if isinstance(v, (dict, list)) else v for v in values))
+            conn.execute("DELETE FROM message_parts")
+            for row in tables.get("message_parts", []):
+                keys = list(row.keys())
+                conn.execute(f"INSERT INTO message_parts({', '.join(keys)}) VALUES({', '.join(['%s'] * len(keys))}) ON CONFLICT(message_id, part_id) DO UPDATE SET " + ", ".join(f"{key}=excluded.{key}" for key in keys if key not in {'message_id', 'part_id'}), tuple(Jsonb(row[key]) if isinstance(row[key], (dict, list)) else row[key] for key in keys))
+            conn.execute("DELETE FROM attachments")
+            for row in tables.get("attachments", []):
+                keys = list(row.keys())
+                conn.execute(f"INSERT INTO attachments({', '.join(keys)}) VALUES({', '.join(['%s'] * len(keys))}) ON CONFLICT(message_id, COALESCE(part_id, ''), sha1) DO UPDATE SET " + ", ".join(f"{key}=excluded.{key}" for key in keys if key not in {'message_id', 'part_id', 'sha1'}), tuple(Jsonb(row[key]) if isinstance(row[key], (dict, list)) else row[key] for key in keys))
+            self.refresh_content_object_refs()
+        verified = self.verify_objects()
+        self.record_operational_event("archive.restored", "info", "archive", None, "Restored archive export.", {"source": str(root), **verified})
+        return {"dry_run": False, "messages": len(tables.get("messages", [])), "objects": len(tables.get("content_objects", [])), "verification": verified}
+
+    def refresh_imap_mailboxes(self) -> dict[str, int]:
+        with self._connect() as conn:
+            labels = [dict(row) for row in conn.execute("SELECT id, name FROM labels ORDER BY name")]
+            for label in labels:
+                name = _imap_mailbox_name(label["name"] or label["id"])
+                row = conn.execute(
+                    """
+                    INSERT INTO imap_mailboxes(name, label_id)
+                    VALUES(%s, %s)
+                    ON CONFLICT(name) DO UPDATE SET label_id=excluded.label_id, updated_at=now()
+                    RETURNING id
+                    """,
+                    (name, label["id"]),
+                ).fetchone()
+                mailbox_id = row["id"]
+                messages = conn.execute(
+                    """
+                    SELECT id FROM messages
+                    WHERE archive_state IN ('complete', 'tombstoned')
+                      AND raw_rfc822_digest IS NOT NULL
+                      AND label_ids ? %s
+                    ORDER BY COALESCE(message_ts, updated_at), id
+                    """,
+                    (label["id"],),
+                ).fetchall()
+                for message in messages:
+                    conn.execute(
+                        """
+                        INSERT INTO imap_message_uids(mailbox_id, message_id)
+                        VALUES(%s, %s)
+                        ON CONFLICT(mailbox_id, message_id) DO NOTHING
+                        """,
+                        (mailbox_id, message["id"]),
+                    )
+        return {"mailboxes": len(labels)}
+
+    def imap_mailboxes(self) -> list[dict[str, Any]]:
+        self.refresh_imap_mailboxes()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT mb.id, mb.name, mb.label_id, mb.uidvalidity, COUNT(mu.message_id) AS messages, COALESCE(MAX(mu.uid), 0) AS uidnext_base
+                FROM imap_mailboxes mb
+                LEFT JOIN imap_message_uids mu ON mu.mailbox_id = mb.id
+                GROUP BY mb.id, mb.name, mb.label_id, mb.uidvalidity
+                ORDER BY mb.name
+                """
+            )
+            return [{**dict(row), "uidnext": int(row["uidnext_base"] or 0) + 1} for row in rows]
+
+    def imap_mailbox(self, name: str) -> dict[str, Any] | None:
+        self.refresh_imap_mailboxes()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT mb.id, mb.name, mb.label_id, mb.uidvalidity, COUNT(mu.message_id) AS messages, COALESCE(MAX(mu.uid), 0) AS uidnext_base
+                FROM imap_mailboxes mb
+                LEFT JOIN imap_message_uids mu ON mu.mailbox_id = mb.id
+                WHERE lower(mb.name) = lower(%s)
+                GROUP BY mb.id, mb.name, mb.label_id, mb.uidvalidity
+                """,
+                (name,),
+            ).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item["uidnext"] = int(item.pop("uidnext_base") or 0) + 1
+            return item
+
+    def imap_messages(self, mailbox: str, limit: int | None = None) -> list[dict[str, Any]]:
+        box = self.imap_mailbox(mailbox)
+        if not box:
+            return []
+        sql = """
+            SELECT mu.uid, m.id, m.subject, m.sender, m.recipients, m.message_date, m.message_ts, m.raw_rfc822_digest, co.compression
+            FROM imap_message_uids mu
+            JOIN messages m ON m.id = mu.message_id
+            JOIN content_objects co ON co.digest = m.raw_rfc822_digest
+            WHERE mu.mailbox_id = %s
+              AND m.archive_state IN ('complete', 'tombstoned')
+              AND m.raw_rfc822_digest IS NOT NULL
+            ORDER BY mu.uid
+        """
+        params: tuple[Any, ...] = (box["id"],)
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = (box["id"], limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(row) for row in rows]
+
+    def imap_message_bytes(self, mailbox: str, uid: int) -> bytes | None:
+        box = self.imap_mailbox(mailbox)
+        if not box:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT m.raw_rfc822_digest, co.compression
+                FROM imap_message_uids mu
+                JOIN messages m ON m.id = mu.message_id
+                JOIN content_objects co ON co.digest = m.raw_rfc822_digest
+                WHERE mu.mailbox_id = %s AND mu.uid = %s
+                """,
+                (box["id"], uid),
+            ).fetchone()
+        if not row:
+            return None
+        return self.objects.get(row["raw_rfc822_digest"], compression=row["compression"])
+
+    def imap_status(self) -> dict[str, Any]:
+        boxes = self.imap_mailboxes()
+        return {"mailboxes": len(boxes), "messages": sum(int(box["messages"] or 0) for box in boxes), "read_only": True, "uid_model": "per_label_mailbox"}
+
+    def resilience_status(self) -> dict[str, Any]:
+        job_status = self.intelligence_job_status()
+        dead_letters = self.list_dead_letter_jobs(limit=10)
+        events = self.operational_events(limit=20, severity="error")
+        repair = self.repair_cache(dry_run=True)
+        degraded = []
+        if job_status.get("dead", 0) or dead_letters:
+            degraded.append("dead_letter_jobs")
+        if repair.get("missing_object_files", {}).get("count"):
+            degraded.append("missing_object_files")
+        if repair.get("corrupt_object_files", {}).get("count"):
+            degraded.append("corrupt_object_files")
+        if repair.get("stale_running_jobs", {}).get("count"):
+            degraded.append("stale_running_jobs")
+        if events:
+            degraded.append("recent_errors")
+        return {
+            "ok": not degraded,
+            "degraded": degraded,
+            "jobs": job_status,
+            "dead_letters": dead_letters,
+            "recent_errors": events,
+            "repair_preview": repair,
+            "latest_sync_runs": self.sync_runs(limit=5),
+        }
+
+    def repair_cache(self, dry_run: bool = True) -> dict[str, Any]:
+        missing = []
+        corrupt = []
+        stale_count = 0
+        with self._connect() as conn:
+            for row in conn.execute("SELECT digest, path, compression FROM content_objects ORDER BY created_at"):
+                from pathlib import Path
+
+                if not Path(row["path"]).exists():
+                    missing.append(dict(row))
+                    continue
+                try:
+                    self.objects.get(row["digest"], compression=row["compression"])
+                except Exception as exc:
+                    item = dict(row)
+                    item["error"] = repr(exc)
+                    corrupt.append(item)
+            stale = conn.execute(
+                """
+                SELECT id FROM intelligence_jobs
+                WHERE status='running' AND locked_at < now() - interval '15 minutes'
+                ORDER BY locked_at, id
+                """
+            ).fetchall()
+            stale_count = len(stale)
+        reclaimed = {"reclaimed": 0} if dry_run else self.reclaim_stale_intelligence_jobs()
+        if not dry_run:
+            self.refresh_content_object_refs()
+            self.record_operational_event("repair.cache", "warning" if missing or corrupt else "info", "repair", None, "Ran cache repair.", {"missing_object_files": len(missing), "corrupt_object_files": len(corrupt), "reclaimed": reclaimed.get("reclaimed", 0)})
+        return {
+            "dry_run": dry_run,
+            "missing_object_files": {"count": len(missing), "items": missing[:25]},
+            "corrupt_object_files": {"count": len(corrupt), "items": corrupt[:25]},
+            "stale_running_jobs": {"count": stale_count, **reclaimed},
+            "content_refs": "would_refresh" if dry_run else "refreshed",
+        }
+
+    def maintenance_status(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            ref_rows = conn.execute("SELECT COUNT(*) AS count FROM content_object_refs").fetchone()["count"]
+            orphan_objects = conn.execute(
+                """
+                SELECT COUNT(*) AS count, COALESCE(SUM(original_size), 0) AS original_size, COALESCE(SUM(stored_size), 0) AS stored_size
+                FROM content_objects c
+                WHERE NOT EXISTS (SELECT 1 FROM content_object_refs r WHERE r.digest = c.digest)
+                """
+            ).fetchone()
+            missing_files = 0
+            for row in conn.execute("SELECT path FROM content_objects"):
+                from pathlib import Path
+
+                if not Path(row["path"]).exists():
+                    missing_files += 1
+            dims = [dict(row) for row in conn.execute("SELECT embedding_dim, COUNT(*) AS chunks FROM embedding_chunks GROUP BY embedding_dim ORDER BY embedding_dim NULLS FIRST")]
+            reference_kinds = [dict(row) for row in conn.execute("SELECT ref_kind, COUNT(*) AS refs FROM content_object_refs GROUP BY ref_kind ORDER BY ref_kind")]
+            table_stats = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT relname AS table, n_live_tup, n_dead_tup, last_vacuum, last_autovacuum, last_analyze, last_autoanalyze
+                    FROM pg_stat_user_tables
+                    WHERE schemaname = 'public' AND relname = ANY(%s)
+                    ORDER BY relname
+                    """,
+                    (PROJECT_TABLES,),
+                )
+            ]
+        return {
+            "orphan_content_objects": dict(orphan_objects),
+            "content_object_refs": {"count": ref_rows, "by_kind": reference_kinds},
+            "missing_object_files": missing_files,
+            "embedding_dimensions": dims,
+            "table_stats": table_stats,
+        }
+
+    def prune_orphan_content_objects(self, dry_run: bool = True) -> dict[str, Any]:
+        query = """
+            WITH referenced AS (
+              SELECT raw_json_digest AS digest FROM messages WHERE raw_json_digest IS NOT NULL
+              UNION SELECT text_body_digest FROM messages WHERE text_body_digest IS NOT NULL
+              UNION SELECT markdown_digest FROM messages WHERE markdown_digest IS NOT NULL
+              UNION SELECT raw_rfc822_digest FROM messages WHERE raw_rfc822_digest IS NOT NULL
+              UNION SELECT body_text_digest FROM message_parts WHERE body_text_digest IS NOT NULL
+              UNION SELECT digest FROM attachments
+              UNION SELECT artifact_digest FROM ingest_issues WHERE artifact_digest IS NOT NULL
+            )
+            SELECT digest, path, compression, original_size, stored_size
+            FROM content_objects c
+            WHERE NOT EXISTS (SELECT 1 FROM referenced r WHERE r.digest = c.digest)
+            ORDER BY created_at, digest
+        """
+        with self._connect() as conn:
+            rows = [dict(row) for row in conn.execute(query)]
+            if not dry_run and rows:
+                conn.execute("DELETE FROM content_objects WHERE digest = ANY(%s)", ([row["digest"] for row in rows],))
+        if not dry_run:
+            from pathlib import Path
+
+            for row in rows:
+                path = Path(row["path"])
+                if path.exists():
+                    path.unlink()
+        return {
+            "dry_run": dry_run,
+            "objects": len(rows),
+            "original_size": sum(int(row.get("original_size") or 0) for row in rows),
+            "stored_size": sum(int(row.get("stored_size") or 0) for row in rows),
+            "digests": [row["digest"] for row in rows[:100]],
+        }
+
+    def refresh_content_object_refs(self) -> dict[str, int]:
+        inserts = [
+            ("messages", "raw_json_digest", "raw_json"),
+            ("messages", "text_body_digest", "text_body"),
+            ("messages", "markdown_digest", "markdown"),
+            ("messages", "raw_rfc822_digest", "raw_rfc822"),
+        ]
+        with self._connect() as conn:
+            conn.execute("DELETE FROM content_object_refs")
+            total = 0
+            for table, column, kind in inserts:
+                result = conn.execute(
+                    f"""
+                    INSERT INTO content_object_refs(digest, ref_table, ref_pk, ref_column, ref_kind)
+                    SELECT {column}, %s, id, %s, %s
+                    FROM {table}
+                    WHERE {column} IS NOT NULL
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (table, column, kind),
+                )
+                total += int(result.rowcount or 0)
+            result = conn.execute(
+                """
+                INSERT INTO content_object_refs(digest, ref_table, ref_pk, ref_column, ref_kind)
+                SELECT body_text_digest, 'message_parts', message_id || ':' || part_id, 'body_text_digest', 'part_body'
+                FROM message_parts
+                WHERE body_text_digest IS NOT NULL
+                ON CONFLICT DO NOTHING
+                """
+            )
+            total += int(result.rowcount or 0)
+            result = conn.execute(
+                """
+                INSERT INTO content_object_refs(digest, ref_table, ref_pk, ref_column, ref_kind)
+                SELECT digest, 'attachments', message_id || ':' || COALESCE(part_id, '') || ':' || sha1, 'digest', 'attachment'
+                FROM attachments
+                WHERE digest IS NOT NULL
+                ON CONFLICT DO NOTHING
+                """
+            )
+            total += int(result.rowcount or 0)
+            result = conn.execute(
+                """
+                INSERT INTO content_object_refs(digest, ref_table, ref_pk, ref_column, ref_kind)
+                SELECT artifact_digest, 'ingest_issues', id::text, 'artifact_digest', 'ingest_artifact'
+                FROM ingest_issues
+                WHERE artifact_digest IS NOT NULL
+                ON CONFLICT DO NOTHING
+                """
+            )
+            total += int(result.rowcount or 0)
+        return {"refs": total}
+
+    def refresh_summary_items(self) -> dict[str, int]:
+        statements = [
+            (
+                "thread",
+                """
+                INSERT INTO summary_items(scope_kind, scope_id, title, summary, message_count, latest_message_ts, centroid, centroid_dim, metadata_json, updated_at)
+                SELECT 'thread',
+                       COALESCE(m.thread_id, m.id),
+                       COALESCE(MAX(NULLIF(m.subject, '')), COALESCE(m.thread_id, m.id)),
+                       COUNT(DISTINCT m.id)::text || ' messages in thread',
+                       COUNT(DISTINCT m.id),
+                       MAX(m.message_ts),
+                       AVG(e.embedding)::vector,
+                       MAX(e.embedding_dim),
+                       jsonb_build_object('message_ids', jsonb_agg(DISTINCT m.id)),
+                       now()
+                FROM messages m
+                LEFT JOIN embedding_chunks e ON e.message_id = m.id AND e.source_kind = 'message' AND e.embedding IS NOT NULL
+                GROUP BY COALESCE(m.thread_id, m.id)
+                ON CONFLICT(scope_kind, scope_id) DO UPDATE SET
+                  title=excluded.title, summary=excluded.summary, message_count=excluded.message_count,
+                  latest_message_ts=excluded.latest_message_ts, centroid=excluded.centroid,
+                  centroid_dim=excluded.centroid_dim, metadata_json=excluded.metadata_json, updated_at=now()
+                """,
+            ),
+            (
+                "contact",
+                """
+                INSERT INTO summary_items(scope_kind, scope_id, title, summary, message_count, latest_message_ts, centroid, centroid_dim, metadata_json, updated_at)
+                SELECT 'contact',
+                       m.sender_addr,
+                       COALESCE(MAX(NULLIF(m.sender, '')), m.sender_addr),
+                       COUNT(DISTINCT m.id)::text || ' messages from ' || m.sender_addr,
+                       COUNT(DISTINCT m.id),
+                       MAX(m.message_ts),
+                       AVG(e.embedding)::vector,
+                       MAX(e.embedding_dim),
+                       jsonb_build_object('domain', MAX(m.sender_domain), 'message_ids', jsonb_agg(DISTINCT m.id)),
+                       now()
+                FROM messages m
+                LEFT JOIN embedding_chunks e ON e.message_id = m.id AND e.source_kind = 'message' AND e.embedding IS NOT NULL
+                WHERE m.sender_addr IS NOT NULL
+                GROUP BY m.sender_addr
+                ON CONFLICT(scope_kind, scope_id) DO UPDATE SET
+                  title=excluded.title, summary=excluded.summary, message_count=excluded.message_count,
+                  latest_message_ts=excluded.latest_message_ts, centroid=excluded.centroid,
+                  centroid_dim=excluded.centroid_dim, metadata_json=excluded.metadata_json, updated_at=now()
+                """,
+            ),
+            (
+                "category",
+                """
+                INSERT INTO summary_items(scope_kind, scope_id, title, summary, message_count, latest_message_ts, centroid, centroid_dim, metadata_json, updated_at)
+                SELECT 'category',
+                       mc.category,
+                       COALESCE(MAX(c.name), mc.category),
+                       COUNT(DISTINCT m.id)::text || ' messages in category ' || mc.category,
+                       COUNT(DISTINCT m.id),
+                       MAX(m.message_ts),
+                       AVG(e.embedding)::vector,
+                       MAX(e.embedding_dim),
+                       jsonb_build_object('default_hidden', COALESCE(bool_or(c.default_hidden), false), 'message_ids', jsonb_agg(DISTINCT m.id)),
+                       now()
+                FROM message_categories mc
+                JOIN messages m ON m.id = mc.message_id
+                LEFT JOIN categories c ON c.id = mc.category
+                LEFT JOIN embedding_chunks e ON e.message_id = m.id AND e.source_kind = 'message' AND e.embedding IS NOT NULL
+                GROUP BY mc.category
+                ON CONFLICT(scope_kind, scope_id) DO UPDATE SET
+                  title=excluded.title, summary=excluded.summary, message_count=excluded.message_count,
+                  latest_message_ts=excluded.latest_message_ts, centroid=excluded.centroid,
+                  centroid_dim=excluded.centroid_dim, metadata_json=excluded.metadata_json, updated_at=now()
+                """,
+            ),
+            (
+                "project",
+                """
+                INSERT INTO summary_items(scope_kind, scope_id, title, summary, message_count, latest_message_ts, centroid, centroid_dim, metadata_json, updated_at)
+                SELECT 'project',
+                       gnp.node,
+                       gnp.label,
+                       COUNT(DISTINCT m.id)::text || ' messages linked to project ' || gnp.label,
+                       COUNT(DISTINCT m.id),
+                       MAX(m.message_ts),
+                       AVG(e.embedding)::vector,
+                       MAX(e.embedding_dim),
+                       jsonb_build_object('node', gnp.node, 'message_ids', jsonb_agg(DISTINCT m.id)),
+                       now()
+                FROM graph_node_profiles gnp
+                JOIN graph_triples gt ON (gt.subject = gnp.node OR gt.object = gnp.node) AND gt.source_message_id IS NOT NULL
+                JOIN messages m ON m.id = gt.source_message_id
+                LEFT JOIN embedding_chunks e ON e.message_id = m.id AND e.source_kind = 'message' AND e.embedding IS NOT NULL
+                WHERE gnp.kind = 'projects'
+                GROUP BY gnp.node, gnp.label
+                ON CONFLICT(scope_kind, scope_id) DO UPDATE SET
+                  title=excluded.title, summary=excluded.summary, message_count=excluded.message_count,
+                  latest_message_ts=excluded.latest_message_ts, centroid=excluded.centroid,
+                  centroid_dim=excluded.centroid_dim, metadata_json=excluded.metadata_json, updated_at=now()
+                """,
+            ),
+        ]
+        counts: dict[str, int] = {}
+        with self._connect() as conn:
+            for scope, sql in statements:
+                conn.execute("DELETE FROM summary_items WHERE scope_kind = %s", (scope,))
+                result = conn.execute(sql)
+                counts[scope] = int(result.rowcount or 0)
+        return counts
+
+    def list_summary_items(self, scope_kind: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        where = ""
+        params: list[Any] = []
+        if scope_kind:
+            where = "WHERE scope_kind = %s"
+            params.append(scope_kind)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT scope_kind, scope_id, title, summary, message_count, latest_message_ts, centroid_dim, metadata_json, updated_at
+                FROM summary_items
+                {where}
+                ORDER BY message_count DESC, latest_message_ts DESC NULLS LAST, scope_kind, scope_id
+                LIMIT %s
+                """,
+                (*params, limit),
+            )
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["metadata"] = item.pop("metadata_json") or {}
+                result.append(item)
+            return result
+
+    def refresh_timeline_views(self) -> dict[str, str]:
+        with self._connect() as conn:
+            conn.execute("REFRESH MATERIALIZED VIEW message_timeline_daily")
+            conn.execute("REFRESH MATERIALIZED VIEW graph_entity_emergence")
+        return {"message_timeline_daily": "refreshed", "graph_entity_emergence": "refreshed"}
+
+    def refresh_materialized_summary_views(self) -> dict[str, str]:
+        views = [
+            "message_search_summary",
+            "thread_summary",
+            "contact_summary",
+            "category_summary",
+            "project_summary",
+            "graph_node_summary",
+        ]
+        with self._connect() as conn:
+            for view in views:
+                conn.execute(f"REFRESH MATERIALIZED VIEW {view}")
+        return {view: "refreshed" for view in views}
+
+    def timeline_daily(self, limit: int = 90) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT day, messages, hydrated_messages, senders, threads
+                FROM message_timeline_daily
+                ORDER BY day DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [dict(row) for row in rows]
+
+    def emerging_entities(self, limit: int = 50, kind: str | None = None, visibility: str = "user") -> list[dict[str, Any]]:
+        where = ["visibility = %s"]
+        params: list[Any] = [visibility]
+        if kind:
+            where.append("kind = %s")
+            params.append(kind)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT node, label, kind, visibility, first_seen, last_seen, messages, triples
+                FROM graph_entity_emergence
+                WHERE {' AND '.join(where)}
+                ORDER BY first_seen DESC NULLS LAST, messages DESC, node
+                LIMIT %s
+                """,
+                (*params, limit),
+            )
+            return [dict(row) for row in rows]
+
+    def analyze_storage_tables(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            for table in PROJECT_TABLES:
+                conn.execute(f"ANALYZE {table}")
+        return {"analyzed": PROJECT_TABLES}
+
+    def storage_diagnostics(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            extensions = [dict(row) for row in conn.execute("SELECT extname, extversion FROM pg_extension ORDER BY extname")]
+            relations = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT relname AS relation,
+                           pg_total_relation_size(relid) AS total_bytes,
+                           pg_relation_size(relid) AS heap_bytes,
+                           pg_indexes_size(relid) AS index_bytes,
+                           n_live_tup,
+                           n_dead_tup
+                    FROM pg_stat_user_tables
+                    WHERE schemaname = 'public'
+                    ORDER BY pg_total_relation_size(relid) DESC
+                    """
+                )
+            ]
+            indexes = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT schemaname, tablename, indexname,
+                           pg_relation_size((schemaname || '.' || indexname)::regclass) AS bytes,
+                           indexdef
+                    FROM pg_indexes
+                    WHERE schemaname = 'public'
+                    ORDER BY pg_relation_size((schemaname || '.' || indexname)::regclass) DESC
+                    """
+                )
+            ]
+            vector_dims = [dict(row) for row in conn.execute("SELECT source_kind, embedding_dim, COUNT(*) AS chunks FROM embedding_chunks GROUP BY source_kind, embedding_dim ORDER BY source_kind, embedding_dim")]
+            matviews = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT matviewname, ispopulated
+                    FROM pg_matviews
+                    WHERE schemaname = 'public'
+                    ORDER BY matviewname
+                    """
+                )
+            ]
+            hnsw_indexes = [row for row in indexes if "USING hnsw" in row["indexdef"]]
+        return {
+            "extensions": extensions,
+            "relations": relations,
+            "indexes": indexes,
+            "hnsw_indexes": hnsw_indexes,
+            "vector_dimensions": vector_dims,
+            "materialized_views": matviews,
+            "maintenance": self.maintenance_status(),
+        }
+
+    def record_ingest_issue(
+        self,
+        message_id: str | None,
+        source: str,
+        severity: str,
+        detail: str,
+        artifact: dict[str, Any] | bytes | str | None = None,
+    ) -> int:
+        artifact_digest = None
+        with self._connect() as conn:
+            if artifact is not None:
+                if isinstance(artifact, bytes):
+                    stored = self.objects.put(artifact, media_type="application/octet-stream")
+                elif isinstance(artifact, str):
+                    stored = self.objects.put_text(artifact)
+                else:
+                    stored = self.objects.put_json(artifact)
+                self._record_object_conn(conn, stored)
+                artifact_digest = stored.digest
+            row = conn.execute(
+                """
+                INSERT INTO ingest_issues(message_id, source, severity, detail, artifact_digest)
+                VALUES(%s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (message_id, source, severity, detail[:4000], artifact_digest),
+            ).fetchone()
+            self._upsert_content_ref_conn(conn, artifact_digest, "ingest_issues", str(row["id"]), "artifact_digest", "ingest_artifact")
+            return int(row["id"])
+
+    def list_ingest_issues(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, message_id, source, severity, detail, artifact_digest, created_at
+                FROM ingest_issues
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [dict(row) for row in rows]
+
+    def triples(self) -> list[tuple[str, str, str, str | None]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT subject, predicate, object, source_message_id FROM graph_triples")
+            return [(row["subject"], row["predicate"], row["object"], row["source_message_id"]) for row in rows]
+
+    def add_triples(self, triples: list[tuple[str, str, str, str | None]]) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO graph_triples(subject, predicate, object, source_message_id)
+                    VALUES(%s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    triples,
+                )
+        self._mirror_triples_to_age(triples)
+
+    def _mirror_triples_to_age(self, triples: list[tuple[str, str, str, str | None]]) -> None:
+        try:
+            with self._connect() as conn:
+                conn.execute("SET search_path=ag_catalog, public")
+                for subject, predicate, obj, source_message_id in triples[:500]:
+                    cypher = (
+                        "MERGE (s:Node {id: " + json.dumps(subject) + "}) "
+                        "MERGE (o:Node {id: " + json.dumps(obj) + "}) "
+                        "MERGE (s)-[:RELATED {predicate: " + json.dumps(predicate) + ", source_message_id: " + json.dumps(source_message_id) + "}]->(o)"
+                    )
+                    conn.execute(_age_sql(cypher, "v agtype"))
+        except Exception:
+            return
+
+    def delete_graph_triples_for_message(self, message_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM graph_triples WHERE source_message_id = %s", (message_id,))
+
+    def delete_graph_triples_for_attachment(self, sha1: str) -> None:
+        attachment = f"gmeow:attachment/{sha1}"
+        attachment_message = "gmeow:message/attachment_" + sha1
+        with self._connect() as conn:
+            conn.execute("DELETE FROM graph_triples WHERE subject = ANY(%s) OR object = ANY(%s)", ([attachment, attachment_message], [attachment, attachment_message]))
+
+    def graph_triples_for_message(self, message_id: str) -> list[dict[str, str | None]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT subject, predicate, object, source_message_id FROM graph_triples WHERE source_message_id = %s ORDER BY subject, predicate, object", (message_id,))
+            return [dict(row) for row in rows]
+
+    def refresh_graph_node_profiles(self) -> dict[str, int]:
+        with self._connect() as conn:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    WITH endpoints AS (
+                      SELECT subject AS node, predicate, source_message_id FROM graph_triples
+                      UNION ALL
+                      SELECT object AS node, predicate, source_message_id FROM graph_triples
+                    )
+                    SELECT node, MIN(predicate) AS predicate, COUNT(*) AS degree, COUNT(DISTINCT source_message_id) AS message_count
+                    FROM endpoints
+                    GROUP BY node
+                    """
+                )
+            ]
+            seen = []
+            for row in rows:
+                label = self._graph_node_label(row["node"])
+                profile = _graph_node_profile(row["node"], label, row.get("predicate"))
+                conn.execute(
+                    """
+                    INSERT INTO graph_node_profiles(node, label, kind, namespace, visibility, role, noise_reason, degree, message_count, updated_at)
+                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT(node) DO UPDATE SET
+                      label=excluded.label,
+                      kind=excluded.kind,
+                      namespace=excluded.namespace,
+                      visibility=excluded.visibility,
+                      role=excluded.role,
+                      noise_reason=excluded.noise_reason,
+                      degree=excluded.degree,
+                      message_count=excluded.message_count,
+                      updated_at=now()
+                    """,
+                    (
+                        row["node"],
+                        label,
+                        profile["kind"],
+                        profile.get("namespace"),
+                        profile["visibility"],
+                        profile["role"],
+                        profile.get("noise_reason"),
+                        row["degree"],
+                        row["message_count"],
+                    ),
+                )
+                seen.append(row["node"])
+            if seen:
+                conn.execute("DELETE FROM graph_node_profiles WHERE NOT (node = ANY(%s))", (seen,))
+            else:
+                conn.execute("DELETE FROM graph_node_profiles")
+        return {"profiles": len(seen)}
+
+    def graph_nodes_for_message(self, message_id: str, visibility: str = "user", kind: str | None = None, namespace: str | None = None) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        seen: set[tuple[str, str, str]] = set()
+        for triple in self.graph_triples_for_message(message_id):
+            for role, value in [("subject", triple["subject"]), ("object", triple["object"])]:
+                if value is None:
+                    continue
+                label = self._graph_node_label(value)
+                profile = _graph_node_profile(value, label, triple["predicate"])
+                if not _profile_allowed(profile, visibility=visibility, kind=kind, namespace=namespace):
+                    continue
+                node_kind = str(profile["kind"])
+                key = (node_kind, value, role)
+                if key in seen:
+                    continue
+                seen.add(key)
+                grouped.setdefault(node_kind, []).append({"id": value, "label": label, "role": role, "predicate": triple["predicate"] or "", "profile": profile})
+        return {kind: nodes for kind, nodes in grouped.items() if nodes}
+
+    def graph_neighbors(self, node: str, depth: int = 1, limit: int = 100) -> dict[str, Any]:
+        depth = max(1, min(depth, 3))
+        seen = {node}
+        frontier = {node}
+        edges = []
+        with self._connect() as conn:
+            for distance in range(1, depth + 1):
+                if not frontier or len(edges) >= limit:
+                    break
+                rows = conn.execute(
+                    """
+                    SELECT subject, predicate, object, source_message_id
+                    FROM graph_triples
+                    WHERE subject = ANY(%s) OR object = ANY(%s)
+                    ORDER BY source_message_id, predicate
+                    LIMIT %s
+                    """,
+                    (list(frontier), list(frontier), max(1, limit - len(edges))),
+                )
+                next_frontier = set()
+                for row in rows:
+                    edge = dict(row)
+                    edge["distance"] = distance
+                    edges.append(edge)
+                    for endpoint in [row["subject"], row["object"]]:
+                        if endpoint not in seen:
+                            seen.add(endpoint)
+                            next_frontier.add(endpoint)
+                frontier = next_frontier
+        return {"node": node, "nodes": sorted(seen), "edges": edges}
+
+    def graph_projection(self, limit: int = 25, prefix: str | None = None, visibility: str = "user", kind: str | None = None, namespace: str | None = None) -> dict[str, Any]:
+        from .graph import GraphProjector
+
+        triples = self.triples()
+        if prefix:
+            triples = [triple for triple in triples if triple[0].startswith(prefix) or triple[2].startswith(prefix)]
+        triples = [
+            triple
+            for triple in triples
+            if _profile_allowed(_graph_node_profile(triple[0], self._graph_node_label(triple[0]), triple[1]), visibility=visibility, kind=kind, namespace=namespace)
+            or _profile_allowed(_graph_node_profile(triple[2], self._graph_node_label(triple[2]), triple[1]), visibility=visibility, kind=kind, namespace=namespace)
+        ]
+        projection = GraphProjector().summary(triples, limit=limit * 10)
+        filtered_top_nodes = []
+        for node in projection["top_nodes"]:
+            node["label"] = self._graph_node_label(node["id"])
+            node["profile"] = _graph_node_profile(node["id"], node["label"])
+            if _profile_allowed(node["profile"], visibility=visibility, kind=kind, namespace=namespace):
+                filtered_top_nodes.append(node)
+            if len(filtered_top_nodes) >= limit:
+                break
+        projection["top_nodes"] = filtered_top_nodes
+        return projection
+
+    def graph_path(self, source: str, target: str, max_depth: int = 4) -> dict[str, Any]:
+        from .graph import GraphProjector
+
+        result = GraphProjector().shortest_path(self.triples(), source, target, max_depth=max_depth)
+        if result is None:
+            return {"source": source, "target": target, "found": False, "max_depth": max_depth}
+        result["found"] = True
+        total_weight = 0.0
+        for edge in result["path"]:
+            edge["from_label"] = self._graph_node_label(edge["from"])
+            edge["to_label"] = self._graph_node_label(edge["to"])
+            stats = self._edge_stats(edge["from"], edge["predicate"].lstrip("^"), edge["to"])
+            if not stats and edge["predicate"].startswith("^"):
+                stats = self._edge_stats(edge["to"], edge["predicate"].lstrip("^"), edge["from"])
+            if stats:
+                edge["weight"] = stats["weight"]
+                edge["evidence_count"] = stats["evidence_count"]
+                edge["message_count"] = stats["message_count"]
+                total_weight += float(stats["weight"])
+        result["score"] = round(1.0 / (1.0 + total_weight), 6) if result["path"] else 0.0
+        result["total_weight"] = round(total_weight, 6)
+        return result
+
+    def refresh_graph_edge_stats(self) -> dict[str, int]:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM graph_edge_stats")
+            result = conn.execute(
+                """
+                INSERT INTO graph_edge_stats(subject, predicate, object, evidence_count, message_count, first_message_ts, last_message_ts, weight)
+                SELECT gt.subject,
+                       gt.predicate,
+                       gt.object,
+                       COUNT(*) AS evidence_count,
+                       COUNT(DISTINCT gt.source_message_id) AS message_count,
+                       MIN(m.message_ts) AS first_message_ts,
+                       MAX(m.message_ts) AS last_message_ts,
+                       CASE
+                         WHEN gt.predicate IN ('gmeow:from', 'gmeow:to', 'gmeow:aboutProject', 'https://schema.org/about', 'http://xmlns.com/foaf/0.1/topic') THEN 0.35
+                         WHEN gt.predicate IN ('gmeow:hasAttachmentEvent', 'gmeow:hasCalendarEvent', 'gmeow:calendarAttendee', 'gmeow:calendarOrganizer', 'gmeow:calendarLocation', 'gmeow:calendarStart') THEN 0.35
+                         WHEN gt.predicate IN ('gmeow:hasAttachmentDocument', 'gmeow:hasDocument', 'gmeow:hasDocumentAuthor', 'gmeow:documentTitle', 'gmeow:documentAuthor') THEN 0.45
+                         WHEN gt.predicate IN ('gmeow:attachmentMentions', 'gmeow:attachmentMentionsCanonical', 'gmeow:documentMentions', 'gmeow:calendarMentions') THEN 0.55
+                         WHEN gt.predicate IN ('gmeow:ocrMentions', 'gmeow:visionMentions') THEN 0.8
+                         WHEN gt.predicate IN ('gmeow:mentionsEntity', 'gmeow:hasAttachment', 'gmeow:hasLabel', 'gmeow:containsFile', 'gmeow:attachmentContainsFile') THEN 0.65
+                         WHEN gt.predicate LIKE 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' THEN 1.25
+                         ELSE 1.0
+                       END / LN(COUNT(*) + 2.0) AS weight
+                FROM graph_triples gt
+                LEFT JOIN messages m ON m.id = gt.source_message_id
+                GROUP BY gt.subject, gt.predicate, gt.object
+                """
+            )
+            return {"edges": int(result.rowcount or 0)}
+
+    def _graph_edge_rows(self, limit_edges: int = 50_000) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT subject, predicate, object, evidence_count, message_count, first_message_ts, last_message_ts, weight
+                FROM graph_edge_stats
+                ORDER BY weight ASC, message_count DESC
+                LIMIT %s
+                """,
+                (limit_edges,),
+            )
+            return [dict(row) for row in rows]
+
+    def graph_weighted_path(self, source: str, target: str, max_depth: int = 4, limit_edges: int = 50_000) -> dict[str, Any]:
+        from .graph import WeightedGraphProjector
+
+        result = WeightedGraphProjector().weighted_path(self._graph_edge_rows(limit_edges=limit_edges), source, target, max_depth=max_depth)
+        if result is None:
+            return {"source": source, "target": target, "found": False, "max_depth": max_depth}
+        result["found"] = True
+        for edge in result["path"]:
+            edge["from_label"] = self._graph_node_label(edge["from"])
+            edge["to_label"] = self._graph_node_label(edge["to"])
+        return result
+
+    def graph_centrality(self, metric: str = "pagerank", limit: int = 25, kind: str | None = None, namespace: str | None = None, visibility: str = "user", limit_edges: int = 50_000) -> list[dict[str, Any]]:
+        from .graph import WeightedGraphProjector
+
+        rows = WeightedGraphProjector().centrality(self._graph_edge_rows(limit_edges=limit_edges), metric=metric)
+        rows.sort(key=lambda item: (-item["score"], item["node"]))
+        results = []
+        for item in rows:
+            label = self._graph_node_label(item["node"])
+            profile = _graph_node_profile(item["node"], label)
+            if not _algorithm_profile_allowed(profile, visibility=visibility, kind=kind, namespace=namespace):
+                continue
+            results.append({"node": item["node"], "label": label, "score": round(item["score"], 8), "profile": profile})
+            if len(results) >= limit:
+                break
+        return results
+
+    def graph_components(self, mode: str = "weak", limit: int = 10, min_size: int = 2, visibility: str = "user", limit_edges: int = 50_000) -> list[dict[str, Any]]:
+        from .graph import WeightedGraphProjector
+
+        edge_rows = self._graph_edge_rows(limit_edges=limit_edges)
+        degree: dict[str, int] = {}
+        for edge in edge_rows:
+            degree[str(edge["subject"])] = degree.get(str(edge["subject"]), 0) + 1
+            degree[str(edge["object"])] = degree.get(str(edge["object"]), 0) + 1
+        components = WeightedGraphProjector().components(edge_rows, mode=mode)
+        results = []
+        for component in sorted(components, key=lambda values: (-len(values), sorted(values)[0] if values else "")):
+            visible_nodes = []
+            for node in sorted(component, key=lambda value: (-degree.get(value, 0), value)):
+                label = self._graph_node_label(node)
+                profile = _graph_node_profile(node, label)
+                if _algorithm_profile_allowed(profile, visibility=visibility):
+                    visible_nodes.append({"node": node, "label": label, "degree": degree.get(node, 0), "profile": profile})
+            if len(visible_nodes) < min_size:
+                continue
+            results.append({"mode": mode, "size": len(component), "visible_size": len(visible_nodes), "nodes": visible_nodes[:50]})
+            if len(results) >= limit:
+                break
+        return results
+
+    def graph_related_nodes(self, node: str, limit: int = 25, max_weight: float | None = None, kind: str | None = None, namespace: str | None = None, visibility: str = "user", limit_edges: int = 50_000) -> list[dict[str, Any]]:
+        from .graph import WeightedGraphProjector
+
+        candidates = WeightedGraphProjector().related_nodes(self._graph_edge_rows(limit_edges=limit_edges), node, limit=limit * 5, max_weight=max_weight)
+        results = []
+        for item in candidates:
+            label = self._graph_node_label(item["node"])
+            profile = _graph_node_profile(item["node"], label)
+            if not _algorithm_profile_allowed(profile, visibility=visibility, kind=kind, namespace=namespace):
+                continue
+            results.append({**item, "label": label, "profile": profile})
+            if len(results) >= limit:
+                break
+        return results
+
+    def graph_bridges(self, limit: int = 25, kind: str | None = None, namespace: str | None = None, visibility: str = "user", limit_edges: int = 50_000) -> list[dict[str, Any]]:
+        results = self.graph_centrality(metric="betweenness", limit=limit, kind=kind, namespace=namespace, visibility=visibility, limit_edges=limit_edges)
+        for item in results:
+            item["broker_score"] = item.pop("score")
+        return results
+
+    def graph_cycles(self, limit: int = 25, max_cycle_len: int = 8, visibility: str = "user", limit_edges: int = 50_000) -> list[dict[str, Any]]:
+        from .graph import WeightedGraphProjector
+
+        cycles = WeightedGraphProjector().cycles(self._graph_edge_rows(limit_edges=limit_edges), limit=limit * 5, max_cycle_len=max_cycle_len)
+        results = []
+        for cycle in cycles:
+            nodes = []
+            for node in cycle:
+                label = self._graph_node_label(node)
+                profile = _graph_node_profile(node, label)
+                if _algorithm_profile_allowed(profile, visibility=visibility):
+                    nodes.append({"node": node, "label": label, "profile": profile})
+            if len(nodes) < 2:
+                continue
+            results.append({"length": len(cycle), "nodes": nodes})
+            if len(results) >= limit:
+                break
+        return results
+
+    def graph_recommended_messages(self, message_id: str, limit: int = 20, include_categories: list[str] | None = None, exclude_categories: list[str] | None = None) -> list[dict[str, Any]]:
+        important_predicates = (
+            "gmeow:from",
+            "gmeow:to",
+            "gmeow:aboutProject",
+            "https://schema.org/about",
+            "http://xmlns.com/foaf/0.1/topic",
+            "gmeow:mentionsEntity",
+            "gmeow:hasLabel",
+            "gmeow:hasAttachment",
+            "gmeow:hasAttachmentDocument",
+            "gmeow:hasDocument",
+            "gmeow:hasAttachmentEvent",
+            "gmeow:hasCalendarEvent",
+            "gmeow:attachmentMentions",
+            "gmeow:attachmentMentionsCanonical",
+            "gmeow:documentMentions",
+            "gmeow:calendarMentions",
+        )
+        with self._connect() as conn:
+            source_nodes = [
+                row["object"]
+                for row in conn.execute(
+                    """
+                    SELECT DISTINCT object FROM graph_triples
+                    WHERE source_message_id = %s AND predicate = ANY(%s)
+                    """,
+                    (message_id, list(important_predicates)),
+                )
+            ]
+            if not source_nodes:
+                return []
+            rows = conn.execute(
+                """
+                SELECT gt.source_message_id AS message_id,
+                       COUNT(*) AS shared_edges,
+                       COUNT(DISTINCT gt.object) AS shared_nodes,
+                       ARRAY_AGG(DISTINCT gt.object ORDER BY gt.object) AS nodes
+                FROM graph_triples gt
+                WHERE gt.object = ANY(%s)
+                  AND gt.source_message_id IS NOT NULL
+                  AND gt.source_message_id != %s
+                  AND gt.predicate = ANY(%s)
+                GROUP BY gt.source_message_id
+                ORDER BY shared_nodes DESC, shared_edges DESC, gt.source_message_id
+                LIMIT %s
+                """,
+                (source_nodes, message_id, list(important_predicates), limit * 5),
+            )
+            found = [dict(row) for row in rows]
+        graph_edges = []
+        for row in found:
+            weight = 1.0 / (float(row["shared_edges"]) + float(row["shared_nodes"]) + 1.0)
+            graph_edges.append({"subject": message_id, "predicate": "gmeow:sharesNeighborhood", "object": row["message_id"], "weight": weight, "evidence_count": row["shared_edges"], "message_count": row["shared_nodes"]})
+        from .graph import WeightedGraphProjector
+
+        ranked = WeightedGraphProjector().related_nodes(graph_edges, message_id, limit=limit * 5)
+        by_id = {row["message_id"]: row for row in found}
+        results = []
+        for item in ranked:
+            row = by_id.get(item["node"])
+            if not row:
+                continue
+            message = self.get_message(row["message_id"])
+            if message is None or not self.category_allowed(message.get("categories", []), include_categories, exclude_categories):
+                continue
+            shared = []
+            for node in (row.get("nodes") or [])[:20]:
+                label = self._graph_node_label(node)
+                profile = _graph_node_profile(node, label)
+                if not _algorithm_profile_allowed(profile):
+                    continue
+                shared.append({"node": node, "label": label, "profile": profile})
+            results.append(
+                {
+                    "message_id": row["message_id"],
+                    "score": item["score"],
+                    "distance": item["distance"],
+                    "shared_edges": row["shared_edges"],
+                    "shared_nodes": row["shared_nodes"],
+                    "shared": shared,
+                    "message": self.compact_message(message),
+                }
+            )
+            if len(results) >= limit:
+                break
+        return results
+
+    def _edge_stats(self, subject: str, predicate: str, obj: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT evidence_count, message_count, weight FROM graph_edge_stats WHERE subject = %s AND predicate = %s AND object = %s",
+                (subject, predicate, obj),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def graph_ranked_nodes(
+        self,
+        limit: int = 25,
+        kind: str | None = None,
+        predicate: str | None = None,
+        include_noise: bool = False,
+        namespace: str | None = None,
+        visibility: str = "user",
+    ) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if predicate:
+            where.append("predicate = %s")
+            params.append(predicate)
+        kind_prefixes = _kind_prefixes(kind)
+        if kind_prefixes:
+            placeholders = ", ".join(["%s"] * len(kind_prefixes))
+            where.append(f"(subject LIKE ANY(ARRAY[{placeholders}]) OR object LIKE ANY(ARRAY[{placeholders}]))")
+            params.extend(kind_prefixes)
+            params.extend(kind_prefixes)
+        where_sql = "WHERE " + " AND ".join(where) if where else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                WITH endpoints AS (
+                  SELECT subject AS node, predicate, source_message_id FROM graph_triples {where_sql}
+                  UNION ALL
+                  SELECT object AS node, predicate, source_message_id FROM graph_triples {where_sql}
+                )
+                SELECT node, COUNT(*) AS degree, COUNT(DISTINCT source_message_id) AS messages
+                FROM endpoints GROUP BY node ORDER BY messages DESC, degree DESC, node LIMIT %s
+                """,
+                (*params, *params, limit * 5),
+            )
+            results = []
+            for row in rows:
+                item = dict(row)
+                item["label"] = self._graph_node_label(item["node"])
+                item["profile"] = _graph_node_profile(item["node"], item["label"], predicate)
+                if not _profile_allowed(item["profile"], visibility="all" if include_noise else visibility, kind=kind, namespace=namespace):
+                    continue
+                results.append(item)
+                if len(results) >= limit:
+                    break
+            return results
+
+    def graph_projects(self, limit: int = 25) -> list[dict[str, Any]]:
+        from .graph import DOAP, RDF_TYPE
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.subject AS project, COUNT(DISTINCT p.source_message_id) AS messages, COUNT(*) AS degree
+                FROM graph_triples p
+                WHERE p.predicate = %s AND p.object = %s
+                GROUP BY p.subject
+                ORDER BY messages DESC, degree DESC, project
+                LIMIT %s
+                """,
+                (RDF_TYPE, DOAP + "Project", limit),
+            )
+            projects = []
+            for row in rows:
+                project = dict(row)
+                project["label"] = self._graph_node_label(project["project"])
+                project["repositories"] = [
+                    repo["object"]
+                    for repo in conn.execute(
+                        "SELECT DISTINCT object FROM graph_triples WHERE subject = %s AND predicate IN (%s, %s) ORDER BY object",
+                        (project["project"], DOAP + "repository", "https://schema.org/codeRepository"),
+                    )
+                ]
+                projects.append(project)
+            return projects
+
+    def ontology_profile(self) -> dict[str, Any]:
+        from .graph import ONTOLOGY_PROFILE
+
+        counts = {}
+        with self._connect() as conn:
+            for name, profile in ONTOLOGY_PROFILE.items():
+                namespace = profile["namespace"]
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS triples, COUNT(DISTINCT source_message_id) AS messages
+                    FROM graph_triples WHERE predicate LIKE %s OR object LIKE %s
+                    """,
+                    (f"{namespace}%", f"{namespace}%"),
+                ).fetchone()
+                counts[name] = {**profile, "triples": row["triples"], "messages": row["messages"]}
+        return {"ontologies": counts}
+
+    def graph_related_messages(self, message_id: str, limit: int = 20, include_categories: list[str] | None = None, exclude_categories: list[str] | None = None) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            nodes = {
+                row["object"]
+                for row in conn.execute(
+                    """
+                    SELECT object FROM graph_triples
+                    WHERE source_message_id = %s
+                      AND predicate IN ('gmeow:from', 'gmeow:to', 'gmeow:mentionsEntity', 'gmeow:hasLabel', 'gmeow:hasAttachment')
+                    """,
+                    (message_id,),
+                )
+            }
+            if not nodes:
+                return []
+            rows = conn.execute(
+                """
+                SELECT source_message_id AS message_id, COUNT(*) AS shared_edges
+                FROM graph_triples
+                WHERE object = ANY(%s) AND source_message_id IS NOT NULL AND source_message_id != %s
+                GROUP BY source_message_id
+                ORDER BY shared_edges DESC, source_message_id
+                LIMIT %s
+                """,
+                (list(nodes), message_id, limit),
+            )
+            found = [dict(row) for row in rows]
+        results = []
+        for row in found:
+            message = self.get_message(row["message_id"])
+            if message is None or not self.category_allowed(message.get("categories", []), include_categories, exclude_categories):
+                continue
+            results.append({"message_id": row["message_id"], "shared_edges": row["shared_edges"], "message": self.compact_message(message)})
+        return results
+
+    def graph_top_nodes(
+        self,
+        prefix: str | None = None,
+        limit: int = 25,
+        include_noise: bool = False,
+        kind: str | None = None,
+        namespace: str | None = None,
+        visibility: str = "user",
+    ) -> list[dict[str, Any]]:
+        if kind or namespace or visibility or include_noise:
+            where = []
+            params: list[Any] = []
+            if prefix:
+                where.append("node LIKE %s")
+                params.append(f"{prefix}%")
+            if kind:
+                where.append("kind = %s")
+                params.append(_normalize_kind(kind))
+            if namespace:
+                where.append("namespace = %s")
+                params.append(namespace)
+            if not include_noise and visibility not in {"all", "any"}:
+                where.append("visibility = %s")
+                params.append(visibility)
+            where_sql = "WHERE " + " AND ".join(where) if where else ""
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT node, label, kind, namespace, visibility, role, noise_reason, degree, message_count AS messages
+                    FROM graph_node_profiles
+                    {where_sql}
+                    ORDER BY message_count DESC, degree DESC, node
+                    LIMIT %s
+                    """,
+                    (*params, limit),
+                )
+                results = []
+                for row in rows:
+                    item = dict(row)
+                    item["profile"] = {
+                        "kind": item.pop("kind"),
+                        "namespace": item.pop("namespace"),
+                        "visibility": item.pop("visibility"),
+                        "role": item.pop("role"),
+                        "noise_reason": item.pop("noise_reason"),
+                    }
+                    results.append(item)
+                return results
+        subject_where = "WHERE subject LIKE %s" if prefix else ""
+        object_where = "WHERE object LIKE %s" if prefix else ""
+        params = [f"{prefix}%"] if prefix else []
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                WITH endpoints AS (
+                  SELECT subject AS node, source_message_id FROM graph_triples {subject_where}
+                  UNION ALL
+                  SELECT object AS node, source_message_id FROM graph_triples {object_where}
+                )
+                SELECT node, COUNT(*) AS degree, COUNT(DISTINCT source_message_id) AS messages
+                FROM endpoints
+                GROUP BY node
+                ORDER BY messages DESC, degree DESC, node
+                LIMIT %s
+                """,
+                (*params, *params, limit * 10),
+            )
+            results = []
+            for row in rows:
+                item = dict(row)
+                item["label"] = self._graph_node_label(item["node"])
+                item["profile"] = _graph_node_profile(item["node"], item["label"])
+                if not _profile_allowed(item["profile"], visibility="all" if include_noise else visibility, kind=kind, namespace=namespace):
+                    continue
+                results.append(item)
+                if len(results) >= limit:
+                    break
+            return results
+
+    def graph_search(
+        self,
+        term: str,
+        limit: int = 50,
+        include_noise: bool = False,
+        kind: str | None = None,
+        namespace: str | None = None,
+        visibility: str = "user",
+    ) -> list[dict[str, Any]]:
+        like = f"%{term}%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT subject, predicate, object, source_message_id
+                FROM graph_triples
+                WHERE subject ILIKE %s OR predicate ILIKE %s OR object ILIKE %s
+                LIMIT %s
+                """,
+                (like, like, like, limit if include_noise else limit * 25),
+            )
+            results = []
+            for row in rows:
+                item = dict(row)
+                subject_label = self._graph_node_label(item["subject"])
+                object_label = self._graph_node_label(item["object"])
+                subject_profile = _graph_node_profile(item["subject"], subject_label, item["predicate"])
+                object_profile = _graph_node_profile(item["object"], object_label, item["predicate"])
+                item["subject_label"] = subject_label
+                item["object_label"] = object_label
+                item["subject_profile"] = subject_profile
+                item["object_profile"] = object_profile
+                search_visibility = "all" if include_noise else visibility
+                if not (
+                    _profile_allowed(subject_profile, visibility=search_visibility, kind=kind, namespace=namespace)
+                    or _profile_allowed(object_profile, visibility=search_visibility, kind=kind, namespace=namespace)
+                ):
+                    continue
+                results.append(item)
+                if len(results) >= limit:
+                    break
+            return results
+
+    def _graph_node_label(self, value: str) -> str:
+        if value.startswith("gmeow:label/"):
+            return self.label_name(value.rsplit("/", 1)[-1])
+        return _graph_node_label(value)
+
+    def category_allowed(self, categories: list[str], include_categories: list[str] | None, exclude_categories: list[str] | None) -> bool:
+        category_set = set(categories)
+        if include_categories:
+            return bool(category_set & set(include_categories))
+        excluded = set(exclude_categories) if exclude_categories is not None else self.default_excluded_categories()
+        return not bool(category_set & excluded)
+
+
+def _age_sql(cypher: str, columns: str) -> str:
+    tag = "$gmeow$"
+    if tag in cypher:
+        raise ValueError("Cypher query contains reserved dollar-quote tag.")
+    return f"SELECT * FROM cypher('gmeow_graph', {tag}{cypher}{tag}) AS ({columns})"
+
+
+def _worker_id() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def blake3_digest(content: bytes) -> str:
+    return blake3.blake3(content).hexdigest()
+
+
+def _imap_mailbox_name(value: str) -> str:
+    cleaned = (value or "").strip().replace("\\", "/")
+    if not cleaned:
+        return "Unknown"
+    upper = cleaned.upper()
+    system = {
+        "INBOX": "INBOX",
+        "SENT": "Sent",
+        "TRASH": "Trash",
+        "SPAM": "Spam",
+        "DRAFT": "Drafts",
+        "IMPORTANT": "Important",
+        "STARRED": "Starred",
+    }
+    return system.get(upper, cleaned.strip("/"))
+
+
+def _read_only_cypher(query: str) -> bool:
+    lowered = query.strip().lower()
+    if not lowered.startswith("match "):
+        return False
+    forbidden = {" create ", " merge ", " delete ", " detach ", " set ", " remove ", " drop ", " call "}
+    padded = f" {lowered} "
+    return not any(word in padded for word in forbidden)
+
+
+def _profile_allowed(profile: dict[str, Any], visibility: str = "user", kind: str | None = None, namespace: str | None = None) -> bool:
+    requested_visibility = (visibility or "user").lower()
+    if requested_visibility not in {"all", "any"} and profile.get("visibility") != requested_visibility:
+        return False
+    if kind and _normalize_kind(str(profile.get("kind"))) != _normalize_kind(kind):
+        return False
+    if namespace and profile.get("namespace") != namespace:
+        return False
+    return True
+
+
+def _algorithm_profile_allowed(profile: dict[str, Any], visibility: str = "user", kind: str | None = None, namespace: str | None = None) -> bool:
+    if not _profile_allowed(profile, visibility=visibility, kind=kind, namespace=namespace):
+        return False
+    if kind or namespace or (visibility or "user").lower() in {"all", "any", "noise", "structural"}:
+        return True
+    return profile.get("kind") != "literals"
+
+
+def _normalize_kind(kind: str) -> str:
+    value = kind.lower().replace("-", "_")
+    aliases = {
+        "address": "addresses",
+        "contact": "addresses",
+        "contacts": "addresses",
+        "entity": "entities",
+        "project": "projects",
+        "label": "labels",
+        "attachment": "attachments",
+        "document": "documents",
+        "documents": "documents",
+        "event": "events",
+        "events": "events",
+        "archive_file": "archive_files",
+        "archive_files": "archive_files",
+        "document_author": "document_authors",
+        "document_authors": "document_authors",
+        "calendar_attendee": "calendar_attendees",
+        "calendar_attendees": "calendar_attendees",
+        "ocr_entity": "ocr_entities",
+        "ocr_entities": "ocr_entities",
+        "vision_entity": "vision_entities",
+        "vision_entities": "vision_entities",
+        "document_entity": "document_entities",
+        "document_entities": "document_entities",
+        "calendar_entity": "calendar_entities",
+        "calendar_entities": "calendar_entities",
+        "attachment_evidence": "attachment_evidence",
+        "url": "urls",
+        "literal": "literals",
+        "class": "ontology_classes",
+        "ontology_class": "ontology_classes",
+        "message": "messages",
+        "thread": "threads",
+        "org": "orgs",
+        "organization": "orgs",
+        "organizations": "orgs",
+        "handle": "handles",
+        "claim": "claims",
+        "task": "tasks",
+        "header": "headers",
+    }
+    return aliases.get(value, value)
+
+
+def _kind_prefixes(kind: str | None) -> list[str]:
+    normalized = _normalize_kind(kind or "")
+    prefixes = {
+        "addresses": ["gmeow:address/%"],
+        "entities": ["gmeow:entity/%"],
+        "projects": ["gmeow:project/%"],
+        "labels": ["gmeow:label/%"],
+        "attachments": ["gmeow:attachment/%"],
+        "documents": ["gmeow:document/%"],
+        "events": ["gmeow:event/%"],
+        "archive_files": ["gmeow:archiveFile/%"],
+        "document_authors": ["gmeow:documentAuthor/%"],
+        "calendar_attendees": ["gmeow:calendarAttendee/%"],
+        "attachment_evidence": ["gmeow:attachmentEvidence/%"],
+        "ocr_entities": ["gmeow:ocrEntity/%"],
+        "vision_entities": ["gmeow:visionEntity/%"],
+        "document_entities": ["gmeow:documentEntity/%"],
+        "calendar_entities": ["gmeow:calendarEntity/%"],
+        "urls": ["gmeow:url/%"],
+        "orgs": ["gmeow:org/%"],
+        "handles": ["gmeow:org/@%"],
+        "messages": ["gmeow:message/%"],
+        "threads": ["gmeow:thread/%"],
+    }
+    return prefixes.get(normalized, [])
+
+
+def _message_search_fields(sender: str | None, recipients: str | None, message_date: str | None) -> dict[str, Any]:
+    sender_addr = _clean_address(parseaddr(sender or "")[1])
+    sender_domain = _address_domain(sender_addr)
+    recipient_addrs = sorted(
+        {
+            address
+            for _name, raw_address in getaddresses([recipients or ""])
+            if (address := _clean_address(raw_address))
+        }
+    )
+    recipient_domains = sorted({domain for address in recipient_addrs if (domain := _address_domain(address))})
+    return {
+        "message_ts": _query_datetime(_parse_message_date(message_date)),
+        "sender_addr": sender_addr or None,
+        "sender_domain": sender_domain or None,
+        "recipient_addrs": recipient_addrs,
+        "recipient_domains": recipient_domains,
+    }
+
+
+def _message_search_text(
+    *,
+    subject: str | None,
+    sender: str | None,
+    recipients: str | None,
+    snippet: str | None,
+    text_body: str | None,
+    markdown: str | None,
+    headers: dict[str, Any],
+    label_ids: list[str],
+) -> str:
+    header_text = " ".join(f"{key}: {value}" for key, value in sorted((headers or {}).items()) if isinstance(value, str))
+    return "\n".join(
+        part
+        for part in [
+            subject or "",
+            sender or "",
+            recipients or "",
+            snippet or "",
+            " ".join(label_ids or []),
+            header_text,
+            text_body or "",
+            markdown or "",
+        ]
+        if part
+    )
+
+
+def _sql_text_query(fts_query: str) -> str:
+    values = re.findall(r'"([^"]+)"', fts_query or "")
+    if values:
+        return " ".join(values)
+    return fts_query.strip()
+
+
+def _query_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = _parse_message_date(value) or value
+    try:
+        result = datetime.fromisoformat(parsed.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=timezone.utc)
+    return result.astimezone(timezone.utc)
+
+
+def _address_filter_value(value: str) -> tuple[str | None, str | None]:
+    raw = (parseaddr(value or "")[1] or value or "").strip().lower()
+    if raw.startswith("@"):
+        return None, raw[1:] or None
+    if "@" in raw:
+        address = _clean_address(raw)
+        return address or None, _address_domain(address)
+    clean = raw.strip("<> ")
+    if "." in clean and " " not in clean:
+        return None, clean
+    return None, None
+
+
+def _clean_address(value: str | None) -> str:
+    return (value or "").strip().strip("<>").lower()
+
+
+def _address_domain(address: str | None) -> str | None:
+    if not address or "@" not in address:
+        return None
+    return address.rsplit("@", 1)[-1].strip().lower() or None
+
+
+PROJECT_TABLES = [
+    "content_objects",
+    "content_object_refs",
+    "labels",
+    "threads",
+    "messages",
+    "message_parts",
+    "attachments",
+    "sync_state",
+    "priority_rules",
+    "graph_triples",
+    "graph_node_profiles",
+    "graph_edge_stats",
+    "summary_items",
+    "intelligence_jobs",
+    "dead_letter_jobs",
+    "operational_events",
+    "sync_runs",
+    "retention_policies",
+    "attachment_metadata_versions",
+    "imap_mailboxes",
+    "imap_message_uids",
+    "archive_exports",
+    "categories",
+    "message_categories",
+    "category_rules",
+    "category_overrides",
+    "learned_category_runs",
+    "people_aliases",
+    "embedding_chunks",
+    "ingest_issues",
+]
