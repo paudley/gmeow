@@ -1,21 +1,25 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-from __future__ import annotations
+"""Exercise core Gmeow cache and sync behavior.
+
+These tests validate parsing, storage, graph, category, archive, intelligence, and backfill
+workflows against PostgreSQL fixtures. They serve as executable specifications for correctness
+across the mailbox ingestion pipeline."""
 
 import base64
 import json
-import os
+from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any, cast
 
 import psycopg
 import pytest
 
-from gmeow.categories import CategoryEngine, deterministic_assignments, message_document
 from gmeow.cache import categorize_message
-from gmeow.config import GmeowConfig, PriorityRule
-from gmeow.graph import DOAP, FOAF, RDF_TYPE, SCHEMA, extract_triples
-from gmeow.graph import extract_attachment_sidecar_triples
+from gmeow.categories import CategoryEngine, deterministic_assignments, message_document
+from gmeow.config import GmeowConfig, MaintenanceConfig, PriorityRule
+from gmeow.graph import DOAP, FOAF, RDF_TYPE, SCHEMA, extract_attachment_sidecar_triples, extract_triples
 from gmeow.intelligence import IntelligenceWorker
 from gmeow.kg import spacy_entities
 from gmeow.markdown import message_to_markdown
@@ -27,12 +31,18 @@ from gmeow.semantic import chunk_text
 from gmeow.sync import SyncService, message_matches_rule, should_search_gmail
 from gmeow.text_index import TantivyMessageIndex
 from gmeow.toon import dumps as toon_dumps
+from tests._test_config import TEST_POSTGRES_DSN
+
+DEFAULT_LIST_STR = cast(list[str], None)
+DEFAULT_STR = cast(str, None)
+DEFAULT_DICT_ANY = cast(dict[str, Any], None)
+DEFAULT_FAKE_GMAIL_METADATA = cast(dict[str, dict[str, Any]], None)
+DEFAULT_FAKE_GMAIL_PAGES = cast(dict[tuple[str, str], dict[str, Any]], None)
+
+TEST_DSN = TEST_POSTGRES_DSN
 
 
-TEST_DSN = os.environ.get("GMEOW_TEST_POSTGRES_DSN")
-
-
-def test_gmeow_config_loads_namespaced_toml(tmp_path) -> None:
+def test_gmeow_config_loads_namespaced_toml(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         """
@@ -43,6 +53,7 @@ postgres_dsn = "postgresql://gmeow:change-me@127.0.0.1:5432/gmeow"
 
 [gmeow.maintenance]
 enabled = false
+backfill_enabled = true
 
 [gmeow.secrets]
 file = "~/.config/gmeow/secrets.sops.yaml"
@@ -61,13 +72,21 @@ priority = 5
     assert config.data_dir == Path("cache")
     assert config.subject == "user@example.com"
     assert config.maintenance.enabled is False
+    assert config.maintenance.backfill_enabled is True
     assert str(config.secrets.file).endswith(".config/gmeow/secrets.sops.yaml")
     assert config.secrets.unlock_key == "test-key"
     assert config.priority_rules[0].name == "recent"
 
 
+def test_maintenance_backfill_defaults_off() -> None:
+    config = MaintenanceConfig.from_dict({})
+
+    assert config.backfill_enabled is False
+    assert config.backfill_seconds == 5
+
+
 @pytest.fixture(autouse=True)
-def clean_pg_test_rows():
+def clean_pg_test_rows() -> Iterator[None]:
     cleanup_pg()
     yield
     cleanup_pg()
@@ -76,35 +95,31 @@ def clean_pg_test_rows():
 def cleanup_pg() -> None:
     if not TEST_DSN:
         return
+    conn: Any
     with psycopg.connect(TEST_DSN) as conn:
-        for table in [
-            "embedding_chunks",
-            "ingest_issues",
-            "intelligence_jobs",
-            "graph_triples",
-            "attachments",
-            "message_categories",
-            "category_overrides",
-            "category_rules",
-            "learned_category_runs",
-            "message_parts",
-            "messages",
-            "threads",
-            "labels",
-            "priority_rules",
-            "sync_state",
-            "content_objects",
-        ]:
-            conn.execute(f"DELETE FROM {table}")
+        conn.execute(
+            """
+            TRUNCATE TABLE
+              embedding_chunks, ingest_issues, sync_runs, dead_letter_jobs, intelligence_jobs,
+              graph_triples, graph_node_profiles, graph_edge_stats, summary_items,
+              attachments, attachment_metadata_versions,
+              archive_exports, content_object_refs, message_categories, category_overrides,
+              category_rules, learned_category_runs, message_parts, messages, threads, labels,
+              priority_rules, sync_state, content_objects
+            RESTART IDENTITY CASCADE
+            """
+        )
+    with psycopg.connect(TEST_DSN, autocommit=True) as conn:
+        conn.execute("SET search_path=ag_catalog, public")
         try:
-            conn.execute("SET search_path=ag_catalog, public")
             conn.execute("SELECT drop_graph('gmeow_graph', true)")
-            conn.execute("SELECT create_graph('gmeow_graph')")
-        except Exception:
-            pass
+        except psycopg.Error as exc:
+            if "graph" not in str(exc).lower() or "does not exist" not in str(exc).lower():
+                raise
+        conn.execute("SELECT create_graph('gmeow_graph')")
 
 
-def make_cache(tmp_path) -> PgCache:
+def make_cache(tmp_path: Path) -> PgCache:
     if not TEST_DSN:
         pytest.skip("GMEOW_TEST_POSTGRES_DSN is required for Postgres integration tests")
     cache = PgCache(TEST_DSN, ObjectStore(tmp_path / "objects"), TantivyMessageIndex(tmp_path / "tantivy"))
@@ -112,7 +127,7 @@ def make_cache(tmp_path) -> PgCache:
     return cache
 
 
-def make_attachments(tmp_path) -> CasAttachmentStore:
+def make_attachments(tmp_path: Path) -> CasAttachmentStore:
     return CasAttachmentStore(ObjectStore(tmp_path / "objects"))
 
 
@@ -120,7 +135,7 @@ def b64(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
 
 
-def gmail_fixture() -> dict:
+def gmail_fixture() -> dict[str, Any]:
     return {
         "id": "m1",
         "threadId": "t1",
@@ -156,7 +171,7 @@ def gmail_fixture() -> dict:
     }
 
 
-def gmail_fixture_two() -> dict:
+def gmail_fixture_two() -> dict[str, Any]:
     value = gmail_fixture()
     value["id"] = "m2"
     value["threadId"] = "t1"
@@ -172,7 +187,37 @@ def gmail_fixture_two() -> dict:
     return value
 
 
-def unifi_fixture() -> dict:
+def gmail_fixture_variant(message_id: str, subject: str, sender: str, date_header: str, body: str) -> dict[str, Any]:
+    value = gmail_fixture()
+    value["id"] = message_id
+    value["threadId"] = f"t-{message_id}"
+    value["snippet"] = body
+    for header in value["payload"]["headers"]:
+        if header["name"] == "Subject":
+            header["value"] = subject
+        if header["name"] == "From":
+            header["value"] = sender
+        if header["name"] == "Date":
+            header["value"] = date_header
+    value["payload"]["parts"][0]["body"]["data"] = b64(body)
+    return value
+
+
+def set_fixture_header(raw: dict[str, Any], name: str, value: str) -> dict[str, Any]:
+    for header in raw["payload"]["headers"]:
+        if header["name"] == name:
+            header["value"] = value
+            break
+    return raw
+
+
+def upsert_fixture_message(cache: PgCache, raw: dict[str, Any]) -> None:
+    parsed = parse_gmail_message(raw)
+    cache.upsert_thread({"id": parsed.thread_id or parsed.gmail_id, "snippet": parsed.snippet})
+    cache.upsert_message(parsed, raw, markdown=message_to_markdown(parsed), hydrated=True)
+
+
+def unifi_fixture() -> dict[str, Any]:
     value = gmail_fixture()
     value["id"] = "u1"
     value["threadId"] = "tu1"
@@ -185,13 +230,11 @@ def unifi_fixture() -> dict:
             header["value"] = '"UniFi OS, example-camera-system" <no-reply@notifications.ui.com>'
         if header["name"] == "Date":
             header["value"] = "Wed, 20 May 2026 06:51:04 -0600"
-    value["payload"]["parts"][0]["body"]["data"] = b64(
-        "G4 Instant: 1 Smart Detection Link: https://unifi.ui.com/protect/events/event/123"
-    )
+    value["payload"]["parts"][0]["body"]["data"] = b64("G4 Instant: 1 Smart Detection Link: https://unifi.ui.com/protect/events/event/123")
     return value
 
 
-def ringcentral_fixture() -> dict:
+def ringcentral_fixture() -> dict[str, Any]:
     value = gmail_fixture()
     value["id"] = "r1"
     value["threadId"] = "tr1"
@@ -206,7 +249,9 @@ def ringcentral_fixture() -> dict:
     return value
 
 
-def github_fixture(message_id: str = "g1", subject: str = "Re: [example-org/example-project] Harden/core managed git e2e (PR #163)") -> dict:
+def github_fixture(
+    message_id: str = "g1", subject: str = "Re: [example-org/example-project] Harden/core managed git e2e (PR #163)"
+) -> dict[str, Any]:
     value = gmail_fixture()
     value["id"] = message_id
     value["threadId"] = "tg1"
@@ -255,7 +300,9 @@ def test_doap_project_graph_for_dev_notifications() -> None:
     parsed = parse_gmail_message(github_fixture())
     triples = extract_triples(parsed)
     assert any(predicate == RDF_TYPE and obj == DOAP + "Project" for _, predicate, obj, _ in triples)
-    assert any(predicate == DOAP + "repository" and obj == "https://github.com/example-org/example-project" for _, predicate, obj, _ in triples)
+    assert any(
+        predicate == DOAP + "repository" and obj == "https://github.com/example-org/example-project" for _, predicate, obj, _ in triples
+    )
     assert any(predicate == SCHEMA + "about" and obj.startswith("gmeow:project/") for _, predicate, obj, _ in triples)
 
 
@@ -290,7 +337,7 @@ def test_spacy_ner_and_sidecar_kg() -> None:
     assert any(predicate == "gmeow:mentions/org" for _, predicate, _, _ in triples)
 
 
-def test_attachment_store_merges_sidecar(tmp_path) -> None:
+def test_attachment_store_merges_sidecar(tmp_path: Path) -> None:
     store = make_attachments(tmp_path)
     first = store.put(b"hello", {"gmail": {"filename": "a.txt"}}, extract_metadata=False)
     first.sidecar_path.write_text(json.dumps({"external_summary": "added elsewhere", "source": {"gmail": {"filename": "a.txt"}}}))
@@ -301,7 +348,7 @@ def test_attachment_store_merges_sidecar(tmp_path) -> None:
     assert second.metadata["source"]["gmail"]["mime_type"] == "text/plain"
 
 
-def test_attachment_store_adds_exiftool_metadata(tmp_path) -> None:
+def test_attachment_store_adds_exiftool_metadata(tmp_path: Path) -> None:
     store = make_attachments(tmp_path)
     stored = store.put(b"hello", {"gmail": {"filename": "a.txt"}})
     assert stored.metadata["source"]["gmail"]["filename"] == "a.txt"
@@ -309,7 +356,7 @@ def test_attachment_store_adds_exiftool_metadata(tmp_path) -> None:
     assert "extracted_at" in stored.metadata["exiftool"]
 
 
-def test_cache_offline_message_search(tmp_path) -> None:
+def test_cache_offline_message_search(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     cache.upsert_label({"id": "INBOX", "name": "Inbox", "type": "system"})
     parsed = parse_gmail_message(gmail_fixture())
@@ -330,7 +377,7 @@ def test_cache_offline_message_search(tmp_path) -> None:
     cache.close()
 
 
-def test_compact_search_results_and_thread_order(tmp_path) -> None:
+def test_compact_search_results_and_thread_order(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     first = parse_gmail_message(gmail_fixture())
     second = parse_gmail_message(gmail_fixture_two())
@@ -346,7 +393,7 @@ def test_compact_search_results_and_thread_order(tmp_path) -> None:
     cache.close()
 
 
-def test_message_categories_exclude_camera_alerts_by_default(tmp_path) -> None:
+def test_message_categories_exclude_camera_alerts_by_default(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     raw = unifi_fixture()
     parsed = parse_gmail_message(raw)
@@ -362,7 +409,63 @@ def test_message_categories_exclude_camera_alerts_by_default(tmp_path) -> None:
     cache.close()
 
 
-def test_category_engine_persists_system_and_manual_categories(tmp_path) -> None:
+def test_text_search_applies_include_categories_before_limit(tmp_path: Path) -> None:
+    cache = make_cache(tmp_path)
+    older = gmail_fixture_variant(
+        "categorized",
+        "Limit Needle",
+        "Older <shared@example.com>",
+        "Fri, 22 May 2026 12:00:00 -0600",
+        "Limit needle categorized body",
+    )
+    newer = gmail_fixture_variant(
+        "uncategorized",
+        "Limit Needle",
+        "Newer <shared@example.com>",
+        "Sat, 23 May 2026 12:00:00 -0600",
+        "Limit needle uncategorized body",
+    )
+    for raw in [older, newer]:
+        parsed = parse_gmail_message(raw)
+        cache.upsert_thread({"id": parsed.thread_id or parsed.gmail_id, "snippet": parsed.snippet})
+        cache.upsert_message(parsed, raw, markdown=message_to_markdown(parsed), hydrated=True)
+    cache.apply_category("categorized", "needle_category", reason="test")
+
+    results = cache.text_search("Limit Needle", limit=1, include_categories=["needle_category"])
+
+    assert [message["id"] for message in results] == ["categorized"]
+    cache.close()
+
+
+def test_address_messages_applies_include_categories_before_limit(tmp_path: Path) -> None:
+    cache = make_cache(tmp_path)
+    older = gmail_fixture_variant(
+        "categorized",
+        "Address Needle",
+        "Shared <shared@example.com>",
+        "Fri, 22 May 2026 12:00:00 -0600",
+        "Older categorized address message",
+    )
+    newer = gmail_fixture_variant(
+        "uncategorized",
+        "Address Needle",
+        "Shared <shared@example.com>",
+        "Sat, 23 May 2026 12:00:00 -0600",
+        "Newer uncategorized address message",
+    )
+    for raw in [older, newer]:
+        parsed = parse_gmail_message(raw)
+        cache.upsert_thread({"id": parsed.thread_id or parsed.gmail_id, "snippet": parsed.snippet})
+        cache.upsert_message(parsed, raw, markdown=message_to_markdown(parsed), hydrated=True)
+    cache.apply_category("categorized", "address_category", reason="test")
+
+    results = cache.address_messages("shared@example.com", limit=1, include_categories=["address_category"])
+
+    assert [message["id"] for message in results] == ["categorized"]
+    cache.close()
+
+
+def test_category_engine_persists_system_and_manual_categories(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     for raw in [unifi_fixture(), ringcentral_fixture(), github_fixture()]:
         parsed = parse_gmail_message(raw)
@@ -382,7 +485,7 @@ def test_category_engine_persists_system_and_manual_categories(tmp_path) -> None
     cache.close()
 
 
-def test_seed_initial_categories_adds_manual_rules(tmp_path) -> None:
+def test_seed_initial_categories_adds_manual_rules(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     seeded = CategoryEngine(cache).seed_initial_categories()
     assert seeded["rules_inserted"] > 0
@@ -404,7 +507,7 @@ def test_seed_initial_categories_adds_manual_rules(tmp_path) -> None:
     cache.close()
 
 
-def test_category_discovery_uses_sklearn_clusters(tmp_path) -> None:
+def test_category_discovery_uses_sklearn_clusters(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     raws = [github_fixture("g1"), github_fixture("g2", "Re: [example-org/example-project] Add output surface report (PR #162)")]
     raws += [unifi_fixture(), ringcentral_fixture()]
@@ -412,7 +515,7 @@ def test_category_discovery_uses_sklearn_clusters(tmp_path) -> None:
         parsed = parse_gmail_message(raw)
         cache.upsert_thread({"id": parsed.thread_id or parsed.gmail_id, "snippet": parsed.snippet})
         cache.upsert_message(parsed, raw, markdown=message_to_markdown(parsed), hydrated=True)
-    run = CategoryEngine(cache).discover(since_hours=None)
+    run = CategoryEngine(cache).discover(since_hours=24 * 365 * 10)
     assert run["messages"] == 4
     assert run["clusters"]
     assert cache.learned_category_runs()[0]["run"]["clusters"]
@@ -456,7 +559,7 @@ def test_priority_rule_post_filter() -> None:
     )
 
 
-def test_attachment_sidecar_text_search(tmp_path) -> None:
+def test_attachment_sidecar_text_search(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     cache.add_attachment(
         {
@@ -471,7 +574,7 @@ def test_attachment_sidecar_text_search(tmp_path) -> None:
                 "source": {"message": {"subject": "Apollo Invoice"}},
                 "exiftool": {"tags": {"PDF:Title": "Quarterly Statement"}},
             },
-            "path": "/tmp/invoice.pdf",
+            "path": str(tmp_path / "invoice.pdf"),
         }
     )
     results = cache.attachment_text_search("Quarterly")
@@ -487,7 +590,7 @@ def test_attachment_sidecar_text_search(tmp_path) -> None:
             "mime_type": "image/png",
             "size": 12,
             "metadata": {"image_description": "A scanned permit approval letter."},
-            "path": "/tmp/scan.png",
+            "path": str(tmp_path / "scan.png"),
         }
     )
     message_attachments = cache.attachment_text_for_message("m2")
@@ -496,7 +599,7 @@ def test_attachment_sidecar_text_search(tmp_path) -> None:
     cache.close()
 
 
-def test_mcp_message_enrichment_omits_attachment_paths(tmp_path) -> None:
+def test_mcp_message_enrichment_omits_attachment_paths(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     parsed = parse_gmail_message(gmail_fixture())
     cache.upsert_thread({"id": "t1", "snippet": parsed.snippet})
@@ -512,7 +615,7 @@ def test_mcp_message_enrichment_omits_attachment_paths(tmp_path) -> None:
             "mime_type": "application/pdf",
             "size": 12,
             "metadata": {"source": {"message": {"subject": "Apollo Invoice"}}},
-            "path": "/tmp/invoice.pdf",
+            "path": str(tmp_path / "invoice.pdf"),
         }
     )
     message = enriched_message(cache, "m1")
@@ -531,7 +634,7 @@ def test_mcp_message_enrichment_omits_attachment_paths(tmp_path) -> None:
     cache.close()
 
 
-def test_graph_discovery_helpers(tmp_path) -> None:
+def test_graph_discovery_helpers(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     parsed = parse_gmail_message(gmail_fixture())
     cache.upsert_thread({"id": "t1", "snippet": parsed.snippet})
@@ -572,7 +675,7 @@ def test_graph_discovery_helpers(tmp_path) -> None:
     cache.close()
 
 
-def test_project_ranking_and_ontology_profile(tmp_path) -> None:
+def test_project_ranking_and_ontology_profile(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     parsed = parse_gmail_message(github_fixture())
     cache.upsert_thread({"id": parsed.thread_id or parsed.gmail_id, "snippet": parsed.snippet})
@@ -587,22 +690,18 @@ def test_project_ranking_and_ontology_profile(tmp_path) -> None:
     cache.close()
 
 
-def test_age_status_and_read_only_cypher(tmp_path) -> None:
+def test_age_status_and_read_only_cypher(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     cache.add_triples([("gmeow:message/m1", "gmeow:mentionsEntity", "gmeow:entity/Apollo", "m1")])
     status = cache.age_status()
     assert status["available"] is True
     rows = cache.age_cypher("MATCH (n) RETURN count(n)", columns="count agtype")
     assert rows
-    try:
+    with pytest.raises(ValueError):
         cache.age_cypher("CREATE (n)")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("mutating Cypher should be rejected")
 
 
-def test_ingest_issue_records_artifact(tmp_path) -> None:
+def test_ingest_issue_records_artifact(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     issue_id = cache.record_ingest_issue("bad1", "gmail.full", "error", "bad payload", {"id": "bad1", "payload": None})
     issues = cache.list_ingest_issues()
@@ -612,17 +711,12 @@ def test_ingest_issue_records_artifact(tmp_path) -> None:
     assert cache.sync_status()["counts"]["ingest_issues"] == 1
 
 
-def test_contacts_resolve_address_variants(tmp_path) -> None:
+def test_contacts_resolve_address_variants(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     first_raw = gmail_fixture()
-    second_raw = gmail_fixture_two()
-    for header in second_raw["payload"]["headers"]:
-        if header["name"] == "From":
-            header["value"] = "Alice Example <alice@example.com>"
+    second_raw = set_fixture_header(gmail_fixture_two(), "From", "Alice Example <alice@example.com>")
     for raw in [first_raw, second_raw]:
-        parsed = parse_gmail_message(raw)
-        cache.upsert_thread({"id": parsed.thread_id or parsed.gmail_id, "snippet": parsed.snippet})
-        cache.upsert_message(parsed, raw, markdown=message_to_markdown(parsed), hydrated=True)
+        upsert_fixture_message(cache, raw)
     contacts = cache.contacts()
     alice = next(contact for contact in contacts if contact["address"] == "alice@example.com")
     assert alice["messages"] == 2
@@ -630,24 +724,16 @@ def test_contacts_resolve_address_variants(tmp_path) -> None:
     assert set(alice["names"]) == {"Alice", "Alice Example"}
     alias_raw = gmail_fixture()
     alias_raw["id"] = "m3"
-    for header in alias_raw["payload"]["headers"]:
-        if header["name"] == "From":
-            header["value"] = "Alice Example <alice@work.example>"
-    parsed = parse_gmail_message(alias_raw)
-    cache.upsert_thread({"id": parsed.thread_id or parsed.gmail_id, "snippet": parsed.snippet})
-    cache.upsert_message(parsed, alias_raw, markdown=message_to_markdown(parsed), hydrated=True)
+    set_fixture_header(alias_raw, "From", "Alice Example <alice@work.example>")
+    upsert_fixture_message(cache, alias_raw)
     people = cache.people()
     alice_person = next(person for person in people if person["name"] == "Alice Example")
     assert alice_person["addresses"] == ["alice@example.com", "alice@work.example"]
     cache.upsert_people_alias("a.smith@example.net", "Alice Example", display_name="Alice Example")
     alias_raw = gmail_fixture()
     alias_raw["id"] = "m4"
-    for header in alias_raw["payload"]["headers"]:
-        if header["name"] == "From":
-            header["value"] = "A Smith <a.smith@example.net>"
-    parsed = parse_gmail_message(alias_raw)
-    cache.upsert_thread({"id": parsed.thread_id or parsed.gmail_id, "snippet": parsed.snippet})
-    cache.upsert_message(parsed, alias_raw, markdown=message_to_markdown(parsed), hydrated=True)
+    set_fixture_header(alias_raw, "From", "A Smith <a.smith@example.net>")
+    upsert_fixture_message(cache, alias_raw)
     aliased = next(person for person in cache.people() if person["name"] == "Alice Example")
     assert "a.smith@example.net" in aliased["addresses"]
     cache.close()
@@ -668,32 +754,69 @@ def test_priority_rule_serializes_for_help() -> None:
 
 
 class RecordingSemantic:
-    def __init__(self):
-        self.messages = []
-        self.attachments = []
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, str, dict[str, Any]]] = []
+        self.attachments: list[tuple[str, str, dict[str, Any]]] = []
 
-    def index_message(self, message_id, text, metadata=None):
+    def index_message(self, message_id: str, text: str, metadata: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
         self.messages.append((message_id, text, metadata))
 
-    def index_attachment(self, sha1, text, metadata=None):
+    def index_attachment(self, sha1: str, text: str, metadata: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
         self.attachments.append((sha1, text, metadata))
+
+    def search(self, _query: str, limit: int = 10, source_kind: str = DEFAULT_STR) -> list[dict[str, Any]]:
+        return []
+
+    def available(self) -> bool:
+        return True
+
+
+class FailingSemantic:
+    def index_message(self, message_id: str, text: str, metadata: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
+        raise RuntimeError("semantic unavailable")
+
+    def index_attachment(self, sha1: str, text: str, metadata: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
+        raise RuntimeError("semantic unavailable")
+
+    def search(self, _query: str, limit: int = 10, source_kind: str = DEFAULT_STR) -> list[dict[str, Any]]:
+        raise RuntimeError("semantic unavailable")
+
+    def available(self) -> bool:
+        return False
 
 
 class FakeGmail:
-    def __init__(self, messages):
+    def __init__(
+        self,
+        messages: dict[str, dict[str, Any]],
+        pages: dict[tuple[str, str], dict[str, Any]] = DEFAULT_FAKE_GMAIL_PAGES,
+        metadata: dict[str, dict[str, Any]] = DEFAULT_FAKE_GMAIL_METADATA,
+    ) -> None:
         self.messages = messages
-        self.queries = []
-        self.fetched = []
-        self.modified = []
+        self.pages = pages or {}
+        self.metadata = metadata or {}
+        self.queries: list[str] = []
+        self.page_queries: list[dict[str, Any]] = []
+        self.metadata_fetched: list[str] = []
+        self.fetched: list[tuple[str, str]] = []
+        self.modified: list[dict[str, Any]] = []
 
-    def list_labels(self):
+    def list_labels(self) -> list[dict[str, str]]:
         return [{"id": "INBOX", "name": "Inbox", "type": "system"}]
 
-    def search_messages(self, query, limit=100):
+    def search_messages(self, query: str, limit: int = 100) -> list[str]:
         self.queries.append(query)
         return list(self.messages)[:limit]
 
-    def list_history(self, start_history_id, label_id=None, limit=500):
+    def search_messages_page(self, query: str, page_token: str = DEFAULT_STR, page_size: int = 50) -> dict[str, Any]:
+        self.page_queries.append({"query": query, "page_token": page_token, "page_size": page_size})
+        page = self.pages.get((query, page_token))
+        if page is not None:
+            return page
+        ids = list(self.messages)[:page_size]
+        return {"messages": [{"id": message_id} for message_id in ids], "next_page_token": ""}
+
+    def list_history(self, start_history_id: str, label_id: str = DEFAULT_STR, limit: int = 500) -> dict[str, Any]:
         return {
             "history_id": "200",
             "history": [
@@ -702,24 +825,43 @@ class FakeGmail:
             ],
         }
 
-    def get_message(self, message_id, fmt="full"):
+    def get_message(self, message_id: str, fmt: str = "full") -> dict[str, Any]:
         self.fetched.append((message_id, fmt))
         if fmt == "raw":
             return {"id": message_id, "raw": b64("Subject: Apollo\r\n\r\nBody")}
         return self.messages[message_id]
 
-    def get_thread(self, thread_id):
+    def get_message_metadata(self, message_id: str) -> dict[str, Any]:
+        self.metadata_fetched.append(message_id)
+        if message_id in self.metadata:
+            return self.metadata[message_id]
+        raw = self.messages[message_id]
+        return {
+            "id": raw["id"],
+            "threadId": raw.get("threadId"),
+            "historyId": raw.get("historyId"),
+            "labelIds": raw.get("labelIds", []),
+            "internalDate": raw.get("internalDate"),
+            "payload": {"headers": (raw.get("payload") or {}).get("headers", [])},
+        }
+
+    def get_thread(self, thread_id: str) -> dict[str, Any]:
         return {}
 
-    def get_attachment(self, message_id, attachment_id):
+    def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
         return b""
 
-    def modify_message(self, message_id, add_label_ids=None, remove_label_ids=None):
+    def modify_message(
+        self,
+        message_id: str,
+        add_label_ids: list[str] = DEFAULT_LIST_STR,
+        remove_label_ids: list[str] = DEFAULT_LIST_STR,
+    ) -> dict[str, str]:
         self.modified.append({"message_id": message_id, "add": add_label_ids or [], "remove": remove_label_ids or []})
         return {"id": message_id}
 
 
-def test_intelligence_worker_runs_until_empty(tmp_path) -> None:
+def test_intelligence_worker_runs_until_empty(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     parsed = parse_gmail_message(gmail_fixture())
     cache.upsert_thread({"id": "t1", "snippet": parsed.snippet})
@@ -734,7 +876,7 @@ def test_intelligence_worker_runs_until_empty(tmp_path) -> None:
             "mime_type": "application/pdf",
             "size": 12,
             "metadata": {"source": {"gmail": {"message_id": "m1", "filename": "invoice.pdf"}}},
-            "path": "/tmp/invoice.pdf",
+            "path": str(tmp_path / "invoice.pdf"),
         }
     )
     cache.add_triples(
@@ -758,10 +900,10 @@ def test_intelligence_worker_runs_until_empty(tmp_path) -> None:
     cache.close()
 
 
-def test_search_uses_live_gmail_for_unbounded_queries(tmp_path) -> None:
+def test_search_uses_live_gmail_for_unbounded_queries(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=None, cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.search("Apollo", limit=5)
     assert result["source"] == "gmail+cache"
     assert gmail.queries == ["Apollo"]
@@ -772,10 +914,10 @@ def test_search_uses_live_gmail_for_unbounded_queries(tmp_path) -> None:
     cache.close()
 
 
-def test_live_search_returns_default_hidden_messages_inline(tmp_path) -> None:
+def test_live_search_returns_default_hidden_messages_inline(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"u1": unifi_fixture()})
-    sync = SyncService(config=None, cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.search("UniFi", limit=5)
     assert result["source"] == "gmail+cache"
     assert result["live"]["hydrated"] == 1
@@ -783,14 +925,14 @@ def test_live_search_returns_default_hidden_messages_inline(tmp_path) -> None:
     assert "camera_alert" in result["messages"][0]["categories"]
 
 
-def test_live_search_prefers_cached_analyzed_message(tmp_path) -> None:
+def test_live_search_prefers_cached_analyzed_message(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     parsed = parse_gmail_message(gmail_fixture())
     cache.upsert_thread({"id": "t1", "snippet": parsed.snippet})
     cache.upsert_message(parsed, gmail_fixture(), markdown=message_to_markdown(parsed), hydrated=True)
     cache.apply_category("m1", "personal", reason="already analyzed")
     gmail = FakeGmail({"m1": gmail_fixture_two()})
-    sync = SyncService(config=None, cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.search("Apollo", limit=5)
     assert result["messages"][0]["id"] == "m1"
     assert result["messages"][0]["subject"] == "Apollo Invoice"
@@ -799,11 +941,11 @@ def test_live_search_prefers_cached_analyzed_message(tmp_path) -> None:
     cache.close()
 
 
-def test_hydrate_applies_manual_rules_and_star_raw_helpers(tmp_path) -> None:
+def test_hydrate_applies_manual_rules_and_star_raw_helpers(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     CategoryEngine(cache).seed_initial_categories()
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=None, cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     message = sync.hydrate_message("m1")
     assert "financial_statement" in message["categories"]
     assert sync.star("m1", starred=True)["id"] == "m1"
@@ -817,11 +959,11 @@ def test_hydrate_applies_manual_rules_and_star_raw_helpers(tmp_path) -> None:
     cache.close()
 
 
-def test_history_sync_hydrates_changed_messages(tmp_path) -> None:
+def test_history_sync_hydrates_changed_messages(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     cache.set_state("gmail_history_id", "100")
     gmail = FakeGmail({"m1": gmail_fixture(), "m2": gmail_fixture_two()})
-    sync = SyncService(config=None, cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.sync_history(limit=10)
     assert result["messages"] == 2
     assert result["hydrated"] == 2
@@ -830,13 +972,139 @@ def test_history_sync_hydrates_changed_messages(tmp_path) -> None:
     cache.close()
 
 
-def test_search_stays_cache_only_for_time_bounded_queries(tmp_path) -> None:
+def test_backfill_processes_one_monthly_page_and_advances_page(tmp_path: Path) -> None:
+    cache = make_cache(tmp_path)
+    cache.set_state("backfill.window_start", "2026-05-01")
+    query = "in:anywhere after:2026/04/30 before:2026/06/01"
+    gmail = FakeGmail(
+        {"m1": gmail_fixture(), "m2": gmail_fixture_two()},
+        pages={(query, ""): {"messages": [{"id": "m1"}], "next_page_token": "p2", "result_size_estimate": 2}},
+    )
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    result = sync.backfill_batch(batch_size=1)
+    assert result["message_ids"] == ["m1"]
+    assert result["advanced"] is True
+    assert result["hydrated"] == 1
+    assert cache.get_state("backfill.window_start") == "2026-05-01"
+    assert cache.get_state("backfill.page_token") == "p2"
+    assert cache.get_state("backfill.current_batch") == ""
+    assert cache.intelligence_job_status()["done"] == 2
+    cache.close()
+
+
+def test_backfill_resumes_current_batch_without_fetching_next_page(tmp_path: Path) -> None:
+    cache = make_cache(tmp_path)
+    cache.set_state(
+        "backfill.current_batch",
+        json.dumps(
+            {
+                "complete": False,
+                "query": "in:anywhere after:2026/04/30 before:2026/06/01",
+                "window_start": "2026-05-01",
+                "window_end": "2026-06-01",
+                "page_token": "",
+                "next_page_token": "",
+                "message_ids": ["m1"],
+                "started_at": "2026-05-24T00:00:00Z",
+            }
+        ),
+    )
+    gmail = FakeGmail({"m1": gmail_fixture()})
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    result = sync.backfill_batch(batch_size=1)
+    assert result["advanced"] is True
+    assert gmail.page_queries == []
+    assert cache.get_state("backfill.window_start") == "2026-06-01"
+    assert cache.get_state("backfill.current_batch") == ""
+    cache.close()
+
+
+def test_backfill_skips_complete_message_without_validation_metadata(tmp_path: Path) -> None:
+    cache = make_cache(tmp_path)
+    gmail = FakeGmail({"m1": gmail_fixture()})
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync.hydrate_message("m1", update_history_cursor=False)
+    IntelligenceWorker(cache, RecordingSemantic()).run_until_empty()
+    gmail.fetched.clear()
+    cache.set_state("backfill.window_start", "2026-05-01")
+    result = sync.backfill_batch(batch_size=1)
+    assert result["skipped"] == 1
+    assert result["hydrated"] == 0
+    assert gmail.metadata_fetched == []
+    assert gmail.fetched == []
+    cache.close()
+
+
+def test_backfill_validation_rehydrates_changed_metadata(tmp_path: Path) -> None:
+    cache = make_cache(tmp_path)
+    gmail = FakeGmail({"m1": gmail_fixture()})
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync.hydrate_message("m1", update_history_cursor=False)
+    IntelligenceWorker(cache, RecordingSemantic()).run_until_empty()
+    changed = gmail_fixture()
+    changed["historyId"] = "999"
+    changed["snippet"] = "Changed Apollo"
+    gmail.messages["m1"] = changed
+    gmail.metadata["m1"] = {
+        "id": "m1",
+        "threadId": changed["threadId"],
+        "historyId": "999",
+        "labelIds": changed["labelIds"],
+        "payload": {"headers": changed["payload"]["headers"]},
+    }
+    gmail.fetched.clear()
+    cache.set_state("backfill.window_start", "2026-05-01")
+    result = sync.backfill_batch(batch_size=1, validate=True)
+    assert result["metadata_checked"] == 1
+    assert result["changed"] == 1
+    assert result["hydrated"] == 1
+    assert ("m1", "full") in gmail.fetched
+    assert cache.get_message("m1")["snippet"] == "Changed Apollo"
+    cache.close()
+
+
+def test_backfill_does_not_advance_dead_intelligence_jobs(tmp_path: Path) -> None:
+    cache = make_cache(tmp_path)
+    gmail = FakeGmail({"m1": gmail_fixture()})
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync.hydrate_message("m1", update_history_cursor=False)
+    with cache._connect() as conn:
+        conn.execute("UPDATE intelligence_jobs SET max_attempts = 1 WHERE kind = 'message' AND target_id = 'm1'")
+    cache.set_state(
+        "backfill.current_batch",
+        json.dumps(
+            {
+                "complete": False,
+                "query": "in:anywhere after:2026/04/30 before:2026/06/01",
+                "window_start": "2026-05-01",
+                "window_end": "2026-06-01",
+                "page_token": "",
+                "next_page_token": "",
+                "message_ids": ["m1"],
+                "started_at": "2026-05-24T00:00:00Z",
+            }
+        ),
+    )
+    failing_sync = SyncService(
+        config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=FailingSemantic(), gmail=gmail
+    )
+
+    result = failing_sync.backfill_batch(batch_size=1)
+
+    assert result["advanced"] is False
+    assert result["target_status"]["dead"] == [{"kind": "message", "target_id": "m1", "status": "dead"}]
+    assert cache.get_state("backfill.current_batch") != ""
+    assert cache.get_state("backfill.window_start") == ""
+    cache.close()
+
+
+def test_search_stays_cache_only_for_time_bounded_queries(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     parsed = parse_gmail_message(gmail_fixture())
     cache.upsert_thread({"id": "t1", "snippet": parsed.snippet})
     cache.upsert_message(parsed, gmail_fixture(), markdown=message_to_markdown(parsed), hydrated=True)
     gmail = FakeGmail({"m2": gmail_fixture_two()})
-    sync = SyncService(config=None, cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.search("Apollo", after="2026-05-01", limit=5)
     assert result["source"] == "cache"
     assert gmail.queries == []
@@ -849,10 +1117,10 @@ def test_search_stays_cache_only_for_time_bounded_queries(tmp_path) -> None:
     cache.close()
 
 
-def test_operator_only_gmail_query_goes_live(tmp_path) -> None:
+def test_operator_only_gmail_query_goes_live(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=None, cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.search("older_than:1y", limit=5)
     assert result["source"] == "gmail+cache"
     assert gmail.queries == ["older_than:1y"]

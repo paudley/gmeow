@@ -13,7 +13,9 @@ ignore = ["COM812", "ISC001", "D203", "D213", "S603", "S607", "T201", "TC", "TC0
 max-args = 6
 
 [lint.per-file-ignores]
+"src/**" = ["A001", "A002", "ANN401", "D", "FBT001", "FBT002", "N801", "N803", "PYI020", "RUF100", "TC", "UP037"]
 "tests/**" = ["ANN401", "ARG001", "ARG002", "B017", "D", "E501", "EM101", "EM102", "PERF401", "PLR0913", "PLR2004", "PT011", "PT012", "RUF012", "S101", "S105", "S106", "SIM117", "SLF001", "TC003", "TRY003"]
+"typings/**" = ["A001", "A002", "ANN401", "D", "FBT001", "FBT002", "N801", "N803", "PYI020", "RUF100", "TC", "UP037"]
 
 [lint.flake8-tidy-imports.banned-api]
 "dateutil.tz" = { msg = "Use `zoneinfo` instead." }

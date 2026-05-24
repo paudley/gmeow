@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""summary and centroid items.
+"""Alembic revision: summary and centroid items.
+
+This revision is part of the Gmeow PostgreSQL schema history. It is applied in order by
+``alembic upgrade`` and must be rolled forward rather than amended once shipped.
 
 Revision ID: 20260523_0012
 Revises: 20260523_0011
 Create Date: 2026-05-23
 """
-
-from __future__ import annotations
 
 from alembic import op
 

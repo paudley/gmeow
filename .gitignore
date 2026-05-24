@@ -29,3 +29,7 @@ htmlcov/
 .coding-ethos/lint-runs/
 .coding-ethos/prune-runs/
 .coding-ethos/state/
+.coding-ethos/code-intel.*
+
+.coding-ethos/code-intel.db-shm
+.coding-ethos/code-intel.db-wal

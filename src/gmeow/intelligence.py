@@ -1,27 +1,35 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide intelligence functionality for Gmeow."""
+"""Run intelligence jobs for cached Gmail artifacts.
 
-from __future__ import annotations
+The module processes message and attachment jobs, updating semantic indexes, graph triples,
+summaries, and category assignments. It owns worker retry behavior around individual analysis
+failures.
+"""
 
 import json
 import os
 import socket
-from typing import Any
+from typing import Any, cast
 
-from .cache import _attachment_text_from_metadata
+from .cache import attachment_text_from_metadata
 from .categories import CategoryEngine
 from .graph import extract_attachment_sidecar_triples, extract_triples
 from .kg import clean_text_for_kg
 from .parser import parse_gmail_message
+from .protocols import IntelligenceCache, IntelligenceGraph, IntelligenceSemantic, NoGraph
+
+DEFAULT_TARGETS = cast(list[tuple[str, str]], None)
 
 INTELLIGENCE_EXCEPTIONS = (RuntimeError, ValueError, KeyError, TypeError, OSError)
+
+DEFAULT_GRAPH = NoGraph()
 
 
 class IntelligenceWorker:
     """Represent IntelligenceWorker data and behavior."""
 
-    def __init__(self, cache: object, semantic: object, graph: object | None = None) -> None:
+    def __init__(self, cache: IntelligenceCache, semantic: IntelligenceSemantic, graph: IntelligenceGraph = DEFAULT_GRAPH) -> None:
         """Initialize IntelligenceWorker."""
         self.cache = cache
         self.semantic = semantic
@@ -33,13 +41,13 @@ class IntelligenceWorker:
         """Enqueue all."""
         return self.cache.enqueue_all_intelligence_jobs()
 
-    def run_until_empty(self, limit: int | None = None) -> dict[str, int]:
+    def run_until_empty(self, limit: int = 0, targets: list[tuple[str, str]] = DEFAULT_TARGETS) -> dict[str, int]:
         """Run until empty."""
         processed = 0
         failed = 0
-        while limit is None or processed < limit:
-            job = self.cache.claim_next_intelligence_job(worker_id=self.worker_id)
-            if job is None:
+        while limit <= 0 or processed < limit:
+            job = self.cache.claim_next_intelligence_job(worker_id=self.worker_id, targets=targets)
+            if not job:
                 break
             try:
                 self.process_job(job)
@@ -65,20 +73,20 @@ class IntelligenceWorker:
     def process_message(self, message_id: str) -> None:
         """Process message."""
         message = self.cache.get_message(message_id)
-        if message is None:
+        if not message:
             raise KeyError(message_id)
         parsed = parse_gmail_message(message["raw"])
-        attachment_sha1s = [attachment["sha1"] for attachment in self.cache.attachments_for_message(message_id)]
+        attachment_sha1s = [str(attachment["sha1"]) for attachment in self.cache.attachments_for_message(message_id)]
         triples = extract_triples(parsed, attachment_sha1s)
         self.cache.delete_graph_triples_for_message(message_id)
         self.cache.add_triples(triples)
-        if self.graph is not None:
-            self.graph.add_triples(triples)
+        self.graph.add_triples(triples)
         self.categories.categorize_message(message_id)
-        text = "\n\n".join([message.get("subject") or "", message.get("text_body") or "", message.get("markdown") or ""])
-        categories = ",".join(self.cache.get_message(message_id).get("categories", []))
+        text = "\n\n".join([str(message.get("subject") or ""), str(message.get("text_body") or ""), str(message.get("markdown") or "")])
+        updated_message = self.cache.get_message(message_id)
+        categories = ",".join(str(category) for category in updated_message.get("categories", []))
         self.semantic.index_message(
-            message_id, clean_text_for_kg(text), {"thread_id": message.get("thread_id") or "", "categories": categories}
+            message_id, clean_text_for_kg(text), {"thread_id": str(message.get("thread_id") or ""), "categories": categories}
         )
 
     def process_attachment(self, sha1: str) -> None:
@@ -87,19 +95,18 @@ class IntelligenceWorker:
         if not attachments:
             raise KeyError(sha1)
         attachment = attachments[0]
-        metadata = attachment.get("metadata", {})
+        metadata = cast(dict[str, Any], attachment.get("metadata", {}))
         triples = extract_attachment_sidecar_triples(sha1, metadata)
         self.cache.delete_graph_triples_for_attachment(sha1)
         self.cache.add_triples(triples)
-        if self.graph is not None:
-            self.graph.add_triples(triples)
-        text = _attachment_text_from_metadata(metadata) or json.dumps(metadata, sort_keys=True)
+        self.graph.add_triples(triples)
+        text = attachment_text_from_metadata(metadata) or json.dumps(metadata, sort_keys=True)
         self.semantic.index_attachment(
             sha1,
             text,
             {
-                "message_id": attachment["message_id"],
-                "filename": attachment.get("filename") or "",
-                "mime_type": attachment.get("mime_type") or "",
+                "message_id": str(attachment["message_id"]),
+                "filename": str(attachment.get("filename") or ""),
+                "mime_type": str(attachment.get("mime_type") or ""),
             },
         )

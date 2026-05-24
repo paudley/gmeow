@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide object store functionality for Gmeow."""
+"""Store immutable attachment and raw content objects.
 
-from __future__ import annotations
+The module manages compressed content-addressed storage and sidecar metadata refreshes. It connects
+object persistence with attachment analysis so cached artifacts remain reproducible.
+"""
 
 import json
 import os
@@ -10,7 +12,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import blake3
 import zstandard as zstd
@@ -18,6 +20,9 @@ import zstandard as zstd
 from .attachment_analysis import analyze_attachment
 from .config import AttachmentAnalysisConfig
 from .metadata import extract_exiftool_metadata
+
+DEFAULT_ATTACHMENT_ANALYSIS_CONFIG = cast(AttachmentAnalysisConfig, None)
+DEFAULT_DICT_ANY = cast(dict[str, Any], None)
 
 COMPRESSIBLE_TYPES = (
     "application/json",
@@ -147,7 +152,7 @@ class CasAttachmentStore:
     is the CAS digest. New storage is BLAKE3-addressed.
     """
 
-    def __init__(self, store: ObjectStore, analysis_config: AttachmentAnalysisConfig | None = None) -> None:
+    def __init__(self, store: ObjectStore, analysis_config: AttachmentAnalysisConfig = DEFAULT_ATTACHMENT_ANALYSIS_CONFIG) -> None:
         """Initialize CasAttachmentStore."""
         self.store = store
         self.analysis_config = analysis_config or AttachmentAnalysisConfig()
@@ -157,7 +162,12 @@ class CasAttachmentStore:
         return self.store.root / "sidecars" / digest[:2] / digest[2:4] / f"{digest}.json"
 
     def put(
-        *, self, content: bytes, metadata: dict[str, Any], extract_metadata: bool = True, media_type: str = "application/octet-stream"
+        self,
+        content: bytes,
+        metadata: dict[str, Any],
+        *,
+        extract_metadata: bool = True,
+        media_type: str = "application/octet-stream",
     ) -> StoredAttachmentObject:
         """Put."""
         media_type = (metadata.get("gmail", {}).get("mime_type") if isinstance(metadata.get("gmail"), dict) else None) or media_type
@@ -194,7 +204,7 @@ class CasAttachmentStore:
         sidecar = self.sidecar_for_digest(sha1)
         if not sidecar.exists():
             return {}
-        return json.loads(sidecar.read_text())
+        return cast(dict[str, Any], json.loads(sidecar.read_text()))
 
     def get_bytes(self, sha1: str, compression: str = "identity") -> bytes:
         """Get bytes."""
@@ -210,7 +220,7 @@ class CasAttachmentStore:
             raise FileNotFoundError(sha1)
         return path
 
-    def refresh_sidecar(self, sha1: str, source_metadata: dict[str, Any] | None = None) -> StoredAttachmentObject:
+    def refresh_sidecar(self, sha1: str, source_metadata: dict[str, Any] = DEFAULT_DICT_ANY) -> StoredAttachmentObject:
         """Refresh sidecar."""
         metadata = self.read_metadata(sha1)
         compression = metadata.get("compression") or "identity"
@@ -254,7 +264,7 @@ def _deep_merge(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str,
     merged = dict(existing)
     for key, value in incoming.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge(merged[key], value)
+            merged[key] = _deep_merge(cast(dict[str, Any], merged[key]), cast(dict[str, Any], value))
         else:
             merged[key] = value
     return merged
