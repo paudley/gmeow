@@ -408,8 +408,8 @@ class PgCache:
             self._upsert_content_ref_conn(conn, markdown_obj.digest, "messages", message.gmail_id, "markdown_digest", "markdown")
             conn.execute("DELETE FROM message_parts WHERE message_id = %s", (message.gmail_id,))
             for part in message.parts:
-                body_digest = None
-                if part.body_text is not None:
+                body_digest: str = cast(str, None)
+                if part.body_text:
                     body_obj = self.objects.put_text(part.body_text, media_type=part.mime_type)
                     self._record_object_conn(conn, body_obj)
                     body_digest = body_obj.digest
