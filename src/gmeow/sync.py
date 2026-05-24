@@ -12,15 +12,15 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any, NoReturn, Protocol, cast
+from typing import Any, NoReturn, cast
 
 from .categories import CategoryEngine
 from .config import GmeowConfig, PriorityRule
 from .gmail import GmailClient
 from .intelligence import IntelligenceWorker
 from .markdown import message_to_markdown
-from .object_store import StoredAttachmentObject
 from .parser import ParsedMessage, parse_gmail_message
+from .protocols import GmeowCache, GmeowSemantic, IntelligenceGraph, NoGraph, SyncAttachments
 from .sync_backfill import (
     backfill_query,
     current_month_start,
@@ -32,6 +32,7 @@ from .sync_backfill import (
 )
 
 DEFAULT_DICT_ANY = cast(dict[str, Any], None)
+DEFAULT_GRAPH: IntelligenceGraph = NoGraph()
 DEFAULT_LIST_STR = cast(list[str], None)
 DEFAULT_OBJECT = cast(object, None)
 DEFAULT_PRIORITY_RULE = cast(PriorityRule, None)
@@ -100,158 +101,6 @@ class MissingGmailClient:
 DEFAULT_GMAIL_CLIENT = MissingGmailClient()
 
 
-class _SyncCache(Protocol):
-    """Cache protocol used by SyncService."""
-
-    def start_sync_run(self, run_kind: str, start_cursor: str = DEFAULT_STR, request: dict[str, Any] = DEFAULT_DICT_ANY) -> int:
-        """Record the start of a sync run."""
-        ...
-
-    def finish_sync_run(
-        self,
-        run_id: int,
-        status: str,
-        end_cursor: str = DEFAULT_STR,
-        result: dict[str, Any] = DEFAULT_DICT_ANY,
-        error: str = DEFAULT_STR,
-    ) -> None:
-        """Record the final state of a sync run."""
-        ...
-
-    def upsert_label(self, label: dict[str, Any]) -> None:
-        """Store or update a Gmail label."""
-        ...
-
-    def upsert_rule(self, name: str, priority: int, rule: dict[str, Any]) -> None:
-        """Store or update a priority rule."""
-        ...
-
-    def get_state(self, key: str) -> str:
-        """Return a persisted sync state value."""
-        ...
-
-    def set_state(self, key: str, value: str) -> None:
-        """Persist a sync state value."""
-        ...
-
-    def delete_state(self, key: str) -> None:
-        """Delete a persisted sync state value."""
-        ...
-
-    def get_message(self, message_id: str) -> dict[str, Any]:
-        """Return a cached message."""
-        ...
-
-    def upsert_thread(self, thread: dict[str, Any]) -> None:
-        """Store or update a Gmail thread."""
-        ...
-
-    def upsert_message(self, message: ParsedMessage, raw_json: dict[str, Any], markdown: str, *, hydrated: bool) -> None:
-        """Store or update a parsed message."""
-        ...
-
-    def enqueue_intelligence_job(self, kind: str, target_id: str, payload: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
-        """Queue intelligence processing for a target."""
-        ...
-
-    def intelligence_target_status(self, targets: list[tuple[str, str]]) -> dict[str, Any]:
-        """Return aggregate intelligence status for targets."""
-        ...
-
-    def message_backfill_complete(self, message_id: str, *, require_raw: bool = True) -> dict[str, Any]:
-        """Return backfill completeness for a message."""
-        ...
-
-    def attachments_for_message(self, message_id: str) -> list[dict[str, Any]]:
-        """Return cached attachments for a message."""
-        ...
-
-    def text_search(
-        self,
-        query: str,
-        limit: int = 20,
-        after: str = DEFAULT_STR,
-        before: str = DEFAULT_STR,
-        include_categories: list[str] = DEFAULT_LIST_STR,
-        exclude_categories: list[str] = DEFAULT_LIST_STR,
-    ) -> list[dict[str, Any]]:
-        """Search cached message text."""
-        ...
-
-    def graph_search(
-        self,
-        term: str,
-        limit: int = 50,
-        *,
-        include_noise: bool = False,
-        kind: str = DEFAULT_STR,
-        namespace: str = DEFAULT_STR,
-        visibility: str = "user",
-    ) -> list[dict[str, Any]]:
-        """Search cached graph content."""
-        ...
-
-    def category_allowed(self, categories: list[str], include_categories: list[str], exclude_categories: list[str]) -> bool:
-        """Return whether categories satisfy visibility filters."""
-        ...
-
-    def raw_rfc822(self, message_id: str) -> bytes:
-        """Return cached raw RFC822 bytes."""
-        ...
-
-    def set_raw_rfc822(self, message_id: str, raw: bytes) -> None:
-        """Store raw RFC822 bytes."""
-        ...
-
-    def archive_incomplete_message_ids(self, limit: int = 25) -> list[str]:
-        """Return message ids missing archive artifacts."""
-        ...
-
-    def latest_history_id(self) -> str:
-        """Return the latest cached Gmail history id."""
-        ...
-
-    def record_operational_event(
-        self,
-        event_type: str,
-        severity: str,
-        component: str,
-        subject_id: str = DEFAULT_STR,
-        detail: str = DEFAULT_STR,
-        metadata: dict[str, Any] = DEFAULT_DICT_ANY,
-    ) -> int:
-        """Record an operational event."""
-        ...
-
-    def apply_retention_policy(self, message_id: str, source: str = "operator", *, dry_run: bool = True) -> dict[str, Any]:
-        """Apply retention policy to a message."""
-        ...
-
-    def add_attachment(self, record: dict[str, Any]) -> None:
-        """Store attachment metadata."""
-        ...
-
-
-class _SyncAttachments(Protocol):
-    """Attachment storage protocol used by SyncService."""
-
-    def put(self, content: bytes, metadata: dict[str, Any]) -> StoredAttachmentObject:
-        """Store attachment content."""
-        ...
-
-
-class _SyncSemantic(Protocol):
-    """Semantic index protocol used by SyncService."""
-
-    def search(self, query: str, limit: int = 10, source_kind: str = DEFAULT_STR) -> list[dict[str, Any]]:
-        """Search semantic chunks."""
-        ...
-
-    def available(self) -> bool:
-        """Return whether semantic search is available."""
-        ...
-
-
 @dataclass(slots=True)
 class HybridFilters:
     """Hold filters shared by hybrid search scoring helpers."""
@@ -276,11 +125,11 @@ class SyncService:
     def __init__(
         self,
         config: GmeowConfig,
-        cache: _SyncCache,
-        attachments: _SyncAttachments,
-        semantic: _SyncSemantic,
+        cache: GmeowCache,
+        attachments: SyncAttachments,
+        semantic: GmeowSemantic,
         gmail: GmailClient = DEFAULT_GMAIL_CLIENT,
-        graph: object = DEFAULT_OBJECT,
+        graph: IntelligenceGraph = DEFAULT_GRAPH,
     ) -> None:
         """Initialize SyncService."""
         self.config = config
@@ -427,11 +276,7 @@ class SyncService:
             targets.extend(target for target in message_targets if target not in targets)
         target_status = self.cache.intelligence_target_status(targets)
         if targets and not target_status["terminal"]:
-            worker = (
-                IntelligenceWorker(cast(Any, self.cache), cast(Any, self.semantic))
-                if self.graph is None
-                else IntelligenceWorker(cast(Any, self.cache), cast(Any, self.semantic), cast(Any, self.graph))
-            )
+            worker = IntelligenceWorker(self.cache, self.semantic, self.graph)
             worker.run_until_empty(targets=targets)
             target_status = self.cache.intelligence_target_status(targets)
         target_status = self._wait_for_running_backfill_targets(targets, target_status)
@@ -905,7 +750,7 @@ def _score_lexical_results(scored: dict[str, dict[str, Any]], messages: list[dic
         _merge_hybrid_score(scored, message, "lexical", 1.0 / rank)
 
 
-def _semantic_hybrid_results(semantic: _SyncSemantic, query: str, limit: int) -> list[dict[str, Any]]:
+def _semantic_hybrid_results(semantic: GmeowSemantic, query: str, limit: int) -> list[dict[str, Any]]:
     try:
         return semantic.search(query, limit=limit, source_kind="message")
     except SYNC_EXCEPTIONS:
@@ -914,7 +759,7 @@ def _semantic_hybrid_results(semantic: _SyncSemantic, query: str, limit: int) ->
 
 def _score_semantic_results(
     scored: dict[str, dict[str, Any]],
-    cache: _SyncCache,
+    cache: GmeowCache,
     results: list[dict[str, Any]],
     filters: HybridFilters,
 ) -> None:
@@ -934,7 +779,7 @@ def _semantic_message_id(result: dict[str, Any]) -> str:
 
 def _score_graph_results(
     scored: dict[str, dict[str, Any]],
-    cache: _SyncCache,
+    cache: GmeowCache,
     query: str,
     limit: int,
     filters: HybridFilters,
@@ -954,7 +799,7 @@ def _graph_hit_counts(results: list[dict[str, Any]]) -> dict[str, int]:
     return graph_hits
 
 
-def _finalize_hybrid_scores(scored: dict[str, dict[str, Any]], cache: _SyncCache, filters: HybridFilters) -> None:
+def _finalize_hybrid_scores(scored: dict[str, dict[str, Any]], cache: GmeowCache, filters: HybridFilters) -> None:
     for item in scored.values():
         recency = _recency_score(item["message"].get("message_date_iso"))
         category_penalty = _category_penalty(cache, item["message"], filters)
@@ -963,13 +808,13 @@ def _finalize_hybrid_scores(scored: dict[str, dict[str, Any]], cache: _SyncCache
         item["message"]["hybrid_sources"] = item["sources"]
 
 
-def _category_penalty(cache: _SyncCache, message: dict[str, Any], filters: HybridFilters) -> float:
+def _category_penalty(cache: GmeowCache, message: dict[str, Any], filters: HybridFilters) -> float:
     if cache.category_allowed(message.get("categories", []), filters.include_categories, filters.exclude_categories):
         return 0.0
     return 0.25
 
 
-def _message_matches_filters(cache: _SyncCache, message: dict[str, Any], filters: HybridFilters) -> bool:
+def _message_matches_filters(cache: GmeowCache, message: dict[str, Any], filters: HybridFilters) -> bool:
     if not message:
         return False
     date = message.get("message_date_iso") or ""

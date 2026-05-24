@@ -10,103 +10,26 @@ failures.
 import json
 import os
 import socket
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from .cache import attachment_text_from_metadata
 from .categories import CategoryEngine
 from .graph import extract_attachment_sidecar_triples, extract_triples
 from .kg import clean_text_for_kg
 from .parser import parse_gmail_message
+from .protocols import IntelligenceCache, IntelligenceGraph, IntelligenceSemantic, NoGraph
 
-GraphTriple = tuple[str, str, str, Any]
 DEFAULT_TARGETS = cast(list[tuple[str, str]], None)
 
 INTELLIGENCE_EXCEPTIONS = (RuntimeError, ValueError, KeyError, TypeError, OSError)
 
-
-class _IntelligenceCache(Protocol):
-    """Provide cache operations required by the intelligence worker."""
-
-    def enqueue_all_intelligence_jobs(self) -> dict[str, int]:
-        """Enqueue every eligible cached artifact for analysis."""
-        ...
-
-    def claim_next_intelligence_job(self, worker_id: str, targets: list[tuple[str, str]]) -> dict[str, Any]:
-        """Claim the next available intelligence job."""
-        ...
-
-    def fail_intelligence_job(self, job_id: int, error: str) -> None:
-        """Record an intelligence job failure."""
-        ...
-
-    def complete_intelligence_job(self, job_id: int) -> None:
-        """Mark an intelligence job complete."""
-        ...
-
-    def intelligence_job_status(self) -> dict[str, int]:
-        """Return intelligence queue status counts."""
-        ...
-
-    def get_message(self, message_id: str) -> dict[str, Any]:
-        """Return a cached message mapping."""
-        ...
-
-    def attachments_for_message(self, message_id: str) -> list[dict[str, Any]]:
-        """Return cached attachments for a message."""
-        ...
-
-    def list_attachments(self) -> list[dict[str, Any]]:
-        """Return every cached attachment."""
-        ...
-
-    def delete_graph_triples_for_message(self, message_id: str) -> None:
-        """Delete graph triples associated with a message."""
-        ...
-
-    def delete_graph_triples_for_attachment(self, sha1: str) -> None:
-        """Delete graph triples associated with an attachment."""
-        ...
-
-    def add_triples(self, triples: list[GraphTriple]) -> None:
-        """Persist graph triples."""
-        ...
-
-
-class _IntelligenceSemantic(Protocol):
-    """Provide semantic index operations used by the worker."""
-
-    def index_message(self, message_id: str, text: str, metadata: dict[str, Any]) -> None:
-        """Index a message document."""
-        ...
-
-    def index_attachment(self, sha1: str, text: str, metadata: dict[str, Any]) -> None:
-        """Index an attachment document."""
-        ...
-
-
-class _IntelligenceGraph(Protocol):
-    """Mirror extracted triples to the external graph store."""
-
-    def add_triples(self, triples: list[GraphTriple]) -> None:
-        """Persist graph triples."""
-        ...
-
-
-class _NoGraph:
-    """Discard graph triples when an external graph store is disabled."""
-
-    def add_triples(self, triples: list[GraphTriple]) -> None:
-        """Ignore graph triples."""
-        _ = triples
-
-
-DEFAULT_GRAPH = _NoGraph()
+DEFAULT_GRAPH = NoGraph()
 
 
 class IntelligenceWorker:
     """Represent IntelligenceWorker data and behavior."""
 
-    def __init__(self, cache: _IntelligenceCache, semantic: _IntelligenceSemantic, graph: _IntelligenceGraph = DEFAULT_GRAPH) -> None:
+    def __init__(self, cache: IntelligenceCache, semantic: IntelligenceSemantic, graph: IntelligenceGraph = DEFAULT_GRAPH) -> None:
         """Initialize IntelligenceWorker."""
         self.cache = cache
         self.semantic = semantic
