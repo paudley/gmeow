@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide attachment analysis functionality for Gmeow."""
+"""Analyze attachment content for the Gmeow archive.
 
-from __future__ import annotations
+The analyzer extracts text, OCR, archive listings, and optional vision captions from cached
+attachments so downstream search and intelligence can operate on derived signals. It defers to
+external tools (tesseract, pandoc, exiftool) when configured and falls back to skip records when
+those binaries are unavailable.
+"""
 
 import base64
 import json
@@ -12,11 +16,20 @@ import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, cast
 
 from .config import AttachmentAnalysisConfig
 from .http_json import HttpJsonError, post_json
 
+
+class _OpenAIContentPart(TypedDict, total=False):
+    """Single content fragment in an OpenAI chat response."""
+
+    type: str
+    text: str
+
+
+DEFAULT_ATTACHMENT_ANALYSIS_CONFIG = cast(AttachmentAnalysisConfig, None)
 ANALYSIS_VERSION = 1
 TEXT_TYPES = (
     "application/json",
@@ -29,7 +42,10 @@ TEXT_TYPES = (
 
 
 def analyze_attachment(
-    path: Path, content: bytes, metadata: dict[str, Any], config: AttachmentAnalysisConfig | None = None
+    path: Path,
+    content: bytes,
+    metadata: dict[str, Any],
+    config: AttachmentAnalysisConfig = DEFAULT_ATTACHMENT_ANALYSIS_CONFIG,
 ) -> dict[str, Any]:
     """Analyze attachment."""
     config = config or AttachmentAnalysisConfig()
@@ -46,10 +62,10 @@ def analyze_attachment(
         analysis["skipped"].append({"stage": "analysis", "reason": "disabled"})
         return analysis
 
-    source = metadata.get("source", {}) if isinstance(metadata.get("source"), dict) else {}
-    gmail = source.get("gmail", {}) if isinstance(source.get("gmail"), dict) else {}
-    declared_media_type = metadata.get("media_type") or gmail.get("mime_type") or "application/octet-stream"
-    filename = gmail.get("filename") or metadata.get("filename") or path.name
+    source = cast(dict[str, Any], metadata.get("source", {}) if isinstance(metadata.get("source"), dict) else {})
+    gmail = cast(dict[str, Any], source.get("gmail", {}) if isinstance(source.get("gmail"), dict) else {})
+    declared_media_type = cast(str, metadata.get("media_type") or gmail.get("mime_type") or "application/octet-stream")
+    filename = cast(str, gmail.get("filename") or metadata.get("filename") or path.name)
     detected = _detect_file(path)
     media_type = _best_media_type(declared_media_type, detected, filename)
     analysis["file"] = {
@@ -123,7 +139,7 @@ def _merge_stage(analysis: dict[str, Any], key: str, result: dict[str, Any]) -> 
         return
     existing = analysis.get(key)
     if isinstance(existing, dict):
-        analysis[key] = _deep_merge(existing, result)
+        analysis[key] = _deep_merge(cast(dict[str, Any], existing), result)
     else:
         analysis[key] = result
 
@@ -154,12 +170,15 @@ def _is_text_like(media_type: str, filename: str) -> bool:
 
 
 def _decode_text(content: bytes, limit: int) -> str:
+    fragment = content[: limit * 4]
+    failures: list[str] = []
     for encoding in ["utf-8", "utf-16", "latin-1"]:
         try:
-            text = content[: limit * 4].decode(encoding)
-            return _clean_text(text, limit)
-        except UnicodeDecodeError:
+            text = fragment.decode(encoding)
+        except UnicodeDecodeError as exc:
+            failures.append(f"{encoding}: {exc!s}")
             continue
+        return _clean_text(text, limit)
     return ""
 
 
@@ -168,7 +187,7 @@ def _pdf_analysis(path: Path, limit: int) -> dict[str, Any]:
     info = _run(["pdfinfo", str(path)], timeout=30)
     result["tools"]["pdfinfo"] = _tool_status(info)
     if info.get("ok"):
-        parsed = {}
+        parsed: dict[str, Any] = {}
         for line in info["stdout"].splitlines():
             if ":" in line:
                 key, value = line.split(":", 1)
@@ -186,7 +205,7 @@ def _pdf_analysis(path: Path, limit: int) -> dict[str, Any]:
 
 
 def _image_ocr(path: Path, languages: str, limit: int) -> dict[str, Any]:
-    result = {"tools": {}, "errors": [], "skipped": []}
+    result: dict[str, Any] = {"tools": {}, "errors": [], "skipped": []}
     ocr = _run(["tesseract", str(path), "stdout", "-l", languages], timeout=60)
     result["tools"]["tesseract"] = _tool_status(ocr)
     if ocr.get("ok") and ocr.get("stdout", "").strip():
@@ -199,7 +218,7 @@ def _image_ocr(path: Path, languages: str, limit: int) -> dict[str, Any]:
 
 
 def _vision_caption(content: bytes, media_type: str, config: AttachmentAnalysisConfig) -> dict[str, Any]:
-    result = {"tools": {}, "errors": [], "skipped": []}
+    result: dict[str, Any] = {"tools": {}, "errors": [], "skipped": []}
     if not config.vision_caption_endpoint or not config.vision_caption_model:
         result["skipped"].append({"stage": "vision_caption", "reason": "endpoint or model not configured"})
         return result
@@ -319,7 +338,7 @@ def _pandoc_candidate(media_type: str, filename: str) -> bool:
 
 
 def _archive_files(output: str) -> list[str]:
-    files = []
+    files: list[str] = []
     for raw_line in output.splitlines():
         line = raw_line.strip()
         if not line or line.startswith(("Archive:", "Length", "Date", "----", "Path = ", "Size = ", "Packed Size = ")):
@@ -337,11 +356,12 @@ def _archive_files(output: str) -> list[str]:
 
 def _finalize_text(analysis: dict[str, Any], limit: int) -> None:
     keys = ["text", "ocr_text", "vision_caption"]
-    texts = [analysis[key] for key in keys if isinstance(analysis.get(key), str)]
+    texts: list[str] = [analysis[key] for key in keys if isinstance(analysis.get(key), str)]
     for section in ["document", "image", "calendar", "archive", "vision"]:
         value = analysis.get(section)
         if isinstance(value, dict):
-            texts.extend(value[key] for key in keys if isinstance(value.get(key), str))
+            section_dict = cast(dict[str, Any], value)
+            texts.extend(section_dict[key] for key in keys if isinstance(section_dict.get(key), str))
     content = _clean_text("\n\n".join(texts), limit)
     if content:
         analysis["content_text"] = content
@@ -361,21 +381,22 @@ def _snake(value: str) -> str:
 
 def _extract_openai_text(data: dict[str, Any]) -> str:
     try:
-        content = data["choices"][0]["message"]["content"]
+        raw_content: Any = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         return ""
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        return "\n".join(str(item.get("text", "")).strip() for item in content if isinstance(item, dict)).strip()
-    return ""
+    if isinstance(raw_content, str):
+        return raw_content.strip()
+    if not isinstance(raw_content, list):
+        return ""
+    typed_parts: list[_OpenAIContentPart] = cast(list[_OpenAIContentPart], raw_content)
+    return "\n".join(part.get("text", "").strip() for part in typed_parts).strip()
 
 
 def _deep_merge(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(existing)
+    merged: dict[str, Any] = dict(existing)
     for key, value in incoming.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge(merged[key], value)
+            merged[key] = _deep_merge(cast(dict[str, Any], merged[key]), cast(dict[str, Any], value))
         else:
             merged[key] = value
     return merged
