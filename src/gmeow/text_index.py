@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide text index functionality for Gmeow."""
+"""Maintain the Tantivy text index for cached messages.
 
-from __future__ import annotations
+The index complements the PostgreSQL full-text search by giving sync and MCP callers a faster,
+in-process surface for exact and proximity queries. Documents are written on hydration and removed
+when the cache retires a message.
+"""
 
 from pathlib import Path
 from typing import Any
@@ -55,7 +58,7 @@ class TantivyMessageIndex:
             ["subject", "sender", "recipients", "snippet", "body", "markdown", "headers", "labels", "categories"],
         )
         hits = searcher.search(parsed, limit).hits
-        ids = []
+        ids: list[str] = []
         for _, address in hits:
             doc = searcher.doc(address)
             value = doc.get_first("id")

@@ -1,47 +1,54 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide headers functionality for Gmeow."""
+"""Parse and classify Gmail message headers.
 
-from __future__ import annotations
+This module turns raw RFC822 header rows into the ``HeaderIntelligence`` record that downstream
+search, graph, and category pipelines consume. It centralizes auto-reply detection, list
+signaling, and authentication-result extraction so producers see consistent fields.
+"""
 
 import re
 from dataclasses import dataclass, field
+
+
+def _empty_list() -> list[str]:
+    return []
 
 
 @dataclass(slots=True)
 class HeaderIntelligence:
     """Represent HeaderIntelligence data and behavior."""
 
-    message_id: str | None = None
-    references: list[str] = field(default_factory=list)
-    list_id: str | None = None
-    list_unsubscribe: str | None = None
-    delivered_to: str | None = None
-    reply_to: str | None = None
-    return_path: str | None = None
-    precedence: str | None = None
-    auto_submitted: str | None = None
-    authentication_results: str | None = None
+    message_id: str = ""
+    references: list[str] = field(default_factory=_empty_list)
+    list_id: str = ""
+    list_unsubscribe: str = ""
+    delivered_to: str = ""
+    reply_to: str = ""
+    return_path: str = ""
+    precedence: str = ""
+    auto_submitted: str = ""
+    authentication_results: str = ""
     received_hops: int = 0
-    spf: str | None = None
-    dkim: str | None = None
-    dmarc: str | None = None
-    warnings: list[str] = field(default_factory=list)
+    spf: str = ""
+    dkim: str = ""
+    dmarc: str = ""
+    warnings: list[str] = field(default_factory=_empty_list)
 
 
 def analyze_headers(headers: dict[str, str]) -> HeaderIntelligence:
     """Analyze headers."""
-    auth = headers.get("authentication-results")
+    auth = headers.get("authentication-results", "")
     intel = HeaderIntelligence(
-        message_id=headers.get("message-id"),
+        message_id=headers.get("message-id", ""),
         references=re.findall(r"<[^>]+>", headers.get("references", "")),
-        list_id=headers.get("list-id"),
-        list_unsubscribe=headers.get("list-unsubscribe"),
-        delivered_to=headers.get("delivered-to"),
-        reply_to=headers.get("reply-to"),
-        return_path=headers.get("return-path"),
-        precedence=headers.get("precedence"),
-        auto_submitted=headers.get("auto-submitted"),
+        list_id=headers.get("list-id", ""),
+        list_unsubscribe=headers.get("list-unsubscribe", ""),
+        delivered_to=headers.get("delivered-to", ""),
+        reply_to=headers.get("reply-to", ""),
+        return_path=headers.get("return-path", ""),
+        precedence=headers.get("precedence", ""),
+        auto_submitted=headers.get("auto-submitted", ""),
         authentication_results=auth,
         received_hops=sum(1 for key in headers if key == "received"),
     )

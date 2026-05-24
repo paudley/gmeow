@@ -1,28 +1,45 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide app functionality for Gmeow."""
+"""Build the FastAPI application for Gmeow.
 
-from __future__ import annotations
+This module wires configuration, storage, Gmail clients, search indexes, and maintenance services
+into the HTTP API. It also mounts the MCP adapter and exposes operational endpoints used by local
+operators.
+"""
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from .config import GmeowConfig
-from .gmail import GoogleGmailClient, UserOAuthGmailClient
+from .gmail import GmailClient, GoogleGmailClient, UserOAuthGmailClient
+from .gmail_actions import (
+    apply_message_label,
+    archive_message,
+    remove_message_label,
+    set_message_read_state,
+    set_message_star_state,
+)
 from .maintenance import MaintenanceScheduler
 from .mcp_server import build_mcp_app
 from .object_store import CasAttachmentStore, ObjectStore
 from .pg_cache import PgCache
+from .protocols import IntelligenceGraph, NoGraph
 from .resilience import degraded_status, readiness, startup_self_check
 from .semantic_pg import PgSemanticIndex
-from .sync import SyncService
+from .sync import MissingGmailClient, SyncService
 from .text_index import TantivyMessageIndex
+
+DEFAULT_CONFIG = cast(GmeowConfig, None)
+DEFAULT_FLOAT = cast(float, None)
+DEFAULT_INT = cast(int, None)
+DEFAULT_LIST_STR = cast(list[str], None)
+DEFAULT_STR = cast(str, None)
 
 
 class SearchRequest(BaseModel):
@@ -30,17 +47,17 @@ class SearchRequest(BaseModel):
 
     query: str
     limit: int = 20
-    after: str | None = None
-    before: str | None = None
-    include_categories: list[str] | None = None
-    exclude_categories: list[str] | None = None
+    after: str = DEFAULT_STR
+    before: str = DEFAULT_STR
+    include_categories: list[str] = DEFAULT_LIST_STR
+    exclude_categories: list[str] = DEFAULT_LIST_STR
     compact: bool = True
     body_chars: int = 500
-    graph_kind: str | None = None
-    graph_namespace: str | None = None
+    graph_kind: str = DEFAULT_STR
+    graph_namespace: str = DEFAULT_STR
     graph_visibility: str = "user"
     include_noise: bool = False
-    source_kind: str | None = None
+    source_kind: str = DEFAULT_STR
 
 
 class GraphNeighborhoodRequest(BaseModel):
@@ -96,8 +113,8 @@ class PeopleAliasRequest(BaseModel):
 
     address: str
     person_key: str
-    display_name: str | None = None
-    note: str | None = None
+    display_name: str = DEFAULT_STR
+    note: str = DEFAULT_STR
 
 
 class PathRequest(BaseModel):
@@ -114,7 +131,7 @@ class RetentionRequest(BaseModel):
     dry_run: bool = True
 
 
-def build_services(config: GmeowConfig) -> tuple[PgCache, CasAttachmentStore, PgSemanticIndex, None, SyncService]:
+def build_services(config: GmeowConfig) -> tuple[PgCache, CasAttachmentStore, PgSemanticIndex, IntelligenceGraph, SyncService]:
     """Build services."""
     config.ensure_dirs()
     objects = ObjectStore(config.object_store_dir)
@@ -125,22 +142,20 @@ def build_services(config: GmeowConfig) -> tuple[PgCache, CasAttachmentStore, Pg
     semantic = PgSemanticIndex(
         postgres_dsn, config.embedding_model, config.embedding_endpoint, config.semantic_chunk_size, config.semantic_chunk_overlap
     )
-    graph = None
-    gmail = None
+    graph: IntelligenceGraph = NoGraph()
+    gmail: GmailClient = MissingGmailClient()
     service_account_info = config.service_account_info()
     user_credentials_info = config.user_credentials_info()
-    if (
-        config.auth_mode == "service_account"
-        and config.subject
-        and (service_account_info is not None or config.service_account_file.exists())
-    ):
-        gmail = GoogleGmailClient(
-            config.service_account_file if service_account_info is None else None, config.subject, service_account_info=service_account_info
-        )
-    elif config.auth_mode == "user_oauth" and (user_credentials_info is not None or config.user_credentials_file.exists()):
-        gmail = UserOAuthGmailClient(
-            config.user_credentials_file if user_credentials_info is None else None, credentials_info=user_credentials_info
-        )
+    if config.auth_mode == "service_account" and config.subject and (service_account_info or config.service_account_file.exists()):
+        if service_account_info:
+            gmail = GoogleGmailClient.from_service_account_info(service_account_info, config.subject)
+        else:
+            gmail = GoogleGmailClient.from_service_account_file(config.service_account_file, config.subject)
+    elif config.auth_mode == "user_oauth" and (user_credentials_info or config.user_credentials_file.exists()):
+        if user_credentials_info:
+            gmail = UserOAuthGmailClient.from_credentials_info(user_credentials_info)
+        else:
+            gmail = UserOAuthGmailClient.from_credentials_file(config.user_credentials_file)
     sync = SyncService(config, cache, attachments, semantic, gmail, graph=graph)
     return cache, attachments, semantic, graph, sync
 
@@ -151,7 +166,7 @@ def list_messages_endpoint(request: Request, limit: int = 50, offset: int = 0) -
     return cache.list_messages(limit=limit, offset=offset)
 
 
-def create_app(config: GmeowConfig | None = None) -> FastAPI:
+def create_app(config: GmeowConfig = DEFAULT_CONFIG) -> FastAPI:
     """Create app."""
     config = config or GmeowConfig.load()
     cache, attachments, semantic, graph, sync = build_services(config)
@@ -161,11 +176,11 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
     startup_status = startup_self_check(config, cache, sync, semantic)
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         """Lifespan."""
         scheduler.start()
         try:
-            if mcp_app is None:
+            if not mcp_app.routes:
                 yield
             else:
                 async with mcp_app.router.lifespan_context(mcp_app):
@@ -184,6 +199,24 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
     app.state.startup_status = startup_status
     app.get("/api/v1/messages")(list_messages_endpoint)
 
+    _register_access_and_health_routes(app, config, cache, sync)
+    _register_operations_routes(app, cache)
+    _register_archive_routes(app, cache, sync)
+    _register_maintenance_routes(app, cache, scheduler)
+    _register_summary_routes(app, cache)
+    _register_sync_routes(app, cache, sync)
+    _register_message_routes(app, cache, sync)
+    _register_attachment_routes(app, cache, attachments)
+    _register_search_routes(app, cache, sync, semantic)
+    _register_graph_routes(app, cache)
+    _register_action_people_routes(app, cache, sync)
+
+    app.router.routes.extend(mcp_app.routes)
+
+    return app
+
+
+def _register_access_and_health_routes(app: FastAPI, config: GmeowConfig, cache: PgCache, sync: SyncService) -> None:
     @app.middleware("http")
     async def loopback_guard(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         """Loopback guard."""
@@ -198,7 +231,7 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
     @app.get("/api/v1/health")
     def health() -> dict[str, Any]:
         """Health."""
-        return {"ok": True, "subject_configured": bool(config.subject), "gmail_configured": sync.gmail is not None}
+        return {"ok": True, "subject_configured": bool(config.subject), "gmail_configured": sync.gmail_available()}
 
     @app.get("/api/v1/health/live")
     def health_live() -> dict[str, Any]:
@@ -215,18 +248,29 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         """Health degraded."""
         return degraded_status(cache, app.state.startup_status)
 
+    _route_refs = (
+        loopback_guard,
+        health,
+        health_live,
+        health_ready,
+        health_degraded,
+    )
+    _ = _route_refs
+
+
+def _register_operations_routes(app: FastAPI, cache: PgCache) -> None:
     @app.get("/api/v1/status/resilience")
     def status_resilience() -> dict[str, Any]:
         """Status resilience."""
         return cache.resilience_status()
 
     @app.get("/api/v1/ops/events")
-    def operational_events(limit: int = 100, component: str | None = None, severity: str | None = None) -> list[dict[str, Any]]:
+    def operational_events(limit: int = 100, component: str = DEFAULT_STR, severity: str = DEFAULT_STR) -> list[dict[str, Any]]:
         """Operational events."""
         return cache.operational_events(limit=limit, component=component, severity=severity)
 
     @app.get("/api/v1/jobs/intelligence")
-    def intelligence_jobs(status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def intelligence_jobs(status: str = DEFAULT_STR, limit: int = 50) -> list[dict[str, Any]]:
         """Intelligence jobs."""
         return cache.list_intelligence_jobs(status=status, limit=limit)
 
@@ -236,7 +280,7 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         return cache.list_dead_letter_jobs(limit=limit, include_closed=include_closed)
 
     @app.post("/api/v1/jobs/dead-letter/retry")
-    def retry_dead_letter_jobs(limit: int | None = None) -> dict[str, int]:
+    def retry_dead_letter_jobs(limit: int = DEFAULT_INT) -> dict[str, int]:
         """Retry dead letter jobs."""
         return cache.retry_dead_letter_jobs(limit=limit)
 
@@ -250,13 +294,26 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         """Repair cache."""
         return cache.repair_cache(dry_run=request.dry_run)
 
+    _route_refs = (
+        status_resilience,
+        operational_events,
+        intelligence_jobs,
+        dead_letter_jobs,
+        retry_dead_letter_jobs,
+        clear_dead_letter_job,
+        repair_cache,
+    )
+    _ = _route_refs
+
+
+def _register_archive_routes(app: FastAPI, cache: PgCache, sync: SyncService) -> None:
     @app.get("/api/v1/archive/status")
-    def archive_status(message_id: str | None = None, limit: int = 50) -> dict[str, Any]:
+    def archive_status(message_id: str = DEFAULT_STR, limit: int = 50) -> dict[str, Any]:
         """Archive status."""
         return cache.archive_status(message_id=message_id, limit=limit)
 
     @app.post("/api/v1/archive/refresh")
-    def archive_refresh(limit: int | None = None) -> dict[str, int]:
+    def archive_refresh(limit: int = DEFAULT_INT) -> dict[str, int]:
         """Archive refresh."""
         return cache.refresh_archive_states(limit=limit)
 
@@ -269,7 +326,7 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/v1/archive/verify-objects")
-    def archive_verify_objects(limit: int | None = None) -> dict[str, Any]:
+    def archive_verify_objects(limit: int = DEFAULT_INT) -> dict[str, Any]:
         """Archive verify objects."""
         return cache.verify_objects(limit=limit)
 
@@ -287,6 +344,22 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
     def archive_restore(request: PathRequest) -> dict[str, Any]:
         """Archive restore."""
         return cache.restore_archive(request.path, dry_run=request.dry_run)
+
+    _register_retention_imap_routes(app, cache)
+
+    _route_refs = (
+        archive_status,
+        archive_refresh,
+        archive_complete,
+        archive_verify_objects,
+        archive_export,
+        archive_verify_export,
+        archive_restore,
+    )
+    _ = _route_refs
+
+
+def _register_retention_imap_routes(app: FastAPI, cache: PgCache) -> None:
 
     @app.get("/api/v1/retention/policies")
     def retention_policies() -> list[dict[str, Any]]:
@@ -313,6 +386,17 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         """Imap refresh."""
         return cache.refresh_imap_mailboxes()
 
+    _route_refs = (
+        retention_policies,
+        retention_preview,
+        retention_apply,
+        imap_status,
+        imap_refresh,
+    )
+    _ = _route_refs
+
+
+def _register_maintenance_routes(app: FastAPI, cache: PgCache, scheduler: MaintenanceScheduler) -> None:
     @app.get("/api/v1/sync/status")
     def sync_status() -> dict[str, Any]:
         """Sync status."""
@@ -356,8 +440,25 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         """Maintenance analyze."""
         return cache.analyze_storage_tables()
 
+    _register_maintenance_refresh_routes(app, cache)
+
+    _route_refs = (
+        sync_status,
+        ingest_issues,
+        maintenance_status,
+        maintenance_timed_status,
+        maintenance_timed_run,
+        maintenance_storage_diagnostics,
+        maintenance_prune_orphans,
+        maintenance_analyze,
+    )
+    _ = _route_refs
+
+
+def _register_maintenance_refresh_routes(app: FastAPI, cache: PgCache) -> None:
+
     @app.post("/api/v1/maintenance/refresh-message-search")
-    def maintenance_refresh_message_search(limit: int | None = None) -> dict[str, Any]:
+    def maintenance_refresh_message_search(limit: int = DEFAULT_INT) -> dict[str, Any]:
         """Maintenance refresh message search."""
         return cache.refresh_message_search_columns(limit=limit)
 
@@ -391,8 +492,21 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         """Maintenance refresh summary views."""
         return cache.refresh_materialized_summary_views()
 
+    _route_refs = (
+        maintenance_refresh_message_search,
+        maintenance_refresh_graph_profiles,
+        maintenance_refresh_content_refs,
+        maintenance_refresh_summaries,
+        maintenance_refresh_graph_edges,
+        maintenance_refresh_timelines,
+        maintenance_refresh_summary_views,
+    )
+    _ = _route_refs
+
+
+def _register_summary_routes(app: FastAPI, cache: PgCache) -> None:
     @app.get("/api/v1/summaries")
-    def summaries(scope_kind: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def summaries(scope_kind: str = DEFAULT_STR, limit: int = 50) -> list[dict[str, Any]]:
         """Summaries."""
         return cache.list_summary_items(scope_kind=scope_kind, limit=limit)
 
@@ -402,10 +516,19 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         return cache.timeline_daily(limit=limit)
 
     @app.get("/api/v1/entities/emerging")
-    def emerging_entities(limit: int = 50, kind: str | None = None, visibility: str = "user") -> list[dict[str, Any]]:
+    def emerging_entities(limit: int = 50, kind: str = DEFAULT_STR, visibility: str = "user") -> list[dict[str, Any]]:
         """Emerging entities."""
         return cache.emerging_entities(limit=limit, kind=kind, visibility=visibility)
 
+    _route_refs = (
+        summaries,
+        timeline_daily,
+        emerging_entities,
+    )
+    _ = _route_refs
+
+
+def _register_sync_routes(app: FastAPI, cache: PgCache, sync: SyncService) -> None:
     @app.post("/api/v1/sync/run")
     def sync_run(limit_per_rule: int = 100) -> dict[str, Any]:
         """Sync run."""
@@ -422,11 +545,29 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.post("/api/v1/sync/backfill")
+    def sync_backfill(batch_size: int = 50, *, validate: bool = False, max_empty_windows: int = 120) -> dict[str, Any]:
+        """Sync backfill."""
+        try:
+            return sync.backfill_batch(batch_size=batch_size, validate=validate, max_empty_windows=max_empty_windows)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.get("/api/v1/labels")
     def labels() -> list[dict[str, Any]]:
         """Labels."""
         return cache.list_labels()
 
+    _route_refs = (
+        sync_run,
+        sync_history,
+        sync_backfill,
+        labels,
+    )
+    _ = _route_refs
+
+
+def _register_message_routes(app: FastAPI, cache: PgCache, sync: SyncService) -> None:
     @app.get("/api/v1/threads")
     def threads(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Threads."""
@@ -436,7 +577,7 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
     def thread(thread_id: str) -> dict[str, Any]:
         """Thread."""
         value = cache.get_thread(thread_id)
-        if value is None:
+        if not value:
             raise HTTPException(status_code=404, detail="Thread not found")
         return value
 
@@ -444,7 +585,7 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
     def message(message_id: str) -> dict[str, Any]:
         """Message."""
         value = cache.get_message(message_id)
-        if value is None:
+        if not value:
             raise HTTPException(status_code=404, detail="Message not found")
         return value
 
@@ -452,9 +593,22 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
     def raw_message(message_id: str) -> dict[str, Any]:
         """Raw message."""
         value = cache.get_message(message_id)
-        if value is None:
+        if not value:
             raise HTTPException(status_code=404, detail="Message not found")
-        return value["raw"]
+        return cast(dict[str, Any], value["raw"])
+
+    _register_raw_message_routes(app, cache, sync)
+
+    _route_refs = (
+        threads,
+        thread,
+        message,
+        raw_message,
+    )
+    _ = _route_refs
+
+
+def _register_raw_message_routes(app: FastAPI, cache: PgCache, sync: SyncService) -> None:
 
     @app.get("/api/v1/messages/{message_id}/raw/rfc822")
     def raw_rfc822_message(message_id: str) -> Response:
@@ -471,11 +625,19 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
     def markdown_message(message_id: str) -> Response:
         """Markdown message."""
         value = cache.get_message(message_id)
-        if value is None:
+        if not value:
             raise HTTPException(status_code=404, detail="Message not found")
         return Response(value.get("markdown") or "", media_type="text/markdown")
 
-    @app.get("/api/v1/attachments/{sha1}")
+    _route_refs = (
+        raw_rfc822_message,
+        markdown_message,
+    )
+    _ = _route_refs
+
+
+def _register_attachment_routes(app: FastAPI, cache: PgCache, attachments: CasAttachmentStore) -> None:
+    @app.get("/api/v1/attachments/{sha1}", response_model=None)
     def attachment(sha1: str) -> Response | FileResponse:
         """Attachment."""
         try:
@@ -502,6 +664,15 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         """Message attachments."""
         return cache.attachment_text_for_message(message_id, include_metadata=include_metadata)
 
+    _route_refs = (
+        attachment,
+        attachment_metadata,
+        message_attachments,
+    )
+    _ = _route_refs
+
+
+def _register_search_routes(app: FastAPI, cache: PgCache, sync: SyncService, semantic: PgSemanticIndex) -> None:
     @app.post("/api/v1/search/text")
     def search_text(request: SearchRequest) -> list[dict[str, Any]]:
         """Search text."""
@@ -515,7 +686,7 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         )["messages"]
         if request.compact:
             return cache.compact_messages(messages, body_chars=request.body_chars)
-        return messages
+        return cast(list[dict[str, Any]], messages)
 
     @app.post("/api/v1/search/attachments/text")
     def search_attachments_text(request: SearchRequest) -> list[dict[str, Any]]:
@@ -557,6 +728,17 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
             visibility=request.graph_visibility,
         )
 
+    _route_refs = (
+        search_text,
+        search_attachments_text,
+        search_semantic,
+        search_hybrid,
+        search_graph,
+    )
+    _ = _route_refs
+
+
+def _register_graph_routes(app: FastAPI, cache: PgCache) -> None:
     @app.post("/api/v1/graph/neighborhood")
     def graph_neighborhood(request: GraphNeighborhoodRequest) -> dict[str, Any]:
         """Graph neighborhood."""
@@ -564,7 +746,7 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
 
     @app.get("/api/v1/graph/projection")
     def graph_projection(
-        limit: int = 25, prefix: str | None = None, visibility: str = "user", kind: str | None = None, namespace: str | None = None
+        limit: int = 25, prefix: str = DEFAULT_STR, visibility: str = "user", kind: str = DEFAULT_STR, namespace: str = DEFAULT_STR
     ) -> dict[str, Any]:
         """Graph projection."""
         return cache.graph_projection(limit=limit, prefix=prefix, visibility=visibility, kind=kind, namespace=namespace)
@@ -582,9 +764,9 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
     @app.get("/api/v1/graph/rank")
     def graph_rank(
         limit: int = 25,
-        kind: str | None = None,
-        predicate: str | None = None,
-        namespace: str | None = None,
+        kind: str = DEFAULT_STR,
+        predicate: str = DEFAULT_STR,
+        namespace: str = DEFAULT_STR,
         visibility: str = "user",
         *,
         include_noise: bool = False,
@@ -596,7 +778,7 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
 
     @app.get("/api/v1/graph/centrality")
     def graph_centrality(
-        metric: str = "pagerank", limit: int = 25, kind: str | None = None, namespace: str | None = None, visibility: str = "user"
+        metric: str = "pagerank", limit: int = 25, kind: str = DEFAULT_STR, namespace: str = DEFAULT_STR, visibility: str = "user"
     ) -> list[dict[str, Any]]:
         """Graph centrality."""
         try:
@@ -604,6 +786,20 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    _register_graph_discovery_routes(app, cache)
+
+    _route_refs = (
+        graph_neighborhood,
+        graph_projection,
+        graph_path,
+        graph_weighted_path,
+        graph_rank,
+        graph_centrality,
+    )
+    _ = _route_refs
+
+
+def _register_graph_discovery_routes(app: FastAPI, cache: PgCache) -> None:
     @app.get("/api/v1/graph/components")
     def graph_components(mode: str = "weak", limit: int = 10, min_size: int = 2, visibility: str = "user") -> list[dict[str, Any]]:
         """Graph components."""
@@ -613,9 +809,9 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
     def graph_related_nodes(
         node: str,
         limit: int = 25,
-        max_weight: float | None = None,
-        kind: str | None = None,
-        namespace: str | None = None,
+        max_weight: float = DEFAULT_FLOAT,
+        kind: str = DEFAULT_STR,
+        namespace: str = DEFAULT_STR,
         visibility: str = "user",
     ) -> list[dict[str, Any]]:
         """Graph related nodes."""
@@ -625,7 +821,7 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
 
     @app.get("/api/v1/graph/bridges")
     def graph_bridges(
-        limit: int = 25, kind: str | None = None, namespace: str | None = None, visibility: str = "user"
+        limit: int = 25, kind: str = DEFAULT_STR, namespace: str = DEFAULT_STR, visibility: str = "user"
     ) -> list[dict[str, Any]]:
         """Graph bridges."""
         return cache.graph_bridges(limit=limit, kind=kind, namespace=namespace, visibility=visibility)
@@ -650,6 +846,22 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         """Graph age status."""
         return cache.age_status()
 
+    _register_graph_message_routes(app, cache)
+
+    _route_refs = (
+        graph_components,
+        graph_related_nodes,
+        graph_bridges,
+        graph_cycles,
+        graph_projects,
+        graph_ontologies,
+        graph_age_status,
+    )
+    _ = _route_refs
+
+
+def _register_graph_message_routes(app: FastAPI, cache: PgCache) -> None:
+
     @app.post("/api/v1/graph/age/cypher")
     def graph_age_cypher(request: GraphCypherRequest) -> list[dict[str, Any]]:
         """Graph age cypher."""
@@ -670,19 +882,19 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
 
     @app.get("/api/v1/graph/messages/{message_id}/nodes")
     def graph_message_nodes(
-        message_id: str, visibility: str = "user", kind: str | None = None, namespace: str | None = None
+        message_id: str, visibility: str = "user", kind: str = DEFAULT_STR, namespace: str = DEFAULT_STR
     ) -> dict[str, Any]:
         """Graph message nodes."""
         return cache.graph_nodes_for_message(message_id, visibility=visibility, kind=kind, namespace=namespace)
 
     @app.get("/api/v1/graph/top")
     def graph_top(
-        prefix: str | None = None,
+        prefix: str = DEFAULT_STR,
         limit: int = 25,
         *,
         include_noise: bool = False,
-        kind: str | None = None,
-        namespace: str | None = None,
+        kind: str = DEFAULT_STR,
+        namespace: str = DEFAULT_STR,
         visibility: str = "user",
     ) -> list[dict[str, Any]]:
         """Graph top."""
@@ -690,30 +902,49 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
             prefix=prefix, limit=limit, include_noise=include_noise, kind=kind, namespace=namespace, visibility=visibility
         )
 
+    _route_refs = (
+        graph_age_cypher,
+        graph_related_messages,
+        graph_recommended_messages,
+        graph_message_nodes,
+        graph_top,
+    )
+    _ = _route_refs
+
+
+def _register_action_people_routes(app: FastAPI, cache: PgCache, sync: SyncService) -> None:
     @app.post("/api/v1/messages/{message_id}/labels")
     def apply_label(message_id: str, request: LabelRequest) -> dict[str, Any]:
         """Apply label."""
-        return sync.apply_label(message_id, request.label_id)
+        label_id = request.label_id
+        result = apply_message_label(sync, message_id, label_id)
+        return dict(result)
 
     @app.delete("/api/v1/messages/{message_id}/labels/{label_id}")
     def remove_label(message_id: str, label_id: str) -> dict[str, Any]:
         """Remove label."""
-        return sync.remove_label(message_id, label_id)
+        result = remove_message_label(sync, message_id, label_id)
+        return dict(result)
 
     @app.post("/api/v1/messages/{message_id}/archive")
     def archive(message_id: str) -> dict[str, Any]:
         """Archive."""
-        return sync.archive(message_id)
+        result = archive_message(sync, message_id)
+        return dict(result)
 
     @app.post("/api/v1/messages/{message_id}/read-state")
     def read_state(message_id: str, request: ReadStateRequest) -> dict[str, Any]:
         """Read state."""
-        return sync.mark_read(message_id, read=request.read)
+        read = request.read
+        result = set_message_read_state(sync, message_id, read=read)
+        return dict(result)
 
     @app.post("/api/v1/messages/{message_id}/star-state")
     def star_state(message_id: str, request: StarStateRequest) -> dict[str, Any]:
         """Star state."""
-        return sync.star(message_id, starred=request.starred)
+        starred = request.starred
+        result = set_message_star_state(sync, message_id, starred=starred)
+        return dict(result)
 
     @app.get("/api/v1/contacts")
     def contacts(limit: int = 100, min_messages: int = 1) -> list[dict[str, Any]]:
@@ -731,10 +962,17 @@ def create_app(config: GmeowConfig | None = None) -> FastAPI:
         cache.upsert_people_alias(request.address, request.person_key, display_name=request.display_name, note=request.note)
         return {"aliases": list(cache.people_aliases().values())}
 
-    if mcp_app is not None:
-        app.router.routes.extend(mcp_app.routes)
-
-    return app
+    _route_refs = (
+        apply_label,
+        remove_label,
+        archive,
+        read_state,
+        star_state,
+        contacts,
+        people,
+        people_alias,
+    )
+    _ = _route_refs
 
 
 def app_from_config_path(config_path: str | Path = "config.toml") -> FastAPI:

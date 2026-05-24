@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""archive secondary mail foundations.
+"""Alembic revision: archive secondary mail foundations.
+
+This revision is part of the Gmeow PostgreSQL schema history. It is applied in order by
+``alembic upgrade`` and must be rolled forward rather than amended once shipped.
 
 Revision ID: 20260523_0017
 Revises: 20260523_0016
 Create Date: 2026-05-23
 """
-
-from __future__ import annotations
 
 from alembic import op
 

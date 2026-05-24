@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""HTTP JSON helpers."""
+"""HTTP JSON helpers.
 
-from __future__ import annotations
+Provides a tiny wrapper around ``http.client`` that posts JSON payloads and parses JSON responses
+without dragging in the full ``requests`` dependency. The single ``HttpJsonError`` exception keeps
+network and decoding failures uniform across callers.
+"""
 
 import http.client
 import json
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 HTTP_SERVER_ERROR = 500
@@ -50,4 +53,4 @@ def post_json(endpoint: str, payload: dict[str, Any], *, timeout: float) -> tupl
     if not isinstance(data, dict):
         msg = "HTTP JSON endpoint returned a non-object response"
         raise TypeError(msg)
-    return response.status, data
+    return response.status, cast(dict[str, Any], data)

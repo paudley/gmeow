@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide metadata functionality for Gmeow."""
+"""Extract attachment metadata via external probes.
 
-from __future__ import annotations
+This module shells out to ``exiftool`` (when available) and parses its JSON output into the
+dict shapes the object store and knowledge graph consume. It isolates the external-tool boundary
+so the rest of the pipeline can stay synchronous and deterministic.
+"""
 
 import json
 import subprocess
