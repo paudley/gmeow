@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide semantic functionality for Gmeow."""
+"""Embedding client and text-chunking primitives for Gmeow.
 
-from __future__ import annotations
+This module wraps the Nomic embedding endpoint and provides the chunking helpers used by both
+the message and attachment indexing paths. The wrapper keeps API quirks (timeouts, retries,
+batch shape) out of the higher-level semantic pipeline.
+"""
 
 from typing import Any
 
@@ -36,7 +39,7 @@ class NomicEmbeddingClient:
         return self._embed([f"search_query: {text}"])[0]
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        embeddings = []
+        embeddings: list[list[float]] = []
         for start in range(0, len(texts), self.batch_size):
             embeddings.extend(self._embed_batch(texts[start : start + self.batch_size]))
         return embeddings
@@ -95,7 +98,7 @@ class HashSemanticIndex:
     def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """Search."""
         query_terms = set(query.lower().split())
-        scored = []
+        scored: list[tuple[int, int, str, str]] = []
         for message_id, text in self.documents.items():
             terms = set(text.lower().split())
             overlap = len(query_terms & terms)

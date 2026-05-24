@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide cache functionality for Gmeow."""
+"""Provide cache functionality for Gmeow.
 
-from __future__ import annotations
+This module keeps pure parsing, categorization, and graph display helpers separate from the
+PostgreSQL cache implementation. Callers use these helpers to normalize message metadata before
+storage and to derive user-facing graph labels from indexed triples.
+"""
 
-import json
 import re
 from datetime import UTC, datetime
 from email.utils import parseaddr, parsedate_to_datetime
-from typing import Any
+from typing import Any, cast
 
 DEFAULT_EXCLUDED_CATEGORIES = {
     "camera_alert",
@@ -102,29 +104,47 @@ def categorize_message(message: dict[str, Any]) -> list[str]:
     snippet = (message.get("snippet") or "").lower()
     text = " ".join([subject, sender, snippet, (message.get("text_body") or "")[:2000].lower()])
     labels = {label.lower() for label in message.get("labels", [])}
-    categories = []
-    if (
-        "notifications.ui.com" in sender
-        or "unifi os" in sender
-        or "unifi.ui.com" in text
-        or ("smart detection" in text and ("recorded an animal" in text or "protect/events" in text))
-    ):
-        categories.append("camera_alert")
-    if "googlealerts-noreply@google.com" in sender:
-        categories.append("news_alert")
-    if "google-workspace-alerts-noreply@google.com" in sender:
-        categories.append("admin_alert")
-    if "category_promotions" in labels:
-        categories.append("promotion")
-    if "category_updates" in labels:
-        categories.append("update")
+    categories: list[str] = []
+    categories.extend(_sender_categories(sender, text))
+    categories.extend(_label_categories(labels))
     if not categories:
         categories.append("primary")
     return sorted(set(categories))
 
 
+def _sender_categories(sender: str, text: str) -> list[str]:
+    categories: list[str] = []
+    camera_alert = (
+        "notifications.ui.com" in sender
+        or "unifi os" in sender
+        or "unifi.ui.com" in text
+        or ("smart detection" in text and ("recorded an animal" in text or "protect/events" in text))
+    )
+    if camera_alert:
+        categories.append("camera_alert")
+    if "googlealerts-noreply@google.com" in sender:
+        categories.append("news_alert")
+    if "google-workspace-alerts-noreply@google.com" in sender:
+        categories.append("admin_alert")
+    return categories
+
+
+def _label_categories(labels: set[str]) -> list[str]:
+    categories: list[str] = []
+    if "category_promotions" in labels:
+        categories.append("promotion")
+    if "category_updates" in labels:
+        categories.append("update")
+    return categories
+
+
 def _title_category(category: str) -> str:
     return category.replace("_", " ").replace("-", " ").title()
+
+
+def title_category(category: str) -> str:
+    """Return a display label for a category slug."""
+    return _title_category(category)
 
 
 def _parse_message_date(value: str) -> str:
@@ -133,18 +153,20 @@ def _parse_message_date(value: str) -> str:
         raise ValueError(msg)
     try:
         parsed = parsedate_to_datetime(value)
-    except (TypeError, ValueError, IndexError) as rfc_exc:
+    except (TypeError, ValueError, IndexError):
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError as iso_exc:
             msg = f"Invalid message date: {value!r}"
             raise ValueError(msg) from iso_exc
-        if parsed is None:
-            msg = f"Invalid message date: {value!r}"
-            raise ValueError(msg) from rfc_exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def parse_message_date(value: str) -> str:
+    """Parse a message date into a UTC ISO timestamp."""
+    return _parse_message_date(value)
 
 
 def _coerce_query_date(value: str) -> str:
@@ -154,10 +176,10 @@ def _coerce_query_date(value: str) -> str:
     return _parse_message_date(value)
 
 
-def _filter_by_date(messages: list[dict[str, Any]], after: str | None, before: str | None) -> list[dict[str, Any]]:
+def _filter_by_date(messages: list[dict[str, Any]], after: str, before: str) -> list[dict[str, Any]]:
     after_iso = _coerce_query_date(after) if after else ""
     before_iso = _coerce_query_date(before) if before else ""
-    result = []
+    result: list[dict[str, Any]] = []
     for message in messages:
         date = message.get("message_date_iso")
         if after_iso and (not date or date < after_iso):
@@ -168,32 +190,62 @@ def _filter_by_date(messages: list[dict[str, Any]], after: str | None, before: s
     return result
 
 
+def filter_by_date(messages: list[dict[str, Any]], after: str = "", before: str = "") -> list[dict[str, Any]]:
+    """Filter messages using local query date bounds."""
+    return _filter_by_date(messages, after, before)
+
+
 def _parse_local_query(query: str) -> dict[str, Any]:
-    parsed: dict[str, Any] = {"from": [], "to": [], "subject": [], "label": [], "after": None, "before": None, "fts": ""}
+    from_values: list[str] = []
+    to_values: list[str] = []
+    subject_values: list[str] = []
+    label_values: list[str] = []
+    after = ""
+    before = ""
     text = query or ""
     text = re.sub(r"[{}]", " ", text)
     text = re.sub(r"\b(?:AND|OR)\b", " ", text, flags=re.IGNORECASE)
     operator_pattern = re.compile(r'\b(from|to|subject|label|after|before):(?:"([^"]+)"|\'([^\']+)\'|(\S+))', re.IGNORECASE)
-    terms = []
+    terms: list[str] = []
     last = 0
     for match in operator_pattern.finditer(text):
         terms.append(text[last : match.start()])
         key = match.group(1).lower()
         value = next(group for group in match.groups()[1:] if group is not None)
         value = value.strip().strip("()")
-        if key in {"after", "before"}:
-            parsed[key] = value
+        if key == "after":
+            after = value
+        elif key == "before":
+            before = value
+        elif key == "from":
+            from_values.append(value)
+        elif key == "to":
+            to_values.append(value)
+        elif key == "subject":
+            subject_values.append(value)
         else:
-            parsed[key].append(value)
+            label_values.append(value)
         last = match.end()
     terms.append(text[last:])
-    parsed["fts"] = _fts_query(" ".join(terms))
-    return parsed
+    return {
+        "from": from_values,
+        "to": to_values,
+        "subject": subject_values,
+        "label": label_values,
+        "after": after,
+        "before": before,
+        "fts": _fts_query(" ".join(terms)),
+    }
+
+
+def parse_local_query(query: str) -> dict[str, Any]:
+    """Parse a local search query into structured filters."""
+    return _parse_local_query(query)
 
 
 def _fts_query(value: str) -> str:
     tokens = re.findall(r'"([^"]+)"|([A-Za-z0-9_.@+-]+)', value or "")
-    parts = []
+    parts: list[str] = []
     for phrase, word in tokens:
         token = phrase or word
         if not token or token.lower() in {"and", "or"}:
@@ -203,12 +255,8 @@ def _fts_query(value: str) -> str:
     return " ".join(parts)
 
 
-def _noisy_graph_node(node: str, label: str) -> bool:
-    return _graph_node_profile(node, label).get("visibility") != "user"
-
-
-def _graph_node_profile(node: str, label: str | None = None, predicate: str | None = None) -> dict[str, Any]:
-    label = label if label is not None else _graph_node_label(node)
+def _graph_node_profile(node: str, label: str = "", predicate: str = "") -> dict[str, Any]:
+    label = label or _graph_node_label(node)
     value = label.strip()
     lowered = value.lower()
     namespace = _ontology_namespace(node)
@@ -232,9 +280,14 @@ def _graph_node_profile(node: str, label: str | None = None, predicate: str | No
     return profile
 
 
-def _structural_graph_profile(node: str, namespace: str | None, predicate: str | None) -> dict[str, str]:
+def graph_node_profile(node: str, label: str = "", predicate: str = "") -> dict[str, Any]:
+    """Return a display and filtering profile for a graph node."""
+    return _graph_node_profile(node, label, predicate)
+
+
+def _structural_graph_profile(node: str, namespace: str, predicate: str) -> dict[str, str]:
     if node in STRUCTURAL_GRAPH_NODES or (
-        namespace is not None
+        namespace
         and (
             predicate == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
             or node.endswith(("#Agent", "#Concept", "#Post", "#Thread", "#Project"))
@@ -267,7 +320,7 @@ def _org_noise_reason(value: str) -> str:
     return ""
 
 
-def _literal_graph_profile(node: str, value: str, lowered: str, namespace: str | None, kind: str) -> dict[str, str]:
+def _literal_graph_profile(node: str, value: str, lowered: str, namespace: str, kind: str) -> dict[str, str]:
     profile = _literal_address_or_url_profile(node, lowered)
     noise = _literal_noise_profile(node, value, lowered)
     if not profile and noise:
@@ -389,7 +442,7 @@ def _looks_like_ui_artifact(value: str) -> bool:
     return normalized in ui_terms
 
 
-def _graph_node_kind(value: str, predicate: str | None) -> str:
+def _graph_node_kind(value: str, predicate: str) -> str:
     for prefix, kind in GRAPH_NODE_KIND_PREFIXES.items():
         if value.startswith(prefix):
             return kind
@@ -408,6 +461,11 @@ def _graph_node_label(value: str) -> str:
     return value
 
 
+def graph_node_label(value: str) -> str:
+    """Return a compact display label for a graph node IRI."""
+    return _graph_node_label(value)
+
+
 def _contact_name_rank(value: str) -> tuple[int, str]:
     return -len(value), value.lower()
 
@@ -419,10 +477,20 @@ def _best_contact_name(names: list[str], address: str) -> str:
     return parseaddr(address)[0] or address
 
 
+def best_contact_name(names: list[str], address: str) -> str:
+    """Return the best display name for an address."""
+    return _best_contact_name(names, address)
+
+
 def _person_key(value: str) -> str:
     normalized = re.sub(r"\s+", " ", value.lower()).strip()
     normalized = re.sub(r"[^a-z0-9@._+-]+", " ", normalized)
     return " ".join(part for part in normalized.split() if len(part) > 1)
+
+
+def person_key(value: str) -> str:
+    """Return the normalized key used for person aliases."""
+    return _person_key(value)
 
 
 def _attachment_text_from_metadata(metadata: dict[str, Any], limit: int = 20_000) -> str:
@@ -445,10 +513,10 @@ def _attachment_text_from_metadata(metadata: dict[str, Any], limit: int = 20_000
         if len("\n\n".join(found)) >= limit:
             return
         if isinstance(value, dict):
-            for child_key, child_value in value.items():
+            for child_key, child_value in cast(dict[object, object], value).items():
                 walk(child_value, str(child_key).lower())
         elif isinstance(value, list):
-            for child in value:
+            for child in cast(list[object], value):
                 walk(child, key)
         elif isinstance(value, str) and key in keys and value.strip():
             found.append(value.strip())
@@ -457,5 +525,6 @@ def _attachment_text_from_metadata(metadata: dict[str, Any], limit: int = 20_000
     return "\n\n".join(found)[:limit]
 
 
-def _json_compact(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+def attachment_text_from_metadata(metadata: dict[str, Any], limit: int = 20_000) -> str:
+    """Extract searchable attachment text from sidecar metadata."""
+    return _attachment_text_from_metadata(metadata, limit)

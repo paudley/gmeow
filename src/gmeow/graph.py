@@ -1,19 +1,37 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide graph functionality for Gmeow."""
+"""Compute and expose the message knowledge graph for Gmeow.
 
-from __future__ import annotations
+This module builds RDF-style triples, registers them with rustworkx, and exposes weighted/ranked
+projection helpers used by MCP and HTTP graph endpoints. It bridges the cache-resident graph store
+with the in-memory analysis routines so callers can reason about people, projects, and topics.
+"""
 
 import itertools
 import re
 from collections import deque
+from collections.abc import Sequence
 from email.utils import getaddresses, parseaddr
-from typing import Any
+from typing import Any, TypedDict
 
 import rustworkx as rx
 
 from .kg import clean_text_for_kg, extract_message_kg, extract_sidecar_kg
 from .parser import ParsedMessage
+
+GraphTriple = tuple[str, str, str, str]
+GraphPath = dict[str, Any]
+NO_SOURCE_MESSAGE = ""
+
+
+class WeightedGraphData(TypedDict):
+    """Typed rustworkx graph data used by weighted graph operations."""
+
+    graph: rx.PyDiGraph
+    nodes: dict[str, int]
+    reverse_nodes: dict[int, str]
+    edge_lookup: dict[tuple[int, int], dict[str, Any]]
+
 
 IRI = "gmeow:"
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
@@ -51,11 +69,11 @@ def _inverse_edge_weight(edge: dict[str, Any]) -> float:
     return 1.0 / max(float(edge["weight"]), 0.000001)
 
 
-def extract_triples(message: ParsedMessage, attachment_sha1s: list[str] | None = None) -> list[tuple[str, str, str, str | None]]:
+def extract_triples(message: ParsedMessage, attachment_sha1s: Sequence[str] = ()) -> list[GraphTriple]:
     """Extract triples."""
     msg = _node("message", message.gmail_id)
     clean_text = clean_text_for_kg(message.text)
-    triples: list[tuple[str, str, str, str | None]] = [
+    triples: list[GraphTriple] = [
         (msg, RDF_TYPE, "gmeow:Message", message.gmail_id),
         (msg, RDF_TYPE, SIOC + "Post", message.gmail_id),
         (msg, RDF_TYPE, SCHEMA + "EmailMessage", message.gmail_id),
@@ -82,11 +100,12 @@ def extract_triples(message: ParsedMessage, attachment_sha1s: list[str] | None =
     triples.extend((msg, "gmeow:hasClaim", claim, message.gmail_id) for claim in extract_claims(clean_text))
     triples.extend((msg, "gmeow:hasTask", task, message.gmail_id) for task in extract_tasks(clean_text))
     triples.extend(_project_triples(msg, message))
-    triples.extend(extract_message_kg(message.gmail_id, "\n\n".join([message.subject or "", message.snippet, clean_text])))
+    message_text = "\n\n".join([message.subject or "", message.snippet, clean_text])
+    triples.extend(_required_source_triples(extract_message_kg(message.gmail_id, message_text)))
     return triples
 
 
-def _thread_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str, str | None]]:
+def _thread_triples(msg: str, message: ParsedMessage) -> list[GraphTriple]:
     if not message.thread_id:
         return []
     thread = _node("thread", message.thread_id)
@@ -97,12 +116,12 @@ def _thread_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, st
     ]
 
 
-def _sender_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str, str | None]]:
+def _sender_triples(msg: str, message: ParsedMessage) -> list[GraphTriple]:
     if not message.sender:
         return []
     name, address = parseaddr(message.sender)
     node = _address_node(message.sender)
-    triples = [
+    triples: list[GraphTriple] = [
         (msg, "gmeow:from", node, message.gmail_id),
         (msg, SIOC + "has_creator", node, message.gmail_id),
         (msg, SCHEMA + "sender", node, message.gmail_id),
@@ -114,8 +133,8 @@ def _sender_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, st
     return triples
 
 
-def _recipient_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str, str | None]]:
-    triples: list[tuple[str, str, str, str | None]] = []
+def _recipient_triples(msg: str, message: ParsedMessage) -> list[GraphTriple]:
+    triples: list[GraphTriple] = []
     for name, address in getaddresses([message.recipients] if message.recipients else []):
         if not address:
             continue
@@ -132,14 +151,14 @@ def _recipient_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str,
     return triples
 
 
-def _name_triples(node: str, name: str, message_id: str | None) -> list[tuple[str, str, str, str | None]]:
+def _name_triples(node: str, name: str, message_id: str) -> list[GraphTriple]:
     if not name:
         return []
     return [(node, "gmeow:displayName", name, message_id), (node, FOAF + "name", name, message_id), (node, RDFS_LABEL, name, message_id)]
 
 
-def _label_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str, str | None]]:
-    triples = []
+def _label_triples(msg: str, message: ParsedMessage) -> list[GraphTriple]:
+    triples: list[GraphTriple] = []
     for label in message.label_ids:
         label_node = _node("label", label)
         triples.extend(
@@ -152,11 +171,11 @@ def _label_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str
     return triples
 
 
-def _project_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str, str | None]]:
+def _project_triples(msg: str, message: ParsedMessage) -> list[GraphTriple]:
     if not _looks_like_dev_project(message):
         return []
     project = _dev_project_node(message)
-    triples = [
+    triples: list[GraphTriple] = [
         (msg, "gmeow:aboutProject", project, message.gmail_id),
         (msg, SCHEMA + "about", project, message.gmail_id),
         (msg, FOAF + "topic", project, message.gmail_id),
@@ -172,9 +191,21 @@ def _project_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, s
     return triples
 
 
-def extract_attachment_sidecar_triples(sha1: str, metadata: dict[str, Any]) -> list[tuple[str, str, str, str | None]]:
+def extract_attachment_sidecar_triples(sha1: str, metadata: dict[str, Any]) -> list[GraphTriple]:
     """Extract attachment sidecar triples."""
-    return extract_sidecar_kg(sha1, metadata)
+    return _required_source_triples(extract_sidecar_kg(sha1, metadata))
+
+
+def _required_source_triples(triples: Sequence[tuple[str, str, str, object]]) -> list[GraphTriple]:
+    return [(subject, predicate, obj, str(source) if source else NO_SOURCE_MESSAGE) for subject, predicate, obj, source in triples]
+
+
+def _summary_node_sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
+    return (-int(item["messages"]), -int(item["degree"]), str(item["id"]))
+
+
+def _related_node_sort_key(item: dict[str, Any]) -> tuple[float, str]:
+    return (float(item["distance"]), str(item["node"]))
 
 
 def extract_entities(text: str) -> list[str]:
@@ -207,7 +238,7 @@ def extract_tasks(text: str) -> list[str]:
 class GraphProjector:
     """Represent GraphProjector data and behavior."""
 
-    def build(self, triples: list[tuple[str, str, str, str | None]]) -> object:
+    def build(self, triples: list[GraphTriple]) -> rx.PyDiGraph:
         """Build."""
         graph = rx.PyDiGraph()
         nodes: dict[str, int] = {}
@@ -218,7 +249,7 @@ class GraphProjector:
             graph.add_edge(nodes[subject], nodes[obj], predicate)
         return graph
 
-    def summary(self, triples: list[tuple[str, str, str, str | None]], limit: int = 25) -> dict[str, Any]:
+    def summary(self, triples: list[GraphTriple], limit: int = 25) -> dict[str, Any]:
         """Summary."""
         graph = self.build(triples)
         counts: dict[str, dict[str, Any]] = {}
@@ -229,7 +260,7 @@ class GraphProjector:
                 if source:
                     item["messages"].add(source)
                 item["predicates"].add(predicate)
-        top_nodes = [
+        top_nodes: list[dict[str, Any]] = [
             {
                 "id": item["id"],
                 "degree": item["degree"],
@@ -238,7 +269,7 @@ class GraphProjector:
             }
             for item in counts.values()
         ]
-        top_nodes.sort(key=lambda item: (-item["messages"], -item["degree"], item["id"]))
+        top_nodes.sort(key=_summary_node_sort_key)
         return {
             "nodes": graph.num_nodes(),
             "edges": graph.num_edges(),
@@ -247,23 +278,23 @@ class GraphProjector:
 
     def shortest_path(
         self,
-        triples: list[tuple[str, str, str, str | None]],
+        triples: list[GraphTriple],
         source: str,
         target: str,
         max_depth: int = 4,
-    ) -> dict[str, Any] | None:
+    ) -> GraphPath:
         """Shortest path."""
-        adjacency: dict[str, list[tuple[str, str, str | None]]] = {}
+        adjacency: dict[str, list[GraphTriple]] = {}
         for subject, predicate, obj, message_id in triples:
-            adjacency.setdefault(subject, []).append((obj, predicate, message_id))
-            adjacency.setdefault(obj, []).append((subject, "^" + predicate, message_id))
-        queue = deque([(source, [])])
+            adjacency.setdefault(subject, []).append((obj, predicate, message_id, NO_SOURCE_MESSAGE))
+            adjacency.setdefault(obj, []).append((subject, "^" + predicate, message_id, NO_SOURCE_MESSAGE))
+        queue: deque[tuple[str, list[dict[str, Any]]]] = deque([(source, [])])
         seen = {source}
         while queue:
             node, path = queue.popleft()
             if len(path) >= max_depth:
                 continue
-            for next_node, predicate, message_id in adjacency.get(node, []):
+            for next_node, predicate, message_id, _ in adjacency.get(node, []):
                 if next_node in seen:
                     continue
                 edge = {"from": node, "predicate": predicate, "to": next_node, "source_message_id": message_id}
@@ -272,13 +303,13 @@ class GraphProjector:
                     return {"source": source, "target": target, "depth": len(next_path), "path": next_path}
                 seen.add(next_node)
                 queue.append((next_node, next_path))
-        return None
+        return {}
 
 
 class WeightedGraphProjector:
     """Represent WeightedGraphProjector data and behavior."""
 
-    def build(self, edges: list[dict[str, Any]], *, bidirectional: bool = True) -> dict[str, Any]:
+    def build(self, edges: list[dict[str, Any]], *, bidirectional: bool = True) -> WeightedGraphData:
         """Build."""
         graph = rx.PyDiGraph(multigraph=True, node_count_hint=len(edges) * 2, edge_count_hint=len(edges) * (2 if bidirectional else 1))
         nodes: dict[str, int] = {}
@@ -294,7 +325,7 @@ class WeightedGraphProjector:
                 nodes[obj] = graph.add_node(obj)
             source = nodes[subject]
             target = nodes[obj]
-            data = {**item, "predicate": predicate, "weight": weight}
+            data: dict[str, Any] = {**item, "predicate": predicate, "weight": weight}
             graph.add_edge(source, target, data)
             if (source, target) not in edge_lookup or weight < float(edge_lookup[(source, target)]["weight"]):
                 edge_lookup[(source, target)] = data
@@ -306,20 +337,20 @@ class WeightedGraphProjector:
         reverse_nodes = {index: node for node, index in nodes.items()}
         return {"graph": graph, "nodes": nodes, "reverse_nodes": reverse_nodes, "edge_lookup": edge_lookup}
 
-    def weighted_path(self, edges: list[dict[str, Any]], source: str, target: str, max_depth: int = 4) -> dict[str, Any] | None:
+    def weighted_path(self, edges: list[dict[str, Any]], source: str, target: str, max_depth: int = 4) -> GraphPath:
         """Weighted path."""
         built = self.build(edges, bidirectional=True)
         graph = built["graph"]
         nodes = built["nodes"]
         if source not in nodes or target not in nodes:
-            return None
+            return {}
         paths = rx.digraph_dijkstra_shortest_paths(graph, nodes[source], nodes[target], _edge_weight)
         node_path = list(paths[nodes[target]]) if nodes[target] in paths else []
         if not node_path or len(node_path) - 1 > max_depth:
-            return None
+            return {}
         edge_lookup = built["edge_lookup"]
         reverse_nodes = built["reverse_nodes"]
-        path = []
+        path: list[dict[str, Any]] = []
         total = 0.0
         for left, right in itertools.pairwise(node_path):
             data = edge_lookup[(left, right)]
@@ -344,9 +375,7 @@ class WeightedGraphProjector:
             "path": path,
         }
 
-    def related_nodes(
-        self, edges: list[dict[str, Any]], source: str, limit: int = 25, max_weight: float | None = None
-    ) -> list[dict[str, Any]]:
+    def related_nodes(self, edges: list[dict[str, Any]], source: str, limit: int = 25, max_weight: float = 0.0) -> list[dict[str, Any]]:
         """Related nodes."""
         built = self.build(edges, bidirectional=True)
         graph = built["graph"]
@@ -355,15 +384,15 @@ class WeightedGraphProjector:
             return []
         lengths = rx.digraph_dijkstra_shortest_path_lengths(graph, nodes[source], _edge_weight)
         reverse_nodes = built["reverse_nodes"]
-        results = []
+        results: list[dict[str, Any]] = []
         for index, path_distance in lengths.items():
             if index == nodes[source]:
                 continue
             distance = float(path_distance)
-            if max_weight is not None and distance > max_weight:
+            if max_weight and distance > max_weight:
                 continue
             results.append({"node": reverse_nodes[index], "distance": round(distance, 6), "score": round(1.0 / (1.0 + distance), 6)})
-        results.sort(key=lambda item: (item["distance"], item["node"]))
+        results.sort(key=_related_node_sort_key)
         return results[:limit]
 
     def centrality(self, edges: list[dict[str, Any]], metric: str = "pagerank") -> list[dict[str, Any]]:
@@ -409,7 +438,7 @@ class WeightedGraphProjector:
         built = self.build(edges, bidirectional=False)
         graph = built["graph"]
         reverse_nodes = built["reverse_nodes"]
-        results = []
+        results: list[list[str]] = []
         for cycle in rx.simple_cycles(graph):
             if len(cycle) <= max_cycle_len:
                 results.append([reverse_nodes[index] for index in cycle])
@@ -438,7 +467,7 @@ def _project_label(project_node: str) -> str:
     return project_node.rsplit("/", 1)[-1].replace("_", "/")
 
 
-def _dev_repository_url(message: ParsedMessage) -> str | None:
+def _dev_repository_url(message: ParsedMessage) -> str:
     text = " ".join([message.subject or "", message.recipients or "", message.snippet or "", message.text or ""])
     match = re.search(r"github\.com[:/](?P<repo>[\w.-]+/[\w.-]+)", text, re.IGNORECASE)
     if match:
@@ -449,4 +478,4 @@ def _dev_repository_url(message: ParsedMessage) -> str | None:
     match = re.search(r"[\[<](?P<repo>[\w.-]+/[\w.-]+)[\]>]", text)
     if match:
         return "https://github.com/" + match.group("repo")
-    return None
+    return ""
