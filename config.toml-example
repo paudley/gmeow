@@ -26,6 +26,10 @@ sync_priority_seconds = 3600
 sync_priority_limit_per_rule = 100
 intelligence_seconds = 30
 intelligence_limit = 25
+backfill_enabled = false
+backfill_seconds = 5
+backfill_batch_size = 50
+backfill_max_empty_windows = 120
 derived_refresh_seconds = 900
 analyze_seconds = 3600
 
