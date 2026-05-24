@@ -1,25 +1,59 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide mcp server functionality for Gmeow."""
+"""Expose Gmeow through MCP tools and resources.
 
-from __future__ import annotations
+The module registers Gmail search, graph, category, archive, backfill, and operational tools against
+FastMCP. It formats tool output for JSON or Toon consumers while reusing the same cache and sync
+services as the API.
+"""
 
 import json
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Protocol, cast
 
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
 
 from .categories import CategoryEngine
-from .object_store import ObjectStore
+from .gmail_actions import apply_message_label, archive_message, set_message_read_state, set_message_star_state
 from .pg_cache import PgCache
 from .sync import SyncService
 from .toon import dumps as toon_dumps
 
+DEFAULT_INT = cast(int, None)
+DEFAULT_LIST_STR = cast(list[str], None)
+DEFAULT_STR = cast(str, None)
+DEFAULT_OPTIONS = cast(dict[str, Any], None)
 
-def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -> object | None:
+
+class AttachmentMetadataReader(Protocol):
+    """Attachment metadata reader used by MCP resources."""
+
+    def read_metadata(self, sha1: str) -> dict[str, Any]:
+        """Read stored attachment metadata."""
+        ...
+
+
+def build_mcp_app(cache: PgCache, sync: SyncService, attachments: AttachmentMetadataReader) -> Starlette:
     """Build mcp app."""
     mcp = FastMCP("gmeow")
+    _register_mcp_resources(mcp, cache, attachments)
+    _register_mcp_search_tools(mcp, cache, sync)
+    _register_mcp_graph_query_tools(mcp, cache)
+    _register_mcp_graph_rank_tools(mcp, cache)
+    _register_mcp_graph_discovery_tools(mcp, cache)
+    _register_mcp_message_people_tools(mcp, cache)
+    _register_mcp_status_tools(mcp, cache, sync)
+    _register_mcp_operational_tools(mcp, cache)
+    _register_mcp_archive_tools(mcp, cache, sync)
+    _register_mcp_storage_tools(mcp, cache)
+    _register_mcp_category_help_tools(mcp, cache, sync)
+    _register_mcp_sync_action_tools(mcp, sync)
+    return _mcp_http_app(mcp)
+
+
+def _register_mcp_resources(mcp: FastMCP, cache: PgCache, attachments: AttachmentMetadataReader) -> None:
+    """Register resources."""
 
     @mcp.resource("gmail://labels")
     def labels() -> str:
@@ -41,8 +75,15 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         """Attachment metadata."""
         return json.dumps(attachments.read_metadata(sha1), indent=2)
 
+    _registered = (labels, thread, message, attachment_metadata)
+    _ = _registered
+
+
+def _register_mcp_search_tools(mcp: FastMCP, cache: PgCache, sync: SyncService) -> None:
+    """Register search tools."""
+
     @mcp.tool()
-    def gmail_text_search(query: str, options: dict[str, Any] | None = None) -> object:
+    def gmail_text_search(query: str, options: dict[str, Any] = DEFAULT_OPTIONS) -> object:
         """Gmail text search."""
         opts = _options(options)
         result = sync.search(
@@ -65,36 +106,13 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         return _format(cache.attachment_text_search(query, limit=limit), output_format)
 
     @mcp.tool()
-    def gmail_semantic_search(query: str, options: dict[str, Any] | None = None) -> object:
+    def gmail_semantic_search(query: str, options: dict[str, Any] = DEFAULT_OPTIONS) -> object:
         """Gmail semantic search."""
         opts = _options(options, limit=10)
-        source_kind = opts["source_kind"]
-        after = opts["after"]
-        before = opts["before"]
-        include_categories = opts["include_categories"]
-        exclude_categories = opts["exclude_categories"]
-        needs_filter = after or before or include_categories is not None or exclude_categories is not None
-        results = sync.semantic.search(query, limit=opts["limit"] * 4 if needs_filter else opts["limit"], source_kind=source_kind)
-        filtered = []
-        for result in results:
-            message_id = (result.get("metadata") or {}).get("message_id") or str(result.get("id", "")).split(":", 1)[0]
-            message = cache.get_message(message_id)
-            if not message:
-                continue
-            date = message.get("message_date_iso")
-            if after and (not date or date < after):
-                continue
-            if before and (not date or date > before):
-                continue
-            if not cache.category_allowed(message.get("categories", []), include_categories, exclude_categories):
-                continue
-            result["message"] = cache.compact_message(message) if opts["compact"] else message
-            filtered.append(result)
-        results = filtered[: opts["limit"]] if needs_filter else results
-        return _format(results, opts["output_format"])
+        return _format(_gmail_semantic_search(cache, sync, query, opts), opts["output_format"])
 
     @mcp.tool()
-    def gmail_hybrid_search(query: str, options: dict[str, Any] | None = None) -> object:
+    def gmail_hybrid_search(query: str, options: dict[str, Any] = DEFAULT_OPTIONS) -> object:
         """Gmail hybrid search."""
         opts = _options(options, limit=10)
         result = sync.hybrid_search(
@@ -109,8 +127,54 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
             result["messages"] = cache.compact_messages(result["messages"], body_chars=opts["body_chars"])
         return _format(result, opts["output_format"])
 
+    _registered = (gmail_text_search, gmail_attachment_text_search, gmail_semantic_search, gmail_hybrid_search)
+    _ = _registered
+
+
+def _gmail_semantic_search(cache: PgCache, sync: SyncService, query: str, opts: dict[str, Any]) -> list[dict[str, Any]]:
+    """Run semantic search and apply cache-only visibility filters."""
+    needs_filter = opts["after"] or opts["before"] or opts["include_categories"] is not None or opts["exclude_categories"] is not None
+    results = sync.semantic.search(
+        query,
+        limit=opts["limit"] * 4 if needs_filter else opts["limit"],
+        source_kind=opts["source_kind"],
+    )
+    if not needs_filter:
+        return results
+    return _filtered_semantic_results(cache, results, opts)
+
+
+def _filtered_semantic_results(cache: PgCache, results: list[dict[str, Any]], opts: dict[str, Any]) -> list[dict[str, Any]]:
+    """Filter semantic hits by cached message metadata."""
+    filtered: list[dict[str, Any]] = []
+    for result in results:
+        metadata: object = result.get("metadata") or {}
+        metadata_message_id = cast(dict[str, Any], metadata).get("message_id") if isinstance(metadata, dict) else ""
+        message_id = str(metadata_message_id or str(result.get("id", "")).split(":", 1)[0])
+        message = cache.get_message(message_id)
+        if _semantic_hit_allowed(cache, message, opts):
+            result["message"] = cache.compact_message(message) if opts["compact"] else message
+            filtered.append(result)
+    return filtered[: opts["limit"]]
+
+
+def _semantic_hit_allowed(cache: PgCache, message: dict[str, Any], opts: dict[str, Any]) -> bool:
+    """Return whether a semantic hit is visible for the requested filters."""
+    if not message:
+        return False
+    date = message.get("message_date_iso")
+    if opts["after"] and (not date or date < opts["after"]):
+        return False
+    if opts["before"] and (not date or date > opts["before"]):
+        return False
+    return cache.category_allowed(message.get("categories", []), opts["include_categories"], opts["exclude_categories"])
+
+
+def _register_mcp_graph_query_tools(mcp: FastMCP, cache: PgCache) -> None:
+    """Register graph query tools."""
+
     @mcp.tool()
-    def gmail_graph_search(query: str, options: dict[str, Any] | None = None) -> object:
+    def gmail_graph_search(query: str, options: dict[str, Any] = DEFAULT_OPTIONS) -> object:
         """Gmail graph search."""
         opts = _options(options, limit=50)
         return _format(
@@ -134,8 +198,8 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
     def gmail_graph_related_messages(
         message_id: str,
         limit: int = 20,
-        include_categories: list[str] | None = None,
-        exclude_categories: list[str] | None = None,
+        include_categories: list[str] = DEFAULT_LIST_STR,
+        exclude_categories: list[str] = DEFAULT_LIST_STR,
         output_format: str = "toon",
     ) -> object:
         """Gmail graph related messages."""
@@ -147,7 +211,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         )
 
     @mcp.tool()
-    def gmail_graph_top_nodes(prefix: str | None = None, options: dict[str, Any] | None = None) -> object:
+    def gmail_graph_top_nodes(prefix: str = DEFAULT_STR, options: dict[str, Any] = DEFAULT_OPTIONS) -> object:
         """Gmail graph top nodes."""
         opts = _options(options, limit=25)
         return _format(
@@ -165,10 +229,10 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
     @mcp.tool()
     def gmail_graph_projection(
         limit: int = 25,
-        prefix: str | None = None,
+        prefix: str = DEFAULT_STR,
         visibility: str = "user",
-        kind: str | None = None,
-        namespace: str | None = None,
+        kind: str = DEFAULT_STR,
+        namespace: str = DEFAULT_STR,
         output_format: str = "toon",
     ) -> object:
         """Gmail graph projection."""
@@ -186,8 +250,23 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         """Gmail graph weighted path."""
         return _format(cache.graph_weighted_path(source, target, max_depth=max_depth), output_format)
 
+    _registered = (
+        gmail_graph_search,
+        gmail_graph_neighborhood,
+        gmail_graph_related_messages,
+        gmail_graph_top_nodes,
+        gmail_graph_projection,
+        gmail_graph_path,
+        gmail_graph_weighted_path,
+    )
+    _ = _registered
+
+
+def _register_mcp_graph_rank_tools(mcp: FastMCP, cache: PgCache) -> None:
+    """Register graph rank tools."""
+
     @mcp.tool()
-    def gmail_graph_rank(options: dict[str, Any] | None = None) -> object:
+    def gmail_graph_rank(options: dict[str, Any] = DEFAULT_OPTIONS) -> object:
         """Gmail graph rank."""
         opts = _options(options, limit=25)
         return _format(
@@ -203,7 +282,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         )
 
     @mcp.tool()
-    def gmail_graph_centrality(metric: str = "pagerank", options: dict[str, Any] | None = None) -> object:
+    def gmail_graph_centrality(metric: str = "pagerank", options: dict[str, Any] = DEFAULT_OPTIONS) -> object:
         """Gmail graph centrality."""
         opts = _options(options, limit=25)
         return _format(
@@ -221,7 +300,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         return _format(cache.graph_components(mode=mode, limit=limit, min_size=min_size, visibility=visibility), output_format)
 
     @mcp.tool()
-    def gmail_graph_related_nodes(node: str, options: dict[str, Any] | None = None) -> object:
+    def gmail_graph_related_nodes(node: str, options: dict[str, Any] = DEFAULT_OPTIONS) -> object:
         """Gmail graph related nodes."""
         opts = _options(options, limit=25)
         return _format(
@@ -236,9 +315,16 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
             opts["output_format"],
         )
 
+    _registered = (gmail_graph_rank, gmail_graph_centrality, gmail_graph_components, gmail_graph_related_nodes)
+    _ = _registered
+
+
+def _register_mcp_graph_discovery_tools(mcp: FastMCP, cache: PgCache) -> None:
+    """Register graph discovery tools."""
+
     @mcp.tool()
     def gmail_graph_bridges(
-        limit: int = 25, kind: str | None = None, namespace: str | None = None, visibility: str = "user", output_format: str = "toon"
+        limit: int = 25, kind: str = DEFAULT_STR, namespace: str = DEFAULT_STR, visibility: str = "user", output_format: str = "toon"
     ) -> object:
         """Gmail graph bridges."""
         return _format(cache.graph_bridges(limit=limit, kind=kind, namespace=namespace, visibility=visibility), output_format)
@@ -252,8 +338,8 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
     def gmail_graph_recommended_messages(
         message_id: str,
         limit: int = 20,
-        include_categories: list[str] | None = None,
-        exclude_categories: list[str] | None = None,
+        include_categories: list[str] = DEFAULT_LIST_STR,
+        exclude_categories: list[str] = DEFAULT_LIST_STR,
         output_format: str = "toon",
     ) -> object:
         """Gmail graph recommended messages."""
@@ -284,6 +370,21 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         """Gmail graph age cypher."""
         return _format(cache.age_cypher(query, columns=columns, limit=limit), output_format)
 
+    _registered = (
+        gmail_graph_bridges,
+        gmail_graph_cycles,
+        gmail_graph_recommended_messages,
+        gmail_graph_projects,
+        gmail_graph_ontologies,
+        gmail_graph_age_status,
+        gmail_graph_age_cypher,
+    )
+    _ = _registered
+
+
+def _register_mcp_message_people_tools(mcp: FastMCP, cache: PgCache) -> None:
+    """Register message people tools."""
+
     @mcp.tool()
     def gmail_get_message(message_id: str, output_format: str = "toon") -> object:
         """Gmail get message."""
@@ -295,7 +396,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         return _format(enriched_thread(cache, thread_id, compact=compact), output_format)
 
     @mcp.tool()
-    def gmail_address_messages(address: str, options: dict[str, Any] | None = None) -> object:
+    def gmail_address_messages(address: str, options: dict[str, Any] = DEFAULT_OPTIONS) -> object:
         """Gmail address messages."""
         opts = _options(options, limit=50)
         results = cache.address_messages(
@@ -325,11 +426,26 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
 
     @mcp.tool()
     def gmail_set_people_alias(
-        address: str, person_key: str, display_name: str | None = None, note: str | None = None, output_format: str = "toon"
+        address: str, person_key: str, display_name: str = DEFAULT_STR, note: str = DEFAULT_STR, output_format: str = "toon"
     ) -> object:
         """Gmail set people alias."""
         cache.upsert_people_alias(address, person_key, display_name=display_name, note=note)
         return _format({"aliases": list(cache.people_aliases().values()), "people": cache.people()}, output_format)
+
+    _registered = (
+        gmail_get_message,
+        gmail_get_thread,
+        gmail_address_messages,
+        gmail_get_attachments,
+        gmail_contacts,
+        gmail_people,
+        gmail_set_people_alias,
+    )
+    _ = _registered
+
+
+def _register_mcp_status_tools(mcp: FastMCP, cache: PgCache, sync: SyncService) -> None:
+    """Register status tools."""
 
     @mcp.tool()
     def gmail_status(output_format: str = "toon") -> object:
@@ -339,7 +455,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         return _format(status, output_format)
 
     @mcp.tool()
-    def gmail_summaries(scope_kind: str | None = None, limit: int = 50, output_format: str = "toon") -> object:
+    def gmail_summaries(scope_kind: str = DEFAULT_STR, limit: int = 50, output_format: str = "toon") -> object:
         """Gmail summaries."""
         return _format(cache.list_summary_items(scope_kind=scope_kind, limit=limit), output_format)
 
@@ -349,7 +465,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         return _format(cache.timeline_daily(limit=limit), output_format)
 
     @mcp.tool()
-    def gmail_emerging_entities(limit: int = 50, kind: str | None = None, visibility: str = "user", output_format: str = "toon") -> object:
+    def gmail_emerging_entities(limit: int = 50, kind: str = DEFAULT_STR, visibility: str = "user", output_format: str = "toon") -> object:
         """Gmail emerging entities."""
         return _format(cache.emerging_entities(limit=limit, kind=kind, visibility=visibility), output_format)
 
@@ -367,15 +483,29 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         """Gmail resilience status."""
         return _format(cache.resilience_status(), output_format)
 
+    _registered = (
+        gmail_status,
+        gmail_summaries,
+        gmail_timeline_daily,
+        gmail_emerging_entities,
+        gmail_maintenance_status,
+        gmail_resilience_status,
+    )
+    _ = _registered
+
+
+def _register_mcp_operational_tools(mcp: FastMCP, cache: PgCache) -> None:
+    """Register operational tools."""
+
     @mcp.tool()
     def gmail_operational_events(
-        limit: int = 50, component: str | None = None, severity: str | None = None, output_format: str = "toon"
+        limit: int = 50, component: str = DEFAULT_STR, severity: str = DEFAULT_STR, output_format: str = "toon"
     ) -> object:
         """Gmail operational events."""
         return _format(cache.operational_events(limit=limit, component=component, severity=severity), output_format)
 
     @mcp.tool()
-    def gmail_intelligence_jobs(status: str | None = None, limit: int = 50, output_format: str = "toon") -> object:
+    def gmail_intelligence_jobs(status: str = DEFAULT_STR, limit: int = 50, output_format: str = "toon") -> object:
         """Gmail intelligence jobs."""
         return _format(cache.list_intelligence_jobs(status=status, limit=limit), output_format)
 
@@ -385,7 +515,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         return _format(cache.list_dead_letter_jobs(limit=limit, include_closed=include_closed), output_format)
 
     @mcp.tool()
-    def gmail_retry_dead_letter_jobs(limit: int | None = None, output_format: str = "toon") -> object:
+    def gmail_retry_dead_letter_jobs(limit: int = DEFAULT_INT, output_format: str = "toon") -> object:
         """Gmail retry dead letter jobs."""
         return _format(cache.retry_dead_letter_jobs(limit=limit), output_format)
 
@@ -394,13 +524,26 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         """Gmail repair cache."""
         return _format(cache.repair_cache(dry_run=dry_run), output_format)
 
+    _registered = (
+        gmail_operational_events,
+        gmail_intelligence_jobs,
+        gmail_dead_letter_jobs,
+        gmail_retry_dead_letter_jobs,
+        gmail_repair_cache,
+    )
+    _ = _registered
+
+
+def _register_mcp_archive_tools(mcp: FastMCP, cache: PgCache, sync: SyncService) -> None:
+    """Register archive tools."""
+
     @mcp.tool()
-    def gmail_archive_status(message_id: str | None = None, limit: int = 50, output_format: str = "toon") -> object:
+    def gmail_archive_status(message_id: str = DEFAULT_STR, limit: int = 50, output_format: str = "toon") -> object:
         """Gmail archive status."""
         return _format(cache.archive_status(message_id=message_id, limit=limit), output_format)
 
     @mcp.tool()
-    def gmail_refresh_archive_states(limit: int | None = None, output_format: str = "toon") -> object:
+    def gmail_refresh_archive_states(limit: int = DEFAULT_INT, output_format: str = "toon") -> object:
         """Gmail refresh archive states."""
         return _format(cache.refresh_archive_states(limit=limit), output_format)
 
@@ -410,7 +553,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         return _format(sync.complete_archive(limit=limit), output_format)
 
     @mcp.tool()
-    def gmail_verify_objects(limit: int | None = None, output_format: str = "toon") -> object:
+    def gmail_verify_objects(limit: int = DEFAULT_INT, output_format: str = "toon") -> object:
         """Gmail verify objects."""
         return _format(cache.verify_objects(limit=limit), output_format)
 
@@ -430,6 +573,21 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
     ) -> object:
         """Gmail apply retention policy."""
         return _format(cache.apply_retention_policy(message_id, source=source, dry_run=dry_run), output_format)
+
+    _registered = (
+        gmail_archive_status,
+        gmail_refresh_archive_states,
+        gmail_complete_archive,
+        gmail_verify_objects,
+        gmail_retention_policies,
+        gmail_retention_preview,
+        gmail_apply_retention_policy,
+    )
+    _ = _registered
+
+
+def _register_mcp_storage_tools(mcp: FastMCP, cache: PgCache) -> None:
+    """Register storage tools."""
 
     @mcp.tool()
     def gmail_export_archive(path: str, output_format: str = "toon") -> object:
@@ -466,6 +624,21 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         """Gmail prune orphan objects."""
         return _format(cache.prune_orphan_content_objects(dry_run=dry_run), output_format)
 
+    _registered = (
+        gmail_export_archive,
+        gmail_verify_archive,
+        gmail_restore_archive,
+        gmail_imap_status,
+        gmail_refresh_imap,
+        gmail_storage_diagnostics,
+        gmail_prune_orphan_objects,
+    )
+    _ = _registered
+
+
+def _register_mcp_category_help_tools(mcp: FastMCP, cache: PgCache, sync: SyncService) -> None:
+    """Register category help tools."""
+
     @mcp.tool()
     def gmail_categories(output_format: str = "toon") -> object:
         """Gmail categories."""
@@ -479,7 +652,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         )
 
     @mcp.tool()
-    def gmail_category_stats(after: str | None = None, before: str | None = None, output_format: str = "toon") -> object:
+    def gmail_category_stats(after: str = DEFAULT_STR, before: str = DEFAULT_STR, output_format: str = "toon") -> object:
         """Gmail category stats."""
         return _format(cache.category_stats(after=after, before=before), output_format)
 
@@ -489,18 +662,18 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         return _format(CategoryEngine(cache).seed_initial_categories(), output_format)
 
     @mcp.tool()
-    def gmail_discover_categories(since_hours: int = 48, limit: int | None = None, output_format: str = "toon") -> object:
+    def gmail_discover_categories(since_hours: int = 48, limit: int = DEFAULT_INT, output_format: str = "toon") -> object:
         """Gmail discover categories."""
         return _format(CategoryEngine(cache).discover(since_hours=since_hours, limit=limit), output_format)
 
     @mcp.tool()
-    def gmail_recategorize(since_hours: int | None = None, limit: int | None = None, output_format: str = "toon") -> object:
+    def gmail_recategorize(since_hours: int = DEFAULT_INT, limit: int = DEFAULT_INT, output_format: str = "toon") -> object:
         """Gmail recategorize."""
         return _format(CategoryEngine(cache).recategorize(since_hours=since_hours, limit=limit), output_format)
 
     @mcp.tool()
     def gmail_apply_category(
-        message_id: str, category: str, action: str = "include", reason: str | None = None, output_format: str = "toon"
+        message_id: str, category: str, action: str = "include", reason: str = DEFAULT_STR, output_format: str = "toon"
     ) -> object:
         """Gmail apply category."""
         cache.apply_category(message_id, category, action=action, reason=reason)
@@ -513,7 +686,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         return _format({"id": rule_id, "category": category, "rule": rule, "enabled": enabled}, output_format)
 
     @mcp.tool()
-    def gmail_enable_learned_category(learned_id: str, category: str | None = None, output_format: str = "toon") -> object:
+    def gmail_enable_learned_category(learned_id: str, category: str = DEFAULT_STR, output_format: str = "toon") -> object:
         """Gmail enable learned category."""
         return _format(CategoryEngine(cache).enable_learned_category(learned_id, category=category), output_format)
 
@@ -622,6 +795,7 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
                     "gmail_verify_archive",
                     "gmail_restore_archive",
                     "gmail_imap_status",
+                    "gmail_backfill",
                 ],
             },
             "formats": ["json", "toon"],
@@ -629,8 +803,30 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
                 "limit_per_rule": "Maximum Gmail search results to hydrate for each configured priority rule.",
                 "rules": [asdict(rule) for rule in sync.config.priority_rules],
             },
+            "backfill": {
+                "batch_size": "Maximum messages fetched and fully analyzed per backfill batch.",
+                "validate": "When true, cached messages get lightweight Gmail metadata drift checks before skipping.",
+                "scope": "Oldest-first monthly windows over in:anywhere.",
+            },
         }
         return _format(help_data, output_format)
+
+    _registered = (
+        gmail_categories,
+        gmail_category_stats,
+        gmail_seed_categories,
+        gmail_discover_categories,
+        gmail_recategorize,
+        gmail_apply_category,
+        gmail_set_category_rule,
+        gmail_enable_learned_category,
+        gmail_help,
+    )
+    _ = _registered
+
+
+def _register_mcp_sync_action_tools(mcp: FastMCP, sync: SyncService) -> None:
+    """Register sync action tools."""
 
     @mcp.tool()
     def gmail_sync_priority(limit_per_rule: int = 100) -> dict[str, Any]:
@@ -643,56 +839,87 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: ObjectStore) -
         return sync.sync_history(limit=limit)
 
     @mcp.tool()
+    def gmail_backfill(
+        batch_size: int = 50,
+        *,
+        validate: bool = False,
+        max_empty_windows: int = 120,
+        output_format: str = "toon",
+    ) -> object:
+        """Gmail backfill."""
+        return _format(
+            sync.backfill_batch(batch_size=batch_size, validate=validate, max_empty_windows=max_empty_windows),
+            output_format,
+        )
+
+    @mcp.tool()
     def gmail_apply_label(message_id: str, label_id: str) -> dict[str, Any]:
         """Gmail apply label."""
-        return sync.apply_label(message_id, label_id)
+        return apply_message_label(sync, message_id, label_id)
 
     @mcp.tool()
     def gmail_archive(message_id: str) -> dict[str, Any]:
         """Gmail archive."""
-        return sync.archive(message_id)
+        return archive_message(sync, message_id)
 
     @mcp.tool()
     def gmail_mark_read(message_id: str, *, read: bool = True) -> dict[str, Any]:
         """Gmail mark read."""
-        return sync.mark_read(message_id, read=read)
+        return set_message_read_state(sync, message_id, read=read)
 
     @mcp.tool()
     def gmail_star(message_id: str, *, starred: bool = True) -> dict[str, Any]:
         """Gmail star."""
-        return sync.star(message_id, starred=starred)
+        return set_message_star_state(sync, message_id, starred=starred)
 
     @mcp.tool()
     def gmail_raw_rfc822(message_id: str) -> str:
         """Gmail raw rfc822."""
         return sync.hydrate_raw_rfc822(message_id).decode("utf-8", errors="replace")
 
-    if hasattr(mcp, "streamable_http_app"):
-        return mcp.streamable_http_app()
-    if hasattr(mcp, "sse_app"):
-        return mcp.sse_app()
-    return None
+    _registered = (
+        gmail_sync_priority,
+        gmail_sync_history,
+        gmail_backfill,
+        gmail_apply_label,
+        gmail_archive,
+        gmail_mark_read,
+        gmail_star,
+        gmail_raw_rfc822,
+    )
+    _ = _registered
 
 
-def enriched_message(cache: PgCache, message_id: str) -> dict[str, Any] | None:
+def _mcp_http_app(mcp: FastMCP) -> Starlette:
+    """Return the HTTP adapter for the installed FastMCP version."""
+    mcp_any: Any = mcp
+    if hasattr(mcp_any, "streamable_http_app"):
+        return cast(Starlette, mcp_any.streamable_http_app())
+    if hasattr(mcp_any, "sse_app"):
+        return cast(Starlette, mcp_any.sse_app())
+    msg = "FastMCP does not expose an HTTP app adapter"
+    raise RuntimeError(msg)
+
+
+def enriched_message(cache: PgCache, message_id: str) -> dict[str, Any]:
     """Enriched message."""
     message = cache.get_message(message_id)
-    if message is None:
-        return None
+    if not message:
+        return {"error": "message_not_found", "message_id": message_id}
     message["graph"] = cache.graph_triples_for_message(message_id)
     message["graph_nodes"] = cache.graph_nodes_for_message(message_id)
     message["attachment_sidecars"] = cache.attachments_for_message(message_id)
     return message
 
 
-def enriched_thread(cache: PgCache, thread_id: str, *, compact: bool = False) -> dict[str, Any] | None:
+def enriched_thread(cache: PgCache, thread_id: str, *, compact: bool = False) -> dict[str, Any]:
     """Enriched thread."""
     thread = cache.get_thread(thread_id, compact=compact)
-    if thread is None:
-        return None
+    if not thread:
+        return {"error": "thread_not_found", "thread_id": thread_id}
     if compact:
         return thread
-    thread["messages"] = [enriched_message(cache, message["id"]) or message for message in thread["messages"]]
+    thread["messages"] = [enriched_message(cache, message["id"]) for message in thread["messages"]]
     return thread
 
 
@@ -702,7 +929,7 @@ def _format(value: object, output_format: str) -> object:
     return value
 
 
-def _options(options: dict[str, Any] | None, *, limit: int = 20) -> dict[str, Any]:
+def _options(options: dict[str, Any], *, limit: int = 20) -> dict[str, Any]:
     opts = dict(options or {})
     return {
         "limit": int(opts.get("limit", limit)),

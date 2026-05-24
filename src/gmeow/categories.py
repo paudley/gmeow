@@ -1,14 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide categories functionality for Gmeow."""
+"""Compute and persist categorization decisions for Gmeow messages.
 
-from __future__ import annotations
+This module owns the deterministic category vocabulary, learned-category discovery, and the
+manual-profile and manual-rule overlays that combine into the assignments stored alongside each
+message. The CategoryEngine is the entry point used by ingestion, MCP tools, and the maintenance
+worker to keep category state in sync with the underlying mail corpus.
+"""
 
 import re
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
-from typing import Any
+from typing import Any, cast
 
 from sklearn.cluster import DBSCAN
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -160,7 +164,7 @@ class CategoryEngine:
 
     def __init__(self, cache: object) -> None:
         """Initialize CategoryEngine."""
-        self.cache = cache
+        self.cache: Any = cache
         self._manual_profiles_cache: dict[str, list[str]] | None = None
 
     def categorize_message(self, message_id: str, manual_profiles: dict[str, list[str]] | None = None) -> list[dict[str, Any]]:
@@ -177,7 +181,7 @@ class CategoryEngine:
         self.cache.replace_message_categories(message_id, deduped)
         return deduped
 
-    def recategorize(self, since_hours: int | None = None, limit: int | None = None) -> dict[str, Any]:
+    def recategorize(self, since_hours: int = 0, limit: int = 0) -> dict[str, Any]:
         """Recategorize."""
         messages = self._messages(since_hours=since_hours, limit=limit)
         manual_profiles = self._manual_profiles(messages)
@@ -200,11 +204,11 @@ class CategoryEngine:
                 inserted += 1
         return {"rules_inserted": inserted, "categories": self.cache.list_categories()}
 
-    def discover(self, since_hours: int = 48, limit: int | None = None, *, store: bool = True) -> dict[str, Any]:
+    def discover(self, since_hours: int = 48, limit: int = 0, *, store: bool = True) -> dict[str, Any]:
         """Discover."""
         messages = self._messages(since_hours=since_hours, limit=limit)
         if len(messages) < MIN_CLUSTER_MESSAGES:
-            run = {"messages": len(messages), "clusters": []}
+            run: dict[str, Any] = {"messages": len(messages), "clusters": []}
             if store:
                 run["id"] = self.cache.store_learned_category_run(run)
             return run
@@ -213,7 +217,7 @@ class CategoryEngine:
         matrix = vectorizer.fit_transform(docs)
         clustering = DBSCAN(eps=0.55, min_samples=2, metric="cosine").fit(matrix)
         terms = vectorizer.get_feature_names_out()
-        clusters = []
+        clusters: list[dict[str, Any]] = []
         for label in sorted({int(value) for value in clustering.labels_} - {-1}):
             indexes = [idx for idx, value in enumerate(clustering.labels_) if int(value) == label]
             top_terms = _matrix_top_terms(matrix[indexes].mean(axis=0), terms, 12)
@@ -236,7 +240,7 @@ class CategoryEngine:
             run["id"] = self.cache.store_learned_category_run(run)
         return run
 
-    def enable_learned_category(self, learned_id: str, category: str | None = None) -> dict[str, Any]:
+    def enable_learned_category(self, learned_id: str, category: str = "") -> dict[str, Any]:
         """Enable learned category."""
         for run in self.cache.learned_category_runs(limit=50):
             for cluster in run["run"].get("clusters", []):
@@ -268,16 +272,16 @@ class CategoryEngine:
                 return {"enabled": target, "messages": len(cluster.get("message_ids", []))}
         raise KeyError(learned_id)
 
-    def _messages(self, since_hours: int | None = None, limit: int | None = None) -> list[dict[str, Any]]:
-        messages = self.cache.iter_messages()
-        if since_hours is not None:
+    def _messages(self, since_hours: int = 0, limit: int = 0) -> list[dict[str, Any]]:
+        messages = cast(list[dict[str, Any]], self.cache.iter_messages())
+        if since_hours:
             cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
             messages = [
                 message
                 for message in messages
                 if message.get("message_date_iso") and datetime.fromisoformat(message["message_date_iso"]) >= cutoff
             ]
-        messages.sort(key=lambda message: message.get("message_date_iso") or "", reverse=True)
+        messages.sort(key=lambda message: cast(str, message.get("message_date_iso") or ""), reverse=True)
         return messages[:limit] if limit else messages
 
     def _manual_profiles(self, messages: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -296,7 +300,7 @@ class CategoryEngine:
     def _manual_profile_assignments(self, message: dict[str, Any], profiles: dict[str, list[str]]) -> list[dict[str, Any]]:
         if not profiles:
             return []
-        assignments = []
+        assignments: list[dict[str, Any]] = []
         doc = message_document(message)
         for category, examples in profiles.items():
             corpus = [*examples, doc]
@@ -317,7 +321,7 @@ class CategoryEngine:
         return assignments
 
     def _manual_rule_assignments(self, message: dict[str, Any]) -> list[dict[str, Any]]:
-        assignments = []
+        assignments: list[dict[str, Any]] = []
         for rule in self.cache.list_category_rules():
             if not rule["enabled"] or not _rule_matches(message, rule["rule"]):
                 continue
@@ -344,7 +348,7 @@ def _rule_matches(message: dict[str, Any], rule: dict[str, Any]) -> bool:
         "labels": " ".join(message.get("labels", []) + message.get("label_ids", [])).lower(),
     }
     for key in ["sender", "subject", "body", "labels"]:
-        values = rule.get(key) or rule.get(f"{key}_contains") or []
+        values: Any = rule.get(key) or rule.get(f"{key}_contains") or []
         if isinstance(values, str):
             values = [values]
         if values and not any(str(value).lower() in haystacks[key] for value in values):
@@ -366,9 +370,11 @@ def _top_terms(text: str, limit: int) -> list[str]:
 
 
 def _matrix_top_terms(row: object, terms: object, limit: int) -> list[str]:
-    array = row.A1 if hasattr(row, "A1") else row.asarray().ravel()
+    matrix_row = cast(Any, row)
+    term_values = cast(Any, terms)
+    array = matrix_row.A1 if hasattr(matrix_row, "A1") else matrix_row.asarray().ravel()
     indexes = array.argsort()[::-1][:limit]
-    return [str(terms[index]) for index in indexes if array[index] > 0]
+    return [str(term_values[index]) for index in indexes if array[index] > 0]
 
 
 def _sender_key(message: dict[str, Any]) -> str:

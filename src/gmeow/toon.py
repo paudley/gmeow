@@ -1,34 +1,41 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide toon functionality for Gmeow."""
+"""Encode Gmeow responses as the compact TOON format.
 
-from __future__ import annotations
+TOON is the default MCP/HTTP response shape because it stays under the context-window budget that
+the agent surfaces care about. This module provides ``dumps``/``loads`` helpers so callers do not
+have to reimplement the uniform-row compaction rules each time.
+"""
 
 import json
 import re
-from typing import Any
+from typing import Any, cast
 
 
-def dumps(value: object) -> str:
+def dumps(value: Any) -> str:
     """Serialize a value to TOON text."""
     return _encode(value, 0).rstrip() + "\n"
 
 
-def _encode(value: object, indent: int) -> str:
+def _encode(value: Any, indent: int) -> str:
     pad = "  " * indent
     if isinstance(value, dict):
-        lines = []
-        for key, item in value.items():
-            if isinstance(item, list):
-                lines.append(_encode_named_list(str(key), item, indent))
-            elif isinstance(item, dict):
+        mapping: dict[str, Any] = cast(Any, value)
+        lines: list[str] = []
+        for key, item in mapping.items():
+            child: Any = item
+            if isinstance(child, list):
+                child_list: list[Any] = cast(Any, child)
+                lines.append(_encode_named_list(str(key), child_list, indent))
+            elif isinstance(child, dict):
                 lines.append(f"{pad}{key}:")
-                lines.append(_encode(item, indent + 1))
+                lines.append(_encode(child, indent + 1))
             else:
-                lines.append(f"{pad}{key}: {_scalar(item)}")
+                lines.append(f"{pad}{key}: {_scalar(child)}")
         return "\n".join(line for line in lines if line != "")
     if isinstance(value, list):
-        return _encode_named_list("items", value, indent)
+        sequence: list[Any] = cast(Any, value)
+        return _encode_named_list("items", sequence, indent)
     return f"{pad}{_scalar(value)}"
 
 

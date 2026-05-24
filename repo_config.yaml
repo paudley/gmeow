@@ -130,7 +130,9 @@ python:
     - main.py
   test_paths:
     - tests
-  stub_paths: []
+  stub_paths:
+    - typings
+    - src
   extra_paths:
     - src
   venv_path: .

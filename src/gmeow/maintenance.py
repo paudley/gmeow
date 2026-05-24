@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide maintenance functionality for Gmeow."""
+"""Schedule and execute Gmeow maintenance tasks.
 
-from __future__ import annotations
+The module coordinates periodic sync, backfill, analysis, archive refresh, and derived-data refresh
+work. It protects Gmail-facing tasks with a lock so maintenance does not run overlapping mailbox
+operations.
+"""
 
 import asyncio
 import threading
@@ -10,13 +13,119 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol, cast
 
 from .config import MaintenanceConfig
 from .intelligence import IntelligenceWorker
+from .object_store import StoredAttachmentObject
+
+DEFAULT_ANY = cast(Any, None)
+DEFAULT_FLOAT = cast(float, None)
+DEFAULT_OBJECT = cast(object, None)
+DEFAULT_STR = cast(str, None)
 
 MAINTENANCE_EXCEPTIONS = (RuntimeError, ValueError, KeyError, TypeError, OSError)
 MAX_RESULT_SUMMARY_CHARS = 2000
+
+
+class _MaintenanceCache(Protocol):
+    """Cache surface used by maintenance tasks."""
+
+    def analyze_storage_tables(self) -> dict[str, Any]:
+        """Analyze storage tables."""
+        ...
+
+    def set_state(self, key: str, value: str) -> None:
+        """Persist a state value."""
+        ...
+
+    def record_operational_event(
+        self,
+        event_type: str,
+        severity: str,
+        component: str,
+        subject_id: str = DEFAULT_STR,
+        detail: str = DEFAULT_STR,
+        metadata: dict[str, Any] = DEFAULT_ANY,
+    ) -> int:
+        """Record an operational event."""
+        ...
+
+    def get_state(self, key: str) -> str:
+        """Return a state value."""
+        ...
+
+    def refresh_message_search_columns(self) -> dict[str, Any]:
+        """Refresh message search columns."""
+        ...
+
+    def refresh_content_object_refs(self) -> dict[str, Any]:
+        """Refresh content object references."""
+        ...
+
+    def refresh_graph_node_profiles(self) -> dict[str, Any]:
+        """Refresh graph node profiles."""
+        ...
+
+    def refresh_graph_edge_stats(self) -> dict[str, Any]:
+        """Refresh graph edge statistics."""
+        ...
+
+    def refresh_summary_items(self) -> dict[str, Any]:
+        """Refresh summary items."""
+        ...
+
+    def refresh_timeline_views(self) -> dict[str, Any]:
+        """Refresh timeline views."""
+        ...
+
+    def refresh_materialized_summary_views(self) -> dict[str, Any]:
+        """Refresh materialized summary views."""
+        ...
+
+    def list_attachments(self) -> list[dict[str, Any]]:
+        """Return stored attachments."""
+        ...
+
+    def get_message(self, message_id: str) -> dict[str, Any]:
+        """Return a cached message."""
+        ...
+
+    def add_attachment(self, record: dict[str, Any]) -> None:
+        """Store attachment metadata."""
+        ...
+
+    def enqueue_intelligence_job(self, kind: str, target_id: str, payload: dict[str, Any] = DEFAULT_ANY) -> None:
+        """Queue intelligence processing."""
+        ...
+
+
+class _MaintenanceSync(Protocol):
+    """Sync surface used by maintenance tasks."""
+
+    def gmail_available(self) -> bool:
+        """Return whether Gmail is configured."""
+        ...
+
+    def sync_history(self, limit: int = 500) -> dict[str, Any]:
+        """Run Gmail history sync."""
+        ...
+
+    def sync_priority(self, limit_per_rule: int = 100) -> dict[str, Any]:
+        """Run priority sync."""
+        ...
+
+    def backfill_batch(self, batch_size: int = 50, *, validate: bool = False, max_empty_windows: int = 120) -> dict[str, Any]:
+        """Run one backfill batch."""
+        ...
+
+
+class _MaintenanceAttachments(Protocol):
+    """Attachment surface used by maintenance tasks."""
+
+    def refresh_sidecar(self, sha1: str, source_metadata: dict[str, Any] = DEFAULT_ANY) -> StoredAttachmentObject:
+        """Refresh an attachment sidecar."""
+        ...
 
 
 @dataclass(slots=True)
@@ -28,12 +137,12 @@ class TimedTaskState:
     running: bool = False
     runs: int = 0
     failures: int = 0
-    last_started_at: str | None = None
-    last_finished_at: str | None = None
-    last_duration_seconds: float | None = None
-    last_result: Any = None
-    last_error: str | None = None
-    next_run_at: str | None = None
+    last_started_at: str = DEFAULT_STR
+    last_finished_at: str = DEFAULT_STR
+    last_duration_seconds: float = DEFAULT_FLOAT
+    last_result: Any = DEFAULT_ANY
+    last_error: str = DEFAULT_STR
+    next_run_at: str = DEFAULT_STR
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
@@ -41,7 +150,13 @@ class MaintenanceScheduler:
     """Represent MaintenanceScheduler data and behavior."""
 
     def __init__(
-        self, config: MaintenanceConfig, cache: object, sync: object, attachments: object, semantic: object, graph: object | None = None
+        self,
+        config: MaintenanceConfig,
+        cache: _MaintenanceCache,
+        sync: _MaintenanceSync,
+        attachments: _MaintenanceAttachments,
+        semantic: object,
+        graph: object = DEFAULT_OBJECT,
     ) -> None:
         """Initialize MaintenanceScheduler."""
         self.config = config
@@ -59,17 +174,18 @@ class MaintenanceScheduler:
         """Start."""
         if not self.config.enabled:
             return
-        specs: list[tuple[str, int | None, Callable[[], Any]]] = [
+        specs: list[tuple[str, int, Callable[[], Any]]] = [
             ("sync_history", self.config.sync_history_seconds, self._sync_history),
             ("sync_priority", self.config.sync_priority_seconds, self._sync_priority),
             ("intelligence", self.config.intelligence_seconds, self._run_intelligence),
             ("derived_refresh", self.config.derived_refresh_seconds, self._refresh_derived),
             ("analyze", self.config.analyze_seconds, self.cache.analyze_storage_tables),
-            ("attachment_sidecars", self.config.attachment_sidecars_seconds, self._refresh_attachment_sidecars),
         ]
+        if self.config.backfill_enabled:
+            specs.append(("backfill", self.config.backfill_seconds, self._backfill))
+        if self.config.attachment_sidecars_seconds:
+            specs.append(("attachment_sidecars", self.config.attachment_sidecars_seconds, self._refresh_attachment_sidecars))
         for name, interval, callback in specs:
-            if interval is None:
-                continue
             state = self._states.setdefault(name, TimedTaskState(name=name, interval_seconds=interval))
             self._tasks.append(asyncio.create_task(self._loop(state, callback), name=f"gmeow-maintenance-{name}"))
 
@@ -107,6 +223,7 @@ class MaintenanceScheduler:
         callbacks: dict[str, Callable[[], Any]] = {
             "sync_history": self._sync_history,
             "sync_priority": self._sync_priority,
+            "backfill": self._backfill,
             "intelligence": self._run_intelligence,
             "derived_refresh": self._refresh_derived,
             "analyze": self.cache.analyze_storage_tables,
@@ -116,7 +233,7 @@ class MaintenanceScheduler:
             raise KeyError(name)
         state = self._states.setdefault(name, TimedTaskState(name=name, interval_seconds=0))
         await self._run_once(state, callbacks[name])
-        return self.status()["tasks"][name]
+        return cast(dict[str, Any], self.status()["tasks"][name])
 
     async def _loop(self, state: TimedTaskState, callback: Callable[[], Any]) -> None:
         delay = 0.0 if self.config.run_on_startup else float(state.interval_seconds)
@@ -140,7 +257,7 @@ class MaintenanceScheduler:
             started = time.monotonic()
             state.running = True
             state.last_started_at = _now_iso()
-            state.last_error = None
+            state.last_error = ""
             self.cache.set_state(f"maintenance.{state.name}.last_started_at", state.last_started_at)
             self.cache.record_operational_event(
                 "maintenance.started", "info", "maintenance", state.name, f"Started maintenance task {state.name}."
@@ -171,25 +288,47 @@ class MaintenanceScheduler:
                 self.cache.set_state(f"maintenance.{state.name}.last_finished_at", state.last_finished_at)
 
     def _run_intelligence(self) -> dict[str, int]:
-        return IntelligenceWorker(self.cache, self.semantic, self.graph).run_until_empty(limit=self.config.intelligence_limit)
+        return IntelligenceWorker(cast(Any, self.cache), cast(Any, self.semantic), cast(Any, self.graph)).run_until_empty(
+            limit=self.config.intelligence_limit
+        )
 
     def _sync_history(self) -> dict[str, Any]:
-        if self.sync.gmail is None:
+        if not self.sync.gmail_available():
             return {"skipped": "gmail client is not configured"}
+        if not self.cache.get_state("gmail_history_id"):
+            return {"skipped": "no Gmail history cursor is available"}
         if not self._gmail_lock.acquire(blocking=False):
             return {"skipped": "another Gmail maintenance task is running"}
         try:
-            return self.sync.sync_history(limit=self.config.sync_history_limit)
+            try:
+                return self.sync.sync_history(limit=self.config.sync_history_limit)
+            except RuntimeError as exc:
+                if "No Gmail history cursor is available" in str(exc):
+                    return {"skipped": str(exc)}
+                raise
         finally:
             self._gmail_lock.release()
 
     def _sync_priority(self) -> dict[str, Any]:
-        if self.sync.gmail is None:
+        if not self.sync.gmail_available():
             return {"skipped": "gmail client is not configured"}
         if not self._gmail_lock.acquire(blocking=False):
             return {"skipped": "another Gmail maintenance task is running"}
         try:
             return self.sync.sync_priority(limit_per_rule=self.config.sync_priority_limit_per_rule)
+        finally:
+            self._gmail_lock.release()
+
+    def _backfill(self) -> dict[str, Any]:
+        if not self.sync.gmail_available():
+            return {"skipped": "gmail client is not configured"}
+        if not self._gmail_lock.acquire(blocking=False):
+            return {"skipped": "another Gmail maintenance task is running"}
+        try:
+            return self.sync.backfill_batch(
+                batch_size=self.config.backfill_batch_size,
+                max_empty_windows=self.config.backfill_max_empty_windows,
+            )
         finally:
             self._gmail_lock.release()
 

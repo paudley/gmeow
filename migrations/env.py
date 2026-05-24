@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide env functionality for Gmeow."""
+"""Alembic environment hook for the Gmeow PostgreSQL schema.
 
-from __future__ import annotations
+The environment resolves the configured DSN through :mod:`gmeow.db` and runs the offline / online
+migration paths Alembic expects. It is loaded by ``alembic upgrade`` and the equivalent CLI
+entrypoints, never imported directly by application code.
+"""
 
 import sys
 from logging.config import fileConfig
