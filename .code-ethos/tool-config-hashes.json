@@ -6,9 +6,9 @@
     ".pylintrc": "sha256:cfc32d94c7a0a3e6f7b57fc3f4a14b70593338610b89fb123e277d5c2f51576b",
     ".sqlfluff": "sha256:efc924fba9ec5baa0d775e931bbafee29c63bba74643af6b22bfedadc71e22f5",
     ".yamllint.yml": "sha256:1877bc157a59d5c2abf2329b31df3591027f0b1ef650b28bd6f6d98dd9d82f53",
-    "mypy.ini": "sha256:96fe2b8feaf143d2befd3806d2a2479f93b3e5bd3558dbdd47b1f08c3543538b",
+    "mypy.ini": "sha256:489082b7ef12bdca49fa8292ec0a25c22c1cc395034c981a3ebf98de3dff2c22",
     "pyrightconfig.json": "sha256:e9cab44ce01dd5b31ac4f2ff0523bf1c5a535fcfd7e73e0eb38248c54359e876",
-    "ruff.toml": "sha256:6b5040ef8786db4bc6b3a03cb612bbe3b09ddf7db804a65bebd22e4b5bb0071e",
+    "ruff.toml": "sha256:83eac82d8a7385d94c59faccec9ee3acc6f80d68d949dd06e89edff32fd00e11",
     "tombi.toml": "sha256:f60dfe4d0f7c4d73d7b4116a78f9f9317ada27ecb61715d5e2835d2b81dc0e23"
   },
   "version": 1

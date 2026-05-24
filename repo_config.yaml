@@ -132,6 +132,7 @@ python:
     - tests
   stub_paths:
     - typings
+    - src
   extra_paths:
     - src
   venv_path: .
