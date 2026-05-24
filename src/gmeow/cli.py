@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide cli functionality for Gmeow."""
+
 from __future__ import annotations
 
 import argparse
@@ -7,9 +9,8 @@ import json
 import time
 from pathlib import Path
 
-from google.auth.exceptions import RefreshError
-
 import uvicorn
+from google.auth.exceptions import RefreshError
 
 from .app import create_app
 from .categories import CategoryEngine
@@ -20,6 +21,7 @@ from .provision import build_gcloud_provision_plan
 
 
 def main() -> None:
+    """Run the Gmeow command-line interface."""
     parser = argparse.ArgumentParser(prog="gmeow")
     parser.add_argument("--config", default="config.toml")
     sub = parser.add_subparsers(dest="command")
@@ -170,7 +172,13 @@ def main() -> None:
 
     if args.command == "ops-events":
         app = create_app(config)
-        print(json.dumps(app.state.cache.operational_events(limit=args.limit, component=args.component, severity=args.severity), indent=2, default=str))
+        print(
+            json.dumps(
+                app.state.cache.operational_events(limit=args.limit, component=args.component, severity=args.severity),
+                indent=2,
+                default=str,
+            )
+        )
         app.state.cache.close()
         return
 
@@ -182,7 +190,9 @@ def main() -> None:
 
     if args.command == "dead-letter":
         app = create_app(config)
-        print(json.dumps(app.state.cache.list_dead_letter_jobs(limit=args.limit, include_closed=args.include_closed), indent=2, default=str))
+        print(
+            json.dumps(app.state.cache.list_dead_letter_jobs(limit=args.limit, include_closed=args.include_closed), indent=2, default=str)
+        )
         app.state.cache.close()
         return
 
@@ -242,7 +252,11 @@ def main() -> None:
 
     if args.command == "apply-retention-policy":
         app = create_app(config)
-        print(json.dumps(app.state.cache.apply_retention_policy(args.message_id, source=args.source, dry_run=not args.apply), indent=2, default=str))
+        print(
+            json.dumps(
+                app.state.cache.apply_retention_policy(args.message_id, source=args.source, dry_run=not args.apply), indent=2, default=str
+            )
+        )
         app.state.cache.close()
         return
 
@@ -414,7 +428,9 @@ def main() -> None:
     if args.command == "discover-categories":
         app = create_app(config)
         try:
-            print(json.dumps(CategoryEngine(app.state.cache).discover(since_hours=args.since_hours, limit=args.limit), indent=2, default=str))
+            print(
+                json.dumps(CategoryEngine(app.state.cache).discover(since_hours=args.since_hours, limit=args.limit), indent=2, default=str)
+            )
         finally:
             app.state.cache.close()
         return
@@ -422,7 +438,11 @@ def main() -> None:
     if args.command == "recategorize":
         app = create_app(config)
         try:
-            print(json.dumps(CategoryEngine(app.state.cache).recategorize(since_hours=args.since_hours, limit=args.limit), indent=2, default=str))
+            print(
+                json.dumps(
+                    CategoryEngine(app.state.cache).recategorize(since_hours=args.since_hours, limit=args.limit), indent=2, default=str
+                )
+            )
         finally:
             app.state.cache.close()
         return
@@ -464,6 +484,7 @@ def main() -> None:
 
 
 def run_doctor(config: GmeowConfig) -> None:
+    """Run doctor."""
     print(f"auth_mode: {config.auth_mode}")
     print(f"subject: {config.subject or '(none)'}")
     print(f"sops_secrets_file: {config.secrets.file or '(none)'} exists={bool(config.secrets.file and config.secrets.file.exists())}")
@@ -483,7 +504,9 @@ def run_doctor(config: GmeowConfig) -> None:
             print("  scopes: https://www.googleapis.com/auth/gmail.modify")
         elif config.auth_mode == "user_oauth":
             print("required_local_oauth_command:")
-            print("  gcloud auth application-default login --scopes=https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/cloud-platform")
+            print(
+                "  gcloud auth application-default login --scopes=https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/cloud-platform"
+            )
         raise SystemExit(1) from exc
     except Exception as exc:
         print("gmail_access: failed")
@@ -493,15 +516,17 @@ def run_doctor(config: GmeowConfig) -> None:
     print(f"labels_visible: {len(labels)}")
 
 
-def service_account_client_id(config: GmeowConfig) -> str | None:
+def service_account_client_id(config: GmeowConfig) -> str:
+    """Service account client id."""
     info = config.service_account_info()
     if info:
-        return info.get("client_id")
+        return str(info.get("client_id") or "")
     path = config.service_account_file
     if not path.exists():
-        return None
+        return ""
     try:
         data = json.loads(path.read_text())
-    except json.JSONDecodeError:
-        return None
-    return data.get("client_id")
+    except json.JSONDecodeError as exc:
+        msg = f"Invalid service account JSON in {path}"
+        raise ValueError(msg) from exc
+    return str(data.get("client_id") or "")

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""complete sql object comments
+"""complete sql object comments.
 
 Revision ID: 20260523_0002
 Revises: 20260523_0001
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     comments = {
         "TABLE alembic_version": "Alembic schema migration version marker.",
         "INDEX alembic_version_pkc": "Primary key index for Alembic version marker.",
@@ -26,7 +28,9 @@ def upgrade() -> None:
         "INDEX category_rules_pkey": "Primary key index for category rule identifiers.",
         "INDEX content_objects_pkey": "Primary key index for CAS object digests.",
         "INDEX embedding_chunks_pkey": "Primary key index for semantic embedding chunk identifiers.",
-        "INDEX graph_triples_subject_predicate_object_source_message_id_key": "Uniqueness index preventing duplicate graph triples from the same source message.",
+        "INDEX graph_triples_subject_predicate_object_source_message_id_key": (
+            "Uniqueness index preventing duplicate graph triples from the same source message."
+        ),
         "INDEX ingest_issues_pkey": "Primary key index for ingest issue identifiers.",
         "INDEX intelligence_jobs_kind_target_id_key": "Uniqueness index ensuring one enrichment job per target.",
         "INDEX intelligence_jobs_pkey": "Primary key index for enrichment job identifiers.",
@@ -56,7 +60,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    """Downgrade."""
 
 
 def _safe_comment(prefix: str, comment: str) -> None:

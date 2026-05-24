@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide metadata functionality for Gmeow."""
+
 from __future__ import annotations
 
 import json
@@ -9,6 +11,7 @@ from typing import Any
 
 
 def extract_exiftool_metadata(path: Path) -> dict[str, Any]:
+    """Extract exiftool metadata."""
     try:
         result = subprocess.run(
             ["exiftool", "-json", "-G", "-struct", str(path)],

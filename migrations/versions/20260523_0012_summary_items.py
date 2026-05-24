@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""summary and centroid items
+"""summary and centroid items.
 
 Revision ID: 20260523_0012
 Revises: 20260523_0011
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS summary_items (
@@ -46,7 +48,9 @@ def upgrade() -> None:
     )
     _comments(
         {
-            "TABLE summary_items": "Materialized summaries and centroid embeddings for threads, contacts, projects, labels, categories, and learned clusters.",
+            "TABLE summary_items": (
+                "Materialized summaries and centroid embeddings for threads, contacts, projects, labels, categories, and learned clusters."
+            ),
             "COLUMN summary_items.scope_kind": "Summary scope type such as thread, contact, project, label, or category.",
             "COLUMN summary_items.scope_id": "Stable identifier within the summary scope.",
             "COLUMN summary_items.title": "Human-readable summary title.",
@@ -66,6 +70,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP TABLE IF EXISTS summary_items")
 
 

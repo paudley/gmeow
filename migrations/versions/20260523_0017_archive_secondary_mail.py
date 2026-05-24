@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""archive secondary mail foundations
+"""archive secondary mail foundations.
 
 Revision ID: 20260523_0017
 Revises: 20260523_0016
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from alembic import op
 
-
 revision = "20260523_0017"
 down_revision = "20260523_0016"
 branch_labels = None
@@ -19,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute("ALTER TABLE content_objects ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ")
     op.execute("ALTER TABLE content_objects ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'unverified'")
     op.execute("ALTER TABLE content_objects ADD COLUMN IF NOT EXISTS verification_error TEXT")
@@ -64,7 +64,9 @@ def upgrade() -> None:
         )
         """
     )
-    op.execute("CREATE INDEX IF NOT EXISTS attachment_metadata_versions_digest_idx ON attachment_metadata_versions(digest, created_at DESC)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS attachment_metadata_versions_digest_idx ON attachment_metadata_versions(digest, created_at DESC)"
+    )
 
     op.execute(
         """
@@ -132,13 +134,23 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP TABLE IF EXISTS archive_exports")
     op.execute("DROP TABLE IF EXISTS imap_message_uids")
     op.execute("DROP TABLE IF EXISTS imap_mailboxes")
     op.execute("DROP TABLE IF EXISTS attachment_metadata_versions")
     op.execute("DROP TABLE IF EXISTS retention_policies")
     op.execute("DROP INDEX IF EXISTS messages_archive_state_idx")
-    for column in ["deleted_label_ids", "deletion_policy", "deletion_source", "purged_at", "tombstoned_at", "archive_error", "archive_checked_at", "archive_state"]:
+    for column in [
+        "deleted_label_ids",
+        "deletion_policy",
+        "deletion_source",
+        "purged_at",
+        "tombstoned_at",
+        "archive_error",
+        "archive_checked_at",
+        "archive_state",
+    ]:
         op.execute(f"ALTER TABLE messages DROP COLUMN IF EXISTS {column}")
     op.execute("DROP INDEX IF EXISTS content_objects_verification_idx")
     for column in ["metadata_json", "write_generation", "verification_error", "verification_status", "verified_at"]:
@@ -147,7 +159,9 @@ def downgrade() -> None:
 
 def _comments() -> None:
     comments = {
-        "COLUMN content_objects.verified_at": "Timestamp when object bytes were last verified against their BLAKE3 digest and compression metadata.",
+        "COLUMN content_objects.verified_at": (
+            "Timestamp when object bytes were last verified against their BLAKE3 digest and compression metadata."
+        ),
         "COLUMN content_objects.verification_status": "Object verification state: unverified, ok, missing, corrupt, or error.",
         "COLUMN content_objects.verification_error": "Most recent object verification error detail.",
         "COLUMN content_objects.write_generation": "Monotonic write generation for future replicated object-store reconciliation.",
@@ -204,7 +218,9 @@ def _comments() -> None:
         "COLUMN archive_exports.finished_at": "Export completion timestamp.",
         "INDEX archive_exports_created_idx": "Accelerates newest-first archive export status queries.",
         "CONSTRAINT retention_policies_name_key ON retention_policies": "Ensures retention policy names are stable and unique.",
-        "CONSTRAINT attachment_metadata_versions_digest_metadata_digest_key ON attachment_metadata_versions": "Prevents duplicate metadata version rows for the same attachment and metadata object.",
+        "CONSTRAINT attachment_metadata_versions_digest_metadata_digest_key ON attachment_metadata_versions": (
+            "Prevents duplicate metadata version rows for the same attachment and metadata object."
+        ),
         "CONSTRAINT imap_mailboxes_name_key ON imap_mailboxes": "Ensures IMAP mailbox names are unique.",
         "CONSTRAINT imap_message_uids_pkey ON imap_message_uids": "Primary key for mailbox/message UID assignments.",
         "CONSTRAINT imap_message_uids_mailbox_id_uid_key ON imap_message_uids": "Ensures IMAP UIDs are unique within a mailbox.",

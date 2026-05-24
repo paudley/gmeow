@@ -1,21 +1,30 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide config functionality for Gmeow."""
+
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-import tomllib
-
 
 GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+DEFAULT_PURGE_LABELS = ["SPAM", "TRASH"]
+
+
+def default_purge_labels() -> list[str]:
+    """Return the default labels eligible for purge policy handling."""
+    return list(DEFAULT_PURGE_LABELS)
 
 
 @dataclass(slots=True)
 class PriorityRule:
+    """Represent PriorityRule data and behavior."""
+
     name: str
     gmail_query: str | None = None
     labels: list[str] = field(default_factory=list)
@@ -29,7 +38,8 @@ class PriorityRule:
     priority: int = 100
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PriorityRule":
+    def from_dict(cls, data: dict[str, Any]) -> PriorityRule:
+        """From dict."""
         return cls(
             name=str(data["name"]),
             gmail_query=data.get("gmail_query") or data.get("query"),
@@ -45,6 +55,7 @@ class PriorityRule:
         )
 
     def to_gmail_query(self) -> str:
+        """To gmail query."""
         parts: list[str] = []
         if self.gmail_query:
             parts.append(f"({self.gmail_query})")
@@ -59,6 +70,8 @@ class PriorityRule:
 
 @dataclass(slots=True)
 class MaintenanceConfig:
+    """Represent MaintenanceConfig data and behavior."""
+
     enabled: bool = True
     sync_history_seconds: int | None = 300
     sync_history_limit: int = 500
@@ -72,7 +85,8 @@ class MaintenanceConfig:
     run_on_startup: bool = False
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "MaintenanceConfig":
+    def from_dict(cls, data: dict[str, Any] | None) -> MaintenanceConfig:
+        """From dict."""
         raw = data or {}
         return cls(
             enabled=bool(raw.get("enabled", True)),
@@ -91,6 +105,8 @@ class MaintenanceConfig:
 
 @dataclass(slots=True)
 class AttachmentAnalysisConfig:
+    """Represent AttachmentAnalysisConfig data and behavior."""
+
     enabled: bool = True
     max_text_chars: int = 200_000
     pdf_text_enabled: bool = True
@@ -104,7 +120,8 @@ class AttachmentAnalysisConfig:
     vision_caption_timeout_seconds: int = 60
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "AttachmentAnalysisConfig":
+    def from_dict(cls, data: dict[str, Any] | None) -> AttachmentAnalysisConfig:
+        """From dict."""
         raw = data or {}
         return cls(
             enabled=bool(raw.get("enabled", True)),
@@ -123,6 +140,8 @@ class AttachmentAnalysisConfig:
 
 @dataclass(slots=True)
 class ImapConfig:
+    """Represent ImapConfig data and behavior."""
+
     enabled: bool = False
     host: str = "127.0.0.1"
     port: int = 1143
@@ -130,7 +149,8 @@ class ImapConfig:
     password_file: Path = Path("data/secrets/imap-password")
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None, data_dir: Path) -> "ImapConfig":
+    def from_dict(cls, data: dict[str, Any] | None, data_dir: Path) -> ImapConfig:
+        """From dict."""
         raw = data or {}
         return cls(
             enabled=bool(raw.get("enabled", False)),
@@ -143,13 +163,16 @@ class ImapConfig:
 
 @dataclass(slots=True)
 class ArchiveConfig:
+    """Represent ArchiveConfig data and behavior."""
+
     require_rfc822: bool = True
     delete_policy_default: str = "tombstone"
-    purge_labels: list[str] = field(default_factory=lambda: ["SPAM", "TRASH"])
+    purge_labels: list[str] = field(default_factory=default_purge_labels)
     purge_categories: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "ArchiveConfig":
+    def from_dict(cls, data: dict[str, Any] | None) -> ArchiveConfig:
+        """From dict."""
         raw = data or {}
         delete_policy = raw.get("delete_policy") or {}
         return cls(
@@ -162,12 +185,15 @@ class ArchiveConfig:
 
 @dataclass(slots=True)
 class SopsSecretsConfig:
+    """Represent SopsSecretsConfig data and behavior."""
+
     file: Path | None = None
     unlock_key: str | None = None
     age_key: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "SopsSecretsConfig":
+    def from_dict(cls, data: dict[str, Any] | None) -> SopsSecretsConfig:
+        """From dict."""
         raw = data or {}
         file_value = raw.get("file") or raw.get("sops_file")
         return cls(
@@ -179,6 +205,8 @@ class SopsSecretsConfig:
 
 @dataclass(slots=True)
 class GmeowConfig:
+    """Represent GmeowConfig data and behavior."""
+
     data_dir: Path = Path("data")
     host: str = "127.0.0.1"
     port: int = 8765
@@ -201,21 +229,25 @@ class GmeowConfig:
 
     @property
     def object_store_dir(self) -> Path:
+        """Object store dir."""
         return self.data_dir / "objects"
 
     @property
     def tantivy_dir(self) -> Path:
+        """Tantivy dir."""
         return self.data_dir / "tantivy"
 
     @classmethod
-    def load(cls, path: Path | str = "config.toml") -> "GmeowConfig":
+    def load(cls, path: Path | str = "config.toml") -> GmeowConfig:
+        """Load."""
         config_path = Path(path)
         if not config_path.exists():
             return cls()
         parsed = tomllib.loads(config_path.read_text()) or {}
         raw = parsed.get("gmeow")
         if not isinstance(raw, dict):
-            raise ValueError(f"{config_path} must contain a [gmeow] table.")
+            msg = f"{config_path} must contain a [gmeow] table."
+            raise TypeError(msg)
         data_dir = Path(raw.get("data_dir", "data"))
         service_account_file = Path(raw.get("service_account_file", data_dir / "secrets" / "service-account.json")).expanduser()
         rules = [PriorityRule.from_dict(rule) for rule in raw.get("priority_rules", [])]
@@ -227,7 +259,9 @@ class GmeowConfig:
             auth_mode=str(raw.get("auth_mode", "service_account")),
             subject=raw.get("subject"),
             service_account_file=service_account_file,
-            user_credentials_file=Path(raw.get("user_credentials_file", Path.home() / ".config/gcloud/application_default_credentials.json")).expanduser(),
+            user_credentials_file=Path(
+                raw.get("user_credentials_file", Path.home() / ".config/gcloud/application_default_credentials.json")
+            ).expanduser(),
             embedding_model=str(raw.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")),
             embedding_endpoint=str(raw.get("embedding_endpoint", "http://127.0.0.1:8090/v1/embeddings")),
             semantic_chunk_size=int(raw.get("semantic_chunk_size", 192)),
@@ -241,33 +275,40 @@ class GmeowConfig:
         )
 
     def ensure_dirs(self) -> None:
+        """Ensure dirs."""
         for path in [self.object_store_dir, self.tantivy_dir, self.service_account_file.parent, self.imap.password_file.parent]:
             path.mkdir(parents=True, exist_ok=True)
 
     def load_secrets(self) -> dict[str, Any]:
+        """Load secrets."""
         if self._decrypted_secrets is not None:
             return self._decrypted_secrets
         if not self.secrets.file:
             self._decrypted_secrets = {}
             return self._decrypted_secrets
         if not self.secrets.file.exists():
-            raise RuntimeError(f"Configured SOPS secrets file does not exist: {self.secrets.file}")
+            msg = f"Configured SOPS secrets file does not exist: {self.secrets.file}"
+            raise RuntimeError(msg)
         self._decrypted_secrets = self._decrypt_sops_secrets()
         return self._decrypted_secrets
 
     def service_account_info(self) -> dict[str, Any] | None:
+        """Service account info."""
         value = self.load_secrets().get("service_account_json")
         return value if isinstance(value, dict) else None
 
     def user_credentials_info(self) -> dict[str, Any] | None:
+        """User credentials info."""
         value = self.load_secrets().get("user_credentials_json")
         return value if isinstance(value, dict) else None
 
     def database_dsn(self) -> str:
+        """Database dsn."""
         value = self.load_secrets().get("postgres_dsn")
         return value if isinstance(value, str) and value else self.postgres_dsn
 
     def imap_password(self) -> str | None:
+        """Imap password."""
         value = self.load_secrets().get("imap_password")
         if isinstance(value, str) and value:
             return value.strip()
@@ -291,17 +332,20 @@ class GmeowConfig:
                 stderr=subprocess.PIPE,
             )
         except FileNotFoundError as exc:
-            raise RuntimeError("sops is required to decrypt configured secrets.") from exc
+            msg = "sops is required to decrypt configured secrets."
+            raise RuntimeError(msg) from exc
         except subprocess.CalledProcessError as exc:
             detail = exc.stderr.strip() if exc.stderr else str(exc)
-            raise RuntimeError(f"Unable to decrypt configured SOPS secrets file: {detail}") from exc
+            msg = f"Unable to decrypt configured SOPS secrets file: {detail}"
+            raise RuntimeError(msg) from exc
         decoded = json.loads(output or "{}")
         if not isinstance(decoded, dict):
-            raise RuntimeError("Configured SOPS secrets file must decrypt to a mapping.")
+            msg = "Configured SOPS secrets file must decrypt to a mapping."
+            raise TypeError(msg)
         return decoded
 
 
-def _optional_int(value: Any) -> int | None:
+def _optional_int(value: object) -> int | None:
     if value is None or value is False:
         return None
     number = int(value)

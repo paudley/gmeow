@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide parser functionality for Gmeow."""
+
 from __future__ import annotations
 
 import base64
@@ -11,6 +13,8 @@ from typing import Any
 
 @dataclass(slots=True)
 class ParsedPart:
+    """Represent ParsedPart data and behavior."""
+
     part_id: str
     mime_type: str
     filename: str | None = None
@@ -22,6 +26,8 @@ class ParsedPart:
 
 @dataclass(slots=True)
 class ParsedMessage:
+    """Represent ParsedMessage data and behavior."""
+
     gmail_id: str
     thread_id: str | None
     label_ids: list[str]
@@ -36,6 +42,7 @@ class ParsedMessage:
 
 
 def decode_gmail_data(data: str | None) -> bytes:
+    """Decode gmail data."""
     if not data:
         return b""
     padding = "=" * (-len(data) % 4)
@@ -77,6 +84,7 @@ def _walk_payload(payload: dict[str, Any], prefix: str = "0") -> list[ParsedPart
 
 
 def parse_gmail_message(message: dict[str, Any]) -> ParsedMessage:
+    """Parse gmail message."""
     payload = message.get("payload", {})
     headers = _headers(payload.get("headers"))
     parts = _walk_payload(payload)
@@ -97,6 +105,7 @@ def parse_gmail_message(message: dict[str, Any]) -> ParsedMessage:
 
 
 def parse_rfc822(raw: bytes) -> tuple[dict[str, str], str]:
+    """Parse rfc822."""
     email_message = BytesParser(policy=policy.default).parsebytes(raw)
     headers = {key.lower(): str(value) for key, value in email_message.items()}
     body = email_message.get_body(preferencelist=("plain", "html"))

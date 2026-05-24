@@ -1,20 +1,28 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide maintenance functionality for Gmeow."""
+
 from __future__ import annotations
 
 import asyncio
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 from .config import MaintenanceConfig
 from .intelligence import IntelligenceWorker
 
+MAINTENANCE_EXCEPTIONS = (RuntimeError, ValueError, KeyError, TypeError, OSError)
+MAX_RESULT_SUMMARY_CHARS = 2000
+
 
 @dataclass(slots=True)
 class TimedTaskState:
+    """Represent TimedTaskState data and behavior."""
+
     name: str
     interval_seconds: int
     running: bool = False
@@ -26,11 +34,16 @@ class TimedTaskState:
     last_result: Any = None
     last_error: str | None = None
     next_run_at: str | None = None
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 class MaintenanceScheduler:
-    def __init__(self, config: MaintenanceConfig, cache: Any, sync: Any, attachments: Any, semantic: Any, graph: Any | None = None):
+    """Represent MaintenanceScheduler data and behavior."""
+
+    def __init__(
+        self, config: MaintenanceConfig, cache: object, sync: object, attachments: object, semantic: object, graph: object | None = None
+    ) -> None:
+        """Initialize MaintenanceScheduler."""
         self.config = config
         self.cache = cache
         self.sync = sync
@@ -43,6 +56,7 @@ class MaintenanceScheduler:
         self._gmail_lock = threading.Lock()
 
     def start(self) -> None:
+        """Start."""
         if not self.config.enabled:
             return
         specs: list[tuple[str, int | None, Callable[[], Any]]] = [
@@ -60,6 +74,7 @@ class MaintenanceScheduler:
             self._tasks.append(asyncio.create_task(self._loop(state, callback), name=f"gmeow-maintenance-{name}"))
 
     async def stop(self) -> None:
+        """Stop."""
         self._stopping.set()
         for task in self._tasks:
             task.cancel()
@@ -67,6 +82,7 @@ class MaintenanceScheduler:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
     def status(self) -> dict[str, Any]:
+        """Status."""
         return {
             "enabled": self.config.enabled,
             "tasks": {
@@ -87,6 +103,7 @@ class MaintenanceScheduler:
         }
 
     async def run_now(self, name: str) -> dict[str, Any]:
+        """Run now."""
         callbacks: dict[str, Callable[[], Any]] = {
             "sync_history": self._sync_history,
             "sync_priority": self._sync_priority,
@@ -105,29 +122,32 @@ class MaintenanceScheduler:
         delay = 0.0 if self.config.run_on_startup else float(state.interval_seconds)
         while not self._stopping.is_set():
             state.next_run_at = _future_iso(delay)
-            try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=delay)
+            stop_task = asyncio.create_task(self._stopping.wait())
+            done, pending = await asyncio.wait({stop_task}, timeout=delay)
+            for task in pending:
+                task.cancel()
+            if stop_task in done:
                 break
-            except asyncio.TimeoutError:
-                pass
             await self._run_once(state, callback)
             delay = float(state.interval_seconds)
 
     async def _run_once(self, state: TimedTaskState, callback: Callable[[], Any]) -> None:
-        if state._lock.locked():
+        if state.lock.locked():
             state.last_error = "previous run still active; skipped overlapping run"
             state.next_run_at = _future_iso(float(state.interval_seconds))
             return
-        async with state._lock:
+        async with state.lock:
             started = time.monotonic()
             state.running = True
             state.last_started_at = _now_iso()
             state.last_error = None
             self.cache.set_state(f"maintenance.{state.name}.last_started_at", state.last_started_at)
-            self.cache.record_operational_event("maintenance.started", "info", "maintenance", state.name, f"Started maintenance task {state.name}.")
+            self.cache.record_operational_event(
+                "maintenance.started", "info", "maintenance", state.name, f"Started maintenance task {state.name}."
+            )
             try:
                 result = await asyncio.to_thread(callback)
-            except Exception as exc:
+            except MAINTENANCE_EXCEPTIONS as exc:
                 state.failures += 1
                 state.last_error = repr(exc)
                 self.cache.set_state(f"maintenance.{state.name}.last_error", state.last_error)
@@ -136,7 +156,14 @@ class MaintenanceScheduler:
                 state.runs += 1
                 state.last_result = result
                 self.cache.set_state(f"maintenance.{state.name}.last_result", _summarize_result(result))
-                self.cache.record_operational_event("maintenance.completed", "info", "maintenance", state.name, f"Completed maintenance task {state.name}.", {"result": _summarize_result(result)})
+                self.cache.record_operational_event(
+                    "maintenance.completed",
+                    "info",
+                    "maintenance",
+                    state.name,
+                    f"Completed maintenance task {state.name}.",
+                    {"result": _summarize_result(result)},
+                )
             finally:
                 state.running = False
                 state.last_finished_at = _now_iso()
@@ -211,13 +238,13 @@ class MaintenanceScheduler:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _future_iso(seconds: float) -> str:
-    return datetime.fromtimestamp(time.time() + seconds, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.fromtimestamp(time.time() + seconds, tz=UTC).isoformat().replace("+00:00", "Z")
 
 
-def _summarize_result(value: Any) -> str:
+def _summarize_result(value: object) -> str:
     text = repr(value)
-    return text if len(text) <= 2000 else text[:1997] + "..."
+    return text if len(text) <= MAX_RESULT_SUMMARY_CHARS else text[: MAX_RESULT_SUMMARY_CHARS - 3] + "..."

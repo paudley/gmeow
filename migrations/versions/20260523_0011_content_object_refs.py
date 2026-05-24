@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""content object references
+"""content object references.
 
 Revision ID: 20260523_0011
 Revises: 20260523_0010
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS content_object_refs (
@@ -35,12 +37,16 @@ def upgrade() -> None:
     op.execute("CREATE INDEX IF NOT EXISTS content_object_refs_kind_idx ON content_object_refs(ref_kind)")
     _comments(
         {
-            "TABLE content_object_refs": "Materialized references from catalog rows to CAS content objects for retention and audit diagnostics.",
+            "TABLE content_object_refs": (
+                "Materialized references from catalog rows to CAS content objects for retention and audit diagnostics."
+            ),
             "COLUMN content_object_refs.digest": "Referenced CAS object digest.",
             "COLUMN content_object_refs.ref_table": "Catalog table that owns this reference.",
             "COLUMN content_object_refs.ref_pk": "Text representation of the owning row primary key.",
             "COLUMN content_object_refs.ref_column": "Owning row column that stores the digest.",
-            "COLUMN content_object_refs.ref_kind": "Logical payload type such as raw_json, text_body, markdown, attachment, part_body, or ingest_artifact.",
+            "COLUMN content_object_refs.ref_kind": (
+                "Logical payload type such as raw_json, text_body, markdown, attachment, part_body, or ingest_artifact."
+            ),
             "COLUMN content_object_refs.updated_at": "Last reference materialization timestamp.",
             "INDEX content_object_refs_pkey": "Primary key index for unique row-to-CAS references.",
             "INDEX content_object_refs_digest_idx": "Accelerates CAS reverse-reference lookup.",
@@ -51,6 +57,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP TABLE IF EXISTS content_object_refs")
 
 

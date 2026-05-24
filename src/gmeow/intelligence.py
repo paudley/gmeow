@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide intelligence functionality for Gmeow."""
+
 from __future__ import annotations
 
 import json
@@ -13,9 +15,14 @@ from .graph import extract_attachment_sidecar_triples, extract_triples
 from .kg import clean_text_for_kg
 from .parser import parse_gmail_message
 
+INTELLIGENCE_EXCEPTIONS = (RuntimeError, ValueError, KeyError, TypeError, OSError)
+
 
 class IntelligenceWorker:
-    def __init__(self, cache: Any, semantic: Any, graph: Any | None = None):
+    """Represent IntelligenceWorker data and behavior."""
+
+    def __init__(self, cache: object, semantic: object, graph: object | None = None) -> None:
+        """Initialize IntelligenceWorker."""
         self.cache = cache
         self.semantic = semantic
         self.graph = graph
@@ -23,9 +30,11 @@ class IntelligenceWorker:
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
 
     def enqueue_all(self) -> dict[str, int]:
+        """Enqueue all."""
         return self.cache.enqueue_all_intelligence_jobs()
 
     def run_until_empty(self, limit: int | None = None) -> dict[str, int]:
+        """Run until empty."""
         processed = 0
         failed = 0
         while limit is None or processed < limit:
@@ -34,7 +43,7 @@ class IntelligenceWorker:
                 break
             try:
                 self.process_job(job)
-            except Exception as exc:
+            except INTELLIGENCE_EXCEPTIONS as exc:
                 self.cache.fail_intelligence_job(job["id"], repr(exc))
                 failed += 1
             else:
@@ -43,15 +52,18 @@ class IntelligenceWorker:
         return {"processed": processed, "failed": failed, "remaining": self.cache.intelligence_job_status().get("pending", 0)}
 
     def process_job(self, job: dict[str, Any]) -> None:
+        """Process job."""
         if job["kind"] == "message":
             self.process_message(job["target_id"])
             return
         if job["kind"] == "attachment":
             self.process_attachment(job["target_id"])
             return
-        raise ValueError(f"Unknown intelligence job kind: {job['kind']}")
+        msg = f"Unknown intelligence job kind: {job['kind']}"
+        raise ValueError(msg)
 
     def process_message(self, message_id: str) -> None:
+        """Process message."""
         message = self.cache.get_message(message_id)
         if message is None:
             raise KeyError(message_id)
@@ -65,9 +77,12 @@ class IntelligenceWorker:
         self.categories.categorize_message(message_id)
         text = "\n\n".join([message.get("subject") or "", message.get("text_body") or "", message.get("markdown") or ""])
         categories = ",".join(self.cache.get_message(message_id).get("categories", []))
-        self.semantic.index_message(message_id, clean_text_for_kg(text), {"thread_id": message.get("thread_id") or "", "categories": categories})
+        self.semantic.index_message(
+            message_id, clean_text_for_kg(text), {"thread_id": message.get("thread_id") or "", "categories": categories}
+        )
 
     def process_attachment(self, sha1: str) -> None:
+        """Process attachment."""
         attachments = [attachment for attachment in self.cache.list_attachments() if attachment["sha1"] == sha1]
         if not attachments:
             raise KeyError(sha1)

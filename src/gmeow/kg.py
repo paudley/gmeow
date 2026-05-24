@@ -1,15 +1,22 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide kg functionality for Gmeow."""
+
 from __future__ import annotations
 
 import json
 import re
-from html import unescape
 from functools import lru_cache
+from html import unescape
 from typing import Any
 
+import spacy
 
 Triple = tuple[str, str, str, str | None]
+
+MIN_ENTITY_TEXT_LENGTH = 2
+MAX_CLEAN_TOKEN_LENGTH = 100
+MAX_ENTITY_TEXT_LENGTH = 120
 
 
 SPACY_ENTITY_TYPES = {
@@ -70,9 +77,7 @@ STOP_ENTITY_VALUES = {
 
 
 @lru_cache(maxsize=1)
-def _nlp():
-    import spacy
-
+def _nlp() -> spacy.language.Language:
     try:
         return spacy.load("en_core_web_sm")
     except OSError:
@@ -82,6 +87,7 @@ def _nlp():
 
 
 def extract_message_kg(message_id: str, text: str) -> list[Triple]:
+    """Extract message kg."""
     subject = _node("message", message_id)
     triples: list[Triple] = []
     clean = clean_text_for_kg(text)
@@ -90,14 +96,13 @@ def extract_message_kg(message_id: str, text: str) -> list[Triple]:
         triples.append((subject, f"gmeow:mentions/{entity['kind']}", entity_node, message_id))
         triples.append((entity_node, "rdf:type", f"gmeow:{entity['kind'].title()}", message_id))
         triples.append((entity_node, "gmeow:canonicalText", entity["text"], message_id))
-    for url in extract_urls(clean):
-        triples.append((subject, "gmeow:mentionsUrl", _node("url", url), message_id))
-    for email in extract_email_addresses(clean):
-        triples.append((subject, "gmeow:mentionsEmail", _node("address", email), message_id))
+    triples.extend((subject, "gmeow:mentionsUrl", _node("url", url), message_id) for url in extract_urls(clean))
+    triples.extend((subject, "gmeow:mentionsEmail", _node("address", email), message_id) for email in extract_email_addresses(clean))
     return _dedupe(triples)
 
 
 def extract_sidecar_kg(sha1: str, metadata: dict[str, Any]) -> list[Triple]:
+    """Extract sidecar kg."""
     subject = _node("attachment", sha1)
     triples: list[Triple] = [(subject, "rdf:type", "gmeow:Attachment", None)]
     source = metadata.get("source", {})
@@ -107,118 +112,22 @@ def extract_sidecar_kg(sha1: str, metadata: dict[str, Any]) -> list[Triple]:
     message_node = _node("message", message_id) if message_id else None
     if gmail.get("message_id"):
         triples.append((message_node, "gmeow:hasAttachment", subject, message_id))
-    for key, predicate in [
-        ("filename", "gmeow:attachmentFilename"),
-        ("mime_type", "gmeow:attachmentMimeType"),
-        ("size", "gmeow:attachmentSize"),
-    ]:
-        if gmail.get(key) is not None:
-            triples.append((subject, predicate, str(gmail[key]), gmail.get("message_id")))
-    for key, predicate in [
-        ("subject", "gmeow:sourceMessageSubject"),
-        ("from", "gmeow:sourceMessageFrom"),
-        ("to", "gmeow:sourceMessageTo"),
-        ("date", "gmeow:sourceMessageDate"),
-    ]:
-        if message.get(key):
-            triples.append((subject, predicate, str(message[key]), gmail.get("message_id")))
+    triples.extend(_mapped_triples(subject, gmail, message_id, _GMAIL_ATTACHMENT_FIELDS))
+    triples.extend(_mapped_triples(subject, message, message_id, _SOURCE_MESSAGE_FIELDS))
     tags = metadata.get("exiftool", {}).get("tags", {})
-    tag_map = {
-        "File:FileType": "gmeow:fileType",
-        "File:MIMEType": "gmeow:fileMimeType",
-        "File:ImageWidth": "gmeow:imageWidth",
-        "File:ImageHeight": "gmeow:imageHeight",
-        "PNG:ImageWidth": "gmeow:imageWidth",
-        "PNG:ImageHeight": "gmeow:imageHeight",
-        "EXIF:ImageWidth": "gmeow:imageWidth",
-        "EXIF:ImageHeight": "gmeow:imageHeight",
-        "PDF:Title": "gmeow:documentTitle",
-        "PDF:Author": "gmeow:documentAuthor",
-        "PDF:Creator": "gmeow:documentCreator",
-        "PDF:Producer": "gmeow:documentProducer",
-    }
-    for key, predicate in tag_map.items():
-        if tags.get(key) is not None:
-            triples.append((subject, predicate, str(tags[key]), message_id))
+    triples.extend(_mapped_triples(subject, tags, message_id, _EXIF_TAG_FIELDS, include_falsey=True))
     analysis = metadata.get("analysis", {}) if isinstance(metadata.get("analysis"), dict) else {}
     file_info = analysis.get("file", {}) if isinstance(analysis.get("file"), dict) else {}
-    if file_info:
-        for key, predicate in [
-            ("media_type", "gmeow:analysisMediaType"),
-            ("detected_media_type", "gmeow:detectedMimeType"),
-            ("file_description", "gmeow:fileDescription"),
-            ("extension", "gmeow:fileExtension"),
-        ]:
-            if file_info.get(key):
-                triples.append((subject, predicate, str(file_info[key]), message_id))
+    triples.extend(_mapped_triples(subject, file_info, message_id, _ANALYSIS_FILE_FIELDS))
     if analysis.get("available_text") is not None:
         triples.append((subject, "gmeow:analysisHasText", str(bool(analysis.get("available_text"))).lower(), message_id))
     document = analysis.get("document", {}) if isinstance(analysis.get("document"), dict) else {}
-    if document:
-        document_node = _node("document", sha1)
-        triples.append((subject, "gmeow:hasDocument", document_node, message_id))
-        triples.append((document_node, "rdf:type", "gmeow:Document", message_id))
-        if message_node:
-            triples.append((message_node, "gmeow:hasAttachmentDocument", document_node, message_id))
-    for key, predicate in [
-        ("title", "gmeow:documentTitle"),
-        ("author", "gmeow:documentAuthor"),
-        ("pages", "gmeow:documentPages"),
-        ("page_size", "gmeow:documentPageSize"),
-        ("producer", "gmeow:documentProducer"),
-        ("creator", "gmeow:documentCreator"),
-        ("pdf_version", "gmeow:documentPdfVersion"),
-    ]:
-        if document.get(key):
-            triples.append((subject, predicate, str(document[key]), message_id))
-            if document:
-                triples.append((document_node, predicate, str(document[key]), message_id))
-    if document.get("author"):
-        author_node = _node("documentAuthor", str(document["author"]))
-        triples.append((subject, "gmeow:hasDocumentAuthor", author_node, message_id))
-        triples.append((author_node, "gmeow:canonicalText", str(document["author"]), message_id))
-        if message_node:
-            triples.append((message_node, "gmeow:attachmentMentions", author_node, message_id))
+    triples.extend(_document_triples(subject, message_node, message_id, sha1, document))
     calendar = analysis.get("calendar", {}) if isinstance(analysis.get("calendar"), dict) else {}
     fields = calendar.get("fields", {}) if isinstance(calendar.get("fields"), dict) else {}
-    event_node = None
-    if fields:
-        event_identity = _first_field(fields, "uid") or "|".join([_first_field(fields, "summary"), _first_field(fields, "dtstart"), sha1])
-        event_node = _node("event", event_identity)
-        triples.append((subject, "gmeow:hasCalendarEvent", event_node, message_id))
-        triples.append((event_node, "rdf:type", "gmeow:Event", message_id))
-        if message_node:
-            triples.append((message_node, "gmeow:hasAttachmentEvent", event_node, message_id))
-    for key, predicate in [
-        ("summary", "gmeow:calendarSummary"),
-        ("location", "gmeow:calendarLocation"),
-        ("dtstart", "gmeow:calendarStart"),
-        ("dtend", "gmeow:calendarEnd"),
-        ("organizer", "gmeow:calendarOrganizer"),
-        ("attendee", "gmeow:calendarAttendee"),
-    ]:
-        for value in fields.get(key, [])[:25]:
-            triples.append((subject, predicate, str(value), message_id))
-            if event_node:
-                triples.append((event_node, predicate, str(value), message_id))
-            if key in {"attendee", "organizer"}:
-                attendee_node = _node("calendarAttendee", str(value))
-                triples.append((subject, "gmeow:hasCalendarParticipant", attendee_node, message_id))
-                if event_node:
-                    triples.append((event_node, "gmeow:hasParticipant", attendee_node, message_id))
-                if message_node:
-                    triples.append((message_node, "gmeow:attachmentMentions", attendee_node, message_id))
+    triples.extend(_calendar_triples(subject, message_node, message_id, sha1, fields))
     archive = analysis.get("archive", {}) if isinstance(analysis.get("archive"), dict) else {}
-    for filename in archive.get("files", [])[:100]:
-        child = _node("archiveFile", f"{sha1}/{filename}")
-        triples.append((subject, "gmeow:containsFile", child, message_id))
-        triples.append((child, "rdf:type", "gmeow:ArchiveFile", message_id))
-        triples.append((child, "gmeow:filename", str(filename), message_id))
-        extension = _extension(filename)
-        if extension:
-            triples.append((child, "gmeow:fileExtension", extension, message_id))
-        if message_node:
-            triples.append((message_node, "gmeow:attachmentContainsFile", child, message_id))
+    triples.extend(_archive_file_triples(subject, message_node, message_id, sha1, archive))
     extracted_sections = {
         "document": document.get("text") or "",
         "content": analysis.get("content_text") or "",
@@ -233,7 +142,156 @@ def extract_sidecar_kg(sha1: str, metadata: dict[str, Any]) -> list[Triple]:
     return _dedupe(triples)
 
 
-def _attachment_text_entities(attachment_node: str, message_node: str | None, message_id: str | None, source_kind: str, text: str) -> list[Triple]:
+_GMAIL_ATTACHMENT_FIELDS = {
+    "filename": "gmeow:attachmentFilename",
+    "mime_type": "gmeow:attachmentMimeType",
+    "size": "gmeow:attachmentSize",
+}
+_SOURCE_MESSAGE_FIELDS = {
+    "subject": "gmeow:sourceMessageSubject",
+    "from": "gmeow:sourceMessageFrom",
+    "to": "gmeow:sourceMessageTo",
+    "date": "gmeow:sourceMessageDate",
+}
+_EXIF_TAG_FIELDS = {
+    "File:FileType": "gmeow:fileType",
+    "File:MIMEType": "gmeow:fileMimeType",
+    "File:ImageWidth": "gmeow:imageWidth",
+    "File:ImageHeight": "gmeow:imageHeight",
+    "PNG:ImageWidth": "gmeow:imageWidth",
+    "PNG:ImageHeight": "gmeow:imageHeight",
+    "EXIF:ImageWidth": "gmeow:imageWidth",
+    "EXIF:ImageHeight": "gmeow:imageHeight",
+    "PDF:Title": "gmeow:documentTitle",
+    "PDF:Author": "gmeow:documentAuthor",
+    "PDF:Creator": "gmeow:documentCreator",
+    "PDF:Producer": "gmeow:documentProducer",
+}
+_ANALYSIS_FILE_FIELDS = {
+    "media_type": "gmeow:analysisMediaType",
+    "detected_media_type": "gmeow:detectedMimeType",
+    "file_description": "gmeow:fileDescription",
+    "extension": "gmeow:fileExtension",
+}
+_DOCUMENT_FIELDS = {
+    "title": "gmeow:documentTitle",
+    "author": "gmeow:documentAuthor",
+    "pages": "gmeow:documentPages",
+    "page_size": "gmeow:documentPageSize",
+    "producer": "gmeow:documentProducer",
+    "creator": "gmeow:documentCreator",
+    "pdf_version": "gmeow:documentPdfVersion",
+}
+_CALENDAR_FIELDS = {
+    "summary": "gmeow:calendarSummary",
+    "location": "gmeow:calendarLocation",
+    "dtstart": "gmeow:calendarStart",
+    "dtend": "gmeow:calendarEnd",
+    "organizer": "gmeow:calendarOrganizer",
+    "attendee": "gmeow:calendarAttendee",
+}
+
+
+def _mapped_triples(
+    subject: str, values: dict[str, Any], message_id: str | None, mapping: dict[str, str], *, include_falsey: bool = False
+) -> list[Triple]:
+    return [
+        (subject, predicate, str(values[key]), message_id)
+        for key, predicate in mapping.items()
+        if key in values and (include_falsey or values.get(key))
+    ]
+
+
+def _document_triples(subject: str, message_node: str | None, message_id: str | None, sha1: str, document: dict[str, Any]) -> list[Triple]:
+    if not document:
+        return []
+    document_node = _node("document", sha1)
+    triples = [
+        (subject, "gmeow:hasDocument", document_node, message_id),
+        (document_node, "rdf:type", "gmeow:Document", message_id),
+    ]
+    if message_node:
+        triples.append((message_node, "gmeow:hasAttachmentDocument", document_node, message_id))
+    for triple in _mapped_triples(subject, document, message_id, _DOCUMENT_FIELDS):
+        triples.append(triple)
+        triples.append((document_node, triple[1], triple[2], message_id))
+    if document.get("author"):
+        author_node = _node("documentAuthor", str(document["author"]))
+        triples.extend(
+            [
+                (subject, "gmeow:hasDocumentAuthor", author_node, message_id),
+                (author_node, "gmeow:canonicalText", str(document["author"]), message_id),
+            ]
+        )
+        if message_node:
+            triples.append((message_node, "gmeow:attachmentMentions", author_node, message_id))
+    return triples
+
+
+def _calendar_triples(subject: str, message_node: str | None, message_id: str | None, sha1: str, fields: dict[str, Any]) -> list[Triple]:
+    if not fields:
+        return []
+    event_identity = _first_field(fields, "uid") or "|".join([_first_field(fields, "summary"), _first_field(fields, "dtstart"), sha1])
+    event_node = _node("event", event_identity)
+    triples = [(subject, "gmeow:hasCalendarEvent", event_node, message_id), (event_node, "rdf:type", "gmeow:Event", message_id)]
+    if message_node:
+        triples.append((message_node, "gmeow:hasAttachmentEvent", event_node, message_id))
+    for key, predicate in _CALENDAR_FIELDS.items():
+        for value in fields.get(key, [])[:25]:
+            triples.extend(
+                _calendar_value_triples(
+                    {"subject": subject, "message_node": message_node, "message_id": message_id, "event_node": event_node},
+                    key,
+                    predicate,
+                    str(value),
+                )
+            )
+    return triples
+
+
+def _calendar_value_triples(context: dict[str, str | None], key: str, predicate: str, value: str) -> list[Triple]:
+    subject = str(context["subject"])
+    message_node = context["message_node"]
+    message_id = context["message_id"]
+    event_node = str(context["event_node"])
+    triples = [(subject, predicate, value, message_id), (event_node, predicate, value, message_id)]
+    if key in {"attendee", "organizer"}:
+        attendee_node = _node("calendarAttendee", value)
+        triples.extend(
+            [
+                (subject, "gmeow:hasCalendarParticipant", attendee_node, message_id),
+                (event_node, "gmeow:hasParticipant", attendee_node, message_id),
+            ]
+        )
+        if message_node:
+            triples.append((message_node, "gmeow:attachmentMentions", attendee_node, message_id))
+    return triples
+
+
+def _archive_file_triples(
+    subject: str, message_node: str | None, message_id: str | None, sha1: str, archive: dict[str, Any]
+) -> list[Triple]:
+    triples: list[Triple] = []
+    for filename in archive.get("files", [])[:100]:
+        child = _node("archiveFile", f"{sha1}/{filename}")
+        triples.extend(
+            [
+                (subject, "gmeow:containsFile", child, message_id),
+                (child, "rdf:type", "gmeow:ArchiveFile", message_id),
+                (child, "gmeow:filename", str(filename), message_id),
+            ]
+        )
+        extension = _extension(filename)
+        if extension:
+            triples.append((child, "gmeow:fileExtension", extension, message_id))
+        if message_node:
+            triples.append((message_node, "gmeow:attachmentContainsFile", child, message_id))
+    return triples
+
+
+def _attachment_text_entities(
+    attachment_node: str, message_node: str | None, message_id: str | None, source_kind: str, text: str
+) -> list[Triple]:
     if not text:
         return []
     triples: list[Triple] = []
@@ -287,9 +345,7 @@ def _section_text(analysis: dict[str, Any], sections: list[str], keys: list[str]
         value = analysis.get(section)
         if not isinstance(value, dict):
             continue
-        for key in keys:
-            if isinstance(value.get(key), str):
-                found.append(value[key])
+        found.extend(value[key] for key in keys if isinstance(value.get(key), str))
     return "\n\n".join(found)
 
 
@@ -308,18 +364,25 @@ def _entity_node_kind(source_kind: str) -> str:
 
 
 def spacy_entities(text: str, limit: int = 200) -> list[dict[str, str]]:
+    """Spacy entities."""
     clean = clean_text_for_kg(text)
     if not clean:
         return []
     doc = _nlp()(clean[:100_000])
     entities = []
     seen: set[tuple[str, str]] = set()
+    _append_spacy_entities(entities, seen, doc, limit)
+    _append_fallback_org_entities(entities, seen, clean, limit)
+    return entities
+
+
+def _append_spacy_entities(entities: list[dict[str, str]], seen: set[tuple[str, str]], doc: object, limit: int) -> None:
     for ent in getattr(doc, "ents", []):
         kind = SPACY_ENTITY_TYPES.get(ent.label_)
         if not kind:
             continue
         value = ent.text.strip()
-        if len(value) < 2:
+        if len(value) < MIN_ENTITY_TEXT_LENGTH:
             continue
         if _noisy_entity(value):
             continue
@@ -330,6 +393,9 @@ def spacy_entities(text: str, limit: int = 200) -> list[dict[str, str]]:
         entities.append({"text": value, "label": ent.label_, "kind": kind})
         if len(entities) >= limit:
             break
+
+
+def _append_fallback_org_entities(entities: list[dict[str, str]], seen: set[tuple[str, str]], clean: str, limit: int) -> None:
     for value in re.findall(r"\b[A-Z][A-Za-z0-9]*(?:AI|ML|OS|DB|API|Inc|Corp|Labs?)\b", clean):
         if _noisy_entity(value):
             continue
@@ -340,17 +406,17 @@ def spacy_entities(text: str, limit: int = 200) -> list[dict[str, str]]:
         entities.append({"text": value, "label": "ORG_FALLBACK", "kind": "org"})
         if len(entities) >= limit:
             break
-    return entities
 
 
 def clean_text_for_kg(text: str) -> str:
+    """Clean text for kg."""
     value = unescape(text or "")
     value = re.sub(r"(?is)<!--.*?-->", " ", value)
     value = re.sub(r"(?is)<(script|style|head|svg|noscript)[^>]*>.*?</\1>", " ", value)
     value = re.sub(r"(?is)<[^>]+>", " ", value)
     cleaned_tokens = []
     for token in value.split():
-        if len(token) > 100:
+        if len(token) > MAX_CLEAN_TOKEN_LENGTH:
             continue
         if re.fullmatch(r"[A-Za-z0-9+/=_-]{40,}", token):
             continue
@@ -366,16 +432,16 @@ def _noisy_entity(value: str) -> bool:
         return True
     if re.search(r"[<>{}=;]", value):
         return True
-    if len(value) > 120:
-        return True
-    return False
+    return len(value) > MAX_ENTITY_TEXT_LENGTH
 
 
 def extract_urls(text: str) -> list[str]:
+    """Extract urls."""
     return sorted(set(re.findall(r"https?://[^\s<>\"]+", text or "")))[:100]
 
 
 def extract_email_addresses(text: str) -> list[str]:
+    """Extract email addresses."""
     return sorted(set(re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text or "")))[:100]
 
 

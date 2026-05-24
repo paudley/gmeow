@@ -1,18 +1,27 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide categories functionality for Gmeow."""
+
 from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 from typing import Any
+
+from sklearn.cluster import DBSCAN
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from .cache import categorize_message
 from .kg import clean_text_for_kg
 
-
 DEFAULT_HIDDEN = {"camera_alert", "machine_notification", "bulk_status_noise", "call_notice", "dev_activity", "dev_review", "mailing_list"}
+MIN_CLUSTER_MESSAGES = 2
+MIN_PROFILE_EXAMPLES = 2
+PROFILE_MATCH_THRESHOLD = 0.35
+MIN_CATEGORY_TOKEN_LENGTH = 3
 
 
 INITIAL_CATEGORY_RULES: list[tuple[str, dict[str, Any], str]] = [
@@ -24,7 +33,11 @@ INITIAL_CATEGORY_RULES: list[tuple[str, dict[str, Any], str]] = [
     ("dev_ci", {"domain": "gitlab.com", "subject": ["pipeline"]}, "GitLab pipeline notifications"),
     ("dev_review", {"domain": "github.com", "body": ["pull request", "review", "commented"]}, "GitHub code review notifications"),
     ("security_admin", {"domain": "google.com", "sender": ["workspace-alerts"]}, "Google Workspace admin alerts"),
-    ("security_admin", {"domain": "gitlab.com", "subject": ["password", "passkey", "verify your identity"]}, "GitLab security account alerts"),
+    (
+        "security_admin",
+        {"domain": "gitlab.com", "subject": ["password", "passkey", "verify your identity"]},
+        "GitLab security account alerts",
+    ),
     ("financial_statement", {"domain": "interactivebrokers.com"}, "Interactive Brokers statements and reports"),
     ("financial_statement", {"subject": ["statement", "e-statement", "invoice", "receipt"]}, "Statements, invoices, and receipts"),
     ("mailing_list", {"domain": "tuhs.org"}, "TUHS mailing list"),
@@ -45,6 +58,7 @@ INITIAL_CATEGORY_RULES: list[tuple[str, dict[str, Any], str]] = [
 
 
 def message_document(message: dict[str, Any]) -> str:
+    """Message document."""
     labels = " ".join(message.get("labels", []) + message.get("label_ids", []))
     sender_name, sender_addr = parseaddr(message.get("sender") or "")
     sender_domain = sender_addr.split("@", 1)[-1] if "@" in sender_addr else sender_addr
@@ -65,6 +79,7 @@ def message_document(message: dict[str, Any]) -> str:
 
 
 def normalize_text(text: str) -> str:
+    """Normalize text."""
     value = clean_text_for_kg(text).lower()
     value = re.sub(r"https?://\S+", " ", value)
     value = re.sub(r"[\w.+-]+@[\w.-]+", " ", value)
@@ -74,36 +89,14 @@ def normalize_text(text: str) -> str:
 
 
 def deterministic_assignments(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Deterministic assignments."""
     categories = set(categorize_message(message))
     sender = (message.get("sender") or "").lower()
     subject = (message.get("subject") or "").lower()
     text = " ".join([subject, sender, (message.get("snippet") or "").lower(), (message.get("text_body") or "")[:2000].lower()])
     labels = {label.lower() for label in message.get("labels", [])}
 
-    if "notify@ringcentral.com" in sender or "service@ringcentral.com" in sender or subject.startswith("new call"):
-        categories.add("call_notice")
-    if "notifications@github.com" in sender or "noreply.github.com" in text:
-        categories.add("dev_activity")
-        if "commented on this pull request" in text or "review" in text or "requested" in text:
-            categories.add("dev_review")
-        if "workflow run" in text or "ci" in subject or "run failed" in subject:
-            categories.add("dev_ci")
-    if "gitlab@mg.gitlab.com" in sender:
-        categories.add("dev_activity")
-        if "pipeline" in text or "failed pipeline" in subject or "fixed pipeline" in subject:
-            categories.add("dev_ci")
-        if "password changed" in subject or "passkey" in subject or "verify your identity" in subject:
-            categories.add("security_admin")
-    if "google-workspace-alerts-noreply@google.com" in sender or "verify your identity" in text or "password changed" in text:
-        categories.add("security_admin")
-    if "interactivebrokers.com" in sender or "statement" in subject or "trade confirmation" in text:
-        categories.add("financial_statement")
-    if "tuhs.org" in sender or "category_forums" in labels:
-        categories.add("mailing_list")
-    if "newsletter" in sender or "daily@" in sender or "weekly" in subject:
-        categories.add("newsletter")
-    if "category_social" in labels or "redditmail.com" in sender or "linkedin.com" in sender or "patreon.com" in sender:
-        categories.add("social")
+    categories.update(_deterministic_rule_categories(sender, subject, text, labels))
 
     if categories - {"update", "primary"}:
         categories.discard("primary")
@@ -120,12 +113,58 @@ def deterministic_assignments(message: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _deterministic_rule_categories(sender: str, subject: str, text: str, labels: set[str]) -> set[str]:
+    categories: set[str] = set()
+    rules = [
+        ("call_notice", "notify@ringcentral.com" in sender or "service@ringcentral.com" in sender or subject.startswith("new call")),
+        ("security_admin", _is_security_admin_message(sender, subject, text)),
+        ("financial_statement", "interactivebrokers.com" in sender or "statement" in subject or "trade confirmation" in text),
+        ("mailing_list", "tuhs.org" in sender or "category_forums" in labels),
+        ("newsletter", "newsletter" in sender or "daily@" in sender or "weekly" in subject),
+        ("social", "category_social" in labels or "redditmail.com" in sender or "linkedin.com" in sender or "patreon.com" in sender),
+    ]
+    categories.update(category for category, matched in rules if matched)
+    categories.update(_dev_categories(sender, subject, text))
+    return categories
+
+
+def _dev_categories(sender: str, subject: str, text: str) -> set[str]:
+    categories: set[str] = set()
+    if "notifications@github.com" in sender or "noreply.github.com" in text:
+        categories.add("dev_activity")
+        if "commented on this pull request" in text or "review" in text or "requested" in text:
+            categories.add("dev_review")
+        if "workflow run" in text or "ci" in subject or "run failed" in subject:
+            categories.add("dev_ci")
+    if "gitlab@mg.gitlab.com" in sender:
+        categories.add("dev_activity")
+        if "pipeline" in text or "failed pipeline" in subject or "fixed pipeline" in subject:
+            categories.add("dev_ci")
+    return categories
+
+
+def _is_security_admin_message(sender: str, subject: str, text: str) -> bool:
+    return (
+        "google-workspace-alerts-noreply@google.com" in sender
+        or "verify your identity" in text
+        or "password changed" in text
+        or (
+            "gitlab@mg.gitlab.com" in sender
+            and ("password changed" in subject or "passkey" in subject or "verify your identity" in subject)
+        )
+    )
+
+
 class CategoryEngine:
-    def __init__(self, cache: Any):
+    """Represent CategoryEngine data and behavior."""
+
+    def __init__(self, cache: object) -> None:
+        """Initialize CategoryEngine."""
         self.cache = cache
         self._manual_profiles_cache: dict[str, list[str]] | None = None
 
     def categorize_message(self, message_id: str, manual_profiles: dict[str, list[str]] | None = None) -> list[dict[str, Any]]:
+        """Categorize message."""
         message = self.cache.get_message(message_id)
         if message is None:
             raise KeyError(message_id)
@@ -139,6 +178,7 @@ class CategoryEngine:
         return deduped
 
     def recategorize(self, since_hours: int | None = None, limit: int | None = None) -> dict[str, Any]:
+        """Recategorize."""
         messages = self._messages(since_hours=since_hours, limit=limit)
         manual_profiles = self._manual_profiles(messages)
         categorized = 0
@@ -151,6 +191,7 @@ class CategoryEngine:
         return {"messages": categorized, "manual_profiles": sorted(manual_profiles), "categories": self.cache.category_stats()}
 
     def seed_initial_categories(self) -> dict[str, Any]:
+        """Seed initial categories."""
         inserted = 0
         for category, rule, description in INITIAL_CATEGORY_RULES:
             self.cache.upsert_category(category, source="manual", default_hidden=category in DEFAULT_HIDDEN, description=description)
@@ -159,23 +200,21 @@ class CategoryEngine:
                 inserted += 1
         return {"rules_inserted": inserted, "categories": self.cache.list_categories()}
 
-    def discover(self, since_hours: int = 48, limit: int | None = None, store: bool = True) -> dict[str, Any]:
+    def discover(self, since_hours: int = 48, limit: int | None = None, *, store: bool = True) -> dict[str, Any]:
+        """Discover."""
         messages = self._messages(since_hours=since_hours, limit=limit)
-        if len(messages) < 2:
+        if len(messages) < MIN_CLUSTER_MESSAGES:
             run = {"messages": len(messages), "clusters": []}
             if store:
                 run["id"] = self.cache.store_learned_category_run(run)
             return run
-        from sklearn.cluster import DBSCAN
-        from sklearn.feature_extraction.text import TfidfVectorizer
-
         docs = [message_document(message) for message in messages]
         vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=1, max_df=0.85, max_features=5000)
         matrix = vectorizer.fit_transform(docs)
         clustering = DBSCAN(eps=0.55, min_samples=2, metric="cosine").fit(matrix)
         terms = vectorizer.get_feature_names_out()
         clusters = []
-        for label in sorted(set(int(value) for value in clustering.labels_) - {-1}):
+        for label in sorted({int(value) for value in clustering.labels_} - {-1}):
             indexes = [idx for idx, value in enumerate(clustering.labels_) if int(value) == label]
             top_terms = _matrix_top_terms(matrix[indexes].mean(axis=0), terms, 12)
             senders = Counter(_sender_key(messages[idx]) for idx in indexes).most_common(5)
@@ -198,6 +237,7 @@ class CategoryEngine:
         return run
 
     def enable_learned_category(self, learned_id: str, category: str | None = None) -> dict[str, Any]:
+        """Enable learned category."""
         for run in self.cache.learned_category_runs(limit=50):
             for cluster in run["run"].get("clusters", []):
                 if cluster.get("id") != learned_id:
@@ -231,11 +271,11 @@ class CategoryEngine:
     def _messages(self, since_hours: int | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         messages = self.cache.iter_messages()
         if since_hours is not None:
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+            cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
             messages = [
                 message
                 for message in messages
-                if message.get("message_date_iso") and datetime.fromisoformat(message["message_date_iso"].replace("Z", "+00:00")) >= cutoff
+                if message.get("message_date_iso") and datetime.fromisoformat(message["message_date_iso"]) >= cutoff
             ]
         messages.sort(key=lambda message: message.get("message_date_iso") or "", reverse=True)
         return messages[:limit] if limit else messages
@@ -256,18 +296,15 @@ class CategoryEngine:
     def _manual_profile_assignments(self, message: dict[str, Any], profiles: dict[str, list[str]]) -> list[dict[str, Any]]:
         if not profiles:
             return []
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.metrics.pairwise import cosine_similarity
-
         assignments = []
         doc = message_document(message)
         for category, examples in profiles.items():
-            corpus = examples + [doc]
-            if len(corpus) < 2:
+            corpus = [*examples, doc]
+            if len(corpus) < MIN_PROFILE_EXAMPLES:
                 continue
             matrix = TfidfVectorizer(ngram_range=(1, 2), min_df=1, max_df=1.0, max_features=3000).fit_transform(corpus)
             similarity = float(cosine_similarity(matrix[-1], matrix[:-1]).max())
-            if similarity >= 0.35:
+            if similarity >= PROFILE_MATCH_THRESHOLD:
                 assignments.append(
                     {
                         "category": category,
@@ -313,26 +350,22 @@ def _rule_matches(message: dict[str, Any], rule: dict[str, Any]) -> bool:
         if values and not any(str(value).lower() in haystacks[key] for value in values):
             return False
     domain = rule.get("domain")
-    if domain and str(domain).lower() not in haystacks["sender"]:
-        return False
-    return True
+    return not (domain and str(domain).lower() not in haystacks["sender"])
 
 
 def _good_token(token: str) -> bool:
-    if len(token) < 3:
+    if len(token) < MIN_CATEGORY_TOKEN_LENGTH:
         return False
     if token.isdigit():
         return False
-    if token in {"the", "and", "for", "you", "your", "with", "this", "that", "from", "have", "has", "was", "are", "http", "https"}:
-        return False
-    return True
+    return token not in {"the", "and", "for", "you", "your", "with", "this", "that", "from", "have", "has", "was", "are", "http", "https"}
 
 
 def _top_terms(text: str, limit: int) -> list[str]:
     return [term for term, _ in Counter(text.split()).most_common(limit)]
 
 
-def _matrix_top_terms(row: Any, terms: Any, limit: int) -> list[str]:
+def _matrix_top_terms(row: object, terms: object, limit: int) -> list[str]:
     array = row.A1 if hasattr(row, "A1") else row.asarray().ravel()
     indexes = array.argsort()[::-1][:limit]
     return [str(terms[index]) for index in indexes if array[index] > 0]

@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide toon functionality for Gmeow."""
+
 from __future__ import annotations
 
 import json
@@ -7,11 +9,12 @@ import re
 from typing import Any
 
 
-def dumps(value: Any) -> str:
+def dumps(value: object) -> str:
+    """Serialize a value to TOON text."""
     return _encode(value, 0).rstrip() + "\n"
 
 
-def _encode(value: Any, indent: int) -> str:
+def _encode(value: object, indent: int) -> str:
     pad = "  " * indent
     if isinstance(value, dict):
         lines = []
@@ -36,8 +39,7 @@ def _encode_named_list(name: str, values: list[Any], indent: int) -> str:
     if _uniform_object_array(values):
         fields = list(values[0].keys())
         lines = [f"{pad}{name}[{len(values)}]{{{','.join(fields)}}}:"]
-        for item in values:
-            lines.append(f"{pad}  " + ",".join(_cell(item.get(field)) for field in fields))
+        lines.extend(f"{pad}  " + ",".join(_cell(item.get(field)) for field in fields) for item in values)
         return "\n".join(lines)
     if all(not isinstance(item, (dict, list)) for item in values):
         return f"{pad}{name}[{len(values)}]: " + ",".join(_cell(item) for item in values)
@@ -58,7 +60,7 @@ def _uniform_object_array(values: list[Any]) -> bool:
     return all(list(item.keys()) == fields and all(not isinstance(item.get(field), (dict, list)) for field in fields) for item in values)
 
 
-def _cell(value: Any) -> str:
+def _cell(value: object) -> str:
     if value is None:
         return ""
     text = _scalar(value)
@@ -67,7 +69,7 @@ def _cell(value: Any) -> str:
     return text
 
 
-def _scalar(value: Any) -> str:
+def _scalar(value: object) -> str:
     if value is None:
         return "null"
     if isinstance(value, bool):

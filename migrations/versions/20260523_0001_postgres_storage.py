@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""postgres storage catalog
+"""postgres storage catalog.
 
 Revision ID: 20260523_0001
 Revises:
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     op.execute("CREATE EXTENSION IF NOT EXISTS bloom")
     op.execute("CREATE EXTENSION IF NOT EXISTS cube")
@@ -267,6 +269,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP TABLE IF EXISTS ingest_issues")
     op.execute("DROP TABLE IF EXISTS embedding_chunks")
     op.execute("DROP TABLE IF EXISTS people_aliases")
@@ -378,4 +381,5 @@ def _safe_comment(prefix: str, comment: str) -> None:
 
 
 def json_literal(value: str) -> str:
+    """Json literal."""
     return "'" + value.replace("'", "''") + "'"

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""attachment row identity
+"""attachment row identity.
 
 Revision ID: 20260523_0007
 Revises: 20260523_0006
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute("ALTER TABLE attachments DROP CONSTRAINT IF EXISTS attachments_pkey")
     op.execute("ALTER TABLE attachments ADD COLUMN IF NOT EXISTS id BIGSERIAL")
     op.execute(
@@ -42,17 +44,24 @@ def upgrade() -> None:
     )
     _comment("COMMENT ON TABLE attachments", "Per-message attachment metadata rows. Payload bytes are deduplicated through the CAS digest.")
     _comment("COMMENT ON COLUMN attachments.id", "Surrogate row identifier for one message attachment part.")
-    _comment("COMMENT ON COLUMN attachments.sha1", "Attachment payload content identifier used by attachment APIs and CAS lookup; not unique by itself.")
+    _comment(
+        "COMMENT ON COLUMN attachments.sha1",
+        "Attachment payload content identifier used by attachment APIs and CAS lookup; not unique by itself.",
+    )
     _comment("COMMENT ON COLUMN attachments.digest", "BLAKE3 CAS digest for attachment payload bytes.")
     _comment("COMMENT ON COLUMN attachments.message_id", "Message that owns this attachment reference.")
     _comment("COMMENT ON COLUMN attachments.part_id", "Gmail MIME part identifier for this message-local attachment reference.")
     _comment("COMMENT ON INDEX attachments_pkey", "Primary key index for per-message attachment metadata rows.")
     _comment("COMMENT ON INDEX attachments_sha1_idx", "Accelerates lookup of all message references for a deduplicated attachment payload.")
-    _comment("COMMENT ON INDEX attachments_message_part_sha1_uidx", "Prevents duplicate metadata rows for the same message part and payload digest.")
+    _comment(
+        "COMMENT ON INDEX attachments_message_part_sha1_uidx",
+        "Prevents duplicate metadata rows for the same message part and payload digest.",
+    )
     _comment("COMMENT ON CONSTRAINT attachments_pkey ON attachments", "Primary key constraint for per-message attachment metadata rows.")
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP INDEX IF EXISTS attachments_message_part_sha1_uidx")
     op.execute("DROP INDEX IF EXISTS attachments_sha1_idx")
 

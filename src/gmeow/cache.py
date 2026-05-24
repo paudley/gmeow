@@ -1,27 +1,114 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide cache functionality for Gmeow."""
+
 from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parseaddr, parsedate_to_datetime
 from typing import Any
 
+DEFAULT_EXCLUDED_CATEGORIES = {
+    "camera_alert",
+    "machine_notification",
+    "bulk_status_noise",
+    "call_notice",
+    "dev_activity",
+    "dev_review",
+    "mailing_list",
+}
 
-DEFAULT_EXCLUDED_CATEGORIES = {"camera_alert", "machine_notification", "bulk_status_noise", "call_notice", "dev_activity", "dev_review", "mailing_list"}
+MIN_USER_ENTITY_LENGTH = 2
+
+STRUCTURAL_GRAPH_NODES = {
+    "gmeow:Message",
+    "gmeow:Org",
+    "gmeow:Person",
+    "gmeow:Date",
+    "gmeow:Cardinal",
+    "gmeow:Event",
+    "gmeow:Document",
+    "gmeow:ArchiveFile",
+    "gmeow:AttachmentEvidence",
+    "gmeow:Location",
+    "gmeow:Money",
+    "gmeow:Product",
+    "gmeow:Time",
+    "gmeow:Place",
+    "gmeow:Facility",
+    "gmeow:Group",
+    "gmeow:Work",
+    "gmeow:Law",
+    "gmeow:Language",
+    "gmeow:Percent",
+    "gmeow:Quantity",
+    "gmeow:Ordinal",
+    "gmeow:Attachment",
+    "http://rdfs.org/sioc/ns#Post",
+    "http://rdfs.org/sioc/ns#Thread",
+    "https://schema.org/EmailMessage",
+    "https://schema.org/SoftwareSourceCode",
+    "http://xmlns.com/foaf/0.1/Agent",
+    "http://www.w3.org/2004/02/skos/core#Concept",
+    "http://usefulinc.com/ns/doap#Project",
+}
+GRAPH_NODE_PREFIX_PROFILES = [
+    ("gmeow:project/", {"kind": "projects", "role": "project"}),
+    ("gmeow:document/", {"kind": "documents", "role": "document"}),
+    ("gmeow:event/", {"kind": "events", "role": "event"}),
+    ("gmeow:archiveFile/", {"kind": "archive_files", "role": "archive_file"}),
+    ("gmeow:documentAuthor/", {"kind": "document_authors", "role": "document_author"}),
+    ("gmeow:calendarAttendee/", {"kind": "calendar_attendees", "role": "calendar_attendee"}),
+    (
+        "gmeow:attachmentEvidence/",
+        {"kind": "attachment_evidence", "visibility": "structural", "role": "evidence", "noise_reason": "evidence_node"},
+    ),
+    ("gmeow:ocrEntity/", {"kind": "ocr_entities", "role": "ocr_entity"}),
+    ("gmeow:visionEntity/", {"kind": "vision_entities", "role": "vision_entity"}),
+    ("gmeow:documentEntity/", {"kind": "document_entities", "role": "document_entity"}),
+    ("gmeow:calendarEntity/", {"kind": "calendar_entities", "role": "calendar_entity"}),
+    ("gmeow:label/", {"kind": "labels", "role": "label"}),
+    ("gmeow:attachment/", {"kind": "attachments", "role": "attachment"}),
+]
+GRAPH_NODE_KIND_PREFIXES = {
+    "gmeow:message/": "messages",
+    "gmeow:thread/": "threads",
+    "gmeow:address/": "addresses",
+    "gmeow:entity/": "entities",
+    "gmeow:org/": "orgs",
+    "gmeow:label/": "labels",
+    "gmeow:attachment/": "attachments",
+    "gmeow:document/": "documents",
+    "gmeow:event/": "events",
+    "gmeow:archiveFile/": "archive_files",
+    "gmeow:documentAuthor/": "document_authors",
+    "gmeow:calendarAttendee/": "calendar_attendees",
+    "gmeow:attachmentEvidence/": "attachment_evidence",
+    "gmeow:ocrEntity/": "ocr_entities",
+    "gmeow:visionEntity/": "vision_entities",
+    "gmeow:documentEntity/": "document_entities",
+    "gmeow:calendarEntity/": "calendar_entities",
+    "gmeow:project/": "projects",
+    "gmeow:url/": "urls",
+}
 
 
 def categorize_message(message: dict[str, Any]) -> list[str]:
+    """Categorize message."""
     subject = (message.get("subject") or "").lower()
     sender = (message.get("sender") or "").lower()
     snippet = (message.get("snippet") or "").lower()
     text = " ".join([subject, sender, snippet, (message.get("text_body") or "")[:2000].lower()])
     labels = {label.lower() for label in message.get("labels", [])}
     categories = []
-    if "notifications.ui.com" in sender or "unifi os" in sender or "unifi.ui.com" in text:
-        categories.append("camera_alert")
-    elif "smart detection" in text and ("recorded an animal" in text or "protect/events" in text):
+    if (
+        "notifications.ui.com" in sender
+        or "unifi os" in sender
+        or "unifi.ui.com" in text
+        or ("smart detection" in text and ("recorded an animal" in text or "protect/events" in text))
+    ):
         categories.append("camera_alert")
     if "googlealerts-noreply@google.com" in sender:
         categories.append("news_alert")
@@ -40,33 +127,36 @@ def _title_category(category: str) -> str:
     return category.replace("_", " ").replace("-", " ").title()
 
 
-def _parse_message_date(value: str | None) -> str | None:
+def _parse_message_date(value: str) -> str:
     if not value:
-        return None
+        msg = "Message date is required."
+        raise ValueError(msg)
     try:
         parsed = parsedate_to_datetime(value)
-    except (TypeError, ValueError, IndexError):
+    except (TypeError, ValueError, IndexError) as rfc_exc:
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
+            parsed = datetime.fromisoformat(value)
+        except ValueError as iso_exc:
+            msg = f"Invalid message date: {value!r}"
+            raise ValueError(msg) from iso_exc
+        if parsed is None:
+            msg = f"Invalid message date: {value!r}"
+            raise ValueError(msg) from rfc_exc
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _coerce_query_date(value: str | None) -> str | None:
-    if not value:
-        return None
+def _coerce_query_date(value: str) -> str:
     value = value.strip()
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
         return value
-    return _parse_message_date(value) or value
+    return _parse_message_date(value)
 
 
 def _filter_by_date(messages: list[dict[str, Any]], after: str | None, before: str | None) -> list[dict[str, Any]]:
-    after_iso = _coerce_query_date(after)
-    before_iso = _coerce_query_date(before)
+    after_iso = _coerce_query_date(after) if after else ""
+    before_iso = _coerce_query_date(before) if before else ""
     result = []
     for message in messages:
         date = message.get("message_date_iso")
@@ -82,8 +172,8 @@ def _parse_local_query(query: str) -> dict[str, Any]:
     parsed: dict[str, Any] = {"from": [], "to": [], "subject": [], "label": [], "after": None, "before": None, "fts": ""}
     text = query or ""
     text = re.sub(r"[{}]", " ", text)
-    text = re.sub(r"\b(?:AND|OR)\b", " ", text, flags=re.I)
-    operator_pattern = re.compile(r'\b(from|to|subject|label|after|before):(?:"([^"]+)"|\'([^\']+)\'|(\S+))', re.I)
+    text = re.sub(r"\b(?:AND|OR)\b", " ", text, flags=re.IGNORECASE)
+    operator_pattern = re.compile(r'\b(from|to|subject|label|after|before):(?:"([^"]+)"|\'([^\']+)\'|(\S+))', re.IGNORECASE)
     terms = []
     last = 0
     for match in operator_pattern.finditer(text):
@@ -130,158 +220,92 @@ def _graph_node_profile(node: str, label: str | None = None, predicate: str | No
         "role": "entity",
         "noise_reason": None,
     }
-    structural_nodes = {
-        "gmeow:Message",
-        "gmeow:Org",
-        "gmeow:Person",
-        "gmeow:Date",
-        "gmeow:Cardinal",
-        "gmeow:Event",
-        "gmeow:Document",
-        "gmeow:ArchiveFile",
-        "gmeow:AttachmentEvidence",
-        "gmeow:Location",
-        "gmeow:Money",
-        "gmeow:Product",
-        "gmeow:Time",
-        "gmeow:Place",
-        "gmeow:Facility",
-        "gmeow:Group",
-        "gmeow:Work",
-        "gmeow:Law",
-        "gmeow:Language",
-        "gmeow:Percent",
-        "gmeow:Quantity",
-        "gmeow:Ordinal",
-        "gmeow:Attachment",
-        "http://rdfs.org/sioc/ns#Post",
-        "http://rdfs.org/sioc/ns#Thread",
-        "https://schema.org/EmailMessage",
-        "https://schema.org/SoftwareSourceCode",
-        "http://xmlns.com/foaf/0.1/Agent",
-        "http://www.w3.org/2004/02/skos/core#Concept",
-        "http://usefulinc.com/ns/doap#Project",
-    }
-    if node in structural_nodes:
-        profile.update({"kind": "ontology_classes", "visibility": "structural", "role": "class", "noise_reason": "ontology_class"})
-        return profile
-    if namespace is not None and (predicate == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" or node.endswith(("#Agent", "#Concept", "#Post", "#Thread", "#Project"))):
-        profile.update({"kind": "ontology_classes", "visibility": "structural", "role": "class", "noise_reason": "ontology_class"})
-        return profile
-    if node.startswith("gmeow:message/") or node.startswith("gmeow:thread/") or node.startswith("gmeow:gmailMessage/"):
-        profile.update({"visibility": "structural", "role": "mailbox_object", "noise_reason": "mailbox_identifier"})
-        return profile
-    if node.startswith("gmeow:project/"):
-        profile.update({"kind": "projects", "role": "project"})
-        return profile
-    if node.startswith("gmeow:org/"):
-        if value.startswith("@"):
-            profile.update({"kind": "handles", "role": "handle"})
-            return profile
-        if _looks_like_mail_label_artifact(value) or _looks_like_metadata_artifact(value) or _looks_like_ui_artifact(value):
-            if _looks_like_mail_label_artifact(value):
-                reason = "mail_label_artifact"
-            elif _looks_like_metadata_artifact(value):
-                reason = "metadata_key_artifact"
-            else:
-                reason = "ui_text_artifact"
-            profile.update({"kind": "orgs", "visibility": "noise", "role": "organization", "noise_reason": reason})
-            return profile
-        profile.update({"kind": "orgs", "role": "organization"})
-        return profile
-    if node.startswith("gmeow:document/"):
-        profile.update({"kind": "documents", "role": "document"})
-        return profile
-    if node.startswith("gmeow:event/"):
-        profile.update({"kind": "events", "role": "event"})
-        return profile
-    if node.startswith("gmeow:archiveFile/"):
-        profile.update({"kind": "archive_files", "role": "archive_file"})
-        return profile
-    if node.startswith("gmeow:documentAuthor/"):
-        profile.update({"kind": "document_authors", "role": "document_author"})
-        return profile
-    if node.startswith("gmeow:calendarAttendee/"):
-        profile.update({"kind": "calendar_attendees", "role": "calendar_attendee"})
-        return profile
-    if node.startswith("gmeow:attachmentEvidence/"):
-        profile.update({"kind": "attachment_evidence", "visibility": "structural", "role": "evidence", "noise_reason": "evidence_node"})
-        return profile
-    if node.startswith("gmeow:ocrEntity/"):
-        profile.update({"kind": "ocr_entities", "role": "ocr_entity"})
-        return profile
-    if node.startswith("gmeow:visionEntity/"):
-        profile.update({"kind": "vision_entities", "role": "vision_entity"})
-        return profile
-    if node.startswith("gmeow:documentEntity/"):
-        profile.update({"kind": "document_entities", "role": "document_entity"})
-        return profile
-    if node.startswith("gmeow:calendarEntity/"):
-        profile.update({"kind": "calendar_entities", "role": "calendar_entity"})
-        return profile
-    if node.startswith("gmeow:address/") or lowered.startswith("mailto:"):
-        profile.update({"kind": "addresses", "role": "contact"})
-        return profile
-    if node.startswith("gmeow:label/"):
-        profile.update({"kind": "labels", "role": "label"})
-        return profile
-    if node.startswith("gmeow:attachment/"):
-        profile.update({"kind": "attachments", "role": "attachment"})
-        return profile
-    if node.startswith("gmeow:url/") or lowered.startswith(("http://", "https://")):
-        profile.update({"kind": "urls", "role": "url"})
-        return profile
-    noisy = {
-        "doctype",
-        "utf-8",
-        "dtd",
-        "w3c",
-        "arial",
-        "roboto",
-        "lato",
-        "tr",
-        "public",
-        "transitional",
-        "html",
-        "css",
-        "nbsp",
-    }
-    if lowered in noisy:
-        profile.update({"visibility": "noise", "role": "boilerplate", "noise_reason": "html_css_boilerplate"})
-        return profile
-    if re.fullmatch(r"\d+(?:\.\d+)?", lowered):
-        profile.update({"visibility": "noise", "role": "numeric_literal", "noise_reason": "bare_number"})
-        return profile
-    if re.fullmatch(r"\d+(?:\.\d+)?\s*(?:px|fps|kb|mb|gb|bytes?)", lowered):
-        profile.update({"visibility": "noise", "role": "numeric_literal", "noise_reason": "measurement_literal"})
-        return profile
-    if node.startswith("gmeow:entity/") and (len(value) <= 2 or re.fullmatch(r"[a-z]{1,3}", lowered)):
-        profile.update({"visibility": "noise", "role": "short_entity", "noise_reason": "too_short"})
-        return profile
-    if node.startswith("gmeow:"):
-        roles = {
-            "entities": "entity",
-            "claims": "claim",
-            "tasks": "task",
-            "headers": "header",
-            "literals": "literal",
-        }
-        profile.update({"role": roles.get(kind, kind[:-1] if kind.endswith("s") else kind)})
-        return profile
-    if re.fullmatch(r"<[^>\s]+@[^>\s]+>", value):
-        profile.update({"kind": "headers", "visibility": "noise", "role": "message_identifier", "noise_reason": "message_id_header"})
-        return profile
-    if "@" in value and not any(char.isspace() for char in value):
-        profile.update({"kind": "addresses", "role": "contact"})
-        return profile
-    if namespace:
-        profile.update({"visibility": "structural", "role": "ontology_term", "noise_reason": "ontology_term"})
-        return profile
-    profile.update({"kind": "literals", "role": "literal"})
+    for candidate in (
+        _structural_graph_profile(node, namespace, predicate),
+        _org_graph_profile(node, value),
+        _prefix_profile(node),
+        _literal_graph_profile(node, value, lowered, namespace, kind),
+    ):
+        if candidate:
+            profile.update(candidate)
+            break
     return profile
 
 
-def _ontology_namespace(value: str) -> str | None:
+def _structural_graph_profile(node: str, namespace: str | None, predicate: str | None) -> dict[str, str]:
+    if node in STRUCTURAL_GRAPH_NODES or (
+        namespace is not None
+        and (
+            predicate == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+            or node.endswith(("#Agent", "#Concept", "#Post", "#Thread", "#Project"))
+        )
+    ):
+        return {"kind": "ontology_classes", "visibility": "structural", "role": "class", "noise_reason": "ontology_class"}
+    if node.startswith(("gmeow:message/", "gmeow:thread/", "gmeow:gmailMessage/")):
+        return {"visibility": "structural", "role": "mailbox_object", "noise_reason": "mailbox_identifier"}
+    return {}
+
+
+def _org_graph_profile(node: str, value: str) -> dict[str, str]:
+    if not node.startswith("gmeow:org/"):
+        return {}
+    if value.startswith("@"):
+        return {"kind": "handles", "role": "handle"}
+    reason = _org_noise_reason(value)
+    if reason:
+        return {"kind": "orgs", "visibility": "noise", "role": "organization", "noise_reason": reason}
+    return {"kind": "orgs", "role": "organization"}
+
+
+def _org_noise_reason(value: str) -> str:
+    if _looks_like_mail_label_artifact(value):
+        return "mail_label_artifact"
+    if _looks_like_metadata_artifact(value):
+        return "metadata_key_artifact"
+    if _looks_like_ui_artifact(value):
+        return "ui_text_artifact"
+    return ""
+
+
+def _literal_graph_profile(node: str, value: str, lowered: str, namespace: str | None, kind: str) -> dict[str, str]:
+    profile = _literal_address_or_url_profile(node, lowered)
+    noise = _literal_noise_profile(node, value, lowered)
+    if not profile and noise:
+        profile = noise
+    if not profile and node.startswith("gmeow:"):
+        roles = {"entities": "entity", "claims": "claim", "tasks": "task", "headers": "header", "literals": "literal"}
+        profile = {"role": roles.get(kind, kind.removesuffix("s"))}
+    if not profile and re.fullmatch(r"<[^>\s]+@[^>\s]+>", value):
+        profile = {"kind": "headers", "visibility": "noise", "role": "message_identifier", "noise_reason": "message_id_header"}
+    if not profile and "@" in value and not any(char.isspace() for char in value):
+        profile = {"kind": "addresses", "role": "contact"}
+    if not profile and namespace:
+        profile = {"visibility": "structural", "role": "ontology_term", "noise_reason": "ontology_term"}
+    return profile or {"kind": "literals", "role": "literal"}
+
+
+def _literal_address_or_url_profile(node: str, lowered: str) -> dict[str, str]:
+    if node.startswith("gmeow:address/") or lowered.startswith("mailto:"):
+        return {"kind": "addresses", "role": "contact"}
+    if node.startswith("gmeow:url/") or lowered.startswith(("http://", "https://")):
+        return {"kind": "urls", "role": "url"}
+    return {}
+
+
+def _literal_noise_profile(node: str, value: str, lowered: str) -> dict[str, str]:
+    noisy = {"doctype", "utf-8", "dtd", "w3c", "arial", "roboto", "lato", "tr", "public", "transitional", "html", "css", "nbsp"}
+    if lowered in noisy:
+        return {"visibility": "noise", "role": "boilerplate", "noise_reason": "html_css_boilerplate"}
+    if re.fullmatch(r"\d+(?:\.\d+)?", lowered):
+        return {"visibility": "noise", "role": "numeric_literal", "noise_reason": "bare_number"}
+    if re.fullmatch(r"\d+(?:\.\d+)?\s*(?:px|fps|kb|mb|gb|bytes?)", lowered):
+        return {"visibility": "noise", "role": "numeric_literal", "noise_reason": "measurement_literal"}
+    if node.startswith("gmeow:entity/") and (len(value) <= MIN_USER_ENTITY_LENGTH or re.fullmatch(r"[a-z]{1,3}", lowered)):
+        return {"visibility": "noise", "role": "short_entity", "noise_reason": "too_short"}
+    return {}
+
+
+def _ontology_namespace(value: str) -> str:
     namespaces = {
         "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
         "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
@@ -295,7 +319,14 @@ def _ontology_namespace(value: str) -> str | None:
     for name, namespace in namespaces.items():
         if value.startswith(namespace):
             return name
-    return "gmeow" if value.startswith("gmeow:") else None
+    return "gmeow" if value.startswith("gmeow:") else ""
+
+
+def _prefix_profile(node: str) -> dict[str, str]:
+    for prefix, profile in GRAPH_NODE_PREFIX_PROFILES:
+        if node.startswith(prefix):
+            return profile
+    return {}
 
 
 def _looks_like_mail_label_artifact(value: str) -> bool:
@@ -359,44 +390,9 @@ def _looks_like_ui_artifact(value: str) -> bool:
 
 
 def _graph_node_kind(value: str, predicate: str | None) -> str:
-    if value.startswith("gmeow:message/"):
-        return "messages"
-    if value.startswith("gmeow:thread/"):
-        return "threads"
-    if value.startswith("gmeow:address/"):
-        return "addresses"
-    if value.startswith("gmeow:entity/"):
-        return "entities"
-    if value.startswith("gmeow:org/"):
-        return "orgs"
-    if value.startswith("gmeow:label/"):
-        return "labels"
-    if value.startswith("gmeow:attachment/"):
-        return "attachments"
-    if value.startswith("gmeow:document/"):
-        return "documents"
-    if value.startswith("gmeow:event/"):
-        return "events"
-    if value.startswith("gmeow:archiveFile/"):
-        return "archive_files"
-    if value.startswith("gmeow:documentAuthor/"):
-        return "document_authors"
-    if value.startswith("gmeow:calendarAttendee/"):
-        return "calendar_attendees"
-    if value.startswith("gmeow:attachmentEvidence/"):
-        return "attachment_evidence"
-    if value.startswith("gmeow:ocrEntity/"):
-        return "ocr_entities"
-    if value.startswith("gmeow:visionEntity/"):
-        return "vision_entities"
-    if value.startswith("gmeow:documentEntity/"):
-        return "document_entities"
-    if value.startswith("gmeow:calendarEntity/"):
-        return "calendar_entities"
-    if value.startswith("gmeow:project/"):
-        return "projects"
-    if value.startswith("gmeow:url/"):
-        return "urls"
+    for prefix, kind in GRAPH_NODE_KIND_PREFIXES.items():
+        if value.startswith(prefix):
+            return kind
     if predicate == "gmeow:hasClaim":
         return "claims"
     if predicate == "gmeow:hasTask":
@@ -412,10 +408,14 @@ def _graph_node_label(value: str) -> str:
     return value
 
 
+def _contact_name_rank(value: str) -> tuple[int, str]:
+    return -len(value), value.lower()
+
+
 def _best_contact_name(names: list[str], address: str) -> str:
     cleaned = [name.strip().strip('"') for name in names if name.strip()]
     if cleaned:
-        return sorted(cleaned, key=lambda value: (-len(value), value.lower()))[0]
+        return sorted(cleaned, key=_contact_name_rank)[0]
     return parseaddr(address)[0] or address
 
 
@@ -436,12 +436,12 @@ def _attachment_text_from_metadata(metadata: dict[str, Any], limit: int = 20_000
         "image_description",
         "vision_caption",
         "pdf_text",
-        "ocr_text",
         "content_text",
     }
     found: list[str] = []
 
-    def walk(value: Any, key: str = "") -> None:
+    def walk(value: object, key: str = "") -> None:
+        """Walk."""
         if len("\n\n".join(found)) >= limit:
             return
         if isinstance(value, dict):
@@ -457,5 +457,5 @@ def _attachment_text_from_metadata(metadata: dict[str, Any], limit: int = 20_000
     return "\n\n".join(found)[:limit]
 
 
-def _json_compact(value: Any) -> str:
+def _json_compact(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""graph edge weights
+"""graph edge weights.
 
 Revision ID: 20260523_0013
 Revises: 20260523_0012
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS graph_edge_stats (
@@ -57,6 +59,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP TABLE IF EXISTS graph_edge_stats")
 
 

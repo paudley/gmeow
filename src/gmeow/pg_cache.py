@@ -1,19 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide pg cache functionality for Gmeow."""
+
 from __future__ import annotations
 
 import json
-import os
-import re
-import shutil
-import socket
-from datetime import datetime, timezone
-from email.utils import getaddresses, parseaddr
+from datetime import UTC, datetime
+from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
 
-import blake3
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -22,10 +20,8 @@ from .cache import (
     _attachment_text_from_metadata,
     _best_contact_name,
     _filter_by_date,
-    _graph_node_kind,
     _graph_node_label,
     _graph_node_profile,
-    _noisy_graph_node,
     _parse_local_query,
     _parse_message_date,
     _person_key,
@@ -33,25 +29,65 @@ from .cache import (
     categorize_message,
 )
 from .db import run_migrations
+from .graph import DOAP, ONTOLOGY_PROFILE, RDF_TYPE, GraphProjector, WeightedGraphProjector
 from .object_store import ObjectStore, StoredObject
 from .parser import ParsedMessage
+from . import pg_cache_archive
+from . import pg_cache_imap
+from .pg_cache_helpers import (
+    PROJECT_TABLES,
+    address_filter_value as _address_filter_value,
+    age_sql as _age_sql,
+    algorithm_profile_allowed as _algorithm_profile_allowed,
+    apply_address_filters as _apply_address_filters,
+    apply_date_filters as _apply_date_filters,
+    apply_fts_filter as _apply_fts_filter,
+    apply_subject_label_filters as _apply_subject_label_filters,
+    kind_prefixes as _kind_prefixes,
+    message_search_fields as _message_search_fields,
+    message_search_text as _message_search_text,
+    normalize_kind as _normalize_kind,
+    profile_allowed as _profile_allowed,
+    read_only_cypher as _read_only_cypher,
+    worker_id as _worker_id,
+)
 from .text_index import TantivyMessageIndex
+
+PG_CACHE_EXCEPTIONS = (psycopg.Error, OSError, ValueError, KeyError, TypeError, RuntimeError)
+MIN_GRAPH_CYCLE_LENGTH = 2
+
+
+def _where_sql(conditions: list[str], *, default: str = "true") -> sql.Composable:
+    if not conditions:
+        return sql.SQL(default)
+    return sql.SQL(" AND ").join(sql.SQL(condition) for condition in conditions)
+
+
+def _where_clause_sql(conditions: list[str]) -> sql.Composable:
+    if not conditions:
+        return sql.SQL("")
+    return sql.SQL("WHERE ").join([sql.SQL(""), _where_sql(conditions)])
 
 
 class PgCache:
-    def __init__(self, dsn: str, objects: ObjectStore, text_index: TantivyMessageIndex):
+    """Represent PgCache data and behavior."""
+
+    def __init__(self, dsn: str, objects: ObjectStore, text_index: TantivyMessageIndex) -> None:
+        """Initialize PgCache."""
         self.dsn = dsn
         self.objects = objects
         self.text_index = text_index
+        self.age_graph_error: str | None = None
         run_migrations(dsn)
         self._ensure_age_graph()
         self.ensure_default_categories()
 
-    def _connect(self):
+    def _connect(self) -> psycopg.Connection[dict[str, object]]:
         return psycopg.connect(self.dsn, row_factory=dict_row)
 
     def close(self) -> None:
-        return None
+        """Close."""
+        return
 
     def _ensure_age_graph(self) -> None:
         try:
@@ -60,11 +96,11 @@ class PgCache:
                 exists = conn.execute("SELECT 1 FROM ag_graph WHERE name = 'gmeow_graph'").fetchone()
                 if not exists:
                     conn.execute("SELECT create_graph('gmeow_graph')")
-        except Exception:
-            # Relational triples remain authoritative; AGE mirror is best-effort.
-            return
+        except PG_CACHE_EXCEPTIONS as exc:
+            self.age_graph_error = repr(exc)
 
     def age_status(self) -> dict[str, Any]:
+        """Age status."""
         try:
             with self._connect() as conn:
                 conn.execute("SET search_path=ag_catalog, public")
@@ -73,12 +109,14 @@ class PgCache:
                     return {"available": False, "graph": "gmeow_graph", "nodes": None, "error": "graph is not created"}
                 row = conn.execute(_age_sql("MATCH (n) RETURN count(n)", "nodes agtype")).fetchone()
                 return {"available": True, "graph": graph["name"], "graphid": graph["graphid"], "nodes": str(row["nodes"]) if row else "0"}
-        except Exception as exc:
+        except PG_CACHE_EXCEPTIONS as exc:
             return {"available": False, "graph": "gmeow_graph", "nodes": None, "error": repr(exc)}
 
     def age_cypher(self, query: str, columns: str = "value agtype", limit: int = 100) -> list[dict[str, Any]]:
+        """Age cypher."""
         if not _read_only_cypher(query):
-            raise ValueError("Only read-only MATCH/RETURN Cypher queries are allowed.")
+            msg = "Only read-only MATCH/RETURN Cypher queries are allowed."
+            raise ValueError(msg)
         query = query.strip().rstrip(";")
         if " limit " not in f" {query.lower()} ":
             query = f"{query} LIMIT {max(1, min(limit, 1000))}"
@@ -91,7 +129,7 @@ class PgCache:
         with self._connect() as conn:
             self._record_object_conn(conn, stored)
 
-    def _record_object_conn(self, conn, stored: StoredObject) -> None:
+    def _record_object_conn(self, conn: psycopg.Connection[dict[str, object]], stored: StoredObject) -> None:
         conn.execute(
             """
             INSERT INTO content_objects(digest, path, media_type, compression, original_size, stored_size, verification_status, verified_at)
@@ -109,7 +147,9 @@ class PgCache:
             (stored.digest, str(stored.path), stored.media_type, stored.compression, stored.original_size, stored.stored_size),
         )
 
-    def _upsert_content_ref_conn(self, conn, digest: str | None, ref_table: str, ref_pk: str, ref_column: str, ref_kind: str) -> None:
+    def _upsert_content_ref_conn(
+        self, conn: psycopg.Connection[dict[str, object]], digest: str | None, ref_table: str, ref_pk: str, ref_column: str, ref_kind: str
+    ) -> None:
         if not digest:
             return
         conn.execute(
@@ -129,7 +169,7 @@ class PgCache:
         row = self._object_row(digest)
         return self.objects.get_text(digest, compression=row["compression"]) if row else ""
 
-    def _stored_json(self, digest: str | None) -> Any:
+    def _stored_json(self, digest: str | None) -> object:
         text = self._stored_text(digest)
         return json.loads(text) if text else {}
 
@@ -144,6 +184,7 @@ class PgCache:
             return conn.execute("SELECT * FROM content_objects WHERE digest = %s", (digest,)).fetchone()
 
     def upsert_label(self, label: dict[str, Any]) -> None:
+        """Upsert label."""
         with self._connect() as conn:
             conn.execute(
                 """
@@ -154,15 +195,18 @@ class PgCache:
             )
 
     def list_labels(self) -> list[dict[str, Any]]:
+        """List labels."""
         with self._connect() as conn:
             return [dict(row) for row in conn.execute("SELECT id, name, type FROM labels ORDER BY name")]
 
     def label_name(self, label_id: str) -> str:
+        """Label name."""
         with self._connect() as conn:
             row = conn.execute("SELECT name FROM labels WHERE id = %s", (label_id,)).fetchone()
         return row["name"] if row else label_id
 
     def upsert_thread(self, thread: dict[str, Any]) -> None:
+        """Upsert thread."""
         with self._connect() as conn:
             conn.execute(
                 """
@@ -172,21 +216,24 @@ class PgCache:
                 (thread["id"], thread.get("snippet", ""), Jsonb(thread)),
             )
 
-    def upsert_message(self, message: ParsedMessage, raw_json: dict[str, Any], markdown: str, hydrated: bool) -> None:
+    def upsert_message(self, message: ParsedMessage, raw_json: dict[str, Any], markdown: str, *, hydrated: bool) -> None:
+        """Upsert message."""
         raw_obj = self.objects.put_json(raw_json)
         text_obj = self.objects.put_text(message.text)
         markdown_obj = self.objects.put_text(markdown, media_type="text/markdown; charset=utf-8")
         history_id = raw_json.get("historyId")
         search_fields = _message_search_fields(message.sender, message.recipients, message.date)
         search_text = _message_search_text(
-            subject=message.subject,
-            sender=message.sender,
-            recipients=message.recipients,
-            snippet=message.snippet,
-            text_body=message.text,
-            markdown=markdown,
-            headers=message.headers,
-            label_ids=message.label_ids,
+            {
+                "subject": message.subject,
+                "sender": message.sender,
+                "recipients": message.recipients,
+                "snippet": message.snippet,
+                "text_body": message.text,
+                "markdown": markdown,
+                "headers": message.headers,
+                "label_ids": message.label_ids,
+            }
         )
         with self._connect() as conn:
             for stored in [raw_obj, text_obj, markdown_obj]:
@@ -243,13 +290,24 @@ class PgCache:
                     body_obj = self.objects.put_text(part.body_text, media_type=part.mime_type)
                     self._record_object_conn(conn, body_obj)
                     body_digest = body_obj.digest
-                    self._upsert_content_ref_conn(conn, body_digest, "message_parts", f"{message.gmail_id}:{part.part_id}", "body_text_digest", "part_body")
+                    self._upsert_content_ref_conn(
+                        conn, body_digest, "message_parts", f"{message.gmail_id}:{part.part_id}", "body_text_digest", "part_body"
+                    )
                 conn.execute(
                     """
                     INSERT INTO message_parts(message_id, part_id, mime_type, filename, body_text_digest, attachment_id, size, headers_json)
                     VALUES(%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (message.gmail_id, part.part_id, part.mime_type, part.filename, body_digest, part.attachment_id, part.size, Jsonb(part.headers)),
+                    (
+                        message.gmail_id,
+                        part.part_id,
+                        part.mime_type,
+                        part.filename,
+                        body_digest,
+                        part.attachment_id,
+                        part.size,
+                        Jsonb(part.headers),
+                    ),
                 )
             self._update_archive_state_conn(conn, message.gmail_id)
         self.text_index.upsert_message(
@@ -268,6 +326,7 @@ class PgCache:
         )
 
     def set_raw_rfc822(self, message_id: str, raw: bytes) -> None:
+        """Set raw rfc822."""
         stored = self.objects.put(raw, media_type="message/rfc822")
         with self._connect() as conn:
             self._record_object_conn(conn, stored)
@@ -276,11 +335,13 @@ class PgCache:
             self._update_archive_state_conn(conn, message_id)
 
     def raw_rfc822(self, message_id: str) -> bytes | None:
+        """Raw rfc822."""
         with self._connect() as conn:
             row = conn.execute("SELECT raw_rfc822_digest FROM messages WHERE id = %s", (message_id,)).fetchone()
         return self._stored_bytes(row["raw_rfc822_digest"]) if row else None
 
     def add_attachment(self, record: dict[str, Any]) -> None:
+        """Add attachment."""
         digest = record.get("digest") or record["sha1"]
         stored = StoredObject(
             digest=digest,
@@ -311,7 +372,10 @@ class PgCache:
             )
             conn.execute(
                 """
-                INSERT INTO attachments(sha1, digest, message_id, part_id, gmail_attachment_id, filename, mime_type, size, metadata_json, path, compression)
+                INSERT INTO attachments(
+                    sha1, digest, message_id, part_id, gmail_attachment_id, filename,
+                    mime_type, size, metadata_json, path, compression
+                )
                 VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(message_id, COALESCE(part_id, ''), sha1) DO UPDATE SET
                   digest=excluded.digest,
@@ -338,7 +402,14 @@ class PgCache:
                     stored.compression,
                 ),
             )
-            self._upsert_content_ref_conn(conn, digest, "attachments", f"{record['message_id']}:{record.get('part_id') or ''}:{record['sha1']}", "digest", "attachment")
+            self._upsert_content_ref_conn(
+                conn,
+                digest,
+                "attachments",
+                f"{record['message_id']}:{record.get('part_id') or ''}:{record['sha1']}",
+                "digest",
+                "attachment",
+            )
             metadata_obj = self.objects.put_json(record.get("metadata", {}))
             self._record_object_conn(conn, metadata_obj)
             conn.execute(
@@ -350,7 +421,7 @@ class PgCache:
                 (digest, metadata_obj.digest, "attachment_sidecar"),
             )
 
-    def _update_archive_state_conn(self, conn, message_id: str) -> None:
+    def _update_archive_state_conn(self, conn: psycopg.Connection[dict[str, object]], message_id: str) -> None:
         conn.execute(
             """
             UPDATE messages
@@ -371,29 +442,39 @@ class PgCache:
         )
 
     def list_attachments(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT id, sha1, digest, message_id, part_id, gmail_attachment_id, filename, mime_type, size, metadata_json, path, compression FROM attachments ORDER BY sha1, message_id, part_id")
-            return [self._attachment_row(row) for row in rows]
-
-    def attachments_for_message(self, message_id: str) -> list[dict[str, Any]]:
+        """List attachments."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, sha1, digest, message_id, part_id, gmail_attachment_id, filename, mime_type, size, metadata_json, path, compression
+                SELECT id, sha1, digest, message_id, part_id, gmail_attachment_id, filename,
+                       mime_type, size, metadata_json, path, compression
+                FROM attachments ORDER BY sha1, message_id, part_id
+                """
+            )
+            return [self._attachment_row(row) for row in rows]
+
+    def attachments_for_message(self, message_id: str) -> list[dict[str, Any]]:
+        """Attachments for message."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, sha1, digest, message_id, part_id, gmail_attachment_id, filename,
+                       mime_type, size, metadata_json, path, compression
                 FROM attachments WHERE message_id = %s ORDER BY filename, sha1
                 """,
                 (message_id,),
             )
             return [self._attachment_row(row, drop_path=True) for row in rows]
 
-    def _attachment_row(self, row: dict[str, Any], drop_path: bool = False) -> dict[str, Any]:
+    def _attachment_row(self, row: dict[str, Any], *, drop_path: bool = False) -> dict[str, Any]:
         item = dict(row)
         item["metadata"] = item.pop("metadata_json") or {}
         if drop_path:
             item.pop("path", None)
         return item
 
-    def attachment_text_for_message(self, message_id: str, include_metadata: bool = True) -> list[dict[str, Any]]:
+    def attachment_text_for_message(self, message_id: str, *, include_metadata: bool = True) -> list[dict[str, Any]]:
+        """Attachment text for message."""
         attachments = self.attachments_for_message(message_id)
         for attachment in attachments:
             text = _attachment_text_from_metadata(attachment.get("metadata", {}))
@@ -405,6 +486,7 @@ class PgCache:
         return attachments
 
     def attachment_text_search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Attachment text search."""
         needle = (query or "").lower()
         results = []
         for attachment in self.list_attachments():
@@ -416,11 +498,13 @@ class PgCache:
         return results
 
     def get_message(self, message_id: str) -> dict[str, Any] | None:
+        """Get message."""
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM messages WHERE id = %s", (message_id,)).fetchone()
         return self._message_row(row) if row else None
 
     def list_messages(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """List messages."""
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM messages ORDER BY COALESCE(message_date, updated_at::text) DESC LIMIT %s OFFSET %s",
@@ -429,6 +513,7 @@ class PgCache:
         return [self._message_row(row) for row in rows]
 
     def iter_messages(self) -> list[dict[str, Any]]:
+        """Iterate over messages."""
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM messages ORDER BY id").fetchall()
         return [self._message_row(row) for row in rows]
@@ -444,7 +529,8 @@ class PgCache:
         data["markdown"] = self._stored_text(data.pop("markdown_digest", None))
         data["has_raw_rfc822"] = bool(data.pop("raw_rfc822_digest", None))
         data["hydrated"] = bool(data["hydrated"])
-        data["message_date_iso"] = _parse_message_date(data.get("message_date"))
+        message_date = data.get("message_date")
+        data["message_date_iso"] = _parse_message_date(message_date) if message_date else None
         data["date"] = data["message_date_iso"]
         data["from"] = data.get("sender")
         data["to"] = data.get("recipients")
@@ -461,6 +547,7 @@ class PgCache:
         return data
 
     def refresh_message_search_columns(self, limit: int | None = None) -> dict[str, int]:
+        """Refresh message search columns."""
         sql = """
             SELECT id, subject, sender, recipients, message_date, snippet, label_ids, headers_json,
                    text_body_digest, markdown_digest
@@ -478,14 +565,16 @@ class PgCache:
             for row in rows:
                 fields = _message_search_fields(row.get("sender"), row.get("recipients"), row.get("message_date"))
                 search_text = _message_search_text(
-                    subject=row.get("subject"),
-                    sender=row.get("sender"),
-                    recipients=row.get("recipients"),
-                    snippet=row.get("snippet"),
-                    text_body=self._stored_text(row.get("text_body_digest")),
-                    markdown=self._stored_text(row.get("markdown_digest")),
-                    headers=row.get("headers_json") or {},
-                    label_ids=list(row.get("label_ids") or []),
+                    {
+                        "subject": row.get("subject"),
+                        "sender": row.get("sender"),
+                        "recipients": row.get("recipients"),
+                        "snippet": row.get("snippet"),
+                        "text_body": self._stored_text(row.get("text_body_digest")),
+                        "markdown": self._stored_text(row.get("markdown_digest")),
+                        "headers": row.get("headers_json") or {},
+                        "label_ids": list(row.get("label_ids") or []),
+                    }
                 )
                 if not search_text.strip():
                     skipped += 1
@@ -516,6 +605,7 @@ class PgCache:
         return {"updated": updated, "skipped": skipped}
 
     def compact_message(self, message: dict[str, Any], body_chars: int = 500) -> dict[str, Any]:
+        """Compact message."""
         text = " ".join((message.get("text_body") or message.get("snippet") or "").split())
         if len(text) > body_chars:
             text = text[:body_chars].rstrip() + "..."
@@ -539,9 +629,11 @@ class PgCache:
         }
 
     def compact_messages(self, messages: list[dict[str, Any]], body_chars: int = 500) -> list[dict[str, Any]]:
+        """Compact messages."""
         return [self.compact_message(message, body_chars=body_chars) for message in messages]
 
-    def get_thread(self, thread_id: str, compact: bool = False) -> dict[str, Any] | None:
+    def get_thread(self, thread_id: str, *, compact: bool = False) -> dict[str, Any] | None:
+        """Get thread."""
         with self._connect() as conn:
             thread = conn.execute("SELECT * FROM threads WHERE id = %s", (thread_id,)).fetchone()
             message_rows = conn.execute("SELECT * FROM messages WHERE thread_id = %s", (thread_id,)).fetchall()
@@ -554,8 +646,14 @@ class PgCache:
         return {"id": thread_id, "snippet": thread["snippet"] if thread else "", "messages": messages}
 
     def list_threads(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """List threads."""
         with self._connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT id, snippet, updated_at FROM threads ORDER BY updated_at DESC LIMIT %s OFFSET %s", (limit, offset))]
+            return [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT id, snippet, updated_at FROM threads ORDER BY updated_at DESC LIMIT %s OFFSET %s", (limit, offset)
+                )
+            ]
 
     def text_search(
         self,
@@ -566,84 +664,59 @@ class PgCache:
         include_categories: list[str] | None = None,
         exclude_categories: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        """Text search."""
         parsed = _parse_local_query(query)
         if after:
             parsed["after"] = after
         if before:
             parsed["before"] = before
-        where = ["true"]
-        params: list[Any] = []
-        rank_sql = "0.0"
-        sql_text_query = _sql_text_query(parsed["fts"])
-        if sql_text_query:
-            where.append("search_tsv @@ websearch_to_tsquery('simple', %s)")
-            params.append(sql_text_query)
-            rank_sql = "ts_rank_cd(search_tsv, websearch_to_tsquery('simple', %s))"
-            params.append(sql_text_query)
-        for value in parsed["from"]:
-            address, domain = _address_filter_value(value)
-            if address:
-                where.append("(sender_addr = %s OR sender ILIKE %s)")
-                params.extend([address, f"%{value}%"])
-            elif domain:
-                where.append("(sender_domain = %s OR sender ILIKE %s)")
-                params.extend([domain, f"%{value}%"])
-            else:
-                where.append("sender ILIKE %s")
-                params.append(f"%{value}%")
-        for value in parsed["to"]:
-            address, domain = _address_filter_value(value)
-            if address:
-                where.append("(%s = ANY(recipient_addrs) OR recipients ILIKE %s)")
-                params.extend([address, f"%{value}%"])
-            elif domain:
-                where.append("(%s = ANY(recipient_domains) OR recipients ILIKE %s)")
-                params.extend([domain, f"%{value}%"])
-            else:
-                where.append("recipients ILIKE %s")
-                params.append(f"%{value}%")
-        for value in parsed["subject"]:
-            where.append("subject ILIKE %s")
-            params.append(f"%{value}%")
-        for label in parsed["label"]:
-            where.append("label_ids ? %s")
-            params.append(label)
-        after_dt = _query_datetime(parsed["after"])
-        before_dt = _query_datetime(parsed["before"])
-        if after_dt is not None:
-            where.append("message_ts >= %s")
-            params.append(after_dt)
-        if before_dt is not None:
-            where.append("message_ts <= %s")
-            params.append(before_dt)
-        if include_categories:
-            where.append("EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
-            params.append(include_categories)
-        elif exclude_categories is not None:
-            where.append("NOT EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
-            params.append(exclude_categories)
-        else:
-            excluded = list(self.default_excluded_categories())
-            if excluded:
-                where.append("NOT EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
-                params.append(excluded)
-        where_sql = " AND ".join(where) if where else "true"
-        sql = f"""
+        filters = self._text_search_filters(parsed, include_categories, exclude_categories)
+        query_sql = sql.SQL(
+            """
             SELECT *, {rank_sql} AS search_rank
             FROM messages
             WHERE {where_sql}
             ORDER BY search_rank DESC, message_ts DESC NULLS LAST, updated_at DESC
             LIMIT %s
         """
-        query_params = (*params, limit)
+        ).format(rank_sql=sql.SQL(str(filters["rank_sql"])), where_sql=_where_sql(filters["where"]))
+        query_params = (*filters["params"], limit)
         with self._connect() as conn:
-            rows = conn.execute(sql, query_params).fetchall()
+            rows = conn.execute(query_sql, query_params).fetchall()
         messages = [self._message_row(row) for row in rows]
-        if after_dt is None or before_dt is None:
+        if filters["after_dt"] is None or filters["before_dt"] is None:
             messages = _filter_by_date(messages, parsed["after"], parsed["before"])
         return messages[:limit]
 
-    def address_messages(self, address: str, limit: int = 50, include_categories: list[str] | None = None, exclude_categories: list[str] | None = None) -> list[dict[str, Any]]:
+    def _text_search_filters(
+        self, parsed: dict[str, Any], include_categories: list[str] | None, exclude_categories: list[str] | None
+    ) -> dict[str, Any]:
+        where = ["true"]
+        params: list[Any] = []
+        rank_sql = _apply_fts_filter(where, params, parsed["fts"])
+        _apply_address_filters(where, params, parsed["from"], "sender")
+        _apply_address_filters(where, params, parsed["to"], "recipients")
+        _apply_subject_label_filters(where, params, parsed)
+        after_dt, before_dt = _apply_date_filters(where, params, parsed)
+        self._apply_category_filters(where, params, include_categories, exclude_categories)
+        return {"where": where, "params": params, "rank_sql": rank_sql, "after_dt": after_dt, "before_dt": before_dt}
+
+    def _apply_category_filters(
+        self, where: list[str], params: list[Any], include_categories: list[str] | None, exclude_categories: list[str] | None
+    ) -> None:
+        if include_categories:
+            where.append("EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
+            params.append(include_categories)
+            return
+        excluded = exclude_categories if exclude_categories is not None else list(self.default_excluded_categories())
+        if excluded:
+            where.append("NOT EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
+            params.append(excluded)
+
+    def address_messages(
+        self, address: str, limit: int = 50, include_categories: list[str] | None = None, exclude_categories: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Address messages."""
         parsed_address, parsed_domain = _address_filter_value(address)
         where = []
         params: list[Any] = []
@@ -669,25 +742,40 @@ class PgCache:
                 params.append(excluded)
         with self._connect() as conn:
             rows = conn.execute(
-                f"""
+                sql.SQL(
+                    """
                 SELECT * FROM messages
-                WHERE {' AND '.join(where)}
+                WHERE {where_sql}
                 ORDER BY message_ts DESC NULLS LAST, updated_at DESC
                 LIMIT %s
-                """,
+                """
+                ).format(where_sql=_where_sql(where)),
                 (*params, limit),
             ).fetchall()
         return [self._message_row(row) for row in rows]
 
     def contacts(self, limit: int = 100, min_messages: int = 1) -> list[dict[str, Any]]:
+        """Contacts."""
         contacts: dict[str, dict[str, Any]] = {}
         for message in self.iter_messages():
             for role, raw_value in [("from", message.get("sender") or ""), ("to", message.get("recipients") or "")]:
-                for name, address in getaddresses([raw_value]):
-                    address = address.lower().strip()
+                for name, raw_address in getaddresses([raw_value]):
+                    address = raw_address.lower().strip()
                     if not address:
                         continue
-                    contact = contacts.setdefault(address, {"address": address, "display_name": "", "names": set(), "messages": 0, "from_messages": 0, "to_messages": 0, "latest_message_date": None, "latest_message_id": None})
+                    contact = contacts.setdefault(
+                        address,
+                        {
+                            "address": address,
+                            "display_name": "",
+                            "names": set(),
+                            "messages": 0,
+                            "from_messages": 0,
+                            "to_messages": 0,
+                            "latest_message_date": None,
+                            "latest_message_id": None,
+                        },
+                    )
                     if name:
                         contact["names"].add(name)
                     contact["messages"] += 1
@@ -707,17 +795,31 @@ class PgCache:
         return rows[:limit]
 
     def people(self, limit: int = 100, min_messages: int = 1) -> list[dict[str, Any]]:
+        """People."""
         aliases = self.people_aliases()
         people: dict[str, dict[str, Any]] = {}
         for contact in self.contacts(limit=10_000, min_messages=1):
             alias = aliases.get(contact["address"])
             name_key = _person_key(contact["display_name"])
             key = alias["person_key"] if alias else name_key if name_key and "@" not in name_key else contact["address"]
-            person = people.setdefault(key, {"key": key, "name": alias.get("display_name") if alias and alias.get("display_name") else contact["display_name"], "addresses": [], "names": set(), "messages": 0, "latest_message_date": None, "latest_message_id": None})
+            person = people.setdefault(
+                key,
+                {
+                    "key": key,
+                    "name": alias.get("display_name") if alias and alias.get("display_name") else contact["display_name"],
+                    "addresses": [],
+                    "names": set(),
+                    "messages": 0,
+                    "latest_message_date": None,
+                    "latest_message_id": None,
+                },
+            )
             person["addresses"].append(contact["address"])
             person["names"].update(contact["names"])
             person["messages"] += contact["messages"]
-            if contact["latest_message_date"] and (person["latest_message_date"] is None or contact["latest_message_date"] > person["latest_message_date"]):
+            if contact["latest_message_date"] and (
+                person["latest_message_date"] is None or contact["latest_message_date"] > person["latest_message_date"]
+            ):
                 person["latest_message_date"] = contact["latest_message_date"]
                 person["latest_message_id"] = contact["latest_message_id"]
         rows = []
@@ -730,6 +832,7 @@ class PgCache:
         return rows[:limit]
 
     def upsert_people_alias(self, address: str, person_key: str, display_name: str | None = None, note: str | None = None) -> None:
+        """Upsert people alias."""
         address = address.lower().strip()
         key = _person_key(person_key) or address
         with self._connect() as conn:
@@ -737,17 +840,25 @@ class PgCache:
                 """
                 INSERT INTO people_aliases(address, person_key, display_name, note)
                 VALUES(%s, %s, %s, %s)
-                ON CONFLICT(address) DO UPDATE SET person_key=excluded.person_key, display_name=excluded.display_name, note=excluded.note, updated_at=now()
+                ON CONFLICT(address) DO UPDATE SET
+                  person_key=excluded.person_key,
+                  display_name=excluded.display_name,
+                  note=excluded.note,
+                  updated_at=now()
                 """,
                 (address, key, display_name, note),
             )
 
     def people_aliases(self) -> dict[str, dict[str, Any]]:
+        """People aliases."""
         with self._connect() as conn:
-            rows = conn.execute("SELECT address, person_key, display_name, note, updated_at FROM people_aliases ORDER BY person_key, address")
+            rows = conn.execute(
+                "SELECT address, person_key, display_name, note, updated_at FROM people_aliases ORDER BY person_key, address"
+            )
             return {row["address"]: dict(row) for row in rows}
 
     def enqueue_intelligence_job(self, kind: str, target_id: str, payload: dict[str, Any] | None = None) -> None:
+        """Enqueue intelligence job."""
         with self._connect() as conn:
             conn.execute(
                 """
@@ -760,26 +871,64 @@ class PgCache:
                     locked_at=NULL,
                     next_run_at=now(),
                     dead_lettered_at=NULL,
-                    payload_json=CASE WHEN excluded.payload_json = '{}'::jsonb THEN intelligence_jobs.payload_json ELSE excluded.payload_json END,
+                    payload_json=CASE
+                      WHEN excluded.payload_json = '{}'::jsonb THEN intelligence_jobs.payload_json
+                      ELSE excluded.payload_json
+                    END,
                     updated_at=now()
                 """,
                 (kind, target_id, Jsonb(payload or {})),
             )
-        self.record_operational_event("job.enqueued", "info", "intelligence", target_id, f"Enqueued {kind} intelligence job.", {"kind": kind})
+        self.record_operational_event(
+            "job.enqueued", "info", "intelligence", target_id, f"Enqueued {kind} intelligence job.", {"kind": kind}
+        )
 
     def enqueue_all_intelligence_jobs(self) -> dict[str, int]:
+        """Enqueue all intelligence jobs."""
         messages = attachments = 0
         with self._connect() as conn:
             for row in conn.execute("SELECT id FROM messages"):
-                conn.execute("INSERT INTO intelligence_jobs(kind, target_id, status, next_run_at) VALUES('message', %s, 'pending', now()) ON CONFLICT(kind, target_id) DO UPDATE SET status='pending', next_run_at=now(), dead_lettered_at=NULL, locked_by=NULL, locked_at=NULL", (row["id"],))
+                conn.execute(
+                    """
+                    INSERT INTO intelligence_jobs(kind, target_id, status, next_run_at)
+                    VALUES('message', %s, 'pending', now())
+                    ON CONFLICT(kind, target_id) DO UPDATE SET
+                      status='pending',
+                      next_run_at=now(),
+                      dead_lettered_at=NULL,
+                      locked_by=NULL,
+                      locked_at=NULL
+                    """,
+                    (row["id"],),
+                )
                 messages += 1
             for row in conn.execute("SELECT DISTINCT sha1 FROM attachments"):
-                conn.execute("INSERT INTO intelligence_jobs(kind, target_id, status, next_run_at) VALUES('attachment', %s, 'pending', now()) ON CONFLICT(kind, target_id) DO UPDATE SET status='pending', next_run_at=now(), dead_lettered_at=NULL, locked_by=NULL, locked_at=NULL", (row["sha1"],))
+                conn.execute(
+                    """
+                    INSERT INTO intelligence_jobs(kind, target_id, status, next_run_at)
+                    VALUES('attachment', %s, 'pending', now())
+                    ON CONFLICT(kind, target_id) DO UPDATE SET
+                      status='pending',
+                      next_run_at=now(),
+                      dead_lettered_at=NULL,
+                      locked_by=NULL,
+                      locked_at=NULL
+                    """,
+                    (row["sha1"],),
+                )
                 attachments += 1
-        self.record_operational_event("job.bulk_enqueued", "info", "intelligence", None, "Enqueued all intelligence jobs.", {"messages": messages, "attachments": attachments})
+        self.record_operational_event(
+            "job.bulk_enqueued",
+            "info",
+            "intelligence",
+            None,
+            "Enqueued all intelligence jobs.",
+            {"messages": messages, "attachments": attachments},
+        )
         return {"messages": messages, "attachments": attachments}
 
     def reclaim_stale_intelligence_jobs(self, stale_after_seconds: int = 900) -> dict[str, int]:
+        """Reclaim stale intelligence jobs."""
         with self._connect() as conn:
             result = conn.execute(
                 """
@@ -797,16 +946,23 @@ class PgCache:
             )
             reclaimed = int(result.rowcount or 0)
         if reclaimed:
-            self.record_operational_event("job.reclaimed", "warning", "intelligence", None, "Reclaimed stale running intelligence jobs.", {"count": reclaimed, "stale_after_seconds": stale_after_seconds})
+            self.record_operational_event(
+                "job.reclaimed",
+                "warning",
+                "intelligence",
+                None,
+                "Reclaimed stale running intelligence jobs.",
+                {"count": reclaimed, "stale_after_seconds": stale_after_seconds},
+            )
         return {"reclaimed": reclaimed}
 
     def claim_next_intelligence_job(self, worker_id: str | None = None) -> dict[str, Any] | None:
+        """Claim next intelligence job."""
         worker_id = worker_id or _worker_id()
         self.reclaim_stale_intelligence_jobs()
-        with self._connect() as conn:
-            with conn.transaction():
-                row = conn.execute(
-                    """
+        with self._connect() as conn, conn.transaction():
+            row = conn.execute(
+                """
                     SELECT id, kind, target_id, attempts, max_attempts, payload_json
                     FROM intelligence_jobs
                     WHERE status = 'pending'
@@ -815,11 +971,11 @@ class PgCache:
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                     """
-                ).fetchone()
-                if row is None:
-                    return None
-                conn.execute(
-                    """
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                """
                     UPDATE intelligence_jobs
                     SET status='running',
                         attempts=attempts+1,
@@ -828,13 +984,14 @@ class PgCache:
                         updated_at=now()
                     WHERE id = %s
                     """,
-                    (worker_id, row["id"]),
-                )
-                item = dict(row)
-                item["locked_by"] = worker_id
-                return item
+                (worker_id, row["id"]),
+            )
+            item = dict(row)
+            item["locked_by"] = worker_id
+            return item
 
     def complete_intelligence_job(self, job_id: int) -> None:
+        """Complete intelligence job."""
         with self._connect() as conn:
             conn.execute(
                 """
@@ -849,9 +1006,12 @@ class PgCache:
                 """,
                 (job_id,),
             )
-        self.record_operational_event("job.completed", "info", "intelligence", str(job_id), "Completed intelligence job.", {"job_id": job_id})
+        self.record_operational_event(
+            "job.completed", "info", "intelligence", str(job_id), "Completed intelligence job.", {"job_id": job_id}
+        )
 
     def fail_intelligence_job(self, job_id: int, error: str) -> None:
+        """Fail intelligence job."""
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT id, kind, target_id, attempts, max_attempts, payload_json FROM intelligence_jobs WHERE id = %s",
@@ -917,43 +1077,54 @@ class PgCache:
         )
 
     def intelligence_job_status(self) -> dict[str, int]:
+        """Intelligence job status."""
         with self._connect() as conn:
-            return {row["status"]: row["count"] for row in conn.execute("SELECT status, COUNT(*) AS count FROM intelligence_jobs GROUP BY status")}
+            return {
+                row["status"]: row["count"]
+                for row in conn.execute("SELECT status, COUNT(*) AS count FROM intelligence_jobs GROUP BY status")
+            }
 
     def list_intelligence_jobs(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        """List intelligence jobs."""
         where = "WHERE status = %s" if status else ""
         params: tuple[Any, ...] = (status, limit) if status else (limit,)
         with self._connect() as conn:
             rows = conn.execute(
-                f"""
+                sql.SQL(
+                    """
                 SELECT id, kind, target_id, status, attempts, max_attempts, locked_by, locked_at, next_run_at,
                        last_error, created_at, updated_at, completed_at, failed_at, dead_lettered_at
                 FROM intelligence_jobs
                 {where}
                 ORDER BY updated_at DESC, id DESC
                 LIMIT %s
-                """,
+                """
+                ).format(where=sql.SQL(where)),
                 params,
             )
             return [dict(row) for row in rows]
 
-    def list_dead_letter_jobs(self, limit: int = 50, include_closed: bool = False) -> list[dict[str, Any]]:
+    def list_dead_letter_jobs(self, limit: int = 50, *, include_closed: bool = False) -> list[dict[str, Any]]:
+        """List dead letter jobs."""
         where = "" if include_closed else "WHERE requeued_at IS NULL AND cleared_at IS NULL"
         with self._connect() as conn:
             rows = conn.execute(
-                f"""
+                sql.SQL(
+                    """
                 SELECT id, source_table, source_id, kind, target_id, attempts, last_error, payload_json,
                        created_at, requeued_at, cleared_at
                 FROM dead_letter_jobs
                 {where}
                 ORDER BY created_at DESC, id DESC
                 LIMIT %s
-                """,
+                """
+                ).format(where=sql.SQL(where)),
                 (limit,),
             )
             return [dict(row) for row in rows]
 
     def retry_dead_letter_jobs(self, limit: int | None = None) -> dict[str, int]:
+        """Retry dead letter jobs."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -984,18 +1155,26 @@ class PgCache:
                 (source_ids,),
             )
             conn.execute("UPDATE dead_letter_jobs SET requeued_at=now() WHERE id = ANY(%s)", (ids,))
-        self.record_operational_event("dead_letter.requeued", "warning", "intelligence", None, "Requeued dead-letter intelligence jobs.", {"count": len(items)})
+        self.record_operational_event(
+            "dead_letter.requeued", "warning", "intelligence", None, "Requeued dead-letter intelligence jobs.", {"count": len(items)}
+        )
         return {"requeued": len(items)}
 
     def clear_dead_letter_job(self, dead_letter_id: int) -> dict[str, Any]:
+        """Clear dead letter job."""
         with self._connect() as conn:
-            result = conn.execute("UPDATE dead_letter_jobs SET cleared_at=now() WHERE id = %s AND cleared_at IS NULL RETURNING id", (dead_letter_id,)).fetchone()
+            result = conn.execute(
+                "UPDATE dead_letter_jobs SET cleared_at=now() WHERE id = %s AND cleared_at IS NULL RETURNING id", (dead_letter_id,)
+            ).fetchone()
         cleared = bool(result)
         if cleared:
-            self.record_operational_event("dead_letter.cleared", "info", "intelligence", str(dead_letter_id), "Cleared dead-letter job.", {"id": dead_letter_id})
+            self.record_operational_event(
+                "dead_letter.cleared", "info", "intelligence", str(dead_letter_id), "Cleared dead-letter job.", {"id": dead_letter_id}
+            )
         return {"cleared": cleared, "id": dead_letter_id}
 
     def ensure_default_categories(self) -> None:
+        """Ensure default categories."""
         defaults = [
             ("camera_alert", "Camera Alert", "system", True, "UniFi Protect and similar camera/event alert noise"),
             ("machine_notification", "Machine Notification", "system", True, "High-volume automated machine status notifications"),
@@ -1023,29 +1202,47 @@ class PgCache:
             ("health_appointment", "Health Appointment", "system", False, "Appointment and health scheduling mail"),
             ("home_services", "Home Services", "system", False, "Household service and vendor mail"),
         ]
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.executemany(
+                """
                     INSERT INTO categories(id, name, source, default_hidden, description)
                     VALUES(%s, %s, %s, %s, %s)
                     ON CONFLICT(id) DO NOTHING
                     """,
-                    defaults,
-                )
+                defaults,
+            )
 
-    def upsert_category(self, category: str, name: str | None = None, source: str = "manual", default_hidden: bool = False, enabled: bool = True, description: str | None = None, profile: dict[str, Any] | None = None) -> None:
+    def upsert_category(
+        self,
+        category: str,
+        name: str | None = None,
+        source: str = "manual",
+        **options: object,
+    ) -> None:
+        """Upsert category."""
+        default_hidden = bool(options.get("default_hidden", False))
+        enabled = bool(options.get("enabled", True))
+        description = options.get("description")
+        profile = options.get("profile")
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO categories(id, name, source, default_hidden, enabled, description, profile_json)
                 VALUES(%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT(id) DO UPDATE SET name=excluded.name, source=excluded.source, default_hidden=excluded.default_hidden, enabled=excluded.enabled, description=excluded.description, profile_json=excluded.profile_json, updated_at=now()
+                ON CONFLICT(id) DO UPDATE SET
+                  name=excluded.name,
+                  source=excluded.source,
+                  default_hidden=excluded.default_hidden,
+                  enabled=excluded.enabled,
+                  description=excluded.description,
+                  profile_json=excluded.profile_json,
+                  updated_at=now()
                 """,
                 (category, name or _title_category(category), source, default_hidden, enabled, description, Jsonb(profile or {})),
             )
 
     def list_categories(self) -> list[dict[str, Any]]:
+        """List categories."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -1066,11 +1263,15 @@ class PgCache:
         return item
 
     def default_excluded_categories(self) -> set[str]:
+        """Default excluded categories."""
         with self._connect() as conn:
             rows = conn.execute("SELECT id FROM categories WHERE default_hidden = true AND enabled = true")
             return {row["id"] for row in rows} or set(DEFAULT_EXCLUDED_CATEGORIES)
 
-    def replace_message_categories(self, message_id: str, assignments: list[dict[str, Any]], sources: tuple[str, ...] = ("system", "learned", "manual_rule")) -> None:
+    def replace_message_categories(
+        self, message_id: str, assignments: list[dict[str, Any]], sources: tuple[str, ...] = ("system", "learned", "manual_rule")
+    ) -> None:
+        """Replace message categories."""
         with self._connect() as conn:
             conn.execute("DELETE FROM message_categories WHERE message_id = %s AND source = ANY(%s)", (message_id, list(sources)))
             for assignment in assignments:
@@ -1080,19 +1281,38 @@ class PgCache:
                     VALUES(%s, %s, %s, %s, %s)
                     ON CONFLICT(id) DO NOTHING
                     """,
-                    (assignment["category"], _title_category(assignment["category"]), assignment.get("source", "system"), assignment["category"] in DEFAULT_EXCLUDED_CATEGORIES, assignment.get("enabled", True)),
+                    (
+                        assignment["category"],
+                        _title_category(assignment["category"]),
+                        assignment.get("source", "system"),
+                        assignment["category"] in DEFAULT_EXCLUDED_CATEGORIES,
+                        assignment.get("enabled", True),
+                    ),
                 )
                 conn.execute(
                     """
                     INSERT INTO message_categories(message_id, category, confidence, source, reason, top_terms_json)
                     VALUES(%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT(message_id, category) DO UPDATE SET confidence=excluded.confidence, source=excluded.source, reason=excluded.reason, top_terms_json=excluded.top_terms_json, updated_at=now()
+                    ON CONFLICT(message_id, category) DO UPDATE SET
+                      confidence=excluded.confidence,
+                      source=excluded.source,
+                      reason=excluded.reason,
+                      top_terms_json=excluded.top_terms_json,
+                      updated_at=now()
                     """,
-                    (message_id, assignment["category"], float(assignment.get("confidence", 1.0)), assignment.get("source", "system"), assignment.get("reason"), Jsonb(assignment.get("top_terms", []))),
+                    (
+                        message_id,
+                        assignment["category"],
+                        float(assignment.get("confidence", 1.0)),
+                        assignment.get("source", "system"),
+                        assignment.get("reason"),
+                        Jsonb(assignment.get("top_terms", [])),
+                    ),
                 )
             self._apply_category_overrides_conn(conn, message_id)
 
     def apply_category(self, message_id: str, category: str, action: str = "include", reason: str | None = None) -> None:
+        """Apply category."""
         self.upsert_category(category, source="manual")
         with self._connect() as conn:
             conn.execute(
@@ -1105,7 +1325,7 @@ class PgCache:
             )
             self._apply_category_overrides_conn(conn, message_id)
 
-    def _apply_category_overrides_conn(self, conn, message_id: str) -> None:
+    def _apply_category_overrides_conn(self, conn: psycopg.Connection[dict[str, object]], message_id: str) -> None:
         for row in conn.execute("SELECT category, action, reason FROM category_overrides WHERE message_id = %s", (message_id,)):
             if row["action"] == "exclude":
                 conn.execute("DELETE FROM message_categories WHERE message_id = %s AND category = %s", (message_id, row["category"]))
@@ -1119,7 +1339,8 @@ class PgCache:
                 (message_id, row["category"], row["reason"] or row["action"]),
             )
 
-    def upsert_category_rule(self, category: str, rule: dict[str, Any], enabled: bool = True) -> int:
+    def upsert_category_rule(self, category: str, rule: dict[str, Any], *, enabled: bool = True) -> int:
+        """Upsert category rule."""
         self.upsert_category(category, source="manual", default_hidden=category in DEFAULT_EXCLUDED_CATEGORIES)
         with self._connect() as conn:
             row = conn.execute(
@@ -1129,6 +1350,7 @@ class PgCache:
             return int(row["id"])
 
     def list_category_rules(self) -> list[dict[str, Any]]:
+        """List category rules."""
         with self._connect() as conn:
             rows = conn.execute("SELECT id, category, rule_json, enabled, created_at, updated_at FROM category_rules ORDER BY category, id")
             result = []
@@ -1140,6 +1362,7 @@ class PgCache:
             return result
 
     def message_category_assignments(self, message_id: str) -> list[dict[str, Any]]:
+        """Message category assignments."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -1158,23 +1381,34 @@ class PgCache:
             return result
 
     def store_learned_category_run(self, run: dict[str, Any]) -> int:
+        """Store learned category run."""
         with self._connect() as conn:
             row = conn.execute("INSERT INTO learned_category_runs(run_json) VALUES(%s) RETURNING id", (Jsonb(run),)).fetchone()
             return int(row["id"])
 
     def learned_category_runs(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Learned category runs."""
         with self._connect() as conn:
-            return [{"id": row["id"], "created_at": row["created_at"], "run": row["run_json"]} for row in conn.execute("SELECT id, run_json, created_at FROM learned_category_runs ORDER BY id DESC LIMIT %s", (limit,))]
+            return [
+                {"id": row["id"], "created_at": row["created_at"], "run": row["run_json"]}
+                for row in conn.execute("SELECT id, run_json, created_at FROM learned_category_runs ORDER BY id DESC LIMIT %s", (limit,))
+            ]
 
     def category_stats(self, after: str | None = None, before: str | None = None) -> dict[str, Any]:
+        """Category stats."""
         messages = _filter_by_date(self.iter_messages(), after, before)
         counts: dict[str, int] = {}
         for message in messages:
             for category in message.get("categories", []):
                 counts[category] = counts.get(category, 0) + 1
-        return {"messages": len(messages), "categories": dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))), "default_excluded": sorted(self.default_excluded_categories())}
+        return {
+            "messages": len(messages),
+            "categories": dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))),
+            "default_excluded": sorted(self.default_excluded_categories()),
+        }
 
     def upsert_rule(self, name: str, priority: int, rule: dict[str, Any]) -> None:
+        """Upsert rule."""
         with self._connect() as conn:
             conn.execute(
                 """
@@ -1185,6 +1419,7 @@ class PgCache:
             )
 
     def set_state(self, key: str, value: str) -> None:
+        """Set state."""
         with self._connect() as conn:
             conn.execute(
                 """
@@ -1195,6 +1430,7 @@ class PgCache:
             )
 
     def get_state(self, key: str) -> str | None:
+        """Get state."""
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM sync_state WHERE key = %s", (key,)).fetchone()
             return row["value"] if row else None
@@ -1208,6 +1444,7 @@ class PgCache:
         detail: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> int | None:
+        """Record operational event."""
         try:
             with self._connect() as conn:
                 row = conn.execute(
@@ -1219,10 +1456,12 @@ class PgCache:
                     (event_type, severity, component, subject_id, detail, Jsonb(metadata or {})),
                 ).fetchone()
                 return int(row["id"]) if row else None
-        except Exception:
+        except PG_CACHE_EXCEPTIONS as exc:
+            self.operational_event_error = repr(exc)
             return None
 
     def operational_events(self, limit: int = 100, component: str | None = None, severity: str | None = None) -> list[dict[str, Any]]:
+        """Operational events."""
         where = []
         params: list[Any] = []
         if component:
@@ -1231,21 +1470,23 @@ class PgCache:
         if severity:
             where.append("severity = %s")
             params.append(severity)
-        where_sql = "WHERE " + " AND ".join(where) if where else ""
         with self._connect() as conn:
             rows = conn.execute(
-                f"""
+                sql.SQL(
+                    """
                 SELECT id, event_type, severity, component, subject_id, detail, metadata_json, created_at
                 FROM operational_events
                 {where_sql}
                 ORDER BY created_at DESC, id DESC
                 LIMIT %s
-                """,
+                """
+                ).format(where_sql=_where_clause_sql(where)),
                 (*params, limit),
             )
             return [dict(row) for row in rows]
 
     def start_sync_run(self, run_kind: str, start_cursor: str | None = None, request: dict[str, Any] | None = None) -> int | None:
+        """Start sync run."""
         try:
             with self._connect() as conn:
                 row = conn.execute(
@@ -1257,12 +1498,24 @@ class PgCache:
                     (run_kind, start_cursor, Jsonb(request or {})),
                 ).fetchone()
                 run_id = int(row["id"]) if row else None
-            self.record_operational_event("sync.started", "info", "sync", str(run_id) if run_id else None, f"Started {run_kind} sync.", {"run_kind": run_kind, "start_cursor": start_cursor})
-            return run_id
-        except Exception:
+            self.record_operational_event(
+                "sync.started",
+                "info",
+                "sync",
+                str(run_id) if run_id else None,
+                f"Started {run_kind} sync.",
+                {"run_kind": run_kind, "start_cursor": start_cursor},
+            )
+        except PG_CACHE_EXCEPTIONS as exc:
+            self.sync_run_error = repr(exc)
             return None
+        else:
+            return run_id
 
-    def finish_sync_run(self, run_id: int | None, status: str, end_cursor: str | None = None, result: dict[str, Any] | None = None, error: str | None = None) -> None:
+    def finish_sync_run(
+        self, run_id: int | None, status: str, end_cursor: str | None = None, result: dict[str, Any] | None = None, error: str | None = None
+    ) -> None:
+        """Finish sync run."""
         if run_id is None:
             return
         try:
@@ -1279,40 +1532,76 @@ class PgCache:
                     """,
                     (status, end_cursor, Jsonb(result or {}), error, run_id),
                 )
-            self.record_operational_event("sync." + status, "error" if status == "failed" else "info", "sync", str(run_id), error or f"Finished sync run {run_id}.", result or {})
-        except Exception:
+            self.record_operational_event(
+                "sync." + status,
+                "error" if status == "failed" else "info",
+                "sync",
+                str(run_id),
+                error or f"Finished sync run {run_id}.",
+                result or {},
+            )
+        except PG_CACHE_EXCEPTIONS as exc:
+            self.sync_run_error = repr(exc)
             return
 
     def sync_runs(self, limit: int = 50, run_kind: str | None = None) -> list[dict[str, Any]]:
+        """Sync runs."""
         where = "WHERE run_kind = %s" if run_kind else ""
         params: tuple[Any, ...] = (run_kind, limit) if run_kind else (limit,)
         with self._connect() as conn:
             rows = conn.execute(
-                f"""
+                sql.SQL(
+                    """
                 SELECT id, run_kind, status, start_cursor, end_cursor, request_json, result_json, error, started_at, finished_at
                 FROM sync_runs
                 {where}
                 ORDER BY started_at DESC, id DESC
                 LIMIT %s
-                """,
+                """
+                ).format(where=sql.SQL(where)),
                 params,
             )
             return [dict(row) for row in rows]
 
     def latest_history_id(self) -> str | None:
+        """Latest history id."""
         with self._connect() as conn:
             row = conn.execute("SELECT MAX(history_id) AS history_id FROM messages").fetchone()
             return str(row["history_id"]) if row and row["history_id"] is not None else None
 
     def sync_status(self) -> dict[str, Any]:
+        """Sync status."""
         with self._connect() as conn:
             counts = {}
-            for table in ["content_objects", "content_object_refs", "labels", "threads", "messages", "attachments", "graph_triples", "graph_node_profiles", "graph_edge_stats", "summary_items", "embedding_chunks", "ingest_issues", "dead_letter_jobs", "operational_events", "sync_runs", "retention_policies", "imap_mailboxes", "imap_message_uids", "archive_exports"]:
-                counts[table] = conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
+            for table in [
+                "content_objects",
+                "content_object_refs",
+                "labels",
+                "threads",
+                "messages",
+                "attachments",
+                "graph_triples",
+                "graph_node_profiles",
+                "graph_edge_stats",
+                "summary_items",
+                "embedding_chunks",
+                "ingest_issues",
+                "dead_letter_jobs",
+                "operational_events",
+                "sync_runs",
+                "retention_policies",
+                "imap_mailboxes",
+                "imap_message_uids",
+                "archive_exports",
+            ]:
+                counts[table] = conn.execute(sql.SQL("SELECT COUNT(*) AS c FROM {}").format(sql.Identifier(table))).fetchone()["c"]
             state = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM sync_state")}
             rows = conn.execute("SELECT message_date FROM messages WHERE message_date IS NOT NULL")
-            iso_dates = sorted(date for row in rows if (date := _parse_message_date(row["message_date"])))
-            archive_states = {row["archive_state"]: row["count"] for row in conn.execute("SELECT archive_state, COUNT(*) AS count FROM messages GROUP BY archive_state")}
+            iso_dates = sorted(_parse_message_date(date) for row in rows if (date := row["message_date"]))
+            archive_states = {
+                row["archive_state"]: row["count"]
+                for row in conn.execute("SELECT archive_state, COUNT(*) AS count FROM messages GROUP BY archive_state")
+            }
         return {
             "counts": counts,
             "state": state,
@@ -1324,6 +1613,7 @@ class PgCache:
         }
 
     def refresh_archive_states(self, limit: int | None = None) -> dict[str, int]:
+        """Refresh archive states."""
         sql = "SELECT id FROM messages ORDER BY updated_at DESC"
         params: tuple[Any, ...] = ()
         if limit is not None:
@@ -1337,8 +1627,14 @@ class PgCache:
         return {"updated": updated}
 
     def archive_status(self, message_id: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """Archive status."""
         with self._connect() as conn:
-            states = {row["archive_state"]: row["count"] for row in conn.execute("SELECT archive_state, COUNT(*) AS count FROM messages GROUP BY archive_state ORDER BY archive_state")}
+            states = {
+                row["archive_state"]: row["count"]
+                for row in conn.execute(
+                    "SELECT archive_state, COUNT(*) AS count FROM messages GROUP BY archive_state ORDER BY archive_state"
+                )
+            }
             if message_id:
                 rows = conn.execute(
                     """
@@ -1369,6 +1665,7 @@ class PgCache:
         return {"states": states, "messages": messages}
 
     def archive_incomplete_message_ids(self, limit: int = 50) -> list[str]:
+        """Archive incomplete message ids."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -1384,10 +1681,20 @@ class PgCache:
             return [row["id"] for row in rows]
 
     def retention_policies(self) -> list[dict[str, Any]]:
+        """Retention policies."""
         with self._connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT id, name, match_kind, match_value, action, enabled, created_at, updated_at FROM retention_policies ORDER BY name")]
+            return [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT id, name, match_kind, match_value, action, enabled, created_at, updated_at
+                    FROM retention_policies ORDER BY name
+                    """
+                )
+            ]
 
     def retention_preview(self, message_id: str) -> dict[str, Any]:
+        """Retention preview."""
         message = self.get_message(message_id)
         if not message:
             raise KeyError(message_id)
@@ -1404,9 +1711,16 @@ class PgCache:
                 matched.append(policy)
         if any(policy["action"] == "purge" for policy in matched):
             action = "purge"
-        return {"message_id": message_id, "action": action, "labels": sorted(labels), "categories": sorted(categories), "matched_policies": matched}
+        return {
+            "message_id": message_id,
+            "action": action,
+            "labels": sorted(labels),
+            "categories": sorted(categories),
+            "matched_policies": matched,
+        }
 
-    def apply_retention_policy(self, message_id: str, source: str = "operator", dry_run: bool = True) -> dict[str, Any]:
+    def apply_retention_policy(self, message_id: str, source: str = "operator", *, dry_run: bool = True) -> dict[str, Any]:
+        """Apply retention policy."""
         preview = self.retention_preview(message_id)
         if dry_run:
             return {"dry_run": True, **preview}
@@ -1426,309 +1740,53 @@ class PgCache:
                 """,
                 (state, source, preview["action"], Jsonb(preview["labels"]), state, message_id),
             )
-        self.record_operational_event("retention.applied", "warning", "archive", message_id, f"Applied retention action {preview['action']}.", preview)
+        self.record_operational_event(
+            "retention.applied", "warning", "archive", message_id, f"Applied retention action {preview['action']}.", preview
+        )
         return {"dry_run": False, "archive_state": state, **preview}
 
     def verify_objects(self, limit: int | None = None) -> dict[str, Any]:
-        sql = "SELECT digest, compression, path FROM content_objects ORDER BY created_at"
-        params: tuple[Any, ...] = ()
-        if limit is not None:
-            sql += " LIMIT %s"
-            params = (limit,)
-        ok = missing = corrupt = error = 0
-        with self._connect() as conn:
-            rows = [dict(row) for row in conn.execute(sql, params)]
-            for row in rows:
-                status = "ok"
-                detail = None
-                try:
-                    if not os.path.exists(row["path"]):
-                        status = "missing"
-                    else:
-                        self.objects.get(row["digest"], compression=row["compression"])
-                except IOError as exc:
-                    status = "corrupt"
-                    detail = repr(exc)
-                except Exception as exc:
-                    status = "error"
-                    detail = repr(exc)
-                conn.execute(
-                    """
-                    UPDATE content_objects
-                    SET verification_status=%s, verification_error=%s, verified_at=now()
-                    WHERE digest=%s
-                    """,
-                    (status, detail, row["digest"]),
-                )
-                if status == "ok":
-                    ok += 1
-                elif status == "missing":
-                    missing += 1
-                elif status == "corrupt":
-                    corrupt += 1
-                else:
-                    error += 1
-        return {"checked": ok + missing + corrupt + error, "ok": ok, "missing": missing, "corrupt": corrupt, "error": error}
+        """Verify objects."""
+        return pg_cache_archive.verify_objects(self, PG_CACHE_EXCEPTIONS, limit=limit)
 
     def export_archive(self, target: str) -> dict[str, Any]:
-        target_path = Path(target)
-        objects_dir = target_path / "objects"
-        target_path.mkdir(parents=True, exist_ok=True)
-        objects_dir.mkdir(parents=True, exist_ok=True)
-        export_id: int | None = None
-        try:
-            with self._connect() as conn:
-                row = conn.execute("INSERT INTO archive_exports(export_path) VALUES(%s) RETURNING id", (str(target_path),)).fetchone()
-                export_id = int(row["id"]) if row else None
-                tables = {}
-                for table in [
-                    "labels",
-                    "threads",
-                    "messages",
-                    "message_parts",
-                    "attachments",
-                    "content_objects",
-                    "content_object_refs",
-                    "retention_policies",
-                    "imap_mailboxes",
-                    "imap_message_uids",
-                ]:
-                    tables[table] = [dict(item) for item in conn.execute(f"SELECT * FROM {table}")]
-            copied = 0
-            for obj in tables["content_objects"]:
-                source = Path(obj["path"])
-                relative = Path("blake3") / obj["digest"][:2] / obj["digest"][2:4] / source.name
-                destination = objects_dir / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                if source.exists():
-                    shutil.copy2(source, destination)
-                    copied += 1
-                obj["export_relative_path"] = str(Path("objects") / relative)
-            manifest = {
-                "format": "gmeow.archive.v1",
-                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "object_count": len(tables["content_objects"]),
-                "message_count": len(tables["messages"]),
-                "tables": tables,
-            }
-            manifest_path = target_path / "manifest.json"
-            manifest_text = json.dumps(manifest, indent=2, sort_keys=True, default=str)
-            manifest_path.write_text(manifest_text)
-            digest = blake3_digest(manifest_text.encode())
-            with self._connect() as conn:
-                if export_id is not None:
-                    conn.execute(
-                        """
-                        UPDATE archive_exports
-                        SET status='complete', manifest_digest=%s, object_count=%s, message_count=%s, finished_at=now()
-                        WHERE id=%s
-                        """,
-                        (digest, len(tables["content_objects"]), len(tables["messages"]), export_id),
-                    )
-            self.record_operational_event("archive.exported", "info", "archive", str(export_id) if export_id else None, "Exported archive manifest.", {"target": str(target_path), "objects_copied": copied})
-            return {"id": export_id, "target": str(target_path), "manifest": str(manifest_path), "manifest_digest": digest, "objects": len(tables["content_objects"]), "objects_copied": copied, "messages": len(tables["messages"])}
-        except Exception as exc:
-            if export_id is not None:
-                with self._connect() as conn:
-                    conn.execute("UPDATE archive_exports SET status='failed', error=%s, finished_at=now() WHERE id=%s", (repr(exc), export_id))
-            raise
+        """Export archive."""
+        return pg_cache_archive.export_archive(self, PG_CACHE_EXCEPTIONS, target)
 
     def verify_archive_export(self, source: str) -> dict[str, Any]:
-        root = Path(source)
-        manifest_path = root / "manifest.json"
-        manifest = json.loads(manifest_path.read_text())
-        missing = []
-        corrupt = []
-        for obj in manifest.get("tables", {}).get("content_objects", []):
-            path = root / obj.get("export_relative_path", "")
-            if not path.exists():
-                missing.append(obj["digest"])
-                continue
-            try:
-                content = path.read_bytes()
-                if obj.get("compression") == "zstd":
-                    import zstandard as zstd
+        """Verify archive export."""
+        return pg_cache_archive.verify_archive_export(source, PG_CACHE_EXCEPTIONS)
 
-                    content = zstd.ZstdDecompressor().decompress(content)
-                if blake3_digest(content) != obj["digest"]:
-                    corrupt.append(obj["digest"])
-            except Exception:
-                corrupt.append(obj["digest"])
-        return {"source": str(root), "objects": len(manifest.get("tables", {}).get("content_objects", [])), "messages": len(manifest.get("tables", {}).get("messages", [])), "missing": missing, "corrupt": corrupt, "ok": not missing and not corrupt}
-
-    def restore_archive(self, source: str, dry_run: bool = True) -> dict[str, Any]:
-        root = Path(source)
-        manifest = json.loads((root / "manifest.json").read_text())
-        tables = manifest.get("tables", {})
-        if dry_run:
-            return {"dry_run": True, "messages": len(tables.get("messages", [])), "objects": len(tables.get("content_objects", []))}
-        for obj in tables.get("content_objects", []):
-            exported = root / obj.get("export_relative_path", "")
-            destination = self.objects.path_for_digest(obj["digest"], compression=obj["compression"])
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if exported.exists() and not destination.exists():
-                shutil.copy2(exported, destination)
-        with self._connect() as conn:
-            for row in tables.get("content_objects", []):
-                conn.execute(
-                    """
-                    INSERT INTO content_objects(digest, path, media_type, compression, original_size, stored_size, verification_status, verified_at, metadata_json)
-                    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT(digest) DO UPDATE SET path=excluded.path, media_type=excluded.media_type, compression=excluded.compression,
-                      original_size=excluded.original_size, stored_size=excluded.stored_size, verification_status=excluded.verification_status,
-                      verified_at=excluded.verified_at, metadata_json=excluded.metadata_json
-                    """,
-                    (
-                        row["digest"],
-                        str(self.objects.path_for_digest(row["digest"], compression=row["compression"])),
-                        row["media_type"],
-                        row["compression"],
-                        row["original_size"],
-                        row["stored_size"],
-                        row.get("verification_status", "unverified"),
-                        row.get("verified_at"),
-                        Jsonb(row.get("metadata_json") or {}),
-                    ),
-                )
-            for row in tables.get("labels", []):
-                conn.execute("INSERT INTO labels(id, name, type, raw_json) VALUES(%s, %s, %s, %s) ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, raw_json=excluded.raw_json", (row["id"], row["name"], row.get("type"), Jsonb(row.get("raw_json") or {})))
-            for row in tables.get("threads", []):
-                conn.execute("INSERT INTO threads(id, snippet, raw_json, updated_at) VALUES(%s, %s, %s, %s) ON CONFLICT(id) DO UPDATE SET snippet=excluded.snippet, raw_json=excluded.raw_json, updated_at=excluded.updated_at", (row["id"], row.get("snippet"), Jsonb(row.get("raw_json") or {}), row.get("updated_at")))
-            for row in tables.get("messages", []):
-                keys = [key for key in row.keys() if key != "search_tsv"]
-                values = [row[key] for key in keys]
-                placeholders = ", ".join(["%s"] * len(keys))
-                columns = ", ".join(keys)
-                updates = ", ".join(f"{key}=excluded.{key}" for key in keys if key != "id")
-                conn.execute(f"INSERT INTO messages({columns}) VALUES({placeholders}) ON CONFLICT(id) DO UPDATE SET {updates}", tuple(Jsonb(v) if isinstance(v, (dict, list)) else v for v in values))
-            conn.execute("DELETE FROM message_parts")
-            for row in tables.get("message_parts", []):
-                keys = list(row.keys())
-                conn.execute(f"INSERT INTO message_parts({', '.join(keys)}) VALUES({', '.join(['%s'] * len(keys))}) ON CONFLICT(message_id, part_id) DO UPDATE SET " + ", ".join(f"{key}=excluded.{key}" for key in keys if key not in {'message_id', 'part_id'}), tuple(Jsonb(row[key]) if isinstance(row[key], (dict, list)) else row[key] for key in keys))
-            conn.execute("DELETE FROM attachments")
-            for row in tables.get("attachments", []):
-                keys = list(row.keys())
-                conn.execute(f"INSERT INTO attachments({', '.join(keys)}) VALUES({', '.join(['%s'] * len(keys))}) ON CONFLICT(message_id, COALESCE(part_id, ''), sha1) DO UPDATE SET " + ", ".join(f"{key}=excluded.{key}" for key in keys if key not in {'message_id', 'part_id', 'sha1'}), tuple(Jsonb(row[key]) if isinstance(row[key], (dict, list)) else row[key] for key in keys))
-            self.refresh_content_object_refs()
-        verified = self.verify_objects()
-        self.record_operational_event("archive.restored", "info", "archive", None, "Restored archive export.", {"source": str(root), **verified})
-        return {"dry_run": False, "messages": len(tables.get("messages", [])), "objects": len(tables.get("content_objects", [])), "verification": verified}
+    def restore_archive(self, source: str, *, dry_run: bool = True) -> dict[str, Any]:
+        """Restore archive."""
+        return pg_cache_archive.restore_archive(self, source, dry_run=dry_run)
 
     def refresh_imap_mailboxes(self) -> dict[str, int]:
-        with self._connect() as conn:
-            labels = [dict(row) for row in conn.execute("SELECT id, name FROM labels ORDER BY name")]
-            for label in labels:
-                name = _imap_mailbox_name(label["name"] or label["id"])
-                row = conn.execute(
-                    """
-                    INSERT INTO imap_mailboxes(name, label_id)
-                    VALUES(%s, %s)
-                    ON CONFLICT(name) DO UPDATE SET label_id=excluded.label_id, updated_at=now()
-                    RETURNING id
-                    """,
-                    (name, label["id"]),
-                ).fetchone()
-                mailbox_id = row["id"]
-                messages = conn.execute(
-                    """
-                    SELECT id FROM messages
-                    WHERE archive_state IN ('complete', 'tombstoned')
-                      AND raw_rfc822_digest IS NOT NULL
-                      AND label_ids ? %s
-                    ORDER BY COALESCE(message_ts, updated_at), id
-                    """,
-                    (label["id"],),
-                ).fetchall()
-                for message in messages:
-                    conn.execute(
-                        """
-                        INSERT INTO imap_message_uids(mailbox_id, message_id)
-                        VALUES(%s, %s)
-                        ON CONFLICT(mailbox_id, message_id) DO NOTHING
-                        """,
-                        (mailbox_id, message["id"]),
-                    )
-        return {"mailboxes": len(labels)}
+        """Refresh imap mailboxes."""
+        return pg_cache_imap.refresh_imap_mailboxes(self)
 
     def imap_mailboxes(self) -> list[dict[str, Any]]:
-        self.refresh_imap_mailboxes()
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT mb.id, mb.name, mb.label_id, mb.uidvalidity, COUNT(mu.message_id) AS messages, COALESCE(MAX(mu.uid), 0) AS uidnext_base
-                FROM imap_mailboxes mb
-                LEFT JOIN imap_message_uids mu ON mu.mailbox_id = mb.id
-                GROUP BY mb.id, mb.name, mb.label_id, mb.uidvalidity
-                ORDER BY mb.name
-                """
-            )
-            return [{**dict(row), "uidnext": int(row["uidnext_base"] or 0) + 1} for row in rows]
+        """Imap mailboxes."""
+        return pg_cache_imap.imap_mailboxes(self)
 
     def imap_mailbox(self, name: str) -> dict[str, Any] | None:
-        self.refresh_imap_mailboxes()
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT mb.id, mb.name, mb.label_id, mb.uidvalidity, COUNT(mu.message_id) AS messages, COALESCE(MAX(mu.uid), 0) AS uidnext_base
-                FROM imap_mailboxes mb
-                LEFT JOIN imap_message_uids mu ON mu.mailbox_id = mb.id
-                WHERE lower(mb.name) = lower(%s)
-                GROUP BY mb.id, mb.name, mb.label_id, mb.uidvalidity
-                """,
-                (name,),
-            ).fetchone()
-            if not row:
-                return None
-            item = dict(row)
-            item["uidnext"] = int(item.pop("uidnext_base") or 0) + 1
-            return item
+        """Imap mailbox."""
+        return pg_cache_imap.imap_mailbox(self, name)
 
     def imap_messages(self, mailbox: str, limit: int | None = None) -> list[dict[str, Any]]:
-        box = self.imap_mailbox(mailbox)
-        if not box:
-            return []
-        sql = """
-            SELECT mu.uid, m.id, m.subject, m.sender, m.recipients, m.message_date, m.message_ts, m.raw_rfc822_digest, co.compression
-            FROM imap_message_uids mu
-            JOIN messages m ON m.id = mu.message_id
-            JOIN content_objects co ON co.digest = m.raw_rfc822_digest
-            WHERE mu.mailbox_id = %s
-              AND m.archive_state IN ('complete', 'tombstoned')
-              AND m.raw_rfc822_digest IS NOT NULL
-            ORDER BY mu.uid
-        """
-        params: tuple[Any, ...] = (box["id"],)
-        if limit is not None:
-            sql += " LIMIT %s"
-            params = (box["id"], limit)
-        with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-            return [dict(row) for row in rows]
+        """Imap messages."""
+        return pg_cache_imap.imap_messages(self, mailbox, limit=limit)
 
     def imap_message_bytes(self, mailbox: str, uid: int) -> bytes | None:
-        box = self.imap_mailbox(mailbox)
-        if not box:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT m.raw_rfc822_digest, co.compression
-                FROM imap_message_uids mu
-                JOIN messages m ON m.id = mu.message_id
-                JOIN content_objects co ON co.digest = m.raw_rfc822_digest
-                WHERE mu.mailbox_id = %s AND mu.uid = %s
-                """,
-                (box["id"], uid),
-            ).fetchone()
-        if not row:
-            return None
-        return self.objects.get(row["raw_rfc822_digest"], compression=row["compression"])
+        """Imap message bytes."""
+        return pg_cache_imap.imap_message_bytes(self, mailbox, uid)
 
     def imap_status(self) -> dict[str, Any]:
-        boxes = self.imap_mailboxes()
-        return {"mailboxes": len(boxes), "messages": sum(int(box["messages"] or 0) for box in boxes), "read_only": True, "uid_model": "per_label_mailbox"}
+        """Imap status."""
+        return pg_cache_imap.imap_status(self)
 
     def resilience_status(self) -> dict[str, Any]:
+        """Resilience status."""
         job_status = self.intelligence_job_status()
         dead_letters = self.list_dead_letter_jobs(limit=10)
         events = self.operational_events(limit=20, severity="error")
@@ -1754,20 +1812,19 @@ class PgCache:
             "latest_sync_runs": self.sync_runs(limit=5),
         }
 
-    def repair_cache(self, dry_run: bool = True) -> dict[str, Any]:
+    def repair_cache(self, *, dry_run: bool = True) -> dict[str, Any]:
+        """Repair cache."""
         missing = []
         corrupt = []
         stale_count = 0
         with self._connect() as conn:
             for row in conn.execute("SELECT digest, path, compression FROM content_objects ORDER BY created_at"):
-                from pathlib import Path
-
                 if not Path(row["path"]).exists():
                     missing.append(dict(row))
                     continue
                 try:
                     self.objects.get(row["digest"], compression=row["compression"])
-                except Exception as exc:
+                except PG_CACHE_EXCEPTIONS as exc:
                     item = dict(row)
                     item["error"] = repr(exc)
                     corrupt.append(item)
@@ -1782,7 +1839,14 @@ class PgCache:
         reclaimed = {"reclaimed": 0} if dry_run else self.reclaim_stale_intelligence_jobs()
         if not dry_run:
             self.refresh_content_object_refs()
-            self.record_operational_event("repair.cache", "warning" if missing or corrupt else "info", "repair", None, "Ran cache repair.", {"missing_object_files": len(missing), "corrupt_object_files": len(corrupt), "reclaimed": reclaimed.get("reclaimed", 0)})
+            self.record_operational_event(
+                "repair.cache",
+                "warning" if missing or corrupt else "info",
+                "repair",
+                None,
+                "Ran cache repair.",
+                {"missing_object_files": len(missing), "corrupt_object_files": len(corrupt), "reclaimed": reclaimed.get("reclaimed", 0)},
+            )
         return {
             "dry_run": dry_run,
             "missing_object_files": {"count": len(missing), "items": missing[:25]},
@@ -1792,6 +1856,7 @@ class PgCache:
         }
 
     def maintenance_status(self) -> dict[str, Any]:
+        """Maintenance status."""
         with self._connect() as conn:
             ref_rows = conn.execute("SELECT COUNT(*) AS count FROM content_object_refs").fetchone()["count"]
             orphan_objects = conn.execute(
@@ -1803,12 +1868,21 @@ class PgCache:
             ).fetchone()
             missing_files = 0
             for row in conn.execute("SELECT path FROM content_objects"):
-                from pathlib import Path
-
                 if not Path(row["path"]).exists():
                     missing_files += 1
-            dims = [dict(row) for row in conn.execute("SELECT embedding_dim, COUNT(*) AS chunks FROM embedding_chunks GROUP BY embedding_dim ORDER BY embedding_dim NULLS FIRST")]
-            reference_kinds = [dict(row) for row in conn.execute("SELECT ref_kind, COUNT(*) AS refs FROM content_object_refs GROUP BY ref_kind ORDER BY ref_kind")]
+            dims = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT embedding_dim, COUNT(*) AS chunks
+                    FROM embedding_chunks GROUP BY embedding_dim ORDER BY embedding_dim NULLS FIRST
+                    """
+                )
+            ]
+            reference_kinds = [
+                dict(row)
+                for row in conn.execute("SELECT ref_kind, COUNT(*) AS refs FROM content_object_refs GROUP BY ref_kind ORDER BY ref_kind")
+            ]
             table_stats = [
                 dict(row)
                 for row in conn.execute(
@@ -1829,7 +1903,8 @@ class PgCache:
             "table_stats": table_stats,
         }
 
-    def prune_orphan_content_objects(self, dry_run: bool = True) -> dict[str, Any]:
+    def prune_orphan_content_objects(self, *, dry_run: bool = True) -> dict[str, Any]:
+        """Prune orphan content objects."""
         query = """
             WITH referenced AS (
               SELECT raw_json_digest AS digest FROM messages WHERE raw_json_digest IS NOT NULL
@@ -1850,8 +1925,6 @@ class PgCache:
             if not dry_run and rows:
                 conn.execute("DELETE FROM content_objects WHERE digest = ANY(%s)", ([row["digest"] for row in rows],))
         if not dry_run:
-            from pathlib import Path
-
             for row in rows:
                 path = Path(row["path"])
                 if path.exists():
@@ -1865,6 +1938,7 @@ class PgCache:
         }
 
     def refresh_content_object_refs(self) -> dict[str, int]:
+        """Refresh content object refs."""
         inserts = [
             ("messages", "raw_json_digest", "raw_json"),
             ("messages", "text_body_digest", "text_body"),
@@ -1876,13 +1950,15 @@ class PgCache:
             total = 0
             for table, column, kind in inserts:
                 result = conn.execute(
-                    f"""
+                    sql.SQL(
+                        """
                     INSERT INTO content_object_refs(digest, ref_table, ref_pk, ref_column, ref_kind)
                     SELECT {column}, %s, id, %s, %s
                     FROM {table}
                     WHERE {column} IS NOT NULL
                     ON CONFLICT DO NOTHING
-                    """,
+                    """
+                    ).format(column=sql.Identifier(column), table=sql.Identifier(table)),
                     (table, column, kind),
                 )
                 total += int(result.rowcount or 0)
@@ -1919,11 +1995,15 @@ class PgCache:
         return {"refs": total}
 
     def refresh_summary_items(self) -> dict[str, int]:
+        """Refresh summary items."""
         statements = [
             (
                 "thread",
                 """
-                INSERT INTO summary_items(scope_kind, scope_id, title, summary, message_count, latest_message_ts, centroid, centroid_dim, metadata_json, updated_at)
+                INSERT INTO summary_items(
+                    scope_kind, scope_id, title, summary, message_count,
+                    latest_message_ts, centroid, centroid_dim, metadata_json, updated_at
+                )
                 SELECT 'thread',
                        COALESCE(m.thread_id, m.id),
                        COALESCE(MAX(NULLIF(m.subject, '')), COALESCE(m.thread_id, m.id)),
@@ -1946,7 +2026,10 @@ class PgCache:
             (
                 "contact",
                 """
-                INSERT INTO summary_items(scope_kind, scope_id, title, summary, message_count, latest_message_ts, centroid, centroid_dim, metadata_json, updated_at)
+                INSERT INTO summary_items(
+                    scope_kind, scope_id, title, summary, message_count,
+                    latest_message_ts, centroid, centroid_dim, metadata_json, updated_at
+                )
                 SELECT 'contact',
                        m.sender_addr,
                        COALESCE(MAX(NULLIF(m.sender, '')), m.sender_addr),
@@ -1970,7 +2053,10 @@ class PgCache:
             (
                 "category",
                 """
-                INSERT INTO summary_items(scope_kind, scope_id, title, summary, message_count, latest_message_ts, centroid, centroid_dim, metadata_json, updated_at)
+                INSERT INTO summary_items(
+                    scope_kind, scope_id, title, summary, message_count,
+                    latest_message_ts, centroid, centroid_dim, metadata_json, updated_at
+                )
                 SELECT 'category',
                        mc.category,
                        COALESCE(MAX(c.name), mc.category),
@@ -1979,7 +2065,10 @@ class PgCache:
                        MAX(m.message_ts),
                        AVG(e.embedding)::vector,
                        MAX(e.embedding_dim),
-                       jsonb_build_object('default_hidden', COALESCE(bool_or(c.default_hidden), false), 'message_ids', jsonb_agg(DISTINCT m.id)),
+                       jsonb_build_object(
+                         'default_hidden', COALESCE(bool_or(c.default_hidden), false),
+                         'message_ids', jsonb_agg(DISTINCT m.id)
+                       ),
                        now()
                 FROM message_categories mc
                 JOIN messages m ON m.id = mc.message_id
@@ -1995,7 +2084,10 @@ class PgCache:
             (
                 "project",
                 """
-                INSERT INTO summary_items(scope_kind, scope_id, title, summary, message_count, latest_message_ts, centroid, centroid_dim, metadata_json, updated_at)
+                INSERT INTO summary_items(
+                    scope_kind, scope_id, title, summary, message_count,
+                    latest_message_ts, centroid, centroid_dim, metadata_json, updated_at
+                )
                 SELECT 'project',
                        gnp.node,
                        gnp.label,
@@ -2028,6 +2120,7 @@ class PgCache:
         return counts
 
     def list_summary_items(self, scope_kind: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        """List summary items."""
         where = ""
         params: list[Any] = []
         if scope_kind:
@@ -2035,13 +2128,15 @@ class PgCache:
             params.append(scope_kind)
         with self._connect() as conn:
             rows = conn.execute(
-                f"""
+                sql.SQL(
+                    """
                 SELECT scope_kind, scope_id, title, summary, message_count, latest_message_ts, centroid_dim, metadata_json, updated_at
                 FROM summary_items
                 {where}
                 ORDER BY message_count DESC, latest_message_ts DESC NULLS LAST, scope_kind, scope_id
                 LIMIT %s
-                """,
+                """
+                ).format(where=sql.SQL(where)),
                 (*params, limit),
             )
             result = []
@@ -2052,12 +2147,14 @@ class PgCache:
             return result
 
     def refresh_timeline_views(self) -> dict[str, str]:
+        """Refresh timeline views."""
         with self._connect() as conn:
             conn.execute("REFRESH MATERIALIZED VIEW message_timeline_daily")
             conn.execute("REFRESH MATERIALIZED VIEW graph_entity_emergence")
         return {"message_timeline_daily": "refreshed", "graph_entity_emergence": "refreshed"}
 
     def refresh_materialized_summary_views(self) -> dict[str, str]:
+        """Refresh materialized summary views."""
         views = [
             "message_search_summary",
             "thread_summary",
@@ -2068,10 +2165,11 @@ class PgCache:
         ]
         with self._connect() as conn:
             for view in views:
-                conn.execute(f"REFRESH MATERIALIZED VIEW {view}")
-        return {view: "refreshed" for view in views}
+                conn.execute(sql.SQL("REFRESH MATERIALIZED VIEW {}").format(sql.Identifier(view)))
+        return dict.fromkeys(views, "refreshed")
 
     def timeline_daily(self, limit: int = 90) -> list[dict[str, Any]]:
+        """Timeline daily."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -2085,6 +2183,7 @@ class PgCache:
             return [dict(row) for row in rows]
 
     def emerging_entities(self, limit: int = 50, kind: str | None = None, visibility: str = "user") -> list[dict[str, Any]]:
+        """Emerging entities."""
         where = ["visibility = %s"]
         params: list[Any] = [visibility]
         if kind:
@@ -2092,24 +2191,28 @@ class PgCache:
             params.append(kind)
         with self._connect() as conn:
             rows = conn.execute(
-                f"""
+                sql.SQL(
+                    """
                 SELECT node, label, kind, visibility, first_seen, last_seen, messages, triples
                 FROM graph_entity_emergence
-                WHERE {' AND '.join(where)}
+                WHERE {where_sql}
                 ORDER BY first_seen DESC NULLS LAST, messages DESC, node
                 LIMIT %s
-                """,
+                """
+                ).format(where_sql=_where_sql(where)),
                 (*params, limit),
             )
             return [dict(row) for row in rows]
 
     def analyze_storage_tables(self) -> dict[str, Any]:
+        """Analyze storage tables."""
         with self._connect() as conn:
             for table in PROJECT_TABLES:
-                conn.execute(f"ANALYZE {table}")
+                conn.execute(sql.SQL("ANALYZE {}").format(sql.Identifier(table)))
         return {"analyzed": PROJECT_TABLES}
 
     def storage_diagnostics(self) -> dict[str, Any]:
+        """Storage diagnostics."""
         with self._connect() as conn:
             extensions = [dict(row) for row in conn.execute("SELECT extname, extversion FROM pg_extension ORDER BY extname")]
             relations = [
@@ -2141,7 +2244,17 @@ class PgCache:
                     """
                 )
             ]
-            vector_dims = [dict(row) for row in conn.execute("SELECT source_kind, embedding_dim, COUNT(*) AS chunks FROM embedding_chunks GROUP BY source_kind, embedding_dim ORDER BY source_kind, embedding_dim")]
+            vector_dims = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT source_kind, embedding_dim, COUNT(*) AS chunks
+                    FROM embedding_chunks
+                    GROUP BY source_kind, embedding_dim
+                    ORDER BY source_kind, embedding_dim
+                    """
+                )
+            ]
             matviews = [
                 dict(row)
                 for row in conn.execute(
@@ -2172,6 +2285,7 @@ class PgCache:
         detail: str,
         artifact: dict[str, Any] | bytes | str | None = None,
     ) -> int:
+        """Record ingest issue."""
         artifact_digest = None
         with self._connect() as conn:
             if artifact is not None:
@@ -2195,6 +2309,7 @@ class PgCache:
             return int(row["id"])
 
     def list_ingest_issues(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List ingest issues."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -2208,21 +2323,22 @@ class PgCache:
             return [dict(row) for row in rows]
 
     def triples(self) -> list[tuple[str, str, str, str | None]]:
+        """Triples."""
         with self._connect() as conn:
             rows = conn.execute("SELECT subject, predicate, object, source_message_id FROM graph_triples")
             return [(row["subject"], row["predicate"], row["object"], row["source_message_id"]) for row in rows]
 
     def add_triples(self, triples: list[tuple[str, str, str, str | None]]) -> None:
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
+        """Add triples."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.executemany(
+                """
                     INSERT INTO graph_triples(subject, predicate, object, source_message_id)
                     VALUES(%s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
-                    triples,
-                )
+                triples,
+            )
         self._mirror_triples_to_age(triples)
 
     def _mirror_triples_to_age(self, triples: list[tuple[str, str, str, str | None]]) -> None:
@@ -2233,28 +2349,48 @@ class PgCache:
                     cypher = (
                         "MERGE (s:Node {id: " + json.dumps(subject) + "}) "
                         "MERGE (o:Node {id: " + json.dumps(obj) + "}) "
-                        "MERGE (s)-[:RELATED {predicate: " + json.dumps(predicate) + ", source_message_id: " + json.dumps(source_message_id) + "}]->(o)"
+                        "MERGE (s)-[:RELATED {predicate: "
+                        + json.dumps(predicate)
+                        + ", source_message_id: "
+                        + json.dumps(source_message_id)
+                        + "}]->(o)"
                     )
                     conn.execute(_age_sql(cypher, "v agtype"))
-        except Exception:
+        except PG_CACHE_EXCEPTIONS as exc:
+            self.age_mirror_error = repr(exc)
             return
 
     def delete_graph_triples_for_message(self, message_id: str) -> None:
+        """Delete graph triples for message."""
         with self._connect() as conn:
             conn.execute("DELETE FROM graph_triples WHERE source_message_id = %s", (message_id,))
 
     def delete_graph_triples_for_attachment(self, sha1: str) -> None:
+        """Delete graph triples for attachment."""
         attachment = f"gmeow:attachment/{sha1}"
         attachment_message = "gmeow:message/attachment_" + sha1
         with self._connect() as conn:
-            conn.execute("DELETE FROM graph_triples WHERE subject = ANY(%s) OR object = ANY(%s)", ([attachment, attachment_message], [attachment, attachment_message]))
+            conn.execute(
+                "DELETE FROM graph_triples WHERE subject = ANY(%s) OR object = ANY(%s)",
+                ([attachment, attachment_message], [attachment, attachment_message]),
+            )
 
     def graph_triples_for_message(self, message_id: str) -> list[dict[str, str | None]]:
+        """Graph triples for message."""
         with self._connect() as conn:
-            rows = conn.execute("SELECT subject, predicate, object, source_message_id FROM graph_triples WHERE source_message_id = %s ORDER BY subject, predicate, object", (message_id,))
+            rows = conn.execute(
+                """
+                SELECT subject, predicate, object, source_message_id
+                FROM graph_triples
+                WHERE source_message_id = %s
+                ORDER BY subject, predicate, object
+                """,
+                (message_id,),
+            )
             return [dict(row) for row in rows]
 
     def refresh_graph_node_profiles(self) -> dict[str, int]:
+        """Refresh graph node profiles."""
         with self._connect() as conn:
             rows = [
                 dict(row)
@@ -2265,7 +2401,8 @@ class PgCache:
                       UNION ALL
                       SELECT object AS node, predicate, source_message_id FROM graph_triples
                     )
-                    SELECT node, MIN(predicate) AS predicate, COUNT(*) AS degree, COUNT(DISTINCT source_message_id) AS message_count
+                    SELECT node, MIN(predicate) AS predicate, COUNT(*) AS degree,
+                           COUNT(DISTINCT source_message_id) AS message_count
                     FROM endpoints
                     GROUP BY node
                     """
@@ -2277,7 +2414,10 @@ class PgCache:
                 profile = _graph_node_profile(row["node"], label, row.get("predicate"))
                 conn.execute(
                     """
-                    INSERT INTO graph_node_profiles(node, label, kind, namespace, visibility, role, noise_reason, degree, message_count, updated_at)
+                    INSERT INTO graph_node_profiles(
+                        node, label, kind, namespace, visibility, role,
+                        noise_reason, degree, message_count, updated_at
+                    )
                     VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                     ON CONFLICT(node) DO UPDATE SET
                       label=excluded.label,
@@ -2309,7 +2449,10 @@ class PgCache:
                 conn.execute("DELETE FROM graph_node_profiles")
         return {"profiles": len(seen)}
 
-    def graph_nodes_for_message(self, message_id: str, visibility: str = "user", kind: str | None = None, namespace: str | None = None) -> dict[str, list[dict[str, Any]]]:
+    def graph_nodes_for_message(
+        self, message_id: str, visibility: str = "user", kind: str | None = None, namespace: str | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Graph nodes for message."""
         grouped: dict[str, list[dict[str, Any]]] = {}
         seen: set[tuple[str, str, str]] = set()
         for triple in self.graph_triples_for_message(message_id):
@@ -2325,10 +2468,13 @@ class PgCache:
                 if key in seen:
                     continue
                 seen.add(key)
-                grouped.setdefault(node_kind, []).append({"id": value, "label": label, "role": role, "predicate": triple["predicate"] or "", "profile": profile})
+                grouped.setdefault(node_kind, []).append(
+                    {"id": value, "label": label, "role": role, "predicate": triple["predicate"] or "", "profile": profile}
+                )
         return {kind: nodes for kind, nodes in grouped.items() if nodes}
 
     def graph_neighbors(self, node: str, depth: int = 1, limit: int = 100) -> dict[str, Any]:
+        """Graph neighbors."""
         depth = max(1, min(depth, 3))
         seen = {node}
         frontier = {node}
@@ -2359,17 +2505,28 @@ class PgCache:
                 frontier = next_frontier
         return {"node": node, "nodes": sorted(seen), "edges": edges}
 
-    def graph_projection(self, limit: int = 25, prefix: str | None = None, visibility: str = "user", kind: str | None = None, namespace: str | None = None) -> dict[str, Any]:
-        from .graph import GraphProjector
-
+    def graph_projection(
+        self, limit: int = 25, prefix: str | None = None, visibility: str = "user", kind: str | None = None, namespace: str | None = None
+    ) -> dict[str, Any]:
+        """Graph projection."""
         triples = self.triples()
         if prefix:
             triples = [triple for triple in triples if triple[0].startswith(prefix) or triple[2].startswith(prefix)]
         triples = [
             triple
             for triple in triples
-            if _profile_allowed(_graph_node_profile(triple[0], self._graph_node_label(triple[0]), triple[1]), visibility=visibility, kind=kind, namespace=namespace)
-            or _profile_allowed(_graph_node_profile(triple[2], self._graph_node_label(triple[2]), triple[1]), visibility=visibility, kind=kind, namespace=namespace)
+            if _profile_allowed(
+                _graph_node_profile(triple[0], self._graph_node_label(triple[0]), triple[1]),
+                visibility=visibility,
+                kind=kind,
+                namespace=namespace,
+            )
+            or _profile_allowed(
+                _graph_node_profile(triple[2], self._graph_node_label(triple[2]), triple[1]),
+                visibility=visibility,
+                kind=kind,
+                namespace=namespace,
+            )
         ]
         projection = GraphProjector().summary(triples, limit=limit * 10)
         filtered_top_nodes = []
@@ -2384,8 +2541,7 @@ class PgCache:
         return projection
 
     def graph_path(self, source: str, target: str, max_depth: int = 4) -> dict[str, Any]:
-        from .graph import GraphProjector
-
+        """Graph path."""
         result = GraphProjector().shortest_path(self.triples(), source, target, max_depth=max_depth)
         if result is None:
             return {"source": source, "target": target, "found": False, "max_depth": max_depth}
@@ -2407,11 +2563,15 @@ class PgCache:
         return result
 
     def refresh_graph_edge_stats(self) -> dict[str, int]:
+        """Refresh graph edge stats."""
         with self._connect() as conn:
             conn.execute("DELETE FROM graph_edge_stats")
             result = conn.execute(
                 """
-                INSERT INTO graph_edge_stats(subject, predicate, object, evidence_count, message_count, first_message_ts, last_message_ts, weight)
+                INSERT INTO graph_edge_stats(
+                    subject, predicate, object, evidence_count, message_count,
+                    first_message_ts, last_message_ts, weight
+                )
                 SELECT gt.subject,
                        gt.predicate,
                        gt.object,
@@ -2420,12 +2580,27 @@ class PgCache:
                        MIN(m.message_ts) AS first_message_ts,
                        MAX(m.message_ts) AS last_message_ts,
                        CASE
-                         WHEN gt.predicate IN ('gmeow:from', 'gmeow:to', 'gmeow:aboutProject', 'https://schema.org/about', 'http://xmlns.com/foaf/0.1/topic') THEN 0.35
-                         WHEN gt.predicate IN ('gmeow:hasAttachmentEvent', 'gmeow:hasCalendarEvent', 'gmeow:calendarAttendee', 'gmeow:calendarOrganizer', 'gmeow:calendarLocation', 'gmeow:calendarStart') THEN 0.35
-                         WHEN gt.predicate IN ('gmeow:hasAttachmentDocument', 'gmeow:hasDocument', 'gmeow:hasDocumentAuthor', 'gmeow:documentTitle', 'gmeow:documentAuthor') THEN 0.45
-                         WHEN gt.predicate IN ('gmeow:attachmentMentions', 'gmeow:attachmentMentionsCanonical', 'gmeow:documentMentions', 'gmeow:calendarMentions') THEN 0.55
+                         WHEN gt.predicate IN (
+                           'gmeow:from', 'gmeow:to', 'gmeow:aboutProject',
+                           'https://schema.org/about', 'http://xmlns.com/foaf/0.1/topic'
+                         ) THEN 0.35
+                         WHEN gt.predicate IN (
+                           'gmeow:hasAttachmentEvent', 'gmeow:hasCalendarEvent', 'gmeow:calendarAttendee',
+                           'gmeow:calendarOrganizer', 'gmeow:calendarLocation', 'gmeow:calendarStart'
+                         ) THEN 0.35
+                         WHEN gt.predicate IN (
+                           'gmeow:hasAttachmentDocument', 'gmeow:hasDocument', 'gmeow:hasDocumentAuthor',
+                           'gmeow:documentTitle', 'gmeow:documentAuthor'
+                         ) THEN 0.45
+                         WHEN gt.predicate IN (
+                           'gmeow:attachmentMentions', 'gmeow:attachmentMentionsCanonical',
+                           'gmeow:documentMentions', 'gmeow:calendarMentions'
+                         ) THEN 0.55
                          WHEN gt.predicate IN ('gmeow:ocrMentions', 'gmeow:visionMentions') THEN 0.8
-                         WHEN gt.predicate IN ('gmeow:mentionsEntity', 'gmeow:hasAttachment', 'gmeow:hasLabel', 'gmeow:containsFile', 'gmeow:attachmentContainsFile') THEN 0.65
+                         WHEN gt.predicate IN (
+                           'gmeow:mentionsEntity', 'gmeow:hasAttachment', 'gmeow:hasLabel',
+                           'gmeow:containsFile', 'gmeow:attachmentContainsFile'
+                         ) THEN 0.65
                          WHEN gt.predicate LIKE 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' THEN 1.25
                          ELSE 1.0
                        END / LN(COUNT(*) + 2.0) AS weight
@@ -2450,8 +2625,7 @@ class PgCache:
             return [dict(row) for row in rows]
 
     def graph_weighted_path(self, source: str, target: str, max_depth: int = 4, limit_edges: int = 50_000) -> dict[str, Any]:
-        from .graph import WeightedGraphProjector
-
+        """Graph weighted path."""
         result = WeightedGraphProjector().weighted_path(self._graph_edge_rows(limit_edges=limit_edges), source, target, max_depth=max_depth)
         if result is None:
             return {"source": source, "target": target, "found": False, "max_depth": max_depth}
@@ -2461,9 +2635,16 @@ class PgCache:
             edge["to_label"] = self._graph_node_label(edge["to"])
         return result
 
-    def graph_centrality(self, metric: str = "pagerank", limit: int = 25, kind: str | None = None, namespace: str | None = None, visibility: str = "user", limit_edges: int = 50_000) -> list[dict[str, Any]]:
-        from .graph import WeightedGraphProjector
-
+    def graph_centrality(
+        self,
+        metric: str = "pagerank",
+        limit: int = 25,
+        kind: str | None = None,
+        namespace: str | None = None,
+        visibility: str = "user",
+        limit_edges: int = 50_000,
+    ) -> list[dict[str, Any]]:
+        """Graph centrality."""
         rows = WeightedGraphProjector().centrality(self._graph_edge_rows(limit_edges=limit_edges), metric=metric)
         rows.sort(key=lambda item: (-item["score"], item["node"]))
         results = []
@@ -2477,9 +2658,10 @@ class PgCache:
                 break
         return results
 
-    def graph_components(self, mode: str = "weak", limit: int = 10, min_size: int = 2, visibility: str = "user", limit_edges: int = 50_000) -> list[dict[str, Any]]:
-        from .graph import WeightedGraphProjector
-
+    def graph_components(
+        self, mode: str = "weak", limit: int = 10, min_size: int = 2, visibility: str = "user", limit_edges: int = 50_000
+    ) -> list[dict[str, Any]]:
+        """Graph components."""
         edge_rows = self._graph_edge_rows(limit_edges=limit_edges)
         degree: dict[str, int] = {}
         for edge in edge_rows:
@@ -2501,10 +2683,21 @@ class PgCache:
                 break
         return results
 
-    def graph_related_nodes(self, node: str, limit: int = 25, max_weight: float | None = None, kind: str | None = None, namespace: str | None = None, visibility: str = "user", limit_edges: int = 50_000) -> list[dict[str, Any]]:
-        from .graph import WeightedGraphProjector
-
-        candidates = WeightedGraphProjector().related_nodes(self._graph_edge_rows(limit_edges=limit_edges), node, limit=limit * 5, max_weight=max_weight)
+    def graph_related_nodes(
+        self,
+        node: str,
+        **options: object,
+    ) -> list[dict[str, Any]]:
+        """Graph related nodes."""
+        limit = int(options.get("limit", 25))
+        max_weight = options.get("max_weight")
+        kind = options.get("kind")
+        namespace = options.get("namespace")
+        visibility = options.get("visibility", "user")
+        limit_edges = int(options.get("limit_edges", 50_000))
+        candidates = WeightedGraphProjector().related_nodes(
+            self._graph_edge_rows(limit_edges=limit_edges), node, limit=limit * 5, max_weight=max_weight
+        )
         results = []
         for item in candidates:
             label = self._graph_node_label(item["node"])
@@ -2516,16 +2709,24 @@ class PgCache:
                 break
         return results
 
-    def graph_bridges(self, limit: int = 25, kind: str | None = None, namespace: str | None = None, visibility: str = "user", limit_edges: int = 50_000) -> list[dict[str, Any]]:
-        results = self.graph_centrality(metric="betweenness", limit=limit, kind=kind, namespace=namespace, visibility=visibility, limit_edges=limit_edges)
+    def graph_bridges(
+        self, limit: int = 25, kind: str | None = None, namespace: str | None = None, visibility: str = "user", limit_edges: int = 50_000
+    ) -> list[dict[str, Any]]:
+        """Graph bridges."""
+        results = self.graph_centrality(
+            metric="betweenness", limit=limit, kind=kind, namespace=namespace, visibility=visibility, limit_edges=limit_edges
+        )
         for item in results:
             item["broker_score"] = item.pop("score")
         return results
 
-    def graph_cycles(self, limit: int = 25, max_cycle_len: int = 8, visibility: str = "user", limit_edges: int = 50_000) -> list[dict[str, Any]]:
-        from .graph import WeightedGraphProjector
-
-        cycles = WeightedGraphProjector().cycles(self._graph_edge_rows(limit_edges=limit_edges), limit=limit * 5, max_cycle_len=max_cycle_len)
+    def graph_cycles(
+        self, limit: int = 25, max_cycle_len: int = 8, visibility: str = "user", limit_edges: int = 50_000
+    ) -> list[dict[str, Any]]:
+        """Graph cycles."""
+        cycles = WeightedGraphProjector().cycles(
+            self._graph_edge_rows(limit_edges=limit_edges), limit=limit * 5, max_cycle_len=max_cycle_len
+        )
         results = []
         for cycle in cycles:
             nodes = []
@@ -2534,14 +2735,17 @@ class PgCache:
                 profile = _graph_node_profile(node, label)
                 if _algorithm_profile_allowed(profile, visibility=visibility):
                     nodes.append({"node": node, "label": label, "profile": profile})
-            if len(nodes) < 2:
+            if len(nodes) < MIN_GRAPH_CYCLE_LENGTH:
                 continue
             results.append({"length": len(cycle), "nodes": nodes})
             if len(results) >= limit:
                 break
         return results
 
-    def graph_recommended_messages(self, message_id: str, limit: int = 20, include_categories: list[str] | None = None, exclude_categories: list[str] | None = None) -> list[dict[str, Any]]:
+    def graph_recommended_messages(
+        self, message_id: str, limit: int = 20, include_categories: list[str] | None = None, exclude_categories: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Graph recommended messages."""
         important_predicates = (
             "gmeow:from",
             "gmeow:to",
@@ -2594,9 +2798,16 @@ class PgCache:
         graph_edges = []
         for row in found:
             weight = 1.0 / (float(row["shared_edges"]) + float(row["shared_nodes"]) + 1.0)
-            graph_edges.append({"subject": message_id, "predicate": "gmeow:sharesNeighborhood", "object": row["message_id"], "weight": weight, "evidence_count": row["shared_edges"], "message_count": row["shared_nodes"]})
-        from .graph import WeightedGraphProjector
-
+            graph_edges.append(
+                {
+                    "subject": message_id,
+                    "predicate": "gmeow:sharesNeighborhood",
+                    "object": row["message_id"],
+                    "weight": weight,
+                    "evidence_count": row["shared_edges"],
+                    "message_count": row["shared_nodes"],
+                }
+            )
         ranked = WeightedGraphProjector().related_nodes(graph_edges, message_id, limit=limit * 5)
         by_id = {row["message_id"]: row for row in found}
         results = []
@@ -2642,10 +2853,12 @@ class PgCache:
         limit: int = 25,
         kind: str | None = None,
         predicate: str | None = None,
+        *,
         include_noise: bool = False,
         namespace: str | None = None,
         visibility: str = "user",
     ) -> list[dict[str, Any]]:
+        """Graph ranked nodes."""
         where = []
         params: list[Any] = []
         if predicate:
@@ -2657,10 +2870,10 @@ class PgCache:
             where.append(f"(subject LIKE ANY(ARRAY[{placeholders}]) OR object LIKE ANY(ARRAY[{placeholders}]))")
             params.extend(kind_prefixes)
             params.extend(kind_prefixes)
-        where_sql = "WHERE " + " AND ".join(where) if where else ""
         with self._connect() as conn:
             rows = conn.execute(
-                f"""
+                sql.SQL(
+                    """
                 WITH endpoints AS (
                   SELECT subject AS node, predicate, source_message_id FROM graph_triples {where_sql}
                   UNION ALL
@@ -2668,7 +2881,8 @@ class PgCache:
                 )
                 SELECT node, COUNT(*) AS degree, COUNT(DISTINCT source_message_id) AS messages
                 FROM endpoints GROUP BY node ORDER BY messages DESC, degree DESC, node LIMIT %s
-                """,
+                """
+                ).format(where_sql=_where_clause_sql(where)),
                 (*params, *params, limit * 5),
             )
             results = []
@@ -2684,8 +2898,7 @@ class PgCache:
             return results
 
     def graph_projects(self, limit: int = 25) -> list[dict[str, Any]]:
-        from .graph import DOAP, RDF_TYPE
-
+        """Graph projects."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -2713,8 +2926,7 @@ class PgCache:
             return projects
 
     def ontology_profile(self) -> dict[str, Any]:
-        from .graph import ONTOLOGY_PROFILE
-
+        """Ontology profile."""
         counts = {}
         with self._connect() as conn:
             for name, profile in ONTOLOGY_PROFILE.items():
@@ -2729,7 +2941,10 @@ class PgCache:
                 counts[name] = {**profile, "triples": row["triples"], "messages": row["messages"]}
         return {"ontologies": counts}
 
-    def graph_related_messages(self, message_id: str, limit: int = 20, include_categories: list[str] | None = None, exclude_categories: list[str] | None = None) -> list[dict[str, Any]]:
+    def graph_related_messages(
+        self, message_id: str, limit: int = 20, include_categories: list[str] | None = None, exclude_categories: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Graph related messages."""
         with self._connect() as conn:
             nodes = {
                 row["object"]
@@ -2768,11 +2983,13 @@ class PgCache:
         self,
         prefix: str | None = None,
         limit: int = 25,
+        *,
         include_noise: bool = False,
         kind: str | None = None,
         namespace: str | None = None,
         visibility: str = "user",
     ) -> list[dict[str, Any]]:
+        """Graph top nodes."""
         if kind or namespace or visibility or include_noise:
             where = []
             params: list[Any] = []
@@ -2788,16 +3005,17 @@ class PgCache:
             if not include_noise and visibility not in {"all", "any"}:
                 where.append("visibility = %s")
                 params.append(visibility)
-            where_sql = "WHERE " + " AND ".join(where) if where else ""
             with self._connect() as conn:
                 rows = conn.execute(
-                    f"""
+                    sql.SQL(
+                        """
                     SELECT node, label, kind, namespace, visibility, role, noise_reason, degree, message_count AS messages
                     FROM graph_node_profiles
                     {where_sql}
                     ORDER BY message_count DESC, degree DESC, node
                     LIMIT %s
-                    """,
+                    """
+                    ).format(where_sql=_where_clause_sql(where)),
                     (*params, limit),
                 )
                 results = []
@@ -2817,7 +3035,8 @@ class PgCache:
         params = [f"{prefix}%"] if prefix else []
         with self._connect() as conn:
             rows = conn.execute(
-                f"""
+                sql.SQL(
+                    """
                 WITH endpoints AS (
                   SELECT subject AS node, source_message_id FROM graph_triples {subject_where}
                   UNION ALL
@@ -2828,7 +3047,8 @@ class PgCache:
                 GROUP BY node
                 ORDER BY messages DESC, degree DESC, node
                 LIMIT %s
-                """,
+                """
+                ).format(subject_where=sql.SQL(subject_where), object_where=sql.SQL(object_where)),
                 (*params, *params, limit * 10),
             )
             results = []
@@ -2847,11 +3067,13 @@ class PgCache:
         self,
         term: str,
         limit: int = 50,
+        *,
         include_noise: bool = False,
         kind: str | None = None,
         namespace: str | None = None,
         visibility: str = "user",
     ) -> list[dict[str, Any]]:
+        """Graph search."""
         like = f"%{term}%"
         with self._connect() as conn:
             rows = conn.execute(
@@ -2891,266 +3113,9 @@ class PgCache:
         return _graph_node_label(value)
 
     def category_allowed(self, categories: list[str], include_categories: list[str] | None, exclude_categories: list[str] | None) -> bool:
+        """Category allowed."""
         category_set = set(categories)
         if include_categories:
             return bool(category_set & set(include_categories))
         excluded = set(exclude_categories) if exclude_categories is not None else self.default_excluded_categories()
         return not bool(category_set & excluded)
-
-
-def _age_sql(cypher: str, columns: str) -> str:
-    tag = "$gmeow$"
-    if tag in cypher:
-        raise ValueError("Cypher query contains reserved dollar-quote tag.")
-    return f"SELECT * FROM cypher('gmeow_graph', {tag}{cypher}{tag}) AS ({columns})"
-
-
-def _worker_id() -> str:
-    return f"{socket.gethostname()}:{os.getpid()}"
-
-
-def blake3_digest(content: bytes) -> str:
-    return blake3.blake3(content).hexdigest()
-
-
-def _imap_mailbox_name(value: str) -> str:
-    cleaned = (value or "").strip().replace("\\", "/")
-    if not cleaned:
-        return "Unknown"
-    upper = cleaned.upper()
-    system = {
-        "INBOX": "INBOX",
-        "SENT": "Sent",
-        "TRASH": "Trash",
-        "SPAM": "Spam",
-        "DRAFT": "Drafts",
-        "IMPORTANT": "Important",
-        "STARRED": "Starred",
-    }
-    return system.get(upper, cleaned.strip("/"))
-
-
-def _read_only_cypher(query: str) -> bool:
-    lowered = query.strip().lower()
-    if not lowered.startswith("match "):
-        return False
-    forbidden = {" create ", " merge ", " delete ", " detach ", " set ", " remove ", " drop ", " call "}
-    padded = f" {lowered} "
-    return not any(word in padded for word in forbidden)
-
-
-def _profile_allowed(profile: dict[str, Any], visibility: str = "user", kind: str | None = None, namespace: str | None = None) -> bool:
-    requested_visibility = (visibility or "user").lower()
-    if requested_visibility not in {"all", "any"} and profile.get("visibility") != requested_visibility:
-        return False
-    if kind and _normalize_kind(str(profile.get("kind"))) != _normalize_kind(kind):
-        return False
-    if namespace and profile.get("namespace") != namespace:
-        return False
-    return True
-
-
-def _algorithm_profile_allowed(profile: dict[str, Any], visibility: str = "user", kind: str | None = None, namespace: str | None = None) -> bool:
-    if not _profile_allowed(profile, visibility=visibility, kind=kind, namespace=namespace):
-        return False
-    if kind or namespace or (visibility or "user").lower() in {"all", "any", "noise", "structural"}:
-        return True
-    return profile.get("kind") != "literals"
-
-
-def _normalize_kind(kind: str) -> str:
-    value = kind.lower().replace("-", "_")
-    aliases = {
-        "address": "addresses",
-        "contact": "addresses",
-        "contacts": "addresses",
-        "entity": "entities",
-        "project": "projects",
-        "label": "labels",
-        "attachment": "attachments",
-        "document": "documents",
-        "documents": "documents",
-        "event": "events",
-        "events": "events",
-        "archive_file": "archive_files",
-        "archive_files": "archive_files",
-        "document_author": "document_authors",
-        "document_authors": "document_authors",
-        "calendar_attendee": "calendar_attendees",
-        "calendar_attendees": "calendar_attendees",
-        "ocr_entity": "ocr_entities",
-        "ocr_entities": "ocr_entities",
-        "vision_entity": "vision_entities",
-        "vision_entities": "vision_entities",
-        "document_entity": "document_entities",
-        "document_entities": "document_entities",
-        "calendar_entity": "calendar_entities",
-        "calendar_entities": "calendar_entities",
-        "attachment_evidence": "attachment_evidence",
-        "url": "urls",
-        "literal": "literals",
-        "class": "ontology_classes",
-        "ontology_class": "ontology_classes",
-        "message": "messages",
-        "thread": "threads",
-        "org": "orgs",
-        "organization": "orgs",
-        "organizations": "orgs",
-        "handle": "handles",
-        "claim": "claims",
-        "task": "tasks",
-        "header": "headers",
-    }
-    return aliases.get(value, value)
-
-
-def _kind_prefixes(kind: str | None) -> list[str]:
-    normalized = _normalize_kind(kind or "")
-    prefixes = {
-        "addresses": ["gmeow:address/%"],
-        "entities": ["gmeow:entity/%"],
-        "projects": ["gmeow:project/%"],
-        "labels": ["gmeow:label/%"],
-        "attachments": ["gmeow:attachment/%"],
-        "documents": ["gmeow:document/%"],
-        "events": ["gmeow:event/%"],
-        "archive_files": ["gmeow:archiveFile/%"],
-        "document_authors": ["gmeow:documentAuthor/%"],
-        "calendar_attendees": ["gmeow:calendarAttendee/%"],
-        "attachment_evidence": ["gmeow:attachmentEvidence/%"],
-        "ocr_entities": ["gmeow:ocrEntity/%"],
-        "vision_entities": ["gmeow:visionEntity/%"],
-        "document_entities": ["gmeow:documentEntity/%"],
-        "calendar_entities": ["gmeow:calendarEntity/%"],
-        "urls": ["gmeow:url/%"],
-        "orgs": ["gmeow:org/%"],
-        "handles": ["gmeow:org/@%"],
-        "messages": ["gmeow:message/%"],
-        "threads": ["gmeow:thread/%"],
-    }
-    return prefixes.get(normalized, [])
-
-
-def _message_search_fields(sender: str | None, recipients: str | None, message_date: str | None) -> dict[str, Any]:
-    sender_addr = _clean_address(parseaddr(sender or "")[1])
-    sender_domain = _address_domain(sender_addr)
-    recipient_addrs = sorted(
-        {
-            address
-            for _name, raw_address in getaddresses([recipients or ""])
-            if (address := _clean_address(raw_address))
-        }
-    )
-    recipient_domains = sorted({domain for address in recipient_addrs if (domain := _address_domain(address))})
-    return {
-        "message_ts": _query_datetime(_parse_message_date(message_date)),
-        "sender_addr": sender_addr or None,
-        "sender_domain": sender_domain or None,
-        "recipient_addrs": recipient_addrs,
-        "recipient_domains": recipient_domains,
-    }
-
-
-def _message_search_text(
-    *,
-    subject: str | None,
-    sender: str | None,
-    recipients: str | None,
-    snippet: str | None,
-    text_body: str | None,
-    markdown: str | None,
-    headers: dict[str, Any],
-    label_ids: list[str],
-) -> str:
-    header_text = " ".join(f"{key}: {value}" for key, value in sorted((headers or {}).items()) if isinstance(value, str))
-    return "\n".join(
-        part
-        for part in [
-            subject or "",
-            sender or "",
-            recipients or "",
-            snippet or "",
-            " ".join(label_ids or []),
-            header_text,
-            text_body or "",
-            markdown or "",
-        ]
-        if part
-    )
-
-
-def _sql_text_query(fts_query: str) -> str:
-    values = re.findall(r'"([^"]+)"', fts_query or "")
-    if values:
-        return " ".join(values)
-    return fts_query.strip()
-
-
-def _query_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    parsed = _parse_message_date(value) or value
-    try:
-        result = datetime.fromisoformat(parsed.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if result.tzinfo is None:
-        result = result.replace(tzinfo=timezone.utc)
-    return result.astimezone(timezone.utc)
-
-
-def _address_filter_value(value: str) -> tuple[str | None, str | None]:
-    raw = (parseaddr(value or "")[1] or value or "").strip().lower()
-    if raw.startswith("@"):
-        return None, raw[1:] or None
-    if "@" in raw:
-        address = _clean_address(raw)
-        return address or None, _address_domain(address)
-    clean = raw.strip("<> ")
-    if "." in clean and " " not in clean:
-        return None, clean
-    return None, None
-
-
-def _clean_address(value: str | None) -> str:
-    return (value or "").strip().strip("<>").lower()
-
-
-def _address_domain(address: str | None) -> str | None:
-    if not address or "@" not in address:
-        return None
-    return address.rsplit("@", 1)[-1].strip().lower() or None
-
-
-PROJECT_TABLES = [
-    "content_objects",
-    "content_object_refs",
-    "labels",
-    "threads",
-    "messages",
-    "message_parts",
-    "attachments",
-    "sync_state",
-    "priority_rules",
-    "graph_triples",
-    "graph_node_profiles",
-    "graph_edge_stats",
-    "summary_items",
-    "intelligence_jobs",
-    "dead_letter_jobs",
-    "operational_events",
-    "sync_runs",
-    "retention_policies",
-    "attachment_metadata_versions",
-    "imap_mailboxes",
-    "imap_message_uids",
-    "archive_exports",
-    "categories",
-    "message_categories",
-    "category_rules",
-    "category_overrides",
-    "learned_category_runs",
-    "people_aliases",
-    "embedding_chunks",
-    "ingest_issues",
-]

@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide attachment analysis functionality for Gmeow."""
+
 from __future__ import annotations
 
 import base64
@@ -8,13 +10,12 @@ import mimetypes
 import re
 import shutil
 import subprocess
-import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .config import AttachmentAnalysisConfig
-
+from .http_json import HttpJsonError, post_json
 
 ANALYSIS_VERSION = 1
 TEXT_TYPES = (
@@ -27,9 +28,12 @@ TEXT_TYPES = (
 )
 
 
-def analyze_attachment(path: Path, content: bytes, metadata: dict[str, Any], config: AttachmentAnalysisConfig | None = None) -> dict[str, Any]:
+def analyze_attachment(
+    path: Path, content: bytes, metadata: dict[str, Any], config: AttachmentAnalysisConfig | None = None
+) -> dict[str, Any]:
+    """Analyze attachment."""
     config = config or AttachmentAnalysisConfig()
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     analysis: dict[str, Any] = {
         "version": ANALYSIS_VERSION,
         "extracted_at": now,
@@ -58,40 +62,56 @@ def analyze_attachment(path: Path, content: bytes, metadata: dict[str, Any], con
         "file_description": detected.get("description"),
     }
 
-    if _is_text_like(media_type, filename):
-        text = _decode_text(content, config.max_text_chars)
-        if text:
-            analysis["text"] = text
-
-    if media_type == "application/pdf" and config.pdf_text_enabled:
-        _merge_stage(analysis, "document", _pdf_analysis(path, config.max_text_chars))
-    elif media_type == "application/pdf":
-        analysis["skipped"].append({"stage": "pdf", "reason": "disabled"})
-
-    if media_type.startswith("image/"):
-        if config.ocr_enabled:
-            _merge_stage(analysis, "image", _image_ocr(path, config.ocr_languages, config.max_text_chars))
-        else:
-            analysis["skipped"].append({"stage": "ocr", "reason": "disabled"})
-        if config.vision_caption_enabled:
-            _merge_stage(analysis, "vision", _vision_caption(content, media_type, config))
-        else:
-            analysis["skipped"].append({"stage": "vision_caption", "reason": "disabled"})
-
+    _add_text_analysis(analysis, content, media_type, filename, config)
+    _add_pdf_analysis(analysis, path, media_type, config)
+    _add_image_analysis(analysis, path, content, media_type, config)
     if _is_calendar(media_type, filename):
         _merge_stage(analysis, "calendar", _calendar_analysis(content))
-
-    if _is_archive(media_type, filename):
-        if config.archive_listing_enabled:
-            _merge_stage(analysis, "archive", _archive_listing(path, filename))
-        else:
-            analysis["skipped"].append({"stage": "archive", "reason": "disabled"})
-
+    _add_archive_analysis(analysis, path, media_type, filename, config)
     if "text" not in analysis and config.pandoc_enabled and _pandoc_candidate(media_type, filename):
         _merge_stage(analysis, "document", _pandoc_text(path, config.max_text_chars))
 
     _finalize_text(analysis, config.max_text_chars)
     return analysis
+
+
+def _add_text_analysis(analysis: dict[str, Any], content: bytes, media_type: str, filename: str, config: AttachmentAnalysisConfig) -> None:
+    if not _is_text_like(media_type, filename):
+        return
+    text = _decode_text(content, config.max_text_chars)
+    if text:
+        analysis["text"] = text
+
+
+def _add_pdf_analysis(analysis: dict[str, Any], path: Path, media_type: str, config: AttachmentAnalysisConfig) -> None:
+    if media_type != "application/pdf":
+        return
+    if config.pdf_text_enabled:
+        _merge_stage(analysis, "document", _pdf_analysis(path, config.max_text_chars))
+    else:
+        analysis["skipped"].append({"stage": "pdf", "reason": "disabled"})
+
+
+def _add_image_analysis(analysis: dict[str, Any], path: Path, content: bytes, media_type: str, config: AttachmentAnalysisConfig) -> None:
+    if not media_type.startswith("image/"):
+        return
+    if config.ocr_enabled:
+        _merge_stage(analysis, "image", _image_ocr(path, config.ocr_languages, config.max_text_chars))
+    else:
+        analysis["skipped"].append({"stage": "ocr", "reason": "disabled"})
+    if config.vision_caption_enabled:
+        _merge_stage(analysis, "vision", _vision_caption(content, media_type, config))
+    else:
+        analysis["skipped"].append({"stage": "vision_caption", "reason": "disabled"})
+
+
+def _add_archive_analysis(analysis: dict[str, Any], path: Path, media_type: str, filename: str, config: AttachmentAnalysisConfig) -> None:
+    if not _is_archive(media_type, filename):
+        return
+    if config.archive_listing_enabled:
+        _merge_stage(analysis, "archive", _archive_listing(path, filename))
+    else:
+        analysis["skipped"].append({"stage": "archive", "reason": "disabled"})
 
 
 def _merge_stage(analysis: dict[str, Any], key: str, result: dict[str, Any]) -> None:
@@ -108,12 +128,12 @@ def _merge_stage(analysis: dict[str, Any], key: str, result: dict[str, Any]) -> 
         analysis[key] = result
 
 
-def _detect_file(path: Path) -> dict[str, str | None]:
+def _detect_file(path: Path) -> dict[str, str]:
     result = _run(["file", "--brief", "--mime-type", str(path)], timeout=10)
     description = _run(["file", "--brief", str(path)], timeout=10)
     return {
-        "mime_type": result.get("stdout", "").strip() if result.get("ok") else None,
-        "description": description.get("stdout", "").strip() if description.get("ok") else None,
+        "mime_type": result.get("stdout", "").strip() if result.get("ok") else "",
+        "description": description.get("stdout", "").strip() if description.get("ok") else "",
     }
 
 
@@ -189,24 +209,25 @@ def _vision_caption(content: bytes, media_type: str, config: AttachmentAnalysisC
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe this email attachment image concisely. Include visible text, objects, UI state, and notable context."},
-                    {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{base64.b64encode(content).decode()}"}},
+                    {
+                        "type": "text",
+                        "text": (
+                            "Describe this email attachment image concisely. Include visible text, objects, UI state, and notable context."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{media_type};base64,{base64.b64encode(content).decode()}"},
+                    },
                 ],
             }
         ],
         "max_tokens": 256,
         "temperature": 0,
     }
-    request = urllib.request.Request(
-        config.vision_caption_endpoint,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=config.vision_caption_timeout_seconds) as response:
-            data = json.loads(response.read().decode())
-    except Exception as exc:
+        _, data = post_json(config.vision_caption_endpoint, payload, timeout=config.vision_caption_timeout_seconds)
+    except (HttpJsonError, OSError, TimeoutError, ValueError, TypeError, json.JSONDecodeError) as exc:
         result["tools"]["vision_caption"] = {"available": False, "error": repr(exc)}
         result["errors"].append({"stage": "vision_caption", "error": repr(exc)})
         return result
@@ -269,7 +290,12 @@ def _run(args: list[str], timeout: int) -> dict[str, Any]:
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"{args[0]} timed out"}
     error = completed.stderr.strip() or completed.stdout.strip()
-    return {"ok": completed.returncode == 0, "stdout": completed.stdout, "stderr": completed.stderr, "error": None if completed.returncode == 0 else error[:2000]}
+    return {
+        "ok": completed.returncode == 0,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "error": None if completed.returncode == 0 else error[:2000],
+    }
 
 
 def _tool_status(result: dict[str, Any]) -> dict[str, Any]:
@@ -294,8 +320,8 @@ def _pandoc_candidate(media_type: str, filename: str) -> bool:
 
 def _archive_files(output: str) -> list[str]:
     files = []
-    for line in output.splitlines():
-        line = line.strip()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
         if not line or line.startswith(("Archive:", "Length", "Date", "----", "Path = ", "Size = ", "Packed Size = ")):
             continue
         if re.fullmatch(r"\d+\s+files?", line):
@@ -310,16 +336,12 @@ def _archive_files(output: str) -> list[str]:
 
 
 def _finalize_text(analysis: dict[str, Any], limit: int) -> None:
-    texts = []
-    for key in ["text", "ocr_text", "vision_caption"]:
-        if isinstance(analysis.get(key), str):
-            texts.append(analysis[key])
+    keys = ["text", "ocr_text", "vision_caption"]
+    texts = [analysis[key] for key in keys if isinstance(analysis.get(key), str)]
     for section in ["document", "image", "calendar", "archive", "vision"]:
         value = analysis.get(section)
         if isinstance(value, dict):
-            for key in ["text", "ocr_text", "vision_caption"]:
-                if isinstance(value.get(key), str):
-                    texts.append(value[key])
+            texts.extend(value[key] for key in keys if isinstance(value.get(key), str))
     content = _clean_text("\n\n".join(texts), limit)
     if content:
         analysis["content_text"] = content

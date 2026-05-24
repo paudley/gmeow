@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""resilience recovery tables
+"""resilience recovery tables.
 
 Revision ID: 20260523_0016
 Revises: 20260523_0015
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from alembic import op
 
-
 revision = "20260523_0016"
 down_revision = "20260523_0015"
 branch_labels = None
@@ -19,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute("ALTER TABLE intelligence_jobs ADD COLUMN IF NOT EXISTS locked_by TEXT")
     op.execute("ALTER TABLE intelligence_jobs ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ")
     op.execute("ALTER TABLE intelligence_jobs ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ NOT NULL DEFAULT now()")
@@ -47,7 +47,10 @@ def upgrade() -> None:
         )
         """
     )
-    op.execute("CREATE INDEX IF NOT EXISTS dead_letter_jobs_open_idx ON dead_letter_jobs(created_at, id) WHERE requeued_at IS NULL AND cleared_at IS NULL")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS dead_letter_jobs_open_idx ON dead_letter_jobs(created_at, id) "
+        "WHERE requeued_at IS NULL AND cleared_at IS NULL"
+    )
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS operational_events (
@@ -85,12 +88,22 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP TABLE IF EXISTS sync_runs")
     op.execute("DROP TABLE IF EXISTS operational_events")
     op.execute("DROP TABLE IF EXISTS dead_letter_jobs")
     op.execute("DROP INDEX IF EXISTS intelligence_jobs_locked_idx")
     op.execute("DROP INDEX IF EXISTS intelligence_jobs_ready_idx")
-    for column in ["failed_at", "completed_at", "dead_lettered_at", "payload_json", "max_attempts", "next_run_at", "locked_at", "locked_by"]:
+    for column in [
+        "failed_at",
+        "completed_at",
+        "dead_lettered_at",
+        "payload_json",
+        "max_attempts",
+        "next_run_at",
+        "locked_at",
+        "locked_by",
+    ]:
         op.execute(f"ALTER TABLE intelligence_jobs DROP COLUMN IF EXISTS {column}")
 
 
@@ -108,7 +121,9 @@ def _comments() -> None:
         "COLUMN dead_letter_jobs.created_at": "Timestamp when the job entered the dead-letter table.",
         "COLUMN dead_letter_jobs.requeued_at": "Timestamp when this dead-letter entry was requeued.",
         "COLUMN dead_letter_jobs.cleared_at": "Timestamp when this dead-letter entry was explicitly cleared.",
-        "TABLE operational_events": "Append-only operational audit trail for sync, maintenance, recovery, repair, and degraded-mode events.",
+        "TABLE operational_events": (
+            "Append-only operational audit trail for sync, maintenance, recovery, repair, and degraded-mode events."
+        ),
         "COLUMN operational_events.id": "Primary key for the operational event.",
         "COLUMN operational_events.event_type": "Machine-readable event type.",
         "COLUMN operational_events.severity": "Event severity such as info, warning, error, or critical.",

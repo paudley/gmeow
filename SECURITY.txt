@@ -1,0 +1,6 @@
+Gmeow security reports should be sent privately to security@blackcat.ca.
+
+Do not open public issues for vulnerabilities, mailbox data exposure, credential
+leaks, local database access problems, or attachment-processing security issues.
+
+The full security policy is in SECURITY.md.

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""materialized summary views
+"""materialized summary views.
 
 Revision ID: 20260523_0015
 Revises: 20260523_0014
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute(
         """
         CREATE MATERIALIZED VIEW IF NOT EXISTS message_search_summary AS
@@ -170,7 +172,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for view in ["graph_node_summary", "project_summary", "category_summary", "contact_summary", "thread_summary", "message_search_summary"]:
+    """Downgrade."""
+    for view in [
+        "graph_node_summary",
+        "project_summary",
+        "category_summary",
+        "contact_summary",
+        "thread_summary",
+        "message_search_summary",
+    ]:
         op.execute(f"DROP MATERIALIZED VIEW IF EXISTS {view}")
 
 

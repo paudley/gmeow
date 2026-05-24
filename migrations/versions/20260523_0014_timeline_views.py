@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""timeline and emergence views
+"""timeline and emergence views.
 
 Revision ID: 20260523_0014
 Revises: 20260523_0013
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute(
         """
         CREATE MATERIALIZED VIEW IF NOT EXISTS message_timeline_daily AS
@@ -56,7 +58,9 @@ def upgrade() -> None:
     op.execute("CREATE INDEX IF NOT EXISTS graph_entity_emergence_last_seen_idx ON graph_entity_emergence(last_seen DESC)")
     _comments(
         {
-            "MATERIALIZED VIEW message_timeline_daily": "Daily mailbox activity timeline for operational diagnostics and time-window browsing.",
+            "MATERIALIZED VIEW message_timeline_daily": (
+                "Daily mailbox activity timeline for operational diagnostics and time-window browsing."
+            ),
             "COLUMN message_timeline_daily.day": "UTC day bucket for parsed message timestamps.",
             "COLUMN message_timeline_daily.messages": "Messages received or sent in the day bucket.",
             "COLUMN message_timeline_daily.hydrated_messages": "Hydrated cached messages in the day bucket.",
@@ -80,6 +84,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP MATERIALIZED VIEW IF EXISTS graph_entity_emergence")
     op.execute("DROP MATERIALIZED VIEW IF EXISTS message_timeline_daily")
 

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide public release check functionality for Gmeow."""
+
 from __future__ import annotations
 
 import subprocess
 import sys
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SPDX = "SPDX-License-Identifier: MIT"
@@ -46,47 +47,56 @@ FORBIDDEN_TEXT = [
 
 
 def main() -> int:
-    failures: list[str] = []
+    """Run public release checks."""
     tracked = _tracked_files()
     tracked_set = set(tracked)
 
-    for rel in REQUIRED_FILES:
-        if not (ROOT / rel).exists():
-            failures.append(f"missing required file: {rel}")
+    failures = _missing_required_files()
+    failures.extend(_forbidden_tracked_paths(tracked_set))
+    failures.extend(_forbidden_text_matches(tracked))
+    failures.extend(_missing_spdx_headers(tracked))
 
-    for rel in sorted(FORBIDDEN_TRACKED_PATHS & tracked_set):
-        if (ROOT / rel).exists():
-            failures.append(f"forbidden tracked local config path: {rel}")
-
-    for rel in tracked:
-        path = ROOT / rel
-        if not path.is_file() or _skip_text_scan(rel):
-            continue
-        text = _read_text(path)
-        if text is None:
-            continue
-        lowered = text.lower()
-        for needle in FORBIDDEN_TEXT:
-            if needle.lower() in lowered:
-                failures.append(f"forbidden private string {needle!r} found in {rel}")
-
-    for rel in tracked:
-        path = ROOT / rel
-        if _needs_spdx(rel) and SPDX not in _read_text(path, default=""):
-            failures.append(f"missing SPDX header: {rel}")
-
-    example = _read_text(ROOT / "config.toml-example", default="")
-    if "[gmeow]" not in example:
-        failures.append("config.toml-example must contain a [gmeow] table")
-    if "[gmeow]" in example and any(value in example for value in ["user@your-domain.example", "paud" + "ley"]):
-        failures.append("config.toml-example contains non-public identity placeholders")
-
+    failures.extend(_example_config_failures())
     if failures:
         for failure in failures:
             print(f"release-check: {failure}", file=sys.stderr)
         return 1
     print("release-check: ok")
     return 0
+
+
+def _missing_required_files() -> list[str]:
+    return [f"missing required file: {rel}" for rel in REQUIRED_FILES if not (ROOT / rel).exists()]
+
+
+def _forbidden_tracked_paths(tracked_set: set[str]) -> list[str]:
+    return [f"forbidden tracked local config path: {rel}" for rel in sorted(FORBIDDEN_TRACKED_PATHS & tracked_set) if (ROOT / rel).exists()]
+
+
+def _forbidden_text_matches(tracked: list[str]) -> list[str]:
+    failures: list[str] = []
+    for rel in tracked:
+        path = ROOT / rel
+        if not path.is_file() or _skip_text_scan(rel):
+            continue
+        text = _read_text(path)
+        lowered = text.lower()
+        failures.extend(f"forbidden private string {needle!r} found in {rel}" for needle in FORBIDDEN_TEXT if needle.lower() in lowered)
+    return failures
+
+
+def _missing_spdx_headers(tracked: list[str]) -> list[str]:
+    return [f"missing SPDX header: {rel}" for rel in tracked if _needs_spdx(rel) and SPDX not in _read_text(ROOT / rel, default="")]
+
+
+def _example_config_failures() -> list[str]:
+    failures: list[str] = []
+    example = _read_text(ROOT / "config.toml-example", default="")
+    if "[gmeow]" not in example:
+        failures.append("config.toml-example must contain a [gmeow] table")
+    if "[gmeow]" in example and any(value in example for value in ["user@your-domain.example", "paud" + "ley"]):
+        failures.append("config.toml-example contains non-public identity placeholders")
+    return failures
 
 
 def _tracked_files() -> list[str]:
@@ -103,7 +113,7 @@ def _skip_text_scan(rel: str) -> bool:
     return rel in {".gitmodules", "uv.lock", "scripts/public_release_check.py"}
 
 
-def _read_text(path: Path, default: str | None = None) -> str | None:
+def _read_text(path: Path, default: str = "") -> str:
     try:
         return path.read_text()
     except UnicodeDecodeError:

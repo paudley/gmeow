@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide text index functionality for Gmeow."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,7 +11,10 @@ import tantivy
 
 
 class TantivyMessageIndex:
-    def __init__(self, path: Path):
+    """Represent TantivyMessageIndex data and behavior."""
+
+    def __init__(self, path: Path) -> None:
+        """Initialize TantivyMessageIndex."""
         self.path = path
         self.path.mkdir(parents=True, exist_ok=True)
         self.schema = _schema()
@@ -19,6 +24,7 @@ class TantivyMessageIndex:
             self.index = tantivy.Index(self.schema, path=str(self.path))
 
     def upsert_message(self, message: dict[str, Any]) -> None:
+        """Upsert message."""
         writer = self.index.writer()
         writer.delete_documents("id", message["id"])
         writer.add_document(
@@ -42,6 +48,7 @@ class TantivyMessageIndex:
         self.index.reload()
 
     def search(self, query: str, limit: int = 20) -> list[str]:
+        """Search."""
         searcher = self.index.searcher()
         parsed, _errors = self.index.parse_query_lenient(
             query or "*",

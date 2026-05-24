@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""comment all project columns
+"""comment all project columns.
 
 Revision ID: 20260523_0003
 Revises: 20260523_0002
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -49,6 +50,7 @@ SPECIAL = {
 
 
 def upgrade() -> None:
+    """Upgrade."""
     bind = op.get_bind()
     for table, purpose in TABLES.items():
         rows = bind.exec_driver_sql(
@@ -67,7 +69,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    """Downgrade."""
 
 
 def _safe_comment(prefix: str, comment: str) -> None:

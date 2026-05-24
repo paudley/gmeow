@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide db functionality for Gmeow."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,12 +11,14 @@ from alembic.config import Config
 
 
 def sqlalchemy_url(dsn: str) -> str:
+    """Sqlalchemy url."""
     if dsn.startswith("postgresql://"):
         return "postgresql+psycopg://" + dsn.removeprefix("postgresql://")
     return dsn
 
 
 def run_migrations(dsn: str, root: Path | None = None) -> None:
+    """Run migrations."""
     project_root = root or Path(__file__).resolve().parents[2]
     config = Config(str(project_root / "alembic.ini"))
     config.set_main_option("script_location", str(project_root / "migrations"))

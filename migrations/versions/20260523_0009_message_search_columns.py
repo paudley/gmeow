@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""message search columns
+"""message search columns.
 
 Revision ID: 20260523_0009
 Revises: 20260523_0008
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_ts TIMESTAMPTZ")
     op.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_addr TEXT")
     op.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_domain TEXT")
@@ -48,6 +50,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP INDEX IF EXISTS messages_search_tsv_gin_idx")
     op.execute("DROP INDEX IF EXISTS messages_recipient_domains_gin_idx")
     op.execute("DROP INDEX IF EXISTS messages_recipient_addrs_gin_idx")

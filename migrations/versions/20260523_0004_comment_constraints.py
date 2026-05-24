@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""comment project constraints
+"""comment project constraints.
 
 Revision ID: 20260523_0004
 Revises: 20260523_0003
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -40,6 +41,7 @@ PROJECT_TABLES = (
 
 
 def upgrade() -> None:
+    """Upgrade."""
     bind = op.get_bind()
     rows = bind.exec_driver_sql(
         """
@@ -63,7 +65,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    """Downgrade."""
 
 
 def _safe_comment(prefix: str, comment: str) -> None:

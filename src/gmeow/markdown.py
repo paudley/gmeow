@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide markdown functionality for Gmeow."""
+
 from __future__ import annotations
 
 import re
@@ -9,6 +11,7 @@ from .parser import ParsedMessage
 
 
 def message_to_markdown(message: ParsedMessage, attachment_sha1s: list[str] | None = None) -> str:
+    """Message to markdown."""
     attachment_sha1s = attachment_sha1s or []
     lines = [
         f"# {message.subject or '(no subject)'}",
@@ -21,43 +24,60 @@ def message_to_markdown(message: ParsedMessage, attachment_sha1s: list[str] | No
         f"- Labels: {', '.join(message.label_ids)}",
         "",
     ]
-    intel = analyze_headers(message.headers)
-    if intel.message_id or intel.authentication_results or intel.warnings:
-        lines.extend(["## Header Intelligence", ""])
-        if intel.message_id:
-            lines.append(f"- Message-ID: `{intel.message_id}`")
-        if intel.reply_to:
-            lines.append(f"- Reply-To: {intel.reply_to}")
-        if intel.list_id:
-            lines.append(f"- List-ID: `{intel.list_id}`")
-        if intel.delivered_to:
-            lines.append(f"- Delivered-To: {intel.delivered_to}")
-        if intel.received_hops:
-            lines.append(f"- Received hops: {intel.received_hops}")
-        if intel.spf or intel.dkim or intel.dmarc:
-            lines.append(f"- Auth: SPF `{intel.spf or 'unknown'}`, DKIM `{intel.dkim or 'unknown'}`, DMARC `{intel.dmarc or 'unknown'}`")
-        for warning in intel.warnings:
-            lines.append(f"- Warning: `{warning}`")
-        lines.append("")
-    if attachment_sha1s:
-        lines.extend(["## Attachments", ""])
-        lines.extend(f"- `{sha1}`" for sha1 in attachment_sha1s)
-        lines.append("")
-    facts = critical_facts(message.text or message.snippet or "")
-    if any(facts.values()):
-        lines.extend(["## Critical Facts", ""])
-        for key, values in facts.items():
-            if values:
-                lines.append(f"- {key.replace('_', ' ').title()}: {', '.join(values[:8])}")
-        lines.append("")
+    lines.extend(_header_intelligence_lines(message))
+    lines.extend(_attachment_lines(attachment_sha1s))
+    lines.extend(_critical_fact_lines(message))
     lines.extend(["## Body", "", message.text or message.snippet or ""])
     return "\n".join(lines).strip() + "\n"
 
 
+def _header_intelligence_lines(message: ParsedMessage) -> list[str]:
+    intel = analyze_headers(message.headers)
+    if not (intel.message_id or intel.authentication_results or intel.warnings):
+        return []
+    lines = ["## Header Intelligence", ""]
+    optional_lines = [
+        ("Message-ID", intel.message_id),
+        ("Reply-To", intel.reply_to),
+        ("List-ID", intel.list_id),
+        ("Delivered-To", intel.delivered_to),
+        ("Received hops", str(intel.received_hops) if intel.received_hops else None),
+    ]
+    lines.extend(f"- {label}: `{value}`" for label, value in optional_lines if value)
+    if intel.spf or intel.dkim or intel.dmarc:
+        lines.append(f"- Auth: SPF `{intel.spf or 'unknown'}`, DKIM `{intel.dkim or 'unknown'}`, DMARC `{intel.dmarc or 'unknown'}`")
+    lines.extend(f"- Warning: `{warning}`" for warning in intel.warnings)
+    lines.append("")
+    return lines
+
+
+def _attachment_lines(attachment_sha1s: list[str]) -> list[str]:
+    if not attachment_sha1s:
+        return []
+    return ["## Attachments", "", *(f"- `{sha1}`" for sha1 in attachment_sha1s), ""]
+
+
+def _critical_fact_lines(message: ParsedMessage) -> list[str]:
+    facts = critical_facts(message.text or message.snippet or "")
+    if not any(facts.values()):
+        return []
+    lines = ["## Critical Facts", ""]
+    lines.extend(f"- {key.replace('_', ' ').title()}: {', '.join(values[:8])}" for key, values in facts.items() if values)
+    lines.append("")
+    return lines
+
+
 def critical_facts(text: str) -> dict[str, list[str]]:
+    """Critical facts."""
     value = text or ""
     facts = {
-        "dates": _unique(re.findall(r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?(?:day)?[,]?\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?[,]?\s+\d{4}\b|\b\d{4}-\d{2}-\d{2}\b", value, re.I)),
+        "dates": _unique(
+            re.findall(
+                r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?(?:day)?[,]?\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?[,]?\s+\d{4}\b|\b\d{4}-\d{2}-\d{2}\b",
+                value,
+                re.IGNORECASE,
+            )
+        ),
         "money": _unique(re.findall(r"\$\s?\d[\d,]*(?:\.\d{2})?", value)),
         "emails": _unique(re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", value)),
         "phones": _unique(re.findall(r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}", value)),
@@ -65,7 +85,7 @@ def critical_facts(text: str) -> dict[str, list[str]]:
         "action_sentences": [],
     }
     for sentence in re.split(r"(?<=[.!?])\s+", value):
-        if re.search(r"\b(action required|please|todo|must|need to|due|deadline|by \w+day)\b", sentence, re.I):
+        if re.search(r"\b(action required|please|todo|must|need to|due|deadline|by \w+day)\b", sentence, re.IGNORECASE):
             facts["action_sentences"].append(sentence.strip()[:300])
     facts["action_sentences"] = _unique(facts["action_sentences"])
     return facts

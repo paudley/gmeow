@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide headers functionality for Gmeow."""
+
 from __future__ import annotations
 
 import re
@@ -8,6 +10,8 @@ from dataclasses import dataclass, field
 
 @dataclass(slots=True)
 class HeaderIntelligence:
+    """Represent HeaderIntelligence data and behavior."""
+
     message_id: str | None = None
     references: list[str] = field(default_factory=list)
     list_id: str | None = None
@@ -26,6 +30,7 @@ class HeaderIntelligence:
 
 
 def analyze_headers(headers: dict[str, str]) -> HeaderIntelligence:
+    """Analyze headers."""
     auth = headers.get("authentication-results")
     intel = HeaderIntelligence(
         message_id=headers.get("message-id"),

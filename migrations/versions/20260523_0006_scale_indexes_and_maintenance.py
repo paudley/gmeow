@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""scale indexes and maintenance metadata
+"""scale indexes and maintenance metadata.
 
 Revision ID: 20260523_0006
 Revises: 20260523_0005
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,9 +18,13 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute("ALTER TABLE embedding_chunks ADD COLUMN IF NOT EXISTS embedding_dim INTEGER")
     op.execute("UPDATE embedding_chunks SET embedding_dim = vector_dims(embedding) WHERE embedding IS NOT NULL AND embedding_dim IS NULL")
-    op.execute("COMMENT ON COLUMN embedding_chunks.embedding_dim IS 'Embedding vector dimensionality captured at index time for partial ANN indexes.'")
+    op.execute(
+        "COMMENT ON COLUMN embedding_chunks.embedding_dim IS "
+        "'Embedding vector dimensionality captured at index time for partial ANN indexes.'"
+    )
     op.execute("CREATE INDEX IF NOT EXISTS messages_history_id_idx ON messages(history_id)")
     op.execute("CREATE INDEX IF NOT EXISTS messages_updated_at_idx ON messages(updated_at DESC)")
     op.execute("CREATE INDEX IF NOT EXISTS messages_labels_gin_idx ON messages USING gin(label_ids)")
@@ -56,6 +61,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP INDEX IF EXISTS embedding_chunks_embedding_768_hnsw_idx")
     op.execute("DROP INDEX IF EXISTS embedding_chunks_dim_idx")
     op.execute("DROP INDEX IF EXISTS embedding_chunks_message_idx")

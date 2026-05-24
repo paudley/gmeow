@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""scoped hnsw indexes
+"""scoped hnsw indexes.
 
 Revision ID: 20260523_0008
 Revises: 20260523_0007
 Create Date: 2026-05-23
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -17,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Upgrade."""
     op.execute(
         """
         CREATE INDEX IF NOT EXISTS embedding_chunks_message_768_hnsw_idx
@@ -42,12 +44,20 @@ def upgrade() -> None:
         WHERE embedding IS NOT NULL
         """
     )
-    _comment("COMMENT ON INDEX embedding_chunks_message_768_hnsw_idx", "Scoped HNSW cosine ANN index for 768-dimensional message embeddings.")
-    _comment("COMMENT ON INDEX embedding_chunks_attachment_768_hnsw_idx", "Scoped HNSW cosine ANN index for 768-dimensional attachment embeddings.")
-    _comment("COMMENT ON INDEX embedding_chunks_source_kind_dim_idx", "Accelerates source-kind and embedding-dimension filtered semantic scans.")
+    _comment(
+        "COMMENT ON INDEX embedding_chunks_message_768_hnsw_idx", "Scoped HNSW cosine ANN index for 768-dimensional message embeddings."
+    )
+    _comment(
+        "COMMENT ON INDEX embedding_chunks_attachment_768_hnsw_idx",
+        "Scoped HNSW cosine ANN index for 768-dimensional attachment embeddings.",
+    )
+    _comment(
+        "COMMENT ON INDEX embedding_chunks_source_kind_dim_idx", "Accelerates source-kind and embedding-dimension filtered semantic scans."
+    )
 
 
 def downgrade() -> None:
+    """Downgrade."""
     op.execute("DROP INDEX IF EXISTS embedding_chunks_source_kind_dim_idx")
     op.execute("DROP INDEX IF EXISTS embedding_chunks_attachment_768_hnsw_idx")
     op.execute("DROP INDEX IF EXISTS embedding_chunks_message_768_hnsw_idx")

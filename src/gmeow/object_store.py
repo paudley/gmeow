@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide object store functionality for Gmeow."""
+
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 import tempfile
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import blake3
@@ -16,7 +18,6 @@ import zstandard as zstd
 from .attachment_analysis import analyze_attachment
 from .config import AttachmentAnalysisConfig
 from .metadata import extract_exiftool_metadata
-
 
 COMPRESSIBLE_TYPES = (
     "application/json",
@@ -39,6 +40,8 @@ INCOMPRESSIBLE_TYPES = (
 
 @dataclass(frozen=True, slots=True)
 class StoredObject:
+    """Represent StoredObject data and behavior."""
+
     digest: str
     path: Path
     media_type: str
@@ -48,22 +51,29 @@ class StoredObject:
 
 
 class ObjectStore:
-    def __init__(self, root: Path, zstd_level: int = 6):
+    """Represent ObjectStore data and behavior."""
+
+    def __init__(self, root: Path, zstd_level: int = 6) -> None:
+        """Initialize ObjectStore."""
         self.root = root
         self.zstd_level = zstd_level
         self.root.mkdir(parents=True, exist_ok=True)
 
     def path_for_digest(self, digest: str, compression: str = "identity") -> Path:
+        """Path for digest."""
         suffix = ".zst" if compression == "zstd" else ""
         return self.root / "blake3" / digest[:2] / digest[2:4] / f"{digest}{suffix}"
 
-    def put_json(self, value: Any, media_type: str = "application/json") -> StoredObject:
+    def put_json(self, value: object, media_type: str = "application/json") -> StoredObject:
+        """Put json."""
         return self.put(json.dumps(value, sort_keys=True, separators=(",", ":")).encode(), media_type=media_type)
 
     def put_text(self, value: str, media_type: str = "text/plain; charset=utf-8") -> StoredObject:
+        """Put text."""
         return self.put(value.encode(), media_type=media_type)
 
     def put(self, content: bytes, media_type: str = "application/octet-stream") -> StoredObject:
+        """Put."""
         digest = blake3.blake3(content).hexdigest()
         compression = "zstd" if _should_compress(media_type) else "identity"
         stored = zstd.ZstdCompressor(level=self.zstd_level).compress(content) if compression == "zstd" else content
@@ -73,7 +83,8 @@ class ObjectStore:
             self._atomic_write(path, stored)
         content = self.get(digest, compression=compression)
         if blake3.blake3(content).hexdigest() != digest:
-            raise IOError(f"CAS verification failed after write for {digest}")
+            msg = f"CAS verification failed after write for {digest}"
+            raise OSError(msg)
         return StoredObject(
             digest=digest,
             path=path,
@@ -84,15 +95,18 @@ class ObjectStore:
         )
 
     def get(self, digest: str, compression: str = "identity") -> bytes:
+        """Get."""
         path = self.path_for_digest(digest, compression=compression)
         content = path.read_bytes()
         if compression == "zstd":
             content = zstd.ZstdDecompressor().decompress(content)
         if blake3.blake3(content).hexdigest() != digest:
-            raise IOError(f"CAS digest mismatch for {digest}")
+            msg = f"CAS digest mismatch for {digest}"
+            raise OSError(msg)
         return content
 
     def get_text(self, digest: str, compression: str = "identity") -> str:
+        """Get text."""
         return self.get(digest, compression=compression).decode("utf-8", errors="replace")
 
     def _atomic_write(self, path: Path, content: bytes) -> None:
@@ -102,7 +116,7 @@ class ObjectStore:
             os.fsync(tmp.fileno())
             tmp_path = Path(tmp.name)
         try:
-            os.replace(tmp_path, path)
+            tmp_path.replace(path)
             dir_fd = os.open(path.parent, os.O_RDONLY)
             try:
                 os.fsync(dir_fd)
@@ -115,6 +129,8 @@ class ObjectStore:
 
 @dataclass(frozen=True, slots=True)
 class StoredAttachmentObject:
+    """Represent StoredAttachmentObject data and behavior."""
+
     sha1: str
     digest: str
     path: Path
@@ -131,19 +147,20 @@ class CasAttachmentStore:
     is the CAS digest. New storage is BLAKE3-addressed.
     """
 
-    def __init__(self, store: ObjectStore, analysis_config: AttachmentAnalysisConfig | None = None):
+    def __init__(self, store: ObjectStore, analysis_config: AttachmentAnalysisConfig | None = None) -> None:
+        """Initialize CasAttachmentStore."""
         self.store = store
         self.analysis_config = analysis_config or AttachmentAnalysisConfig()
 
     def sidecar_for_digest(self, digest: str) -> Path:
+        """Sidecar for digest."""
         return self.store.root / "sidecars" / digest[:2] / digest[2:4] / f"{digest}.json"
 
-    def put(self, content: bytes, metadata: dict[str, Any], extract_metadata: bool = True, media_type: str = "application/octet-stream") -> StoredAttachmentObject:
-        media_type = (
-            metadata.get("gmail", {}).get("mime_type")
-            if isinstance(metadata.get("gmail"), dict)
-            else None
-        ) or media_type
+    def put(
+        *, self, content: bytes, metadata: dict[str, Any], extract_metadata: bool = True, media_type: str = "application/octet-stream"
+    ) -> StoredAttachmentObject:
+        """Put."""
+        media_type = (metadata.get("gmail", {}).get("mime_type") if isinstance(metadata.get("gmail"), dict) else None) or media_type
         stored = self.store.put(content, media_type=media_type)
         merged = self.read_metadata(stored.digest)
         merged["source"] = _deep_merge(merged.get("source", {}), metadata)
@@ -154,7 +171,7 @@ class CasAttachmentStore:
         merged.setdefault("compression", stored.compression)
         if extract_metadata:
             merged["exiftool"] = extract_exiftool_metadata(stored.path)
-            merged["exiftool"]["extracted_at"] = datetime.now(timezone.utc).isoformat()
+            merged["exiftool"]["extracted_at"] = datetime.now(UTC).isoformat()
             merged["analysis"] = _deep_merge(
                 merged.get("analysis", {}),
                 analyze_attachment(stored.path, content, merged, self.analysis_config),
@@ -173,16 +190,19 @@ class CasAttachmentStore:
         )
 
     def read_metadata(self, sha1: str) -> dict[str, Any]:
+        """Read metadata."""
         sidecar = self.sidecar_for_digest(sha1)
         if not sidecar.exists():
             return {}
         return json.loads(sidecar.read_text())
 
     def get_bytes(self, sha1: str, compression: str = "identity") -> bytes:
+        """Get bytes."""
         metadata = self.read_metadata(sha1)
         return self.store.get(sha1, compression=metadata.get("compression") or compression)
 
     def get(self, sha1: str) -> Path:
+        """Get."""
         metadata = self.read_metadata(sha1)
         compression = metadata.get("compression") or "identity"
         path = self.store.path_for_digest(sha1, compression=compression)
@@ -191,6 +211,7 @@ class CasAttachmentStore:
         return path
 
     def refresh_sidecar(self, sha1: str, source_metadata: dict[str, Any] | None = None) -> StoredAttachmentObject:
+        """Refresh sidecar."""
         metadata = self.read_metadata(sha1)
         compression = metadata.get("compression") or "identity"
         path = self.get(sha1)
@@ -209,7 +230,7 @@ class CasAttachmentStore:
                 merged.get("analysis", {}),
                 analyze_attachment(extract_path, content, merged, self.analysis_config),
             )
-        merged["exiftool"]["extracted_at"] = datetime.now(timezone.utc).isoformat()
+        merged["exiftool"]["extracted_at"] = datetime.now(UTC).isoformat()
         merged.setdefault("digest", sha1)
         merged.setdefault("sha1", sha1)
         merged.setdefault("size", len(content))
@@ -217,7 +238,9 @@ class CasAttachmentStore:
         sidecar = self.sidecar_for_digest(sha1)
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(json.dumps(merged, indent=2, sort_keys=True))
-        return StoredAttachmentObject(sha1=sha1, digest=sha1, path=path, sidecar_path=sidecar, size=len(content), metadata=merged, compression=compression)
+        return StoredAttachmentObject(
+            sha1=sha1, digest=sha1, path=path, sidecar_path=sidecar, size=len(content), metadata=merged, compression=compression
+        )
 
 
 def _should_compress(media_type: str) -> bool:

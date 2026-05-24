@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide semantic pg functionality for Gmeow."""
+
 from __future__ import annotations
 
 from typing import Any
 
 import psycopg
 from pgvector.psycopg import register_vector
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -14,7 +17,10 @@ from .semantic import NomicEmbeddingClient, chunk_text
 
 
 class PgSemanticIndex:
-    def __init__(self, dsn: str, model_name: str, endpoint: str, chunk_size: int = 384, chunk_overlap: int = 48):
+    """Represent PgSemanticIndex data and behavior."""
+
+    def __init__(self, dsn: str, model_name: str, endpoint: str, chunk_size: int = 384, chunk_overlap: int = 48) -> None:
+        """Initialize PgSemanticIndex."""
         self.dsn = dsn
         self.model_name = model_name
         self.endpoint = endpoint
@@ -23,7 +29,7 @@ class PgSemanticIndex:
         self._embedder = NomicEmbeddingClient(endpoint, model_name)
         self._ensure_ready()
 
-    def _connect(self):
+    def _connect(self) -> psycopg.Connection[Any]:
         conn = psycopg.connect(self.dsn, row_factory=dict_row)
         register_vector(conn)
         return conn
@@ -33,17 +39,22 @@ class PgSemanticIndex:
             conn.execute("SELECT 1 FROM embedding_chunks LIMIT 1")
 
     def available(self) -> bool:
+        """Available."""
         try:
             with self._connect() as conn:
                 conn.execute("SELECT 1 FROM embedding_chunks LIMIT 1")
-            return True
-        except Exception:
+        except psycopg.Error:
             return False
+        return True
 
     def index_message(self, message_id: str, text: str, metadata: dict[str, Any] | None = None) -> None:
-        self._index("message", message_id, clean_text_for_kg(text), metadata={**(metadata or {}), "message_id": message_id}, message_id=message_id)
+        """Index message."""
+        self._index(
+            "message", message_id, clean_text_for_kg(text), metadata={**(metadata or {}), "message_id": message_id}, message_id=message_id
+        )
 
     def index_attachment(self, sha1: str, text: str, metadata: dict[str, Any] | None = None) -> None:
+        """Index attachment."""
         self._index("attachment", sha1, clean_text_for_kg(text), metadata=metadata or {}, message_id=(metadata or {}).get("message_id"))
 
     def _index(self, source_kind: str, source_id: str, text: str, metadata: dict[str, Any], message_id: str | None) -> None:
@@ -59,11 +70,27 @@ class PgSemanticIndex:
             for idx, chunk in enumerate(chunks):
                 item = dict(metadata)
                 item.update({"chunk_index": idx, "chunk_count": len(chunks), "source_kind": source_kind, "source_id": source_id})
-                rows.append((f"{source_kind}:{source_id}:{idx}", source_kind, source_id, message_id, idx, len(chunks), chunk, Jsonb(item), embeddings[idx], len(embeddings[idx])))
+                rows.append(
+                    (
+                        f"{source_kind}:{source_id}:{idx}",
+                        source_kind,
+                        source_id,
+                        message_id,
+                        idx,
+                        len(chunks),
+                        chunk,
+                        Jsonb(item),
+                        embeddings[idx],
+                        len(embeddings[idx]),
+                    )
+                )
             with conn.cursor() as cur:
                 cur.executemany(
                     """
-                    INSERT INTO embedding_chunks(id, source_kind, source_id, message_id, chunk_index, chunk_count, text, metadata, embedding, embedding_dim)
+                    INSERT INTO embedding_chunks(
+                        id, source_kind, source_id, message_id, chunk_index, chunk_count,
+                        text, metadata, embedding, embedding_dim
+                    )
                     VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(id) DO UPDATE SET
                       text=excluded.text,
@@ -76,6 +103,7 @@ class PgSemanticIndex:
                 )
 
     def search(self, query: str, limit: int = 10, source_kind: str | None = None) -> list[dict[str, Any]]:
+        """Search."""
         embedding = self._embedder.embed_query(query)
         where = ["embedding IS NOT NULL"]
         params: list[Any] = [embedding]
@@ -85,14 +113,16 @@ class PgSemanticIndex:
         params.extend([embedding, limit])
         with self._connect() as conn:
             rows = conn.execute(
-                f"""
+                sql.SQL(
+                    """
                 SELECT id, source_kind, source_id, message_id, chunk_index, text AS document, metadata,
                        embedding <=> %s::vector AS distance
                 FROM embedding_chunks
-                WHERE {" AND ".join(where)}
+                WHERE {where_sql}
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
-                """,
+                """
+                ).format(where_sql=sql.SQL(" AND ").join(sql.SQL(condition) for condition in where)),
                 tuple(params),
             ).fetchall()
         return [dict(row) for row in rows]

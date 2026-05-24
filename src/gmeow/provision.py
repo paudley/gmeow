@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide provision functionality for Gmeow."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,14 +12,18 @@ from .config import GMAIL_MODIFY_SCOPE
 
 @dataclass(frozen=True, slots=True)
 class ProvisionPlan:
+    """Represent ProvisionPlan data and behavior."""
+
     commands: list[list[str]]
     admin_steps: list[str]
 
     def shell_script(self) -> str:
+        """Shell script."""
         return "\n".join(" ".join(command) for command in self.commands)
 
 
 def build_gcloud_provision_plan(project_id: str, service_account_name: str, key_file: Path) -> ProvisionPlan:
+    """Build gcloud provision plan."""
     email = f"{service_account_name}@{project_id}.iam.gserviceaccount.com"
     return ProvisionPlan(
         commands=[

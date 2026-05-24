@@ -1,14 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
+"""Provide graph functionality for Gmeow."""
+
 from __future__ import annotations
 
+import itertools
 import re
-from typing import Any
+from collections import deque
 from email.utils import getaddresses, parseaddr
+from typing import Any
 
-from .parser import ParsedMessage
+import rustworkx as rx
+
 from .kg import clean_text_for_kg, extract_message_kg, extract_sidecar_kg
-
+from .parser import ParsedMessage
 
 IRI = "gmeow:"
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
@@ -38,7 +43,16 @@ def _node(kind: str, value: str) -> str:
     return f"{IRI}{kind}/{safe}"
 
 
+def _edge_weight(edge: dict[str, Any]) -> float:
+    return float(edge["weight"])
+
+
+def _inverse_edge_weight(edge: dict[str, Any]) -> float:
+    return 1.0 / max(float(edge["weight"]), 0.000001)
+
+
 def extract_triples(message: ParsedMessage, attachment_sha1s: list[str] | None = None) -> list[tuple[str, str, str, str | None]]:
+    """Extract triples."""
     msg = _node("message", message.gmail_id)
     clean_text = clean_text_for_kg(message.text)
     triples: list[tuple[str, str, str, str | None]] = [
@@ -51,101 +65,150 @@ def extract_triples(message: ParsedMessage, attachment_sha1s: list[str] | None =
         triples.append((msg, SCHEMA + "name", message.subject, message.gmail_id))
     if message.date:
         triples.append((msg, SCHEMA + "dateReceived", message.date, message.gmail_id))
-    if message.thread_id:
-        thread = _node("thread", message.thread_id)
-        triples.append((msg, "gmeow:inThread", thread, message.gmail_id))
-        triples.append((msg, SIOC + "has_container", thread, message.gmail_id))
-        triples.append((thread, RDF_TYPE, SIOC + "Thread", message.gmail_id))
-    if message.sender:
-        name, address = parseaddr(message.sender)
-        node = _address_node(message.sender)
-        triples.append((msg, "gmeow:from", node, message.gmail_id))
-        triples.append((msg, SIOC + "has_creator", node, message.gmail_id))
-        triples.append((msg, SCHEMA + "sender", node, message.gmail_id))
-        triples.append((node, RDF_TYPE, FOAF + "Agent", message.gmail_id))
-        if address:
-            triples.append((node, FOAF + "mbox", f"mailto:{address.lower()}", message.gmail_id))
-        if name:
-            triples.append((node, "gmeow:displayName", name, message.gmail_id))
-            triples.append((node, FOAF + "name", name, message.gmail_id))
-            triples.append((node, RDFS_LABEL, name, message.gmail_id))
-    if message.recipients:
-        for name, address in getaddresses([message.recipients]):
-            if address:
-                node = _node("address", address.lower())
-                triples.append((msg, "gmeow:to", node, message.gmail_id))
-                triples.append((msg, SCHEMA + "recipient", node, message.gmail_id))
-                triples.append((node, RDF_TYPE, FOAF + "Agent", message.gmail_id))
-                triples.append((node, FOAF + "mbox", f"mailto:{address.lower()}", message.gmail_id))
-                if name:
-                    triples.append((node, "gmeow:displayName", name, message.gmail_id))
-                    triples.append((node, FOAF + "name", name, message.gmail_id))
-                    triples.append((node, RDFS_LABEL, name, message.gmail_id))
-    for label in message.label_ids:
-        label_node = _node("label", label)
-        triples.append((msg, "gmeow:hasLabel", label_node, message.gmail_id))
-        triples.append((msg, SKOS + "related", label_node, message.gmail_id))
-        triples.append((label_node, RDF_TYPE, SKOS + "Concept", message.gmail_id))
-    for key in ["message-id", "in-reply-to", "list-id"]:
-        if message.headers.get(key):
-            triples.append((msg, f"gmeow:header/{key}", message.headers[key], message.gmail_id))
+    triples.extend(_thread_triples(msg, message))
+    triples.extend(_sender_triples(msg, message))
+    triples.extend(_recipient_triples(msg, message))
+    triples.extend(_label_triples(msg, message))
+    triples.extend(
+        (msg, f"gmeow:header/{key}", message.headers[key], message.gmail_id)
+        for key in ["message-id", "in-reply-to", "list-id"]
+        if message.headers.get(key)
+    )
     for sha1 in attachment_sha1s or []:
         attachment = _node("attachment", sha1)
         triples.append((msg, "gmeow:hasAttachment", attachment, message.gmail_id))
         triples.append((msg, SCHEMA + "attachment", attachment, message.gmail_id))
-    for entity in extract_entities(clean_text):
-        triples.append((msg, "gmeow:mentionsEntity", _node("entity", entity), message.gmail_id))
-    for claim in extract_claims(clean_text):
-        triples.append((msg, "gmeow:hasClaim", claim, message.gmail_id))
-    for task in extract_tasks(clean_text):
-        triples.append((msg, "gmeow:hasTask", task, message.gmail_id))
-    if _looks_like_dev_project(message):
-        project = _dev_project_node(message)
-        triples.append((msg, "gmeow:aboutProject", project, message.gmail_id))
-        triples.append((msg, SCHEMA + "about", project, message.gmail_id))
-        triples.append((msg, FOAF + "topic", project, message.gmail_id))
-        triples.append((project, RDF_TYPE, DOAP + "Project", message.gmail_id))
-        triples.append((project, RDF_TYPE, SCHEMA + "SoftwareSourceCode", message.gmail_id))
-        triples.append((project, DOAP + "name", _project_label(project), message.gmail_id))
-        triples.append((project, RDFS_LABEL, _project_label(project), message.gmail_id))
-        repository = _dev_repository_url(message)
-        if repository:
-            triples.append((project, DOAP + "repository", repository, message.gmail_id))
-            triples.append((project, SCHEMA + "codeRepository", repository, message.gmail_id))
+    triples.extend((msg, "gmeow:mentionsEntity", _node("entity", entity), message.gmail_id) for entity in extract_entities(clean_text))
+    triples.extend((msg, "gmeow:hasClaim", claim, message.gmail_id) for claim in extract_claims(clean_text))
+    triples.extend((msg, "gmeow:hasTask", task, message.gmail_id) for task in extract_tasks(clean_text))
+    triples.extend(_project_triples(msg, message))
     triples.extend(extract_message_kg(message.gmail_id, "\n\n".join([message.subject or "", message.snippet, clean_text])))
     return triples
 
 
+def _thread_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str, str | None]]:
+    if not message.thread_id:
+        return []
+    thread = _node("thread", message.thread_id)
+    return [
+        (msg, "gmeow:inThread", thread, message.gmail_id),
+        (msg, SIOC + "has_container", thread, message.gmail_id),
+        (thread, RDF_TYPE, SIOC + "Thread", message.gmail_id),
+    ]
+
+
+def _sender_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str, str | None]]:
+    if not message.sender:
+        return []
+    name, address = parseaddr(message.sender)
+    node = _address_node(message.sender)
+    triples = [
+        (msg, "gmeow:from", node, message.gmail_id),
+        (msg, SIOC + "has_creator", node, message.gmail_id),
+        (msg, SCHEMA + "sender", node, message.gmail_id),
+        (node, RDF_TYPE, FOAF + "Agent", message.gmail_id),
+    ]
+    if address:
+        triples.append((node, FOAF + "mbox", f"mailto:{address.lower()}", message.gmail_id))
+    triples.extend(_name_triples(node, name, message.gmail_id))
+    return triples
+
+
+def _recipient_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str, str | None]]:
+    triples: list[tuple[str, str, str, str | None]] = []
+    for name, address in getaddresses([message.recipients] if message.recipients else []):
+        if not address:
+            continue
+        node = _node("address", address.lower())
+        triples.extend(
+            [
+                (msg, "gmeow:to", node, message.gmail_id),
+                (msg, SCHEMA + "recipient", node, message.gmail_id),
+                (node, RDF_TYPE, FOAF + "Agent", message.gmail_id),
+                (node, FOAF + "mbox", f"mailto:{address.lower()}", message.gmail_id),
+            ]
+        )
+        triples.extend(_name_triples(node, name, message.gmail_id))
+    return triples
+
+
+def _name_triples(node: str, name: str, message_id: str | None) -> list[tuple[str, str, str, str | None]]:
+    if not name:
+        return []
+    return [(node, "gmeow:displayName", name, message_id), (node, FOAF + "name", name, message_id), (node, RDFS_LABEL, name, message_id)]
+
+
+def _label_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str, str | None]]:
+    triples = []
+    for label in message.label_ids:
+        label_node = _node("label", label)
+        triples.extend(
+            [
+                (msg, "gmeow:hasLabel", label_node, message.gmail_id),
+                (msg, SKOS + "related", label_node, message.gmail_id),
+                (label_node, RDF_TYPE, SKOS + "Concept", message.gmail_id),
+            ]
+        )
+    return triples
+
+
+def _project_triples(msg: str, message: ParsedMessage) -> list[tuple[str, str, str, str | None]]:
+    if not _looks_like_dev_project(message):
+        return []
+    project = _dev_project_node(message)
+    triples = [
+        (msg, "gmeow:aboutProject", project, message.gmail_id),
+        (msg, SCHEMA + "about", project, message.gmail_id),
+        (msg, FOAF + "topic", project, message.gmail_id),
+        (project, RDF_TYPE, DOAP + "Project", message.gmail_id),
+        (project, RDF_TYPE, SCHEMA + "SoftwareSourceCode", message.gmail_id),
+        (project, DOAP + "name", _project_label(project), message.gmail_id),
+        (project, RDFS_LABEL, _project_label(project), message.gmail_id),
+    ]
+    repository = _dev_repository_url(message)
+    if repository:
+        triples.append((project, DOAP + "repository", repository, message.gmail_id))
+        triples.append((project, SCHEMA + "codeRepository", repository, message.gmail_id))
+    return triples
+
+
 def extract_attachment_sidecar_triples(sha1: str, metadata: dict[str, Any]) -> list[tuple[str, str, str, str | None]]:
+    """Extract attachment sidecar triples."""
     return extract_sidecar_kg(sha1, metadata)
 
 
 def extract_entities(text: str) -> list[str]:
+    """Extract entities."""
     candidates = re.findall(r"\b[A-Z][A-Za-z0-9&.-]+(?:\s+[A-Z][A-Za-z0-9&.-]+){0,3}\b", text or "")
     stop = {"I", "The", "A", "This", "That", "Thanks", "Regards"}
     return sorted({candidate for candidate in candidates if candidate not in stop})[:50]
 
 
 def extract_claims(text: str) -> list[str]:
-    claims = []
-    for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
-        if re.search(r"\b(is|are|was|were|will|must|should|costs?|means|requires?)\b", sentence, re.I):
-            claims.append(sentence.strip()[:500])
+    """Extract claims."""
+    claims = [
+        sentence.strip()[:500]
+        for sentence in re.split(r"(?<=[.!?])\s+", text or "")
+        if re.search(r"\b(is|are|was|were|will|must|should|costs?|means|requires?)\b", sentence, re.IGNORECASE)
+    ]
     return claims[:25]
 
 
 def extract_tasks(text: str) -> list[str]:
-    tasks = []
-    for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
-        if re.search(r"\b(todo|please|action required|need to|must|by \w+day|due)\b", sentence, re.I):
-            tasks.append(sentence.strip()[:500])
+    """Extract tasks."""
+    tasks = [
+        sentence.strip()[:500]
+        for sentence in re.split(r"(?<=[.!?])\s+", text or "")
+        if re.search(r"\b(todo|please|action required|need to|must|by \w+day|due)\b", sentence, re.IGNORECASE)
+    ]
     return tasks[:25]
 
 
 class GraphProjector:
-    def build(self, triples: list[tuple[str, str, str, str | None]]) -> Any:
-        import rustworkx as rx
+    """Represent GraphProjector data and behavior."""
 
+    def build(self, triples: list[tuple[str, str, str, str | None]]) -> object:
+        """Build."""
         graph = rx.PyDiGraph()
         nodes: dict[str, int] = {}
         for subject, predicate, obj, _ in triples:
@@ -156,6 +219,7 @@ class GraphProjector:
         return graph
 
     def summary(self, triples: list[tuple[str, str, str, str | None]], limit: int = 25) -> dict[str, Any]:
+        """Summary."""
         graph = self.build(triples)
         counts: dict[str, dict[str, Any]] = {}
         for subject, predicate, obj, source in triples:
@@ -165,16 +229,15 @@ class GraphProjector:
                 if source:
                     item["messages"].add(source)
                 item["predicates"].add(predicate)
-        top_nodes = []
-        for item in counts.values():
-            top_nodes.append(
-                {
-                    "id": item["id"],
-                    "degree": item["degree"],
-                    "messages": len(item["messages"]),
-                    "predicates": sorted(item["predicates"])[:10],
-                }
-            )
+        top_nodes = [
+            {
+                "id": item["id"],
+                "degree": item["degree"],
+                "messages": len(item["messages"]),
+                "predicates": sorted(item["predicates"])[:10],
+            }
+            for item in counts.values()
+        ]
         top_nodes.sort(key=lambda item: (-item["messages"], -item["degree"], item["id"]))
         return {
             "nodes": graph.num_nodes(),
@@ -189,8 +252,7 @@ class GraphProjector:
         target: str,
         max_depth: int = 4,
     ) -> dict[str, Any] | None:
-        from collections import deque
-
+        """Shortest path."""
         adjacency: dict[str, list[tuple[str, str, str | None]]] = {}
         for subject, predicate, obj, message_id in triples:
             adjacency.setdefault(subject, []).append((obj, predicate, message_id))
@@ -214,9 +276,10 @@ class GraphProjector:
 
 
 class WeightedGraphProjector:
-    def build(self, edges: list[dict[str, Any]], bidirectional: bool = True) -> dict[str, Any]:
-        import rustworkx as rx
+    """Represent WeightedGraphProjector data and behavior."""
 
+    def build(self, edges: list[dict[str, Any]], *, bidirectional: bool = True) -> dict[str, Any]:
+        """Build."""
         graph = rx.PyDiGraph(multigraph=True, node_count_hint=len(edges) * 2, edge_count_hint=len(edges) * (2 if bidirectional else 1))
         nodes: dict[str, int] = {}
         edge_lookup: dict[tuple[int, int], dict[str, Any]] = {}
@@ -244,14 +307,13 @@ class WeightedGraphProjector:
         return {"graph": graph, "nodes": nodes, "reverse_nodes": reverse_nodes, "edge_lookup": edge_lookup}
 
     def weighted_path(self, edges: list[dict[str, Any]], source: str, target: str, max_depth: int = 4) -> dict[str, Any] | None:
-        import rustworkx as rx
-
+        """Weighted path."""
         built = self.build(edges, bidirectional=True)
         graph = built["graph"]
         nodes = built["nodes"]
         if source not in nodes or target not in nodes:
             return None
-        paths = rx.digraph_dijkstra_shortest_paths(graph, nodes[source], nodes[target], lambda edge: float(edge["weight"]))
+        paths = rx.digraph_dijkstra_shortest_paths(graph, nodes[source], nodes[target], _edge_weight)
         node_path = list(paths[nodes[target]]) if nodes[target] in paths else []
         if not node_path or len(node_path) - 1 > max_depth:
             return None
@@ -259,7 +321,7 @@ class WeightedGraphProjector:
         reverse_nodes = built["reverse_nodes"]
         path = []
         total = 0.0
-        for left, right in zip(node_path, node_path[1:]):
+        for left, right in itertools.pairwise(node_path):
             data = edge_lookup[(left, right)]
             weight = float(data["weight"])
             total += weight
@@ -282,21 +344,22 @@ class WeightedGraphProjector:
             "path": path,
         }
 
-    def related_nodes(self, edges: list[dict[str, Any]], source: str, limit: int = 25, max_weight: float | None = None) -> list[dict[str, Any]]:
-        import rustworkx as rx
-
+    def related_nodes(
+        self, edges: list[dict[str, Any]], source: str, limit: int = 25, max_weight: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Related nodes."""
         built = self.build(edges, bidirectional=True)
         graph = built["graph"]
         nodes = built["nodes"]
         if source not in nodes:
             return []
-        lengths = rx.digraph_dijkstra_shortest_path_lengths(graph, nodes[source], lambda edge: float(edge["weight"]))
+        lengths = rx.digraph_dijkstra_shortest_path_lengths(graph, nodes[source], _edge_weight)
         reverse_nodes = built["reverse_nodes"]
         results = []
-        for index, distance in lengths.items():
+        for index, path_distance in lengths.items():
             if index == nodes[source]:
                 continue
-            distance = float(distance)
+            distance = float(path_distance)
             if max_weight is not None and distance > max_weight:
                 continue
             results.append({"node": reverse_nodes[index], "distance": round(distance, 6), "score": round(1.0 / (1.0 + distance), 6)})
@@ -304,8 +367,7 @@ class WeightedGraphProjector:
         return results[:limit]
 
     def centrality(self, edges: list[dict[str, Any]], metric: str = "pagerank") -> list[dict[str, Any]]:
-        import rustworkx as rx
-
+        """Centrality."""
         metric = metric.lower().replace("-", "_")
         built = self.build(edges, bidirectional=False)
         graph = built["graph"]
@@ -313,7 +375,7 @@ class WeightedGraphProjector:
         if graph.num_nodes() == 0:
             return []
         if metric == "pagerank":
-            scores = rx.pagerank(graph, weight_fn=lambda edge: 1.0 / max(float(edge["weight"]), 0.000001))
+            scores = rx.pagerank(graph, weight_fn=_inverse_edge_weight)
         elif metric == "betweenness":
             scores = rx.digraph_betweenness_centrality(graph)
         elif metric == "closeness":
@@ -325,16 +387,16 @@ class WeightedGraphProjector:
         elif metric == "out_degree":
             scores = rx.out_degree_centrality(graph)
         elif metric == "eigenvector":
-            scores = rx.digraph_eigenvector_centrality(graph, weight_fn=lambda edge: 1.0 / max(float(edge["weight"]), 0.000001), max_iter=1000, tol=1e-5)
+            scores = rx.digraph_eigenvector_centrality(graph, weight_fn=_inverse_edge_weight, max_iter=1000, tol=1e-5)
         elif metric == "katz":
-            scores = rx.digraph_katz_centrality(graph, weight_fn=lambda edge: 1.0 / max(float(edge["weight"]), 0.000001))
+            scores = rx.digraph_katz_centrality(graph, weight_fn=_inverse_edge_weight)
         else:
-            raise ValueError(f"Unsupported centrality metric: {metric}")
+            msg = f"Unsupported centrality metric: {metric}"
+            raise ValueError(msg)
         return [{"node": reverse_nodes[index], "score": float(score)} for index, score in dict(scores).items()]
 
     def components(self, edges: list[dict[str, Any]], mode: str = "weak") -> list[list[str]]:
-        import rustworkx as rx
-
+        """Components."""
         built = self.build(edges, bidirectional=False)
         graph = built["graph"]
         reverse_nodes = built["reverse_nodes"]
@@ -343,8 +405,7 @@ class WeightedGraphProjector:
         return [[reverse_nodes[index] for index in component] for component in components]
 
     def cycles(self, edges: list[dict[str, Any]], limit: int = 25, max_cycle_len: int = 8) -> list[list[str]]:
-        import rustworkx as rx
-
+        """Cycles."""
         built = self.build(edges, bidirectional=False)
         graph = built["graph"]
         reverse_nodes = built["reverse_nodes"]
@@ -355,7 +416,6 @@ class WeightedGraphProjector:
             if len(results) >= limit:
                 break
         return results
-
 
 
 def _address_node(value: str) -> str:
@@ -380,10 +440,10 @@ def _project_label(project_node: str) -> str:
 
 def _dev_repository_url(message: ParsedMessage) -> str | None:
     text = " ".join([message.subject or "", message.recipients or "", message.snippet or "", message.text or ""])
-    match = re.search(r"github\.com[:/](?P<repo>[\w.-]+/[\w.-]+)", text, re.I)
+    match = re.search(r"github\.com[:/](?P<repo>[\w.-]+/[\w.-]+)", text, re.IGNORECASE)
     if match:
         return "https://github.com/" + match.group("repo").rstrip(".git")
-    match = re.search(r"gitlab\.com[:/](?P<repo>[\w./-]+)", text, re.I)
+    match = re.search(r"gitlab\.com[:/](?P<repo>[\w./-]+)", text, re.IGNORECASE)
     if match:
         return "https://gitlab.com/" + match.group("repo").rstrip(".git")
     match = re.search(r"[\[<](?P<repo>[\w.-]+/[\w.-]+)[\]>]", text)
