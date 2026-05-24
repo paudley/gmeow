@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide imap server functionality for Gmeow."""
+"""Provide read-only IMAP access to the Gmeow archive.
 
-from __future__ import annotations
+Implements a minimal RFC 3501 server that exposes cached Gmail bodies through standard IMAP
+clients while preserving the loopback-only trust boundary. The server reuses the durable cache
+so IMAP fetches always return canonical RFC822 bytes rather than re-hydrating Gmail.
+"""
 
 import asyncio
 import re
@@ -21,7 +24,7 @@ class ImapSession:
     """Represent ImapSession data and behavior."""
 
     authenticated: bool = False
-    selected: str | None = None
+    selected: str = ""
 
 
 class ReadOnlyImapServer:
@@ -40,7 +43,7 @@ class ReadOnlyImapServer:
             "imap.started",
             "info",
             "imap",
-            None,
+            "",
             "Read-only IMAP server started.",
             {"host": self.config.imap.host, "port": self.config.imap.port},
         )
@@ -176,8 +179,6 @@ class ReadOnlyImapServer:
         selected = _select_messages(messages, sequence, uid_mode=uid_mode)
         for seq, message in selected:
             content = self.cache.imap_message_bytes(session.selected, int(message["uid"]))
-            if content is None:
-                continue
             flags = "(\\Seen)" if "UNREAD" not in self.cache.get_message(message["id"]).get("label_ids", []) else "()"
             prefix = f"* {seq} FETCH (UID {int(message['uid'])} FLAGS {flags} RFC822 {{{len(content)}}}\r\n"
             writer.write(prefix.encode("utf-8") + content + b"\r\n)\r\n")
