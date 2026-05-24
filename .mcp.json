@@ -4,7 +4,7 @@
       "args": [
         "mcp"
       ],
-      "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run",
+      "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run",
       "type": "stdio"
     }
   }
