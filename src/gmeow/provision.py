@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide provision functionality for Gmeow."""
+"""Bootstrap helpers for local Gmeow installations.
 
-from __future__ import annotations
+The provisioning helpers manifest OAuth client/service-account files, ensure data directories
+exist, and verify Gmail scopes are present. They keep the operator-facing setup steps out of the
+runtime path so daemons can assume a sane environment.
+"""
 
 from dataclasses import dataclass
 from pathlib import Path
