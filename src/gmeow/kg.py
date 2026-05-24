@@ -15,6 +15,8 @@ from typing import Any, cast
 
 import spacy
 
+from ._typing import ensure_dict
+
 Triple = tuple[str, str, str, str]
 
 MIN_ENTITY_TEXT_LENGTH = 2
@@ -124,12 +126,11 @@ def extract_sidecar_kg(sha1: str, metadata: dict[str, Any]) -> list[Triple]:
 
 
 def _exiftool_tags(metadata: dict[str, Any]) -> dict[str, Any]:
-    exif = cast(dict[str, Any], metadata.get("exiftool", {}))
-    return cast(dict[str, Any], exif.get("tags", {}))
+    return ensure_dict(ensure_dict(metadata, "exiftool"), "tags")
 
 
 def _analysis_dict(metadata: dict[str, Any]) -> dict[str, Any]:
-    return cast(dict[str, Any], metadata.get("analysis")) if isinstance(metadata.get("analysis"), dict) else {}
+    return ensure_dict(metadata, "analysis")
 
 
 def _sidecar_mapped_triples(
@@ -144,16 +145,16 @@ def _sidecar_mapped_triples(
 
 def _sidecar_analysis_triples(subject: str, message_node: str, message_id: str, sha1: str, analysis: dict[str, Any]) -> list[Triple]:
     triples: list[Triple] = []
-    file_info = cast(dict[str, Any], analysis.get("file")) if isinstance(analysis.get("file"), dict) else {}
+    file_info = ensure_dict(analysis, "file")
     triples.extend(_mapped_triples(subject, file_info, message_id, _ANALYSIS_FILE_FIELDS))
     if analysis.get("available_text") is not None:
         triples.append((subject, "gmeow:analysisHasText", str(bool(analysis.get("available_text"))).lower(), message_id))
-    document = cast(dict[str, Any], analysis.get("document")) if isinstance(analysis.get("document"), dict) else {}
+    document = ensure_dict(analysis, "document")
     triples.extend(_document_triples(subject, message_node, message_id, sha1, document))
-    calendar = cast(dict[str, Any], analysis.get("calendar")) if isinstance(analysis.get("calendar"), dict) else {}
-    fields = cast(dict[str, Any], calendar.get("fields")) if isinstance(calendar.get("fields"), dict) else {}
+    calendar = ensure_dict(analysis, "calendar")
+    fields = ensure_dict(calendar, "fields")
     triples.extend(_calendar_triples(subject, message_node, message_id, sha1, fields))
-    archive = cast(dict[str, Any], analysis.get("archive")) if isinstance(analysis.get("archive"), dict) else {}
+    archive = ensure_dict(analysis, "archive")
     triples.extend(_archive_file_triples(subject, message_node, message_id, sha1, archive))
     extracted_sections: dict[str, str] = {
         "document": str(document.get("text") or ""),

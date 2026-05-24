@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self, cast
 
+from ._typing import ensure_dict
+
 DEFAULT_INT = cast(int, None)
 DEFAULT_PATH = cast(Path, None)
 DEFAULT_STR = cast(str, None)
@@ -330,13 +332,11 @@ class GmeowConfig:
 
     def service_account_info(self) -> dict[str, Any]:
         """Service account info."""
-        value = self.load_secrets().get("service_account_json")
-        return cast(dict[str, Any], value) if isinstance(value, dict) else {}
+        return ensure_dict(self.load_secrets(), "service_account_json")
 
     def user_credentials_info(self) -> dict[str, Any]:
         """User credentials info."""
-        value = self.load_secrets().get("user_credentials_json")
-        return cast(dict[str, Any], value) if isinstance(value, dict) else {}
+        return ensure_dict(self.load_secrets(), "user_credentials_json")
 
     def database_dsn(self) -> str:
         """Database dsn."""

@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
+from ._typing import ensure_dict
 from .config import AttachmentAnalysisConfig
 from .http_json import HttpJsonError, post_json
 
@@ -62,8 +63,8 @@ def analyze_attachment(
         analysis["skipped"].append({"stage": "analysis", "reason": "disabled"})
         return analysis
 
-    source = cast(dict[str, Any], metadata.get("source", {}) if isinstance(metadata.get("source"), dict) else {})
-    gmail = cast(dict[str, Any], source.get("gmail", {}) if isinstance(source.get("gmail"), dict) else {})
+    source = ensure_dict(metadata, "source")
+    gmail = ensure_dict(source, "gmail")
     declared_media_type = cast(str, metadata.get("media_type") or gmail.get("mime_type") or "application/octet-stream")
     filename = cast(str, gmail.get("filename") or metadata.get("filename") or path.name)
     detected = _detect_file(path)
