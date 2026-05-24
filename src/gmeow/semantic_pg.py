@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide semantic pg functionality for Gmeow."""
+"""Persist semantic embeddings in PostgreSQL with pgvector.
 
-from __future__ import annotations
+The PgSemanticIndex manages embedding chunks, similarity search, and metadata lookups so MCP and
+HTTP search surfaces can blend lexical and semantic signals. It also encapsulates the connection
+setup required to register the pgvector adapter on every Postgres session.
+"""
 
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from pgvector.psycopg import register_vector
@@ -14,6 +17,9 @@ from psycopg.types.json import Jsonb
 
 from .kg import clean_text_for_kg
 from .semantic import NomicEmbeddingClient, chunk_text
+
+DEFAULT_DICT_ANY = cast(dict[str, Any], None)
+DEFAULT_STR = cast(str, None)
 
 
 class PgSemanticIndex:
@@ -29,44 +35,49 @@ class PgSemanticIndex:
         self._embedder = NomicEmbeddingClient(endpoint, model_name)
         self._ensure_ready()
 
-    def _connect(self) -> psycopg.Connection[Any]:
+    def _connect(self) -> psycopg.Connection[dict[str, object]]:
         conn = psycopg.connect(self.dsn, row_factory=dict_row)
         register_vector(conn)
         return conn
 
     def _ensure_ready(self) -> None:
-        with self._connect() as conn:
-            conn.execute("SELECT 1 FROM embedding_chunks LIMIT 1")
+        connection = self._connect()
+        with connection:
+            connection.execute("SELECT 1 FROM embedding_chunks LIMIT 1")
 
     def available(self) -> bool:
         """Available."""
         try:
-            with self._connect() as conn:
-                conn.execute("SELECT 1 FROM embedding_chunks LIMIT 1")
+            connection = self._connect()
+            with connection:
+                connection.execute("SELECT 1 FROM embedding_chunks LIMIT 1")
         except psycopg.Error:
             return False
         return True
 
-    def index_message(self, message_id: str, text: str, metadata: dict[str, Any] | None = None) -> None:
+    def index_message(self, message_id: str, text: str, metadata: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
         """Index message."""
         self._index(
             "message", message_id, clean_text_for_kg(text), metadata={**(metadata or {}), "message_id": message_id}, message_id=message_id
         )
 
-    def index_attachment(self, sha1: str, text: str, metadata: dict[str, Any] | None = None) -> None:
+    def index_attachment(self, sha1: str, text: str, metadata: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
         """Index attachment."""
-        self._index("attachment", sha1, clean_text_for_kg(text), metadata=metadata or {}, message_id=(metadata or {}).get("message_id"))
+        self._index(
+            "attachment", sha1, clean_text_for_kg(text), metadata=metadata or {}, message_id=str((metadata or {}).get("message_id") or "")
+        )
 
-    def _index(self, source_kind: str, source_id: str, text: str, metadata: dict[str, Any], message_id: str | None) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM embedding_chunks WHERE source_kind = %s AND source_id = %s", (source_kind, source_id))
+    def _index(self, source_kind: str, source_id: str, text: str, metadata: dict[str, Any], message_id: str = DEFAULT_STR) -> None:
+        connection = self._connect()
+        with connection:
+            connection.execute("DELETE FROM embedding_chunks WHERE source_kind = %s AND source_id = %s", (source_kind, source_id))
             if not text.strip():
                 return
             chunks = chunk_text(text, chunk_size=self.chunk_size, overlap=self.chunk_overlap)
             if not chunks:
                 return
             embeddings = self._embedder.embed_documents(chunks)
-            rows = []
+            rows: list[tuple[str, str, str, str, int, int, str, Jsonb, list[float], int]] = []
             for idx, chunk in enumerate(chunks):
                 item = dict(metadata)
                 item.update({"chunk_index": idx, "chunk_count": len(chunks), "source_kind": source_kind, "source_id": source_id})
@@ -84,7 +95,7 @@ class PgSemanticIndex:
                         len(embeddings[idx]),
                     )
                 )
-            with conn.cursor() as cur:
+            with connection.cursor() as cur:
                 cur.executemany(
                     """
                     INSERT INTO embedding_chunks(
@@ -102,7 +113,7 @@ class PgSemanticIndex:
                     rows,
                 )
 
-    def search(self, query: str, limit: int = 10, source_kind: str | None = None) -> list[dict[str, Any]]:
+    def search(self, query: str, limit: int = 10, source_kind: str = DEFAULT_STR) -> list[dict[str, Any]]:
         """Search."""
         embedding = self._embedder.embed_query(query)
         where = ["embedding IS NOT NULL"]
@@ -111,8 +122,9 @@ class PgSemanticIndex:
             where.append("source_kind = %s")
             params.append(source_kind)
         params.extend([embedding, limit])
-        with self._connect() as conn:
-            rows = conn.execute(
+        connection = self._connect()
+        with connection:
+            rows = connection.execute(
                 sql.SQL(
                     """
                 SELECT id, source_kind, source_id, message_id, chunk_index, text AS document, metadata,

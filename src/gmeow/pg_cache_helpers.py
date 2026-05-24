@@ -1,30 +1,47 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""PostgreSQL cache helper functions."""
+"""Provide shared SQL and cache helper routines.
 
-from __future__ import annotations
+The module contains query builders, normalization helpers, date filters, and graph profile utilities
+used by PostgreSQL cache modules. It keeps repeated SQL fragments and parsing behavior out of the
+main cache class.
+"""
 
 import os
 import re
 import socket
 from datetime import UTC, datetime
 from email.utils import getaddresses, parseaddr
-from typing import Any
+from typing import Any, cast
 
 import blake3
 from psycopg import sql
 
-from .cache import _parse_message_date
+from .cache import parse_message_date
+
+DEFAULT_DATETIME = cast(datetime, None)
+DEFAULT_SQL_COMPOSABLE = cast(sql.Composable, None)
+DEFAULT_STR = cast(str, None)
 
 AGE_COLUMN_PARTS = 2
 
 
 def age_sql(cypher: str, columns: str) -> sql.Composable:
     """Build a safe Apache AGE query wrapper."""
-    return sql.SQL("SELECT * FROM cypher('gmeow_graph', {}) AS ({})").format(sql.Literal(cypher), age_columns_sql(columns))
+    return sql.SQL("SELECT * FROM cypher('gmeow_graph', {}) AS ({})").format(age_cypher_sql(cypher), age_columns_sql(columns))
 
 
-def import_insert_sql(table: str, keys: list[str], conflict_keys: list[str], conflict_target: sql.Composable | None = None) -> sql.Composable:
+def age_cypher_sql(cypher: str) -> sql.Composable:
+    """Build an AGE-compatible dollar-quoted Cypher literal."""
+    tag = "gmeow_age"
+    while f"${tag}$" in cypher:
+        tag = f"_{tag}"
+    return sql.SQL("${}${}${}$").format(sql.SQL(tag), sql.SQL(cast(Any, cypher)), sql.SQL(tag))
+
+
+def import_insert_sql(
+    table: str, keys: list[str], conflict_keys: list[str], conflict_target: sql.Composable = DEFAULT_SQL_COMPOSABLE
+) -> sql.Composable:
     """Build an INSERT ... ON CONFLICT update statement."""
     columns = sql.SQL(", ").join(sql.Identifier(key) for key in keys)
     placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in keys)
@@ -42,7 +59,7 @@ def import_insert_sql(table: str, keys: list[str], conflict_keys: list[str], con
 
 def age_columns_sql(columns: str) -> sql.Composable:
     """Build a validated AGE result column declaration."""
-    rendered = []
+    rendered: list[Any] = []
     for column in columns.split(","):
         parts = column.split()
         if len(parts) != AGE_COLUMN_PARTS or parts[1].lower() != "agtype" or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", parts[0]):
@@ -52,7 +69,7 @@ def age_columns_sql(columns: str) -> sql.Composable:
     if not rendered:
         msg = "AGE query must declare at least one result column."
         raise ValueError(msg)
-    return sql.SQL(", ").join(rendered)
+    return cast(sql.Composable, sql.SQL(", ").join(rendered))
 
 
 def worker_id() -> str:
@@ -62,7 +79,7 @@ def worker_id() -> str:
 
 def blake3_digest(content: bytes) -> str:
     """Blake3 digest."""
-    return blake3.blake3(content).hexdigest()
+    return str(blake3.blake3(content).hexdigest())
 
 
 def imap_mailbox_name(value: str) -> str:
@@ -93,7 +110,7 @@ def read_only_cypher(query: str) -> bool:
     return not any(word in padded for word in forbidden)
 
 
-def profile_allowed(profile: dict[str, Any], visibility: str = "user", kind: str | None = None, namespace: str | None = None) -> bool:
+def profile_allowed(profile: dict[str, Any], visibility: str = "user", kind: str = DEFAULT_STR, namespace: str = DEFAULT_STR) -> bool:
     """Return whether a graph node profile matches the requested filters."""
     requested_visibility = (visibility or "user").lower()
     if requested_visibility not in {"all", "any"} and profile.get("visibility") != requested_visibility:
@@ -104,7 +121,7 @@ def profile_allowed(profile: dict[str, Any], visibility: str = "user", kind: str
 
 
 def algorithm_profile_allowed(
-    profile: dict[str, Any], visibility: str = "user", kind: str | None = None, namespace: str | None = None
+    profile: dict[str, Any], visibility: str = "user", kind: str = DEFAULT_STR, namespace: str = DEFAULT_STR
 ) -> bool:
     """Return whether a profile should be included in graph algorithms."""
     if not profile_allowed(profile, visibility=visibility, kind=kind, namespace=namespace):
@@ -161,7 +178,7 @@ def normalize_kind(kind: str) -> str:
     return aliases.get(value, value)
 
 
-def kind_prefixes(kind: str | None) -> list[str]:
+def kind_prefixes(kind: str) -> list[str]:
     """Return graph node prefixes for a normalized kind."""
     normalized = normalize_kind(kind or "")
     prefixes = {
@@ -189,14 +206,16 @@ def kind_prefixes(kind: str | None) -> list[str]:
     return prefixes.get(normalized, [])
 
 
-def message_search_fields(sender: str | None, recipients: str | None, message_date: str | None) -> dict[str, Any]:
+def message_search_fields(sender: str, recipients: str, message_date: str) -> dict[str, Any]:
     """Normalize fields used by PostgreSQL message search indexes."""
     sender_addr = clean_address(parseaddr(sender or "")[1])
     sender_domain = address_domain(sender_addr)
-    recipient_addrs = sorted({address for _name, raw_address in getaddresses([recipients or ""]) if (address := clean_address(raw_address))})
+    recipient_addrs = sorted(
+        {address for _name, raw_address in getaddresses([recipients or ""]) if (address := clean_address(raw_address))}
+    )
     recipient_domains = sorted({domain for address in recipient_addrs if (domain := address_domain(address))})
     return {
-        "message_ts": query_datetime(_parse_message_date(message_date)) if message_date else None,
+        "message_ts": query_datetime(parse_message_date(message_date)) if message_date else None,
         "sender_addr": sender_addr or None,
         "sender_domain": sender_domain or None,
         "recipient_addrs": recipient_addrs,
@@ -206,29 +225,22 @@ def message_search_fields(sender: str | None, recipients: str | None, message_da
 
 def message_search_text(fields: dict[str, Any]) -> str:
     """Return full-text search input for a message row."""
+    return "\n".join(_message_search_parts(fields))
+
+
+def _message_search_parts(fields: dict[str, Any]) -> list[str]:
+    """Return non-empty text fragments for message search indexing."""
     subject = fields.get("subject")
     sender = fields.get("sender")
     recipients = fields.get("recipients")
     snippet = fields.get("snippet")
     text_body = fields.get("text_body")
     markdown = fields.get("markdown")
-    headers = fields.get("headers") or {}
-    label_ids = fields.get("label_ids") or []
+    headers = cast(dict[str, object], fields.get("headers") or {})
+    label_ids = [str(label_id) for label_id in cast(list[object], fields.get("label_ids") or [])]
     header_text = " ".join(f"{key}: {value}" for key, value in sorted((headers or {}).items()) if isinstance(value, str))
-    return "\n".join(
-        part
-        for part in [
-            subject or "",
-            sender or "",
-            recipients or "",
-            snippet or "",
-            " ".join(label_ids or []),
-            header_text,
-            text_body or "",
-            markdown or "",
-        ]
-        if part
-    )
+    parts = [subject, sender, recipients, snippet, " ".join(label_ids), header_text, text_body, markdown]
+    return [str(part) for part in parts if part]
 
 
 def sql_text_query(fts_query: str) -> str:
@@ -260,7 +272,7 @@ def apply_address_filters(where: list[str], params: list[Any], values: list[str]
             append_recipient_filter(where, params, value, address, domain)
 
 
-def append_sender_filter(where: list[str], params: list[Any], value: str, address: str | None, domain: str | None) -> None:
+def append_sender_filter(where: list[str], params: list[Any], value: str, address: str, domain: str) -> None:
     """Append sender search predicates."""
     if address:
         where.append("(sender_addr = %s OR sender ILIKE %s)")
@@ -273,7 +285,7 @@ def append_sender_filter(where: list[str], params: list[Any], value: str, addres
         params.append(f"%{value}%")
 
 
-def append_recipient_filter(where: list[str], params: list[Any], value: str, address: str | None, domain: str | None) -> None:
+def append_recipient_filter(where: list[str], params: list[Any], value: str, address: str, domain: str) -> None:
     """Append recipient search predicates."""
     if address:
         where.append("(%s = ANY(recipient_addrs) OR recipients ILIKE %s)")
@@ -296,24 +308,29 @@ def apply_subject_label_filters(where: list[str], params: list[Any], parsed: dic
         params.append(label)
 
 
-def apply_date_filters(where: list[str], params: list[Any], parsed: dict[str, Any]) -> tuple[datetime | None, datetime | None]:
+def apply_date_filters(where: list[str], params: list[Any], parsed: dict[str, Any]) -> tuple[datetime, datetime]:
     """Append date filters from a parsed search query."""
-    after_dt = query_datetime(parsed["after"])
-    before_dt = query_datetime(parsed["before"])
-    if after_dt is not None:
+    after_dt = DEFAULT_DATETIME
+    before_dt = DEFAULT_DATETIME
+    after = str(parsed["after"] or "")
+    before = str(parsed["before"] or "")
+    if after:
+        after_dt = query_datetime(after)
         where.append("message_ts >= %s")
         params.append(after_dt)
-    if before_dt is not None:
+    if before:
+        before_dt = query_datetime(before)
         where.append("message_ts <= %s")
         params.append(before_dt)
     return after_dt, before_dt
 
 
-def query_datetime(value: str | None) -> datetime | None:
+def query_datetime(value: str) -> datetime:
     """Coerce a user query date into a timezone-aware datetime."""
     if not value:
-        return None
-    parsed = _parse_message_date(value)
+        msg = "Query date is required."
+        raise ValueError(msg)
+    parsed = parse_message_date(value)
     try:
         result = datetime.fromisoformat(parsed)
     except (TypeError, ValueError) as exc:
@@ -324,30 +341,30 @@ def query_datetime(value: str | None) -> datetime | None:
     return result.astimezone(UTC)
 
 
-def address_filter_value(value: str) -> tuple[str | None, str | None]:
+def address_filter_value(value: str) -> tuple[str, str]:
     """Return normalized address and domain filters for a raw query value."""
     raw = (parseaddr(value or "")[1] or value or "").strip().lower()
     if raw.startswith("@"):
-        return None, raw[1:] or None
+        return "", raw[1:]
     if "@" in raw:
         address = clean_address(raw)
-        return address or None, address_domain(address)
+        return address, address_domain(address)
     clean = raw.strip("<> ")
     if "." in clean and " " not in clean:
-        return None, clean
-    return None, None
+        return "", clean
+    return "", ""
 
 
-def clean_address(value: str | None) -> str:
+def clean_address(value: str) -> str:
     """Normalize an email address."""
     return (value or "").strip().strip("<>").lower()
 
 
-def address_domain(address: str | None) -> str | None:
+def address_domain(address: str) -> str:
     """Return the domain part of an email address."""
     if not address or "@" not in address:
-        return None
-    return address.rsplit("@", 1)[-1].strip().lower() or None
+        return ""
+    return address.rsplit("@", 1)[-1].strip().lower()
 
 
 PROJECT_TABLES = [

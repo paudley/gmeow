@@ -1,18 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide kg functionality for Gmeow."""
+"""Build knowledge-graph triples from messages and attachment sidecars.
 
-from __future__ import annotations
+This module turns parsed mail content and sidecar analysis output into RDF-style triples that
+downstream consumers persist into the graph store. It owns the entity extraction, ontology mapping,
+and per-section text harvesting that keep the graph aligned with the underlying mail corpus.
+"""
 
 import json
 import re
 from functools import lru_cache
 from html import unescape
-from typing import Any
+from typing import Any, cast
 
 import spacy
 
-Triple = tuple[str, str, str, str | None]
+from ._typing import ensure_dict
+
+Triple = tuple[str, str, str, str]
 
 MIN_ENTITY_TEXT_LENGTH = 2
 MAX_CLEAN_TOKEN_LENGTH = 100
@@ -78,12 +83,7 @@ STOP_ENTITY_VALUES = {
 
 @lru_cache(maxsize=1)
 def _nlp() -> spacy.language.Language:
-    try:
-        return spacy.load("en_core_web_sm")
-    except OSError:
-        nlp = spacy.blank("en")
-        nlp.add_pipe("sentencizer")
-        return nlp
+    return spacy.load("en_core_web_sm")
 
 
 def extract_message_kg(message_id: str, text: str) -> list[Triple]:
@@ -104,42 +104,63 @@ def extract_message_kg(message_id: str, text: str) -> list[Triple]:
 def extract_sidecar_kg(sha1: str, metadata: dict[str, Any]) -> list[Triple]:
     """Extract sidecar kg."""
     subject = _node("attachment", sha1)
-    triples: list[Triple] = [(subject, "rdf:type", "gmeow:Attachment", None)]
-    source = metadata.get("source", {})
-    gmail = source.get("gmail", {})
-    message = source.get("message", {})
-    message_id = gmail.get("message_id")
-    message_node = _node("message", message_id) if message_id else None
-    if gmail.get("message_id"):
+    source = cast(dict[str, Any], metadata.get("source", {}))
+    gmail = cast(dict[str, Any], source.get("gmail", {}))
+    message = cast(dict[str, Any], source.get("message", {}))
+    message_id = str(gmail.get("message_id") or "")
+    message_node = _node("message", message_id) if message_id else ""
+    triples: list[Triple] = [(subject, "rdf:type", "gmeow:Attachment", "")]
+    if message_id:
         triples.append((message_node, "gmeow:hasAttachment", subject, message_id))
+    triples.extend(_sidecar_mapped_triples(subject, gmail, message, metadata, message_id))
+    analysis = _analysis_dict(metadata)
+    triples.extend(_sidecar_analysis_triples(subject, message_node, message_id, sha1, analysis))
+    searchable_text = json.dumps({"source": source, "exiftool": _exiftool_tags(metadata), "analysis": analysis}, sort_keys=True)
+    triples.extend(extract_message_kg(f"attachment/{sha1}", searchable_text))
+    return _dedupe(triples)
+
+
+def _exiftool_tags(metadata: dict[str, Any]) -> dict[str, Any]:
+    return ensure_dict(ensure_dict(metadata, "exiftool"), "tags")
+
+
+def _analysis_dict(metadata: dict[str, Any]) -> dict[str, Any]:
+    return ensure_dict(metadata, "analysis")
+
+
+def _sidecar_mapped_triples(
+    subject: str, gmail: dict[str, Any], message: dict[str, Any], metadata: dict[str, Any], message_id: str
+) -> list[Triple]:
+    triples: list[Triple] = []
     triples.extend(_mapped_triples(subject, gmail, message_id, _GMAIL_ATTACHMENT_FIELDS))
     triples.extend(_mapped_triples(subject, message, message_id, _SOURCE_MESSAGE_FIELDS))
-    tags = metadata.get("exiftool", {}).get("tags", {})
-    triples.extend(_mapped_triples(subject, tags, message_id, _EXIF_TAG_FIELDS, include_falsey=True))
-    analysis = metadata.get("analysis", {}) if isinstance(metadata.get("analysis"), dict) else {}
-    file_info = analysis.get("file", {}) if isinstance(analysis.get("file"), dict) else {}
+    triples.extend(_mapped_triples(subject, _exiftool_tags(metadata), message_id, _EXIF_TAG_FIELDS, include_falsey=True))
+    return triples
+
+
+def _sidecar_analysis_triples(subject: str, message_node: str, message_id: str, sha1: str, analysis: dict[str, Any]) -> list[Triple]:
+    triples: list[Triple] = []
+    file_info = ensure_dict(analysis, "file")
     triples.extend(_mapped_triples(subject, file_info, message_id, _ANALYSIS_FILE_FIELDS))
     if analysis.get("available_text") is not None:
         triples.append((subject, "gmeow:analysisHasText", str(bool(analysis.get("available_text"))).lower(), message_id))
-    document = analysis.get("document", {}) if isinstance(analysis.get("document"), dict) else {}
+    document = ensure_dict(analysis, "document")
     triples.extend(_document_triples(subject, message_node, message_id, sha1, document))
-    calendar = analysis.get("calendar", {}) if isinstance(analysis.get("calendar"), dict) else {}
-    fields = calendar.get("fields", {}) if isinstance(calendar.get("fields"), dict) else {}
+    calendar = ensure_dict(analysis, "calendar")
+    fields = ensure_dict(calendar, "fields")
     triples.extend(_calendar_triples(subject, message_node, message_id, sha1, fields))
-    archive = analysis.get("archive", {}) if isinstance(analysis.get("archive"), dict) else {}
+    archive = ensure_dict(analysis, "archive")
     triples.extend(_archive_file_triples(subject, message_node, message_id, sha1, archive))
-    extracted_sections = {
-        "document": document.get("text") or "",
-        "content": analysis.get("content_text") or "",
-        "ocr": _section_text(analysis, ["image"], ["ocr_text"]) or analysis.get("ocr_text") or "",
-        "vision": _section_text(analysis, ["vision"], ["vision_caption"]) or analysis.get("vision_caption") or "",
-        "calendar": calendar.get("text") or "",
+    extracted_sections: dict[str, str] = {
+        "document": str(document.get("text") or ""),
+        "content": str(analysis.get("content_text") or ""),
+        "ocr": str(_section_text(analysis, ["image"], ["ocr_text"]) or analysis.get("ocr_text") or ""),
+        "vision": str(_section_text(analysis, ["vision"], ["vision_caption"]) or analysis.get("vision_caption") or ""),
+        "calendar": str(calendar.get("text") or ""),
     }
     for source_kind, text in extracted_sections.items():
         triples.extend(_attachment_text_entities(subject, message_node, message_id, source_kind, text))
-    searchable_text = json.dumps({"source": source, "exiftool": tags, "analysis": analysis}, sort_keys=True)
-    triples.extend(extract_message_kg(f"attachment/{sha1}", searchable_text))
-    return _dedupe(triples)
+    return triples
 
 
 _GMAIL_ATTACHMENT_FIELDS = {
@@ -193,7 +214,7 @@ _CALENDAR_FIELDS = {
 
 
 def _mapped_triples(
-    subject: str, values: dict[str, Any], message_id: str | None, mapping: dict[str, str], *, include_falsey: bool = False
+    subject: str, values: dict[str, Any], message_id: str, mapping: dict[str, str], *, include_falsey: bool = False
 ) -> list[Triple]:
     return [
         (subject, predicate, str(values[key]), message_id)
@@ -202,7 +223,7 @@ def _mapped_triples(
     ]
 
 
-def _document_triples(subject: str, message_node: str | None, message_id: str | None, sha1: str, document: dict[str, Any]) -> list[Triple]:
+def _document_triples(subject: str, message_node: str, message_id: str, sha1: str, document: dict[str, Any]) -> list[Triple]:
     if not document:
         return []
     document_node = _node("document", sha1)
@@ -228,7 +249,7 @@ def _document_triples(subject: str, message_node: str | None, message_id: str | 
     return triples
 
 
-def _calendar_triples(subject: str, message_node: str | None, message_id: str | None, sha1: str, fields: dict[str, Any]) -> list[Triple]:
+def _calendar_triples(subject: str, message_node: str, message_id: str, sha1: str, fields: dict[str, Any]) -> list[Triple]:
     if not fields:
         return []
     event_identity = _first_field(fields, "uid") or "|".join([_first_field(fields, "summary"), _first_field(fields, "dtstart"), sha1])
@@ -249,7 +270,7 @@ def _calendar_triples(subject: str, message_node: str | None, message_id: str | 
     return triples
 
 
-def _calendar_value_triples(context: dict[str, str | None], key: str, predicate: str, value: str) -> list[Triple]:
+def _calendar_value_triples(context: dict[str, str], key: str, predicate: str, value: str) -> list[Triple]:
     subject = str(context["subject"])
     message_node = context["message_node"]
     message_id = context["message_id"]
@@ -268,9 +289,7 @@ def _calendar_value_triples(context: dict[str, str | None], key: str, predicate:
     return triples
 
 
-def _archive_file_triples(
-    subject: str, message_node: str | None, message_id: str | None, sha1: str, archive: dict[str, Any]
-) -> list[Triple]:
+def _archive_file_triples(subject: str, message_node: str, message_id: str, sha1: str, archive: dict[str, Any]) -> list[Triple]:
     triples: list[Triple] = []
     for filename in archive.get("files", [])[:100]:
         child = _node("archiveFile", f"{sha1}/{filename}")
@@ -289,9 +308,7 @@ def _archive_file_triples(
     return triples
 
 
-def _attachment_text_entities(
-    attachment_node: str, message_node: str | None, message_id: str | None, source_kind: str, text: str
-) -> list[Triple]:
+def _attachment_text_entities(attachment_node: str, message_node: str, message_id: str, source_kind: str, text: str) -> list[Triple]:
     if not text:
         return []
     triples: list[Triple] = []
@@ -335,17 +352,19 @@ def _attachment_text_entities(
 def _first_field(fields: dict[str, Any], key: str) -> str:
     value = fields.get(key)
     if isinstance(value, list) and value:
-        return str(value[0])
-    return str(value or "")
+        values = cast(list[object], value)
+        return str(values[0])
+    return str(cast(object, value or ""))
 
 
 def _section_text(analysis: dict[str, Any], sections: list[str], keys: list[str]) -> str:
-    found = []
+    found: list[str] = []
     for section in sections:
         value = analysis.get(section)
         if not isinstance(value, dict):
             continue
-        found.extend(value[key] for key in keys if isinstance(value.get(key), str))
+        typed_value = cast(dict[str, object], value)
+        found.extend(str(typed_value[key]) for key in keys if isinstance(typed_value.get(key), str))
     return "\n\n".join(found)
 
 
@@ -369,7 +388,7 @@ def spacy_entities(text: str, limit: int = 200) -> list[dict[str, str]]:
     if not clean:
         return []
     doc = _nlp()(clean[:100_000])
-    entities = []
+    entities: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     _append_spacy_entities(entities, seen, doc, limit)
     _append_fallback_org_entities(entities, seen, clean, limit)
@@ -414,7 +433,7 @@ def clean_text_for_kg(text: str) -> str:
     value = re.sub(r"(?is)<!--.*?-->", " ", value)
     value = re.sub(r"(?is)<(script|style|head|svg|noscript)[^>]*>.*?</\1>", " ", value)
     value = re.sub(r"(?is)<[^>]+>", " ", value)
-    cleaned_tokens = []
+    cleaned_tokens: list[str] = []
     for token in value.split():
         if len(token) > MAX_CLEAN_TOKEN_LENGTH:
             continue

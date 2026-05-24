@@ -26,6 +26,10 @@ sync_priority_seconds = 3600
 sync_priority_limit_per_rule = 100
 intelligence_seconds = 30
 intelligence_limit = 25
+backfill_enabled = false
+backfill_seconds = 5
+backfill_batch_size = 50
+backfill_max_empty_windows = 120
 derived_refresh_seconds = 900
 analyze_seconds = 3600
 
@@ -54,6 +58,9 @@ host = "127.0.0.1"
 port = 1143
 username = "gmeow"
 password_file = "data/secrets/imap-password"
+
+[gmeow.testing]
+postgres_dsn = "postgresql://gmeow-test:gmeow-test@127.0.0.1:5432/gmeow-test"
 
 [[gmeow.priority_rules]]
 name = "recent_important"
