@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide markdown functionality for Gmeow."""
+"""Render Gmail messages as Gmeow markdown summaries.
 
-from __future__ import annotations
+The renderer formats parsed messages and header intelligence into the markdown shape used by the
+cache and the MCP surfaces. It keeps presentation logic out of ``parser`` and ``cache`` so the
+canonical artifacts remain rebuildable.
+"""
 
 import re
 
@@ -92,8 +95,8 @@ def critical_facts(text: str) -> dict[str, list[str]]:
 
 
 def _unique(values: list[str]) -> list[str]:
-    result = []
-    seen = set()
+    result: list[str] = []
+    seen: set[str] = set()
     for value in values:
         cleaned = value.strip().rstrip(".,)")
         key = cleaned.lower()

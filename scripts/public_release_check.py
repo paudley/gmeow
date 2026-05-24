@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: MIT
-"""Provide public release check functionality for Gmeow."""
+"""Pre-publication scanner for the Gmeow repository.
 
-from __future__ import annotations
+This script asserts that no private mailbox data, credentials, machine paths, or production
+identifiers leak into tracked files before a public-facing release. It is invoked from
+``make release-check`` and exits non-zero on any finding.
+"""
 
 import subprocess
 import sys
