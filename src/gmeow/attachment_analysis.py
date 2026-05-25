@@ -172,12 +172,10 @@ def _is_text_like(media_type: str, filename: str) -> bool:
 
 def _decode_text(content: bytes, limit: int) -> str:
     fragment = content[: limit * 4]
-    failures: list[str] = []
     for encoding in ["utf-8", "utf-16", "latin-1"]:
         try:
             text = fragment.decode(encoding)
-        except UnicodeDecodeError as exc:
-            failures.append(f"{encoding}: {exc!s}")
+        except UnicodeDecodeError:
             continue
         return _clean_text(text, limit)
     return ""

@@ -300,7 +300,7 @@ def intelligence_target_status(cache: JobCache, targets: list[tuple[str, str]]) 
         "done": done,
         "dead": dead,
         "missing": missing,
-        "terminal": not pending and not running and not dead and not missing,
+        "terminal": not pending and not running and not missing,
     }
 
 
