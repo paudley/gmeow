@@ -84,6 +84,8 @@ uv run gmeow serve --host 127.0.0.1 --port 8765
 
 REST is available under `/api/v1`. MCP is mounted at `/mcp` when the installed MCP SDK provides an ASGI app.
 
+For persistent local operation under your user account, see [docs/systemd.md](docs/systemd.md).
+
 Useful commands:
 
 ```bash
