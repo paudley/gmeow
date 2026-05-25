@@ -13,6 +13,7 @@ import time
 from dataclasses import asdict
 from functools import partial
 from typing import Any, Protocol, cast
+from collections.abc import Callable
 
 import anyio
 from mcp.server.fastmcp import FastMCP
@@ -65,13 +66,13 @@ def _run_sync_tools_in_worker_threads(mcp: FastMCP) -> None:
     for tool in tool_manager._tools.values():
         if tool.is_async:
             continue
-        original = tool.fn
-
-        async def run_in_thread(_original: Any = original, **kwargs: Any) -> Any:
-            return await anyio.to_thread.run_sync(partial(_original, **kwargs))
-
-        tool.fn = run_in_thread
+        tool.fn = partial(_run_sync_tool_in_worker_thread, tool.fn)
         tool.is_async = True
+
+
+async def _run_sync_tool_in_worker_thread(original: Callable[..., Any], **kwargs: Any) -> Any:
+    """Run a synchronous MCP tool without blocking the HTTP event loop."""
+    return await anyio.to_thread.run_sync(partial(original, **kwargs))
 
 
 def _register_mcp_resources(mcp: FastMCP, cache: PgCache, attachments: AttachmentMetadataReader) -> None:
