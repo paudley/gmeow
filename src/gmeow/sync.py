@@ -18,7 +18,7 @@ from uuid import uuid4
 from googleapiclient.errors import HttpError
 
 from .categories import CategoryEngine
-from .config import GmeowConfig, PriorityRule
+from .runtime_config import RuntimeConfig, PriorityRule
 from .gmail import GmailClient
 from .intelligence import IntelligenceWorker
 from .markdown import message_to_markdown
@@ -128,7 +128,7 @@ class SyncService:
 
     def __init__(
         self,
-        config: GmeowConfig,
+        config: RuntimeConfig,
         cache: GmeowCache,
         attachments: SyncAttachments,
         semantic: GmeowSemantic,

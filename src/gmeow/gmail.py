@@ -19,7 +19,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from tenacity import before_sleep_log, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
-from .config import GMAIL_MODIFY_SCOPE
+from .runtime_config import GMAIL_MODIFY_SCOPE
 
 DEFAULT_LIST_STR = cast(list[str], None)
 DEFAULT_STR = cast(str, None)

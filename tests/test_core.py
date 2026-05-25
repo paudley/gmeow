@@ -20,7 +20,7 @@ import pytest
 
 from gmeow.cache import categorize_message
 from gmeow.categories import CategoryEngine, deterministic_assignments, message_document
-from gmeow.config import GmeowConfig, MaintenanceConfig, PriorityRule
+from gmeow.runtime_config import RuntimeConfig, MaintenanceConfig, PriorityRule
 from gmeow.graph import DOAP, FOAF, RDF_TYPE, SCHEMA, extract_attachment_sidecar_triples, extract_triples
 from gmeow.intelligence import IntelligenceWorker
 from gmeow.kg import spacy_entities
@@ -43,42 +43,6 @@ DEFAULT_FAKE_GMAIL_METADATA = cast(dict[str, dict[str, Any]], None)
 DEFAULT_FAKE_GMAIL_PAGES = cast(dict[tuple[str, str], dict[str, Any]], None)
 
 TEST_DSN = os.environ.get("GMEOW_TEST_POSTGRES_DSN", "")
-
-
-def test_gmeow_config_loads_namespaced_toml(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        """
-[gmeow]
-data_dir = "cache"
-subject = "user@example.com"
-postgres_dsn = "postgresql://gmeow:change-me@127.0.0.1:5432/gmeow"
-
-[gmeow.maintenance]
-enabled = false
-backfill_enabled = true
-
-[gmeow.secrets]
-file = "~/.config/gmeow/secrets.sops.yaml"
-unlock_key = "test-key"
-age_key = "AGE-SECRET-KEY-TEST"
-
-[[gmeow.priority_rules]]
-name = "recent"
-gmail_query = "newer_than:7d"
-priority = 5
-""".strip()
-    )
-
-    config = GmeowConfig.load(config_path)
-
-    assert config.data_dir == Path("cache")
-    assert config.subject == "user@example.com"
-    assert config.maintenance.enabled is False
-    assert config.maintenance.backfill_enabled is True
-    assert str(config.secrets.file).endswith(".config/gmeow/secrets.sops.yaml")
-    assert config.secrets.unlock_key == "test-key"
-    assert config.priority_rules[0].name == "recent"
 
 
 def test_maintenance_backfill_defaults_off() -> None:
@@ -983,7 +947,7 @@ def test_intelligence_worker_runs_until_empty(tmp_path: Path) -> None:
 def test_search_uses_live_gmail_for_unbounded_queries(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.search("Apollo", limit=5)
     assert result["source"] == "gmail+cache"
     assert gmail.queries == ["Apollo"]
@@ -1000,7 +964,7 @@ def test_search_uses_live_gmail_for_unbounded_queries(tmp_path: Path) -> None:
 def test_live_search_defers_attachment_and_raw_hydration(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
 
     result = sync.search("Apollo", limit=5)
 
@@ -1031,7 +995,7 @@ def test_live_search_degrades_to_cache_and_pauses_gmail_after_error(tmp_path: Pa
     cache.upsert_thread({"id": "t1", "snippet": parsed.snippet})
     cache.upsert_message(parsed, gmail_fixture(), markdown=message_to_markdown(parsed), hydrated=True)
     gmail = FailingSearchGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
 
     result = sync.search("Apollo", limit=5)
 
@@ -1054,7 +1018,7 @@ def test_live_search_degrades_to_cache_and_pauses_gmail_after_error(tmp_path: Pa
 def test_live_search_returns_default_hidden_messages_inline(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"u1": unifi_fixture()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.search("UniFi", limit=5)
     assert result["source"] == "gmail+cache"
     assert result["live"]["hydrated"] == 1
@@ -1069,7 +1033,7 @@ def test_live_search_prefers_cached_analyzed_message(tmp_path: Path) -> None:
     cache.upsert_message(parsed, gmail_fixture(), markdown=message_to_markdown(parsed), hydrated=True)
     cache.apply_category("m1", "personal", reason="already analyzed")
     gmail = FakeGmail({"m1": gmail_fixture_two()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.search("Apollo", limit=5)
     assert result["messages"][0]["id"] == "m1"
     assert result["messages"][0]["subject"] == "Apollo Invoice"
@@ -1082,7 +1046,7 @@ def test_hydrate_applies_manual_rules_and_star_raw_helpers(tmp_path: Path) -> No
     cache = make_cache(tmp_path)
     CategoryEngine(cache).seed_initial_categories()
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     message = sync.hydrate_message("m1")
     assert "financial_statement" in message["categories"]
     assert sync.star("m1", starred=True)["id"] == "m1"
@@ -1100,7 +1064,7 @@ def test_history_sync_hydrates_changed_messages(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     cache.set_state("gmail_history_id", "100")
     gmail = FakeGmail({"m1": gmail_fixture(), "m2": gmail_fixture_two()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.sync_history(limit=10)
     assert result["messages"] == 2
     assert result["hydrated"] == 2
@@ -1117,7 +1081,7 @@ def test_backfill_processes_one_monthly_page_and_advances_page(tmp_path: Path) -
         {"m1": gmail_fixture(), "m2": gmail_fixture_two()},
         pages={(query, ""): {"messages": [{"id": "m1"}], "next_page_token": "p2", "result_size_estimate": 2}},
     )
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.backfill_batch(batch_size=1)
     assert result["message_ids"] == ["m1"]
     assert result["advanced"] is True
@@ -1147,7 +1111,7 @@ def test_backfill_resumes_current_batch_without_fetching_next_page(tmp_path: Pat
         ),
     )
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.backfill_batch(batch_size=1)
     assert result["advanced"] is True
     assert gmail.page_queries == []
@@ -1159,7 +1123,7 @@ def test_backfill_resumes_current_batch_without_fetching_next_page(tmp_path: Pat
 def test_backfill_skips_complete_message_without_validation_metadata(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     sync.hydrate_message("m1", update_history_cursor=False)
     IntelligenceWorker(cache, RecordingSemantic()).run_until_empty()
     gmail.fetched.clear()
@@ -1175,7 +1139,7 @@ def test_backfill_skips_complete_message_without_validation_metadata(tmp_path: P
 def test_backfill_validation_rehydrates_changed_metadata(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     sync.hydrate_message("m1", update_history_cursor=False)
     IntelligenceWorker(cache, RecordingSemantic()).run_until_empty()
     changed = gmail_fixture()
@@ -1203,7 +1167,7 @@ def test_backfill_validation_rehydrates_changed_metadata(tmp_path: Path) -> None
 def test_backfill_advances_dead_intelligence_jobs(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     sync.hydrate_message("m1", update_history_cursor=False)
     with cache._connect() as conn:
         conn.execute("UPDATE intelligence_jobs SET max_attempts = 1 WHERE kind IN ('message', 'attachment')")
@@ -1223,7 +1187,7 @@ def test_backfill_advances_dead_intelligence_jobs(tmp_path: Path) -> None:
         ),
     )
     failing_sync = SyncService(
-        config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=FailingSemantic(), gmail=gmail
+        config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=FailingSemantic(), gmail=gmail
     )
 
     result = failing_sync.backfill_batch(batch_size=1)
@@ -1241,7 +1205,7 @@ def test_search_stays_cache_only_for_time_bounded_queries(tmp_path: Path) -> Non
     cache.upsert_thread({"id": "t1", "snippet": parsed.snippet})
     cache.upsert_message(parsed, gmail_fixture(), markdown=message_to_markdown(parsed), hydrated=True)
     gmail = FakeGmail({"m2": gmail_fixture_two()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.search("Apollo", after="2026-05-01", limit=5)
     assert result["source"] == "cache"
     assert gmail.queries == []
@@ -1259,7 +1223,7 @@ def test_search_stays_cache_only_for_time_bounded_queries(tmp_path: Path) -> Non
 def test_operator_only_gmail_query_goes_live(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"m1": gmail_fixture()})
-    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+    sync = SyncService(config=RuntimeConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     result = sync.search("older_than:1y", limit=5)
     assert result["source"] == "gmail+cache"
     assert gmail.queries == ["older_than:1y"]

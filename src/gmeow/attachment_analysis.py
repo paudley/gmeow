@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, TypedDict, cast
 
 from ._typing import ensure_dict
-from .config import AttachmentAnalysisConfig
+from .runtime_config import AttachmentAnalysisConfig
 from .http_json import HttpJsonError, post_json
 
 

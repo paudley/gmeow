@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from gmeow.app import create_app
-from gmeow.config import GmeowConfig
+from gmeow.runtime_config import RuntimeConfig
 
 TEST_DSN = os.environ.get("GMEOW_TEST_POSTGRES_DSN", "")
 
@@ -21,7 +21,7 @@ TEST_DSN = os.environ.get("GMEOW_TEST_POSTGRES_DSN", "")
 def test_health_and_no_delete_or_send_routes(tmp_path: Path) -> None:
     if not TEST_DSN:
         pytest.skip("GMEOW_TEST_POSTGRES_DSN is required for API integration tests")
-    app = create_app(GmeowConfig(data_dir=tmp_path, postgres_dsn=TEST_DSN))
+    app = create_app(RuntimeConfig(data_dir=tmp_path, postgres_dsn=TEST_DSN))
     client = TestClient(app, base_url="http://127.0.0.1")
     response = client.get("/api/v1/health", headers={"host": "127.0.0.1"})
     assert response.status_code == 200
@@ -33,7 +33,7 @@ def test_health_and_no_delete_or_send_routes(tmp_path: Path) -> None:
 def test_loopback_guard_rejects_non_loopback_host(tmp_path: Path) -> None:
     if not TEST_DSN:
         pytest.skip("GMEOW_TEST_POSTGRES_DSN is required for API integration tests")
-    app = create_app(GmeowConfig(data_dir=tmp_path, postgres_dsn=TEST_DSN))
+    app = create_app(RuntimeConfig(data_dir=tmp_path, postgres_dsn=TEST_DSN))
     client = TestClient(app, base_url="http://127.0.0.1")
     response = client.get("/api/v1/health", headers={"host": "example.com"})
     assert response.status_code == 403
@@ -42,7 +42,7 @@ def test_loopback_guard_rejects_non_loopback_host(tmp_path: Path) -> None:
 def test_backfill_endpoint_reports_missing_gmail_client(tmp_path: Path) -> None:
     if not TEST_DSN:
         pytest.skip("GMEOW_TEST_POSTGRES_DSN is required for API integration tests")
-    app = create_app(GmeowConfig(data_dir=tmp_path, postgres_dsn=TEST_DSN))
+    app = create_app(RuntimeConfig(data_dir=tmp_path, postgres_dsn=TEST_DSN))
     client = TestClient(app, base_url="http://127.0.0.1")
     response = client.post("/api/v1/sync/backfill", headers={"host": "127.0.0.1"})
     assert response.status_code == 409

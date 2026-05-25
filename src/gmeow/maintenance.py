@@ -17,7 +17,7 @@ from typing import Any, Protocol, cast
 
 from googleapiclient.errors import HttpError
 
-from .config import MaintenanceConfig
+from .runtime_config import MaintenanceConfig
 from .intelligence import IntelligenceWorker
 from .object_store import StoredAttachmentObject
 

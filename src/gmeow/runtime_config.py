@@ -1,21 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Load and normalize Gmeow configuration.
+"""Runtime-only configuration records for transitional Python services.
 
-The module defines typed configuration records for Gmail, maintenance, storage, analysis, and server
-settings. It keeps TOML parsing and default behavior in one place so runtime services receive
-consistent values.
+The Go Phase 00 config parser is the only config/SOPS bootstrap path. This module remains only so
+later-phase Python runtime code and tests can receive already-resolved settings from callers.
 """
 
-import json
-import os
-import subprocess
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self, cast
-
-from ._typing import ensure_dict
 
 DEFAULT_INT = cast(int, None)
 DEFAULT_PATH = cast(Path, None)
@@ -225,28 +218,8 @@ class ArchiveConfig:
 
 
 @dataclass(slots=True)
-class SopsSecretsConfig:
-    """Represent SopsSecretsConfig data and behavior."""
-
-    file: Path = DEFAULT_PATH
-    unlock_key: str = DEFAULT_STR
-    age_key: str = DEFAULT_STR
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Self:
-        """From dict."""
-        raw = data or {}
-        file_value = raw.get("file") or raw.get("sops_file")
-        return cls(
-            file=Path(file_value).expanduser() if file_value else DEFAULT_PATH,
-            unlock_key=str(raw.get("unlock_key") or ""),
-            age_key=str(raw.get("age_key") or ""),
-        )
-
-
-@dataclass(slots=True)
-class GmeowConfig:
-    """Represent GmeowConfig data and behavior."""
+class RuntimeConfig:
+    """Represent resolved Python runtime settings."""
 
     data_dir: Path = Path("data")
     host: str = "127.0.0.1"
@@ -265,8 +238,9 @@ class GmeowConfig:
     attachment_analysis: AttachmentAnalysisConfig = field(default_factory=AttachmentAnalysisConfig)
     imap: ImapConfig = field(default_factory=ImapConfig)
     archive: ArchiveConfig = field(default_factory=ArchiveConfig)
-    secrets: SopsSecretsConfig = field(default_factory=SopsSecretsConfig)
-    _decrypted_secrets: dict[str, Any] = field(default_factory=default_secrets, init=False, repr=False)
+    service_account_json: dict[str, Any] = field(default_factory=default_secrets)
+    user_credentials_json: dict[str, Any] = field(default_factory=default_secrets)
+    imap_password_value: str = DEFAULT_STR
 
     @property
     def object_store_dir(self) -> Path:
@@ -278,111 +252,30 @@ class GmeowConfig:
         """Tantivy dir."""
         return self.data_dir / "tantivy"
 
-    @classmethod
-    def load(cls, path: Path | str = "config.toml") -> Self:
-        """Load."""
-        config_path = Path(path)
-        if not config_path.exists():
-            return cls()
-        parsed = _string_object_dict(tomllib.loads(config_path.read_text()))
-        raw = parsed.get("gmeow")
-        if not isinstance(raw, dict):
-            msg = f"{config_path} must contain a [gmeow] table."
-            raise TypeError(msg)
-        raw = cast(dict[str, Any], raw)
-        data_dir = Path(raw.get("data_dir", "data"))
-        service_account_file = Path(raw.get("service_account_file", data_dir / "secrets" / "service-account.json")).expanduser()
-        rules = [PriorityRule.from_dict(rule) for rule in _dict_list(raw.get("priority_rules", []))]
-        return cls(
-            data_dir=data_dir,
-            host=str(raw.get("host", "127.0.0.1")),
-            port=int(raw.get("port", 8765)),
-            postgres_dsn=str(raw.get("postgres_dsn", "postgresql://gmeow:gmeow@127.0.0.1:5432/gmeow?sslmode=require")),
-            auth_mode=str(raw.get("auth_mode", "service_account")),
-            subject=str(raw.get("subject") or ""),
-            service_account_file=service_account_file,
-            user_credentials_file=Path(
-                raw.get("user_credentials_file", Path.home() / ".config/gcloud/application_default_credentials.json")
-            ).expanduser(),
-            embedding_model=str(raw.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")),
-            embedding_endpoint=str(raw.get("embedding_endpoint", "http://127.0.0.1:8090/v1/embeddings")),
-            semantic_chunk_size=int(raw.get("semantic_chunk_size", 192)),
-            semantic_chunk_overlap=int(raw.get("semantic_chunk_overlap", 32)),
-            priority_rules=rules,
-            maintenance=MaintenanceConfig.from_dict(_string_object_dict(raw.get("maintenance", {}))),
-            attachment_analysis=AttachmentAnalysisConfig.from_dict(_string_object_dict(raw.get("attachment_analysis", {}))),
-            imap=ImapConfig.from_dict(_string_object_dict(raw.get("imap", {})), data_dir),
-            archive=ArchiveConfig.from_dict(_string_object_dict(raw.get("archive", {}))),
-            secrets=SopsSecretsConfig.from_dict(_string_object_dict(raw.get("secrets", {}))),
-        )
-
     def ensure_dirs(self) -> None:
         """Ensure dirs."""
         for path in [self.object_store_dir, self.tantivy_dir, self.service_account_file.parent, self.imap.password_file.parent]:
             path.mkdir(parents=True, exist_ok=True)
 
-    def load_secrets(self) -> dict[str, Any]:
-        """Load secrets."""
-        if self._decrypted_secrets:
-            return self._decrypted_secrets
-        if not self.secrets.file:
-            self._decrypted_secrets = {}
-            return self._decrypted_secrets
-        if not self.secrets.file.exists():
-            msg = f"Configured SOPS secrets file does not exist: {self.secrets.file}"
-            raise RuntimeError(msg)
-        self._decrypted_secrets = self._decrypt_sops_secrets()
-        return self._decrypted_secrets
-
     def service_account_info(self) -> dict[str, Any]:
         """Service account info."""
-        return ensure_dict(self.load_secrets(), "service_account_json")
+        return self.service_account_json
 
     def user_credentials_info(self) -> dict[str, Any]:
         """User credentials info."""
-        return ensure_dict(self.load_secrets(), "user_credentials_json")
+        return self.user_credentials_json
 
     def database_dsn(self) -> str:
         """Database dsn."""
-        value = self.load_secrets().get("postgres_dsn")
-        return value if isinstance(value, str) and value else self.postgres_dsn
+        return self.postgres_dsn
 
     def imap_password(self) -> str:
         """Imap password."""
-        value = self.load_secrets().get("imap_password")
-        if isinstance(value, str) and value:
-            return value.strip()
+        if self.imap_password_value:
+            return self.imap_password_value.strip()
         if self.imap.password_file.exists():
             return self.imap.password_file.read_text().strip()
         return ""
-
-    def _decrypt_sops_secrets(self) -> dict[str, Any]:
-        if not self.secrets.file:
-            return {}
-        env = os.environ.copy()
-        if self.secrets.age_key:
-            env["SOPS_AGE_KEY"] = self.secrets.age_key
-        if self.secrets.unlock_key:
-            env["GMEOW_SOPS_UNLOCK_KEY"] = self.secrets.unlock_key
-        try:
-            output = subprocess.check_output(
-                ["sops", "decrypt", "--input-type", "yaml", "--output-type", "json", str(self.secrets.file)],
-                env=env,
-                text=True,
-                stderr=subprocess.PIPE,
-            )
-        except FileNotFoundError as exc:
-            msg = "sops is required to decrypt configured secrets."
-            raise RuntimeError(msg) from exc
-        except subprocess.CalledProcessError as exc:
-            detail = exc.stderr.strip() if exc.stderr else str(exc)
-            msg = f"Unable to decrypt configured SOPS secrets file: {detail}"
-            raise RuntimeError(msg) from exc
-        decoded = json.loads(output or "{}")
-        if not isinstance(decoded, dict):
-            msg = "Configured SOPS secrets file must decrypt to a mapping."
-            raise TypeError(msg)
-        return cast(dict[str, Any], decoded)
 
 
 def _optional_int(value: object) -> int:
@@ -423,8 +316,3 @@ def _string_object_dict(value: object) -> dict[str, Any]:
         return {}
     return {str(key): item for key, item in cast(dict[object, Any], value).items()}
 
-
-def _dict_list(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [cast(dict[str, Any], item) for item in cast(list[object], value) if isinstance(item, dict)]

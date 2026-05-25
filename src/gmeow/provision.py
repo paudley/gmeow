@@ -10,7 +10,7 @@ runtime path so daemons can assume a sane environment.
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import GMAIL_MODIFY_SCOPE
+from .runtime_config import GMAIL_MODIFY_SCOPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +40,6 @@ def build_gcloud_provision_plan(project_id: str, service_account_name: str, key_
             "Copy the oauth2ClientId printed by the final gcloud command.",
             "In Google Admin Console, open Security > API Controls > Domain-wide Delegation.",
             f"Authorize the client ID with this scope: {GMAIL_MODIFY_SCOPE}",
-            "Set `subject` in the [gmeow] table in config.toml to the Workspace mailbox to access.",
+            "Set the Workspace mailbox subject in the Go-managed source config before enabling Gmail access.",
         ],
     )

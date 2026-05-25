@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .app import build_services
-from .config import GmeowConfig
+from .runtime_config import RuntimeConfig
 
 IMAP_COMMAND_EXCEPTIONS = (RuntimeError, ValueError, KeyError, TypeError, OSError, UnicodeError)
 MIN_COMMAND_PARTS = 2
@@ -30,7 +30,7 @@ class ImapSession:
 class ReadOnlyImapServer:
     """Represent ReadOnlyImapServer data and behavior."""
 
-    def __init__(self, config: GmeowConfig) -> None:
+    def __init__(self, config: RuntimeConfig) -> None:
         """Initialize ReadOnlyImapServer."""
         self.config = config
         self.cache, self.attachments, self.semantic, self.graph, self.sync = build_services(config)
@@ -186,7 +186,7 @@ class ReadOnlyImapServer:
         await _write_line(writer, f"{tag} OK FETCH completed")
 
 
-def run_imap_server(config: GmeowConfig) -> None:
+def run_imap_server(config: RuntimeConfig) -> None:
     """Run imap server."""
     try:
         asyncio.run(ReadOnlyImapServer(config).serve())
@@ -207,10 +207,10 @@ async def _write_line(writer: asyncio.StreamWriter, line: str) -> None:
     await writer.drain()
 
 
-def _read_password(config: GmeowConfig) -> str:
+def _read_password(config: RuntimeConfig) -> str:
     password = config.imap_password()
     if not password:
-        msg = "IMAP password is not configured in SOPS secrets or the configured password file."
+        msg = "IMAP password is not configured in resolved runtime settings or the configured password file."
         raise RuntimeError(msg)
     return password
 

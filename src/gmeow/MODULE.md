@@ -6,8 +6,9 @@ and a Gmail mutation surface exposed over HTTP, MCP, IMAP, and CLI.
 
 ## Package Layout
 
-- **Configuration** — [`config.py`](./config.py) loads `config.toml` and produces the typed
-  `GmeowConfig` consumed everywhere.
+- **Runtime settings** — [`runtime_config.py`](./runtime_config.py) contains resolved settings
+  records for transitional Python tests and later-phase worker behavior. It does not parse TOML,
+  SOPS, or operator config files.
 - **Protocols** — [`protocols.py`](./protocols.py) hosts the shared `SyncCache`, `IntelligenceCache`,
   `GmeowCache`, `SyncSemantic`, `IntelligenceSemantic`, `GmeowSemantic`, `IntelligenceGraph`,
   `NoGraph`, and `SyncAttachments` structural types used across sync and intelligence.
@@ -27,8 +28,8 @@ and a Gmail mutation surface exposed over HTTP, MCP, IMAP, and CLI.
   [`categories.py`](./categories.py), [`semantic_pg.py`](./semantic_pg.py),
   [`semantic.py`](./semantic.py), [`text_index.py`](./text_index.py).
 - **Interfaces** — [`app.py`](./app.py) (FastAPI), [`mcp_server.py`](./mcp_server.py) (MCP),
-  [`imap_server.py`](./imap_server.py) (read-only IMAP),
-  [`cli.py`](./cli.py) (Typer).
+  [`imap_server.py`](./imap_server.py) (read-only IMAP). These are transitional Python runtime
+  surfaces for tests and later retirement, not the Phase 00 operator startup path.
 - **Operations** — [`maintenance.py`](./maintenance.py),
   [`resilience.py`](./resilience.py), [`provision.py`](./provision.py),
   [`metadata.py`](./metadata.py), [`db.py`](./db.py), [`headers.py`](./headers.py),
@@ -38,14 +39,12 @@ and a Gmail mutation surface exposed over HTTP, MCP, IMAP, and CLI.
 ## External Tool Prerequisites
 
 - **PostgreSQL** with the `vector` (pgvector) and `age` (Apache AGE) extensions enabled.
-- **Tesseract** for OCR on image attachments (optional, gated by
-  `[gmeow.attachment_analysis] ocr_enabled`).
-- **Pandoc** for `.docx` / `.odt` / `.rtf` extraction (optional, gated by
-  `[gmeow.attachment_analysis] pandoc_enabled`).
+- **Tesseract** for OCR on image attachments when enabled by resolved runtime settings.
+- **Pandoc** for `.docx` / `.odt` / `.rtf` extraction when enabled by resolved runtime settings.
 - **Exiftool** for image and document metadata (optional, surfaces in
   `metadata.extract_exiftool_metadata`).
-- **Nomic embedding endpoint** running locally at the URL in
-  `[gmeow] embedding_endpoint` (default `http://127.0.0.1:8090/v1/embeddings`).
+- **Nomic embedding endpoint** running locally at the resolved runtime endpoint when transitional
+  Python semantic tests exercise that path.
 
 ## Integration Test Prerequisites
 

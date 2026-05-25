@@ -15,7 +15,6 @@ import sys
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
-from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
@@ -23,7 +22,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from .config import GmeowConfig
+from .runtime_config import RuntimeConfig
 from .gmail import GmailClient, GoogleGmailClient, UserOAuthGmailClient
 from .gmail_actions import (
     apply_message_label,
@@ -42,7 +41,6 @@ from .semantic_pg import PgSemanticIndex
 from .sync import MissingGmailClient, SyncService
 from .text_index import TantivyMessageIndex
 
-DEFAULT_CONFIG = cast(GmeowConfig, None)
 DEFAULT_FLOAT = cast(float, None)
 DEFAULT_INT = cast(int, None)
 DEFAULT_LIST_STR = cast(list[str], None)
@@ -140,7 +138,7 @@ class RetentionRequest(BaseModel):
     dry_run: bool = True
 
 
-def build_services(config: GmeowConfig) -> tuple[PgCache, CasAttachmentStore, PgSemanticIndex, IntelligenceGraph, SyncService]:
+def build_services(config: RuntimeConfig) -> tuple[PgCache, CasAttachmentStore, PgSemanticIndex, IntelligenceGraph, SyncService]:
     """Build services."""
     config.ensure_dirs()
     objects = ObjectStore(config.object_store_dir)
@@ -197,9 +195,8 @@ async def _slow_request_watchdog(request: Request, request_id: str, started: flo
     faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
 
 
-def create_app(config: GmeowConfig = DEFAULT_CONFIG) -> FastAPI:
+def create_app(config: RuntimeConfig) -> FastAPI:
     """Create app."""
-    config = config or GmeowConfig.load()
     _install_stack_dump_handler()
     cache, attachments, semantic, graph, sync = build_services(config)
     mcp_app = build_mcp_app(cache=cache, sync=sync, attachments=attachments)
@@ -248,7 +245,7 @@ def create_app(config: GmeowConfig = DEFAULT_CONFIG) -> FastAPI:
     return app
 
 
-def _register_access_and_health_routes(app: FastAPI, config: GmeowConfig, cache: PgCache, sync: SyncService) -> None:
+def _register_access_and_health_routes(app: FastAPI, config: RuntimeConfig, cache: PgCache, sync: SyncService) -> None:
     @app.middleware("http")
     async def loopback_guard(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         """Loopback guard."""
@@ -305,7 +302,6 @@ def _register_access_and_health_routes(app: FastAPI, config: GmeowConfig, cache:
         health_degraded,
     )
     _ = _route_refs
-
 
 def _register_operations_routes(app: FastAPI, cache: PgCache) -> None:
     @app.get("/api/v1/status/resilience")
@@ -1040,8 +1036,3 @@ def _register_action_people_routes(app: FastAPI, cache: PgCache, sync: SyncServi
         people_alias,
     )
     _ = _route_refs
-
-
-def app_from_config_path(config_path: str | Path = "config.toml") -> FastAPI:
-    """App from config path."""
-    return create_app(GmeowConfig.load(config_path))

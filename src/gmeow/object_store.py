@@ -18,7 +18,7 @@ import blake3
 import zstandard as zstd
 
 from .attachment_analysis import analyze_attachment
-from .config import AttachmentAnalysisConfig
+from .runtime_config import AttachmentAnalysisConfig
 from .metadata import extract_exiftool_metadata
 
 DEFAULT_ATTACHMENT_ANALYSIS_CONFIG = cast(AttachmentAnalysisConfig, None)
