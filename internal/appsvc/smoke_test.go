@@ -95,6 +95,13 @@ func (store *fakeStore) Put(
 	return digest, nil
 }
 
+func (store *fakeStore) PutCompound(
+	context.Context,
+	filestore.CompoundPutRequest,
+) (contracts.ObjectDigest, error) {
+	return contracts.ObjectDigest("fake-compound-digest"), nil
+}
+
 func (store *fakeStore) Open(
 	context.Context,
 	contracts.ObjectDigest,
@@ -109,8 +116,25 @@ func (store *fakeStore) ReadManifest(
 	return store.manifests[digest], nil
 }
 
+func (store *fakeStore) GetStructure(
+	_ context.Context,
+	digest contracts.ObjectDigest,
+) (contracts.Structure, error) {
+	manifest := store.manifests[digest]
+	return contracts.Structure{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigest:  digest,
+		ObjectID:      manifest.ObjectID,
+		PartsByRole:   map[string][]contracts.StructurePart{},
+	}, nil
+}
+
 func (store *fakeStore) WriteAnnotation(context.Context, contracts.Annotation) error {
 	return nil
+}
+
+func (store *fakeStore) Verify(context.Context) (filestore.VerifyReport, error) {
+	return filestore.VerifyReport{Status: filestore.VerifyStatusOK}, nil
 }
 
 type fakeIndex struct {

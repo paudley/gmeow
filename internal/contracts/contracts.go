@@ -12,21 +12,54 @@ const SchemaVersionPhase00 SchemaVersion = 1
 type ObjectDigest string
 
 type Manifest struct {
-	SchemaVersion SchemaVersion  `json:"schema_version"`
-	ObjectDigest  ObjectDigest   `json:"object_digest"`
-	ObjectID      string         `json:"object_id,omitempty"`
-	MediaType     string         `json:"media_type,omitempty"`
-	Facets        []Facet        `json:"facets"`
-	Provenance    []Provenance   `json:"provenance,omitempty"`
-	Relationships []Relationship `json:"relationships,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	SchemaVersion    SchemaVersion  `json:"schema_version"`
+	ObjectDigest     ObjectDigest   `json:"digest"`
+	ObjectID         string         `json:"object_id"`
+	IdentityStrategy string         `json:"identity_strategy"`
+	MediaType        string         `json:"media_type,omitempty"`
+	Size             int64          `json:"size"`
+	Compression      string         `json:"compression"`
+	ContentRoles     []string       `json:"content_roles,omitempty"`
+	Facets           []Facet        `json:"facets"`
+	Titles           []Title        `json:"titles,omitempty"`
+	Timestamps       Timestamps     `json:"timestamps,omitempty"`
+	Provenance       []Provenance   `json:"provenance,omitempty"`
+	Relationships    []Relationship `json:"relationships,omitempty"`
+	Compound         Compound       `json:"compound"`
+	Analysis         map[string]any `json:"analysis,omitempty"`
+	Graph            []GraphFact    `json:"graph,omitempty"`
+	Keywords         []string       `json:"keywords,omitempty"`
+	Embeddings       []EmbeddingRef `json:"embeddings,omitempty"`
+	Overlays         map[string]any `json:"overlays,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
 }
 
 type Facet struct {
-	Name       string         `json:"name"`
+	Kind       string         `json:"kind"`
+	Name       string         `json:"name,omitempty"`
 	Version    string         `json:"version,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
 	Attributes map[string]any `json:"attributes,omitempty"`
+}
+
+func (facet Facet) FacetKind() string {
+	if facet.Kind != "" {
+		return facet.Kind
+	}
+	return facet.Name
+}
+
+type Title struct {
+	Value      string  `json:"value"`
+	Source     string  `json:"source,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+}
+
+type Timestamps struct {
+	Created  time.Time `json:"created,omitempty"`
+	Modified time.Time `json:"modified,omitempty"`
+	Observed time.Time `json:"observed,omitempty"`
 }
 
 type Provenance struct {
@@ -44,6 +77,49 @@ type Relationship struct {
 	Role   string       `json:"role,omitempty"`
 	Order  int          `json:"order,omitempty"`
 	Source string       `json:"source,omitempty"`
+}
+
+type Compound struct {
+	IsCompound bool           `json:"is_compound"`
+	Parts      []CompoundPart `json:"parts,omitempty"`
+}
+
+type CompoundPart struct {
+	Digest   ObjectDigest   `json:"digest"`
+	Role     string         `json:"role"`
+	Order    int            `json:"order,omitempty"`
+	Required bool           `json:"required,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+type GraphFact struct {
+	Subject   string         `json:"subject"`
+	Predicate string         `json:"predicate"`
+	Object    string         `json:"object"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+}
+
+type EmbeddingRef struct {
+	Model        string       `json:"model"`
+	ObjectDigest ObjectDigest `json:"object_digest"`
+	Dimensions   int          `json:"dimensions,omitempty"`
+}
+
+type StructurePart struct {
+	Digest   ObjectDigest   `json:"digest"`
+	Role     string         `json:"role"`
+	Order    int            `json:"order,omitempty"`
+	Required bool           `json:"required,omitempty"`
+	Facets   []string       `json:"facets,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+type Structure struct {
+	SchemaVersion SchemaVersion              `json:"schema_version"`
+	ObjectDigest  ObjectDigest               `json:"digest"`
+	ObjectID      string                     `json:"object_id"`
+	Facets        []string                   `json:"facets"`
+	PartsByRole   map[string][]StructurePart `json:"parts_by_role"`
 }
 
 type SourceEvent struct {
