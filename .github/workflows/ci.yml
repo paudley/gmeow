@@ -12,11 +12,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-python@v6
-      - uses: astral-sh/setup-uv@v7
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --extra test
       - run: uv run python -m compileall main.py src migrations tests
       - run: uv run pytest
