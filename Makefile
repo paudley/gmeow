@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 
 SHELL := bash
 .SHELLFLAGS := -eu -o pipefail -c
@@ -8,6 +8,7 @@ SHELL := bash
 
 UV ?= uv
 PYTHON ?= python
+GO ?= go
 GMEOW ?= $(UV) run gmeow
 CONFIG ?= config.toml
 HOST ?= 127.0.0.1
@@ -51,7 +52,7 @@ define warn
 	@printf '  $(YELLOW)!$(RESET) %s\n' "$(1)"
 endef
 
-.PHONY: help advice install update lock doctor check quick-check test compile build clean release-check release-audit \
+.PHONY: help advice install update lock doctor check quick-check test compile build clean go-format go-test go-build go-check release-check release-audit \
 	serve serve-public serve-imap status sync sync-history maintenance resilience events jobs dead-letter retry-dead repair-cache \
 	storage analyze prune-objects sidecars refresh-search refresh-graph refresh-derived intelligence-enqueue intelligence-worker intelligence-rebuild \
 	categories-seed categories-discover categories-recategorize categories-stats archive-status archive-complete archive-verify archive-refresh archive-export archive-verify-export archive-restore retention-policies imap-status imap-refresh provision-plan submodules ethos-install
@@ -66,7 +67,7 @@ help: ## Show this help screen.
 	}' $(MAKEFILE_LIST)
 	@printf '\n$(BOLD)Development Checks$(RESET)\n'
 	@awk 'BEGIN{FS=":.*##"} /^[a-zA-Z0-9_.-]+:.*##/ { \
-		if ($$1 ~ /^(check|quick-check|test|compile|build|clean|release-check|release-audit)$$/) printf "  $(GREEN)%-24s$(RESET) %s\n", $$1, $$2 \
+		if ($$1 ~ /^(check|quick-check|test|compile|build|clean|go-format|go-test|go-build|go-check|release-check|release-audit)$$/) printf "  $(GREEN)%-24s$(RESET) %s\n", $$1, $$2 \
 	}' $(MAKEFILE_LIST)
 	@printf '\n$(BOLD)Run and Sync$(RESET)\n'
 	@awk 'BEGIN{FS=":.*##"} /^[a-zA-Z0-9_.-]+:.*##/ { \
@@ -143,6 +144,20 @@ build: ## Build wheel and sdist.
 	$(call section,Building package)
 	$(UV) build
 
+go-format: ## Format Go sources.
+	$(call section,Formatting Go)
+	$(GO) fmt ./...
+
+go-test: ## Run Go tests.
+	$(call section,Running Go tests)
+	$(GO) test ./...
+
+go-build: ## Build Go binaries.
+	$(call section,Building Go binaries)
+	$(GO) build ./cmd/gmeow ./cmd/gmeow-admin ./cmd/gmeow-worker
+
+go-check: go-format go-test go-build ## Run the Go Phase 00 quality gate.
+
 release-check: ## Run public release hygiene checks.
 	$(call section,Running public release hygiene check)
 	$(UV) run $(PYTHON) scripts/public_release_check.py
@@ -151,7 +166,7 @@ release-audit: compile test build release-check ## Run the full local release ga
 	$(call section,Checking whitespace)
 	git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab diff --check
 
-check: release-audit ## Alias for the full local verification gate.
+check: go-check release-audit ## Alias for the full local verification gate.
 
 clean: ## Remove build/test caches and package artifacts.
 	$(call section,Cleaning generated artifacts)

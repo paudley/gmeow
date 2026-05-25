@@ -7,7 +7,7 @@
   - [x] Keep include category predicates in SQL before `LIMIT` for address results.
   - [x] Prevent backfill checkpoint advancement when target intelligence jobs are dead.
   - [x] Add focused regression tests and rerun focused suite.
-- [x] Public release prep: add MIT license, SPDX headers, sanitized docs, GitHub community/security files, CI, Dependabot, and release hygiene checks.
+- [x] Public release prep: add AGPL license, SPDX headers, sanitized docs, GitHub community/security files, CI, Dependabot, and release hygiene checks.
 - [x] Convert config to TOML-only `config.toml` with all app settings under `[gmeow]`.
 - [x] Create sanitized `config.toml-example` and keep local `config.toml` ignored.
 - [x] Remove committed YAML config files and all runtime/docs references to the old YAML config path.

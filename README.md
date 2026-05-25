@@ -38,25 +38,36 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 
 ```bash
 uv sync --extra test
-cp config.toml-example config.toml
+mkdir -p ~/.config/gmeow
+cp gmeow.toml-example gmeow.toml
+printf 'replace-with-local-unlock-key\n' > ~/.config/gmeow/key.txt
 ```
 
-Edit `config.toml`. All Gmeow settings live under `[gmeow]` so this file can be shared with other Google proxy/archive applications.
+Edit `gmeow.toml`. Phase 00 uses the Go config parser for all binaries. Startup requires an unlock key from `GMEOW_SOPS_UNLOCK_KEY` or `~/.config/gmeow/key.txt`; config validation cannot be disabled.
 
 ```toml
-[gmeow]
-subject = "user@example.com"
-service_account_file = "data/secrets/service-account.json"
-postgres_dsn = "postgresql://gmeow:change-me@127.0.0.1:5432/gmeow"
-embedding_endpoint = "http://127.0.0.1:8090/v1/embeddings"
+[system]
+config_version = 1
+instance_id = "local"
+data_dir = "data"
 
-[gmeow.secrets]
-file = "~/.config/gmeow/secrets.sops.yaml"
-unlock_key = "replace-with-local-unlock-key"
-age_key = "AGE-SECRET-KEY-REPLACE-WITH-LOCAL-SOPS-AGE-IDENTITY"
+[filestore]
+root = "data/filestore"
+
+[postgres]
+enabled = true
+host = "127.0.0.1"
+port = 5432
+database = "gmeow"
+user = "gmeow"
+password_secret = "postgres_password"
+ssl_mode = "disable"
+
+[secrets]
+postgres_password = "replace-with-sops-encrypted-leaf"
 ```
 
-When `[gmeow.secrets]` is configured, Gmeow decrypts the SOPS YAML file at startup and uses `postgres_dsn`, `service_account_json`, `user_credentials_json`, and `imap_password` from that single encrypted file. Configured credential file paths remain explicit fallback paths for local deployments that do not use SOPS.
+Do not put `secrets.file`, `secrets.sops_file`, or `config.file` inside `gmeow.toml`. Config source selection belongs to `--config`, `GMEOW_CONFIG`, or the default `gmeow.toml`.
 
 Generate Google Cloud service-account provisioning commands:
 
@@ -79,10 +90,11 @@ gcloud auth application-default login --scopes=https://www.googleapis.com/auth/g
 ## Run
 
 ```bash
-uv run gmeow serve --host 127.0.0.1 --port 8765
+go run ./cmd/gmeow-admin --config gmeow.toml config validate
+go run ./cmd/gmeow --config gmeow.toml status
 ```
 
-REST is available under `/api/v1`. MCP is mounted at `/mcp` when the installed MCP SDK provides an ASGI app.
+Phase 00 binaries validate config and report startup status without initializing unimplemented components.
 
 For persistent local operation under your user account, see [docs/systemd.md](docs/systemd.md).
 
@@ -155,6 +167,7 @@ uv run gmeow serve-imap --host 127.0.0.1 --port 1143
 
 ```bash
 uv sync --extra test
+make go-check
 uv run python -m compileall main.py src migrations tests
 uv run pytest
 uv build
@@ -167,4 +180,11 @@ Before publishing, run the checklist in `docs/PUBLIC_RELEASE_CHECKLIST.md`.
 
 ## License
 
-Gmeow is licensed under the MIT License. See `LICENSE`.
+Gmeow is dual-licensed for open-source and proprietary/commercial use.
+
+**Open Source License:** Gmeow is available under the GNU Affero General Public
+License v3.0 only (AGPL-3.0-only). See `LICENSE`.
+
+**Proprietary License:** Proprietary and commercial licenses are available by
+separate written agreement. Contact <oss@blackcat.ca> to discuss commercial
+terms.

@@ -1,0 +1,50 @@
+[system]
+config_version = 1
+instance_id = "local"
+data_dir = "data"
+
+[filestore]
+root = "data/filestore"
+
+[postgres]
+enabled = true
+host = "127.0.0.1"
+port = 5432
+database = "gmeow"
+user = "gmeow"
+password_secret = "postgres_password"
+ssl_mode = "disable"
+
+[rabbitmq]
+enabled = true
+url_secret = "rabbitmq_url"
+
+[secrets]
+postgres_password = "replace-with-sops-encrypted-leaf"
+rabbitmq_url = "amqp://guest:guest@127.0.0.1:5672/"
+
+[[interfaces]]
+name = "rest"
+kind = "rest"
+enabled = true
+host = "127.0.0.1"
+port = 8765
+
+[[interfaces]]
+name = "mcp"
+kind = "mcp"
+enabled = true
+host = "127.0.0.1"
+port = 8765
+
+[[analysis.analyzers]]
+name = "noop"
+version = "phase00"
+enabled = true
+worker_kind = "go"
+
+[[search.backends]]
+name = "query"
+kind = "query"
+enabled = true
+facets = ["*"]

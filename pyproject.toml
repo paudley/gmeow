@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Local Gmail intelligence server for agents, MCP, and REST automation"
 readme = "README.md"
 requires-python = ">=3.13"
-license = "MIT"
+license = "AGPL-3.0-only"
 authors = [
     { name = "Blackcat Informatics Inc." },
 ]
@@ -13,7 +13,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: FastAPI",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",
     "Topic :: Communications :: Email",
