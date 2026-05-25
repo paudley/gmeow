@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
+from googleapiclient.errors import HttpError
+
 from .config import MaintenanceConfig
 from .intelligence import IntelligenceWorker
 from .object_store import StoredAttachmentObject
@@ -24,7 +26,7 @@ DEFAULT_FLOAT = cast(float, None)
 DEFAULT_OBJECT = cast(object, None)
 DEFAULT_STR = cast(str, None)
 
-MAINTENANCE_EXCEPTIONS = (RuntimeError, ValueError, KeyError, TypeError, OSError)
+MAINTENANCE_EXCEPTIONS = (RuntimeError, ValueError, KeyError, TypeError, OSError, HttpError)
 MAX_RESULT_SUMMARY_CHARS = 2000
 
 
@@ -99,6 +101,18 @@ class _MaintenanceCache(Protocol):
         """Queue intelligence processing."""
         ...
 
+    def claim_deferred_attachment_hydration(self, limit: int, worker_id: str) -> list[dict[str, Any]]:
+        """Claim deferred attachment hydration jobs."""
+        ...
+
+    def complete_deferred_attachment_hydration(self, job_id: int, sha1: str) -> None:
+        """Complete deferred attachment hydration."""
+        ...
+
+    def fail_deferred_attachment_hydration(self, job_id: int, error: str) -> None:
+        """Fail deferred attachment hydration."""
+        ...
+
 
 class _MaintenanceSync(Protocol):
     """Sync surface used by maintenance tasks."""
@@ -117,6 +131,10 @@ class _MaintenanceSync(Protocol):
 
     def backfill_batch(self, batch_size: int = 50, *, validate: bool = False, max_empty_windows: int = 120) -> dict[str, Any]:
         """Run one backfill batch."""
+        ...
+
+    def hydrate_deferred_attachment(self, job: dict[str, Any]) -> str:
+        """Hydrate one deferred attachment and return its digest."""
         ...
 
 
@@ -177,6 +195,7 @@ class MaintenanceScheduler:
         specs: list[tuple[str, int, Callable[[], Any]]] = [
             ("sync_history", self.config.sync_history_seconds, self._sync_history),
             ("sync_priority", self.config.sync_priority_seconds, self._sync_priority),
+            ("attachment_hydration", self.config.attachment_hydration_seconds, self._hydrate_deferred_attachments),
             ("intelligence", self.config.intelligence_seconds, self._run_intelligence),
             ("derived_refresh", self.config.derived_refresh_seconds, self._refresh_derived),
             ("analyze", self.config.analyze_seconds, self.cache.analyze_storage_tables),
@@ -226,6 +245,7 @@ class MaintenanceScheduler:
             "sync_history": self._sync_history,
             "sync_priority": self._sync_priority,
             "backfill": self._backfill,
+            "attachment_hydration": self._hydrate_deferred_attachments,
             "intelligence": self._run_intelligence,
             "derived_refresh": self._refresh_derived,
             "analyze": self.cache.analyze_storage_tables,
@@ -294,11 +314,35 @@ class MaintenanceScheduler:
             limit=self.config.intelligence_limit
         )
 
+    def _hydrate_deferred_attachments(self) -> dict[str, int]:
+        if not self.sync.gmail_available():
+            return {"processed": 0, "failed": 0, "skipped": 1}
+        if not self._gmail_lock.acquire(blocking=False):
+            return {"processed": 0, "failed": 0, "skipped": 1}
+        processed = 0
+        failed = 0
+        try:
+            jobs = self.cache.claim_deferred_attachment_hydration(
+                limit=self.config.attachment_hydration_limit,
+                worker_id=f"maintenance:{threading.get_ident()}",
+            )
+            for job in jobs:
+                try:
+                    sha1 = self.sync.hydrate_deferred_attachment(job)
+                except MAINTENANCE_EXCEPTIONS as exc:
+                    self.cache.fail_deferred_attachment_hydration(int(job["id"]), repr(exc))
+                    failed += 1
+                else:
+                    self.cache.complete_deferred_attachment_hydration(int(job["id"]), sha1)
+                    self.cache.enqueue_intelligence_job("attachment", sha1, {"source": "deferred_attachment_hydration"})
+                    processed += 1
+        finally:
+            self._gmail_lock.release()
+        return {"processed": processed, "failed": failed, "skipped": 0}
+
     def _sync_history(self) -> dict[str, Any]:
         if not self.sync.gmail_available():
             return {"skipped": "gmail client is not configured"}
-        if not self.cache.get_state("gmail_history_id"):
-            return {"skipped": "no Gmail history cursor is available"}
         if not self._gmail_lock.acquire(blocking=False):
             return {"skipped": "another Gmail maintenance task is running"}
         try:

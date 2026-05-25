@@ -17,6 +17,7 @@ import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 
 from . import pg_cache_archive, pg_cache_imap, pg_cache_jobs
 from .cache import (
@@ -191,6 +192,18 @@ def _where_clause_sql(conditions: list[str]) -> sql.Composable:
     return sql.SQL("WHERE ").join([sql.SQL(""), _where_sql(conditions)])
 
 
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_ready(item) for item in value]
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
 class PgCache:
     """Represent PgCache data and behavior."""
 
@@ -201,11 +214,19 @@ class PgCache:
         self.text_index = text_index
         self.age_graph_error: str = DEFAULT_STR
         run_migrations(dsn)
+        self._pool = ConnectionPool(
+            conninfo=dsn,
+            kwargs={"row_factory": dict_row},
+            min_size=1,
+            max_size=10,
+            open=True,
+            name="gmeow-cache",
+        )
         self._ensure_age_graph()
         self.ensure_default_categories()
 
-    def _connect(self) -> _PgConnection:
-        return cast(_PgConnection, psycopg.connect(self.dsn, row_factory=dict_row))
+    def _connect(self) -> Any:
+        return self._pool.connection()
 
     def connection(self) -> _PgConnection:
         """Open a row-dict database connection for helper modules."""
@@ -213,7 +234,7 @@ class PgCache:
 
     def close(self) -> None:
         """Close."""
-        return
+        self._pool.close()
 
     def _ensure_age_graph(self) -> None:
         try:
@@ -1043,6 +1064,233 @@ class PgCache:
         """Retry dead letter jobs."""
         return pg_cache_jobs.retry_dead_letter_jobs(self, limit=limit)
 
+    def record_search_run(
+        self,
+        search_id: str,
+        query: str,
+        source: str,
+        request: dict[str, Any],
+        status: str = "running",
+    ) -> None:
+        """Record or update a search run."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO search_runs(search_id, query, source, status, request_json)
+                VALUES(%s, %s, %s, %s, %s)
+                ON CONFLICT(search_id) DO UPDATE SET
+                  query=excluded.query,
+                  source=excluded.source,
+                  status=excluded.status,
+                  request_json=excluded.request_json,
+                  updated_at=now()
+                """,
+                (search_id, query, source, status, Jsonb(_json_ready(request or {}))),
+            )
+
+    def finish_search_run(
+        self,
+        search_id: str,
+        *,
+        status: str,
+        source: str,
+        live: dict[str, Any],
+        message_ids: list[str],
+        analysis: dict[str, Any],
+        attachment_hydration: dict[str, Any],
+        phase_timings: dict[str, Any],
+        error: str = DEFAULT_STR,
+    ) -> None:
+        """Finish a search run."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE search_runs
+                SET status=%s,
+                    source=%s,
+                    live_json=%s,
+                    message_ids_json=%s,
+                    analysis_json=%s,
+                    attachment_hydration_json=%s,
+                    phase_timings_json=%s,
+                    error=%s,
+                    updated_at=now(),
+                    completed_at=CASE WHEN %s <> 'running' THEN now() ELSE completed_at END
+                WHERE search_id=%s
+                """,
+                (
+                    status,
+                    source,
+                    Jsonb(_json_ready(live or {})),
+                    Jsonb(_json_ready(message_ids)),
+                    Jsonb(_json_ready(analysis or {})),
+                    Jsonb(_json_ready(attachment_hydration or {})),
+                    Jsonb(_json_ready(phase_timings or {})),
+                    error,
+                    status,
+                    search_id,
+                ),
+            )
+
+    def search_run(self, search_id: str) -> dict[str, Any]:
+        """Return a search run."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM search_runs WHERE search_id = %s", (search_id,)).fetchone()
+        if not row:
+            return {}
+        item = dict(row)
+        item["request"] = item.pop("request_json") or {}
+        item["live"] = item.pop("live_json") or {}
+        item["message_ids"] = item.pop("message_ids_json") or []
+        item["analysis"] = item.pop("analysis_json") or {}
+        item["attachment_hydration"] = item.pop("attachment_hydration_json") or {}
+        item["phase_timings_ms"] = item.pop("phase_timings_json") or {}
+        return item
+
+    def enqueue_deferred_attachment_hydration(self, ref: dict[str, Any], payload: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
+        """Queue an attachment for later Gmail download and sidecar analysis."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO deferred_attachment_hydration(
+                  message_id, thread_id, part_id, gmail_attachment_id, filename, mime_type,
+                  size, priority, search_id, payload_json
+                )
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(message_id, part_id, gmail_attachment_id) DO UPDATE
+                SET status=CASE
+                      WHEN deferred_attachment_hydration.status = 'done' THEN deferred_attachment_hydration.status
+                      ELSE 'pending'
+                    END,
+                    priority=GREATEST(deferred_attachment_hydration.priority, excluded.priority),
+                    last_error=NULL,
+                    locked_by=NULL,
+                    locked_at=NULL,
+                    search_id=COALESCE(excluded.search_id, deferred_attachment_hydration.search_id),
+                    payload_json=excluded.payload_json,
+                    updated_at=now()
+                """,
+                (
+                    ref["message_id"],
+                    ref.get("thread_id"),
+                    ref["part_id"],
+                    ref["attachment_id"],
+                    ref.get("filename"),
+                    ref.get("mime_type"),
+                    ref.get("size"),
+                    int(ref.get("priority", 100)),
+                    ref.get("search_id"),
+                    Jsonb(_json_ready(payload or {})),
+                ),
+            )
+
+    def claim_deferred_attachment_hydration(self, limit: int, worker_id: str) -> list[dict[str, Any]]:
+        """Claim deferred attachment hydration jobs."""
+        with self._connect() as conn, conn.transaction():
+            rows = conn.execute(
+                """
+                SELECT id, message_id, thread_id, part_id, gmail_attachment_id, filename, mime_type,
+                       size, attempts, max_attempts, payload_json, search_id
+                FROM deferred_attachment_hydration
+                WHERE status = 'pending'
+                ORDER BY priority DESC, created_at, id
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+                """,
+                (limit,),
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            if ids:
+                conn.execute(
+                    """
+                    UPDATE deferred_attachment_hydration
+                    SET status='running',
+                        attempts=attempts+1,
+                        locked_by=%s,
+                        locked_at=now(),
+                        updated_at=now()
+                    WHERE id = ANY(%s)
+                    """,
+                    (worker_id, ids),
+                )
+        return [dict(row) for row in rows]
+
+    def complete_deferred_attachment_hydration(self, job_id: int, sha1: str) -> None:
+        """Mark deferred attachment hydration complete."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE deferred_attachment_hydration
+                SET status='done',
+                    last_error=NULL,
+                    locked_by=NULL,
+                    locked_at=NULL,
+                    completed_at=now(),
+                    payload_json=payload_json || %s,
+                    updated_at=now()
+                WHERE id=%s
+                """,
+                (Jsonb({"sha1": sha1}), job_id),
+            )
+
+    def fail_deferred_attachment_hydration(self, job_id: int, error: str) -> None:
+        """Mark deferred attachment hydration failed or retryable."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT attempts, max_attempts FROM deferred_attachment_hydration WHERE id = %s",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return
+            status = "dead" if int(row["attempts"] or 0) >= int(row["max_attempts"] or 5) else "pending"
+            conn.execute(
+                """
+                UPDATE deferred_attachment_hydration
+                SET status=%s,
+                    last_error=%s,
+                    locked_by=NULL,
+                    locked_at=NULL,
+                    updated_at=now()
+                WHERE id=%s
+                """,
+                (status, error[:2000], job_id),
+            )
+
+    def deferred_attachment_hydration_status(self, message_ids: list[str] = DEFAULT_LIST_STR) -> dict[str, Any]:
+        """Return deferred attachment hydration status."""
+        conditions: list[str] = []
+        params: list[Any] = []
+        if message_ids:
+            conditions.append("message_id = ANY(%s)")
+            params.append(message_ids)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                sql.SQL(
+                    """
+                    SELECT id, message_id, part_id, gmail_attachment_id, filename, mime_type,
+                           status, attempts, last_error, search_id, updated_at
+                    FROM deferred_attachment_hydration
+                    {where}
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT 200
+                    """
+                ).format(where=sql.SQL(where)),
+                tuple(params),
+            ).fetchall()
+        counts: dict[str, int] = {}
+        items = [dict(row) for row in rows]
+        for item in items:
+            status = str(item["status"])
+            counts[status] = counts.get(status, 0) + 1
+        return {
+            "counts": counts,
+            "pending": [item for item in items if item["status"] in {"pending", "running"}],
+            "dead": [item for item in items if item["status"] == "dead"],
+            "done": [item for item in items if item["status"] == "done"],
+            "terminal": not any(item["status"] in {"pending", "running"} for item in items),
+        }
+
     def clear_dead_letter_job(self, dead_letter_id: int) -> dict[str, Any]:
         """Clear dead letter job."""
         return pg_cache_jobs.clear_dead_letter_job(self, dead_letter_id)
@@ -1253,6 +1501,12 @@ class PgCache:
                 item["top_terms"] = item.pop("top_terms_json") or []
                 result.append(item)
             return result
+
+    def has_manual_category_assignments(self) -> bool:
+        """Return whether manual category examples exist."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM message_categories WHERE source = 'manual' LIMIT 1").fetchone()
+        return bool(row)
 
     def store_learned_category_run(self, run: dict[str, Any]) -> int:
         """Store learned category run."""
@@ -1475,6 +1729,8 @@ class PgCache:
                 "imap_mailboxes",
                 "imap_message_uids",
                 "archive_exports",
+                "search_runs",
+                "deferred_attachment_hydration",
             ]:
                 counts[table] = conn.execute(sql.SQL("SELECT COUNT(*) AS c FROM {}").format(sql.Identifier(table))).fetchone()["c"]
             state = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM sync_state")}
@@ -1488,10 +1744,12 @@ class PgCache:
             "counts": counts,
             "state": state,
             "intelligence_jobs": self.intelligence_job_status(),
+            "deferred_attachment_hydration": self.deferred_attachment_hydration_status(),
             "archive_states": archive_states,
             "date_range": {"earliest": iso_dates[0] if iso_dates else None, "latest": iso_dates[-1] if iso_dates else None},
             "age": self.age_status(),
             "maintenance": self.maintenance_status(),
+            "db_pool": self._pool.get_stats(),
         }
 
     def refresh_archive_states(self, limit: int = DEFAULT_INT) -> dict[str, int]:

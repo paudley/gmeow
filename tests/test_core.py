@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import psycopg
+from psycopg import sql
 import pytest
 
 from gmeow.cache import categorize_message
@@ -22,6 +23,7 @@ from gmeow.config import GmeowConfig, MaintenanceConfig, PriorityRule
 from gmeow.graph import DOAP, FOAF, RDF_TYPE, SCHEMA, extract_attachment_sidecar_triples, extract_triples
 from gmeow.intelligence import IntelligenceWorker
 from gmeow.kg import spacy_entities
+from gmeow.maintenance import MaintenanceScheduler
 from gmeow.markdown import message_to_markdown
 from gmeow.mcp_server import _format, enriched_message, enriched_thread
 from gmeow.object_store import CasAttachmentStore, ObjectStore
@@ -102,6 +104,28 @@ def test_maintenance_zero_intervals_are_disabled() -> None:
     assert config.attachment_sidecars_seconds is DEFAULT_INT
 
 
+def test_maintenance_sync_history_lets_sync_service_resolve_missing_cursor() -> None:
+    class Cache:
+        def get_state(self, _key: str) -> str:
+            return ""
+
+    class Sync:
+        called = False
+
+        def gmail_available(self) -> bool:
+            return True
+
+        def sync_history(self, limit: int = 500) -> dict[str, Any]:
+            self.called = True
+            return {"limit": limit, "source": "fallback"}
+
+    sync = Sync()
+    scheduler = MaintenanceScheduler(MaintenanceConfig(sync_history_limit=12), cast(Any, Cache()), sync, cast(Any, object()), object())
+
+    assert scheduler._sync_history() == {"limit": 12, "source": "fallback"}
+    assert sync.called is True
+
+
 @pytest.fixture(autouse=True)
 def clean_pg_test_rows() -> Iterator[None]:
     cleanup_pg()
@@ -113,19 +137,46 @@ def cleanup_pg() -> None:
     if not TEST_DSN:
         return
     conn: Any
+    tables = [
+        "deferred_attachment_hydration",
+        "search_runs",
+        "embedding_chunks",
+        "ingest_issues",
+        "sync_runs",
+        "dead_letter_jobs",
+        "intelligence_jobs",
+        "graph_triples",
+        "graph_node_profiles",
+        "graph_edge_stats",
+        "summary_items",
+        "attachments",
+        "attachment_metadata_versions",
+        "archive_exports",
+        "content_object_refs",
+        "message_categories",
+        "category_overrides",
+        "category_rules",
+        "learned_category_runs",
+        "message_parts",
+        "messages",
+        "threads",
+        "labels",
+        "priority_rules",
+        "sync_state",
+        "content_objects",
+    ]
     with psycopg.connect(TEST_DSN) as conn:
-        conn.execute(
-            """
-            TRUNCATE TABLE
-              embedding_chunks, ingest_issues, sync_runs, dead_letter_jobs, intelligence_jobs,
-              graph_triples, graph_node_profiles, graph_edge_stats, summary_items,
-              attachments, attachment_metadata_versions,
-              archive_exports, content_object_refs, message_categories, category_overrides,
-              category_rules, learned_category_runs, message_parts, messages, threads, labels,
-              priority_rules, sync_state, content_objects
-            RESTART IDENTITY CASCADE
-            """
-        )
+        existing = [
+            table
+            for table in tables
+            if conn.execute("SELECT to_regclass(%s) AS table_name", (table,)).fetchone()[0]
+        ]
+        if existing:
+            conn.execute(
+                sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(
+                    sql.SQL(", ").join(sql.Identifier(table) for table in existing)
+                )
+            )
     with psycopg.connect(TEST_DSN, autocommit=True) as conn:
         conn.execute("SET search_path=ag_catalog, public")
         try:
@@ -816,6 +867,7 @@ class FakeGmail:
         self.page_queries: list[dict[str, Any]] = []
         self.metadata_fetched: list[str] = []
         self.fetched: list[tuple[str, str]] = []
+        self.attachments_fetched: list[tuple[str, str]] = []
         self.modified: list[dict[str, Any]] = []
 
     def list_labels(self) -> list[dict[str, str]]:
@@ -866,6 +918,7 @@ class FakeGmail:
         return {}
 
     def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        self.attachments_fetched.append((message_id, attachment_id))
         return b""
 
     def modify_message(
@@ -876,6 +929,16 @@ class FakeGmail:
     ) -> dict[str, str]:
         self.modified.append({"message_id": message_id, "add": add_label_ids or [], "remove": remove_label_ids or []})
         return {"id": message_id}
+
+
+class FailingSearchGmail(FakeGmail):
+    def __init__(self, messages: dict[str, dict[str, Any]]) -> None:
+        super().__init__(messages)
+        self.search_attempts = 0
+
+    def search_messages(self, query: str, limit: int = 100) -> list[str]:
+        self.search_attempts += 1
+        raise OSError(f"gmail unavailable for {query} limit={limit}")
 
 
 def test_intelligence_worker_runs_until_empty(tmp_path: Path) -> None:
@@ -926,8 +989,65 @@ def test_search_uses_live_gmail_for_unbounded_queries(tmp_path: Path) -> None:
     assert gmail.queries == ["Apollo"]
     assert result["messages"][0]["id"] == "m1"
     assert len(result["messages"]) == result["live"]["hydrated"]
+    assert result["messages"][0]["text_body"]
+    assert result["analysis"]["pending"] is True
+    assert result["analysis"]["status_url"] == "/api/v1/search/analysis-status?message_ids=m1"
     assert cache.get_message("m1") is not None
     assert cache.intelligence_job_status()["pending"] >= 1
+    cache.close()
+
+
+def test_live_search_defers_attachment_and_raw_hydration(tmp_path: Path) -> None:
+    cache = make_cache(tmp_path)
+    gmail = FakeGmail({"m1": gmail_fixture()})
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+
+    result = sync.search("Apollo", limit=5)
+
+    assert result["source"] == "gmail+cache"
+    assert result["messages"][0]["id"] == "m1"
+    assert result["messages"][0]["subject"] == "Apollo Invoice"
+    assert "Action required by Monday" in result["messages"][0]["text_body"]
+    assert gmail.fetched == [("m1", "full")]
+    assert gmail.attachments_fetched == []
+    assert cache.attachments_for_message("m1") == []
+    assert cache.get_message("m1")["has_raw_rfc822"] is False
+    assert result["live"]["deferred_attachments"] == 1
+    assert result["live"]["analysis"]["pending"] is True
+    assert result["attachment_hydration"]["counts"] == {"pending": 1}
+    assert result["search_id"]
+    status = sync.search_status(result["search_id"])
+    assert status["status"] == "complete"
+    assert status["message_ids"] == ["m1"]
+    assert status["messages"][0]["id"] == "m1"
+    assert status["analysis"]["pending"] is True
+    assert status["attachment_hydration"]["counts"] == {"pending": 1}
+    cache.close()
+
+
+def test_live_search_degrades_to_cache_and_pauses_gmail_after_error(tmp_path: Path) -> None:
+    cache = make_cache(tmp_path)
+    parsed = parse_gmail_message(gmail_fixture())
+    cache.upsert_thread({"id": "t1", "snippet": parsed.snippet})
+    cache.upsert_message(parsed, gmail_fixture(), markdown=message_to_markdown(parsed), hydrated=True)
+    gmail = FailingSearchGmail({"m1": gmail_fixture()})
+    sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
+
+    result = sync.search("Apollo", limit=5)
+
+    assert result["source"] == "gmail+cache"
+    assert result["live"]["degraded"] is True
+    assert "gmail unavailable" in result["live"]["error"]
+    assert result["messages"][0]["id"] == "m1"
+    assert gmail.search_attempts == 1
+    assert cache.get_state("gmail.live_search.paused_until")
+
+    paused = sync.search("Apollo", limit=5)
+
+    assert paused["live"]["degraded"] is True
+    assert paused["live"]["reason"] == "gmail live search temporarily paused after recent errors"
+    assert paused["messages"][0]["id"] == "m1"
+    assert gmail.search_attempts == 1
     cache.close()
 
 
@@ -1126,6 +1246,8 @@ def test_search_stays_cache_only_for_time_bounded_queries(tmp_path: Path) -> Non
     assert result["source"] == "cache"
     assert gmail.queries == []
     assert result["messages"][0]["id"] == "m1"
+    assert result["analysis"]["pending"] is True
+    assert cache.intelligence_job_status()["pending"] >= 1
     assert should_search_gmail("Apollo") is True
     assert should_search_gmail("Apollo", after="2026-05-01") is False
     assert should_search_gmail("Apollo after:2026-05-01") is True

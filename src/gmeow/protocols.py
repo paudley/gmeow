@@ -144,6 +144,38 @@ class SyncCache(Protocol):
         """Store attachment metadata."""
         ...
 
+    def record_search_run(self, search_id: str, query: str, source: str, request: dict[str, Any], status: str = "running") -> None:
+        """Record search run start."""
+        ...
+
+    def finish_search_run(
+        self,
+        search_id: str,
+        *,
+        status: str,
+        source: str,
+        live: dict[str, Any],
+        message_ids: list[str],
+        analysis: dict[str, Any],
+        attachment_hydration: dict[str, Any],
+        phase_timings: dict[str, Any],
+        error: str = DEFAULT_STR,
+    ) -> None:
+        """Record search run completion."""
+        ...
+
+    def search_run(self, search_id: str) -> dict[str, Any]:
+        """Return a search run."""
+        ...
+
+    def enqueue_deferred_attachment_hydration(self, ref: dict[str, Any], payload: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
+        """Queue deferred attachment hydration."""
+        ...
+
+    def deferred_attachment_hydration_status(self, message_ids: list[str] = DEFAULT_LIST_STR) -> dict[str, Any]:
+        """Return deferred attachment hydration status."""
+        ...
+
 
 class IntelligenceCache(Protocol):
     """Cache surface required by ``IntelligenceWorker``."""
@@ -244,6 +276,13 @@ class NoGraph:
 class SyncAttachments(Protocol):
     """Attachment storage protocol used by ``SyncService``."""
 
-    def put(self, content: bytes, metadata: dict[str, Any]) -> StoredAttachmentObject:
+    def put(
+        self,
+        content: bytes,
+        metadata: dict[str, Any],
+        *,
+        extract_metadata: bool = True,
+        media_type: str = "application/octet-stream",
+    ) -> StoredAttachmentObject:
         """Store attachment content."""
         ...

@@ -294,6 +294,10 @@ class CategoryEngine:
 
     def _cached_manual_profiles(self) -> dict[str, list[str]]:
         if self._manual_profiles_cache is None:
+            has_manual = getattr(self.cache, "has_manual_category_assignments", None)
+            if has_manual is not None and not has_manual():
+                self._manual_profiles_cache = {}
+                return self._manual_profiles_cache
             self._manual_profiles_cache = self._manual_profiles(self.cache.iter_messages())
         return self._manual_profiles_cache
 

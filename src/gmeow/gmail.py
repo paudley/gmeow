@@ -8,17 +8,22 @@ calls.
 """
 
 import base64
+import logging
+import ssl
 from pathlib import Path
 from typing import Any, Protocol, Self, cast
 
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from tenacity import before_sleep_log, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from .config import GMAIL_MODIFY_SCOPE
 
 DEFAULT_LIST_STR = cast(list[str], None)
 DEFAULT_STR = cast(str, None)
+LOGGER = logging.getLogger(__name__)
 
 
 class _DelegatedCredentials(Protocol):
@@ -75,6 +80,26 @@ class _GmailApiNode(Protocol):
 
 def _gmail_service(credentials: object) -> _GmailApiNode:
     return cast(_GmailApiNode, build("gmail", "v1", credentials=credentials, cache_discovery=False))
+
+
+def _retryable_gmail_exception(exc: BaseException) -> bool:
+    if isinstance(exc, ssl.SSLError | TimeoutError | OSError):
+        return True
+    if isinstance(exc, HttpError):
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        return status in {408, 429, 500, 502, 503, 504}
+    return False
+
+
+@retry(
+    retry=retry_if_exception(_retryable_gmail_exception),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.25, min=0.25, max=2.0),
+    before_sleep=before_sleep_log(LOGGER, logging.WARNING),
+    reraise=True,
+)
+def _execute_gmail_request(request: _GmailApiNode) -> dict[str, Any]:
+    return request.execute()
 
 
 SERVICE_ACCOUNT_CREDENTIALS = cast(Any, service_account.Credentials)
@@ -154,7 +179,7 @@ class GoogleGmailClient:
 
     def list_labels(self) -> list[dict[str, Any]]:
         """List labels."""
-        response = self.service.users().labels().list(userId=self.user_id).execute()
+        response = _execute_gmail_request(self.service.users().labels().list(userId=self.user_id))
         return list(response.get("labels") or [])
 
     def search_messages(self, query: str, limit: int = 100) -> list[str]:
@@ -174,7 +199,7 @@ class GoogleGmailClient:
         kwargs: dict[str, Any] = {"userId": self.user_id, "q": query, "maxResults": max(1, min(page_size, 500))}
         if page_token:
             kwargs["pageToken"] = page_token
-        response = self.service.users().messages().list(**kwargs).execute()
+        response = _execute_gmail_request(self.service.users().messages().list(**kwargs))
         return {
             "messages": list(response.get("messages") or []),
             "next_page_token": response.get("nextPageToken") or "",
@@ -183,7 +208,7 @@ class GoogleGmailClient:
 
     def get_message_metadata(self, message_id: str) -> dict[str, Any]:
         """Get lightweight message metadata."""
-        return (
+        return _execute_gmail_request(
             self.service.users()
             .messages()
             .get(
@@ -192,7 +217,6 @@ class GoogleGmailClient:
                 format="metadata",
                 metadataHeaders=["Date", "Subject", "From", "To", "Message-ID"],
             )
-            .execute()
         )
 
     def list_history(self, start_history_id: str, label_id: str = DEFAULT_STR, limit: int = 500) -> dict[str, Any]:
@@ -212,25 +236,25 @@ class GoogleGmailClient:
             request_kwargs = dict(kwargs)
             if page_token:
                 request_kwargs["pageToken"] = page_token
-            response = self.service.users().history().list(**request_kwargs).execute()
+            response = _execute_gmail_request(self.service.users().history().list(**request_kwargs))
             records.extend(response.get("history") or [])
             history_id = str(response.get("historyId") or history_id)
             page_token = str(response.get("nextPageToken") or "")
             if not page_token:
                 break
-        return {"history": records[:limit], "history_id": history_id, "truncated": len(records) > limit}
+        return {"history": records[:limit], "history_id": history_id, "truncated": bool(page_token) or len(records) > limit}
 
     def get_message(self, message_id: str, fmt: str = "full") -> dict[str, Any]:
         """Get message."""
-        return self.service.users().messages().get(userId=self.user_id, id=message_id, format=fmt).execute()
+        return _execute_gmail_request(self.service.users().messages().get(userId=self.user_id, id=message_id, format=fmt))
 
     def get_thread(self, thread_id: str) -> dict[str, Any]:
         """Get thread."""
-        return self.service.users().threads().get(userId=self.user_id, id=thread_id, format="full").execute()
+        return _execute_gmail_request(self.service.users().threads().get(userId=self.user_id, id=thread_id, format="full"))
 
     def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
         """Get attachment."""
-        response = (
+        response = _execute_gmail_request(
             self.service.users()
             .messages()
             .attachments()
@@ -239,7 +263,6 @@ class GoogleGmailClient:
                 messageId=message_id,
                 id=attachment_id,
             )
-            .execute()
         )
         data = str(response.get("data") or "")
         padding = "=" * (-len(data) % 4)
@@ -253,7 +276,7 @@ class GoogleGmailClient:
             "addLabelIds": add_label_ids or [],
             "removeLabelIds": remove_label_ids or [],
         }
-        return self.service.users().messages().modify(userId=self.user_id, id=message_id, body=body).execute()
+        return _execute_gmail_request(self.service.users().messages().modify(userId=self.user_id, id=message_id, body=body))
 
 
 class UserOAuthGmailClient(GoogleGmailClient):

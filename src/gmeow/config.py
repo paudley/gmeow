@@ -108,6 +108,8 @@ class MaintenanceConfig:
     sync_priority_limit_per_rule: int = 100
     intelligence_seconds: int = 30
     intelligence_limit: int = 25
+    attachment_hydration_seconds: int = 30
+    attachment_hydration_limit: int = 10
     backfill_enabled: bool = False
     backfill_seconds: int = 5
     backfill_batch_size: int = 50
@@ -129,6 +131,8 @@ class MaintenanceConfig:
             sync_priority_limit_per_rule=int(raw.get("sync_priority_limit_per_rule", 100)),
             intelligence_seconds=_interval_from_raw(raw, "intelligence_seconds", 30),
             intelligence_limit=int(raw.get("intelligence_limit", 25)),
+            attachment_hydration_seconds=_interval_from_raw(raw, "attachment_hydration_seconds", 30),
+            attachment_hydration_limit=int(raw.get("attachment_hydration_limit", 10)),
             backfill_enabled=bool(raw.get("backfill_enabled", False)),
             backfill_seconds=_interval_from_raw(raw, "backfill_seconds", 5),
             backfill_batch_size=int(raw.get("backfill_batch_size", 50)),

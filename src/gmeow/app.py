@@ -7,10 +7,17 @@ into the HTTP API. It also mounts the MCP adapter and exposes operational endpoi
 operators.
 """
 
+import asyncio
+import faulthandler
+import logging
+import signal
+import sys
+import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
@@ -40,6 +47,8 @@ DEFAULT_FLOAT = cast(float, None)
 DEFAULT_INT = cast(int, None)
 DEFAULT_LIST_STR = cast(list[str], None)
 DEFAULT_STR = cast(str, None)
+LOGGER = logging.getLogger(__name__)
+SLOW_REQUEST_SECONDS = 10.0
 
 
 class SearchRequest(BaseModel):
@@ -166,9 +175,32 @@ def list_messages_endpoint(request: Request, limit: int = 50, offset: int = 0) -
     return cache.list_messages(limit=limit, offset=offset)
 
 
+def _install_stack_dump_handler() -> None:
+    """Install in-process stack dumps for production hang diagnosis."""
+    faulthandler.enable(file=sys.stderr, all_threads=True)
+    try:
+        faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
+    except RuntimeError:
+        LOGGER.debug("SIGUSR1 stack dump handler is already registered.")
+
+
+async def _slow_request_watchdog(request: Request, request_id: str, started: float) -> None:
+    await asyncio.sleep(SLOW_REQUEST_SECONDS)
+    elapsed = time.monotonic() - started
+    LOGGER.warning(
+        "Slow request active id=%s method=%s path=%s elapsed=%.3fs",
+        request_id,
+        request.method,
+        request.url.path,
+        elapsed,
+    )
+    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+
+
 def create_app(config: GmeowConfig = DEFAULT_CONFIG) -> FastAPI:
     """Create app."""
     config = config or GmeowConfig.load()
+    _install_stack_dump_handler()
     cache, attachments, semantic, graph, sync = build_services(config)
     mcp_app = build_mcp_app(cache=cache, sync=sync, attachments=attachments)
     scheduler = MaintenanceScheduler(config.maintenance, cache, sync, attachments, semantic, graph=graph)
@@ -226,7 +258,24 @@ def _register_access_and_health_routes(app: FastAPI, config: GmeowConfig, cache:
         test_clients = {"testclient"}
         if client_host not in allowed | test_clients or host_header not in allowed:
             return Response("Gmeow only serves loopback clients by default.\n", status_code=403)
-        return await call_next(request)
+        request_id = uuid4().hex[:12]
+        started = time.monotonic()
+        watchdog = asyncio.create_task(_slow_request_watchdog(request, request_id, started))
+        try:
+            return await call_next(request)
+        finally:
+            watchdog.cancel()
+            with suppress(asyncio.CancelledError):
+                await watchdog
+            elapsed = time.monotonic() - started
+            if elapsed >= SLOW_REQUEST_SECONDS:
+                LOGGER.warning(
+                    "Slow request completed id=%s method=%s path=%s elapsed=%.3fs",
+                    request_id,
+                    request.method,
+                    request.url.path,
+                    elapsed,
+                )
 
     @app.get("/api/v1/health")
     def health() -> dict[str, Any]:
@@ -673,6 +722,22 @@ def _register_attachment_routes(app: FastAPI, cache: PgCache, attachments: CasAt
 
 
 def _register_search_routes(app: FastAPI, cache: PgCache, sync: SyncService, semantic: PgSemanticIndex) -> None:
+    @app.get("/api/v1/search/analysis-status")
+    def search_analysis_status(message_ids: str) -> dict[str, Any]:
+        """Search analysis status."""
+        ids = [message_id.strip() for message_id in message_ids.split(",") if message_id.strip()]
+        status = sync.analysis_status_for_messages(ids)
+        status["messages"] = [message for message_id in ids if (message := cache.get_message(message_id))]
+        return status
+
+    @app.get("/api/v1/search/{search_id}/status")
+    def search_status(search_id: str) -> dict[str, Any]:
+        """Search status."""
+        status = sync.search_status(search_id)
+        if not status:
+            raise HTTPException(status_code=404, detail="Search not found.")
+        return status
+
     @app.post("/api/v1/search/text")
     def search_text(request: SearchRequest) -> list[dict[str, Any]]:
         """Search text."""
@@ -729,6 +794,8 @@ def _register_search_routes(app: FastAPI, cache: PgCache, sync: SyncService, sem
         )
 
     _route_refs = (
+        search_analysis_status,
+        search_status,
         search_text,
         search_attachments_text,
         search_semantic,
