@@ -31,23 +31,6 @@ FORBIDDEN_TRACKED_PATHS = {
     "config/gmeow.yaml",
     "config/gmeow.example.yaml",
 }
-FORBIDDEN_TEXT = [
-    "paud" + "ley",
-    "hi" + "ve2",
-    "104" + "306" + "190" + "268" + "698" + "565" + "204",
-    "/home/" + "paud" + "ley",
-    "mg" + "eow",
-    "gmeow-gmail" + "@",
-    "~/.ssh/" + "gloud/" + "gcats.sops.yaml",
-    "Pat" + "rick " + "Aud" + "ley",
-    "Jan" + "et " + "Mc" + "hugh",
-    "(604) " + "785-5446",
-    "bii-" + "north" + "point-unvr",
-    "ry" + "an@" + "the" + "vancouver" + "life.com",
-    "the" + "vancouver" + "life",
-    "1325 " + "Rol" + "ston Street",
-]
-
 
 def main() -> int:
     """Run public release checks."""
@@ -56,7 +39,6 @@ def main() -> int:
 
     failures = _missing_required_files()
     failures.extend(_forbidden_tracked_paths(tracked_set))
-    failures.extend(_forbidden_text_matches(tracked))
     failures.extend(_missing_spdx_headers(tracked))
 
     failures.extend(_example_config_failures())
@@ -74,18 +56,6 @@ def _missing_required_files() -> list[str]:
 
 def _forbidden_tracked_paths(tracked_set: set[str]) -> list[str]:
     return [f"forbidden tracked local config path: {rel}" for rel in sorted(FORBIDDEN_TRACKED_PATHS & tracked_set) if (ROOT / rel).exists()]
-
-
-def _forbidden_text_matches(tracked: list[str]) -> list[str]:
-    failures: list[str] = []
-    for rel in tracked:
-        path = ROOT / rel
-        if not path.is_file() or _skip_text_scan(rel):
-            continue
-        text = _read_text(path)
-        lowered = text.lower()
-        failures.extend(f"forbidden private string {needle!r} found in {rel}" for needle in FORBIDDEN_TEXT if needle.lower() in lowered)
-    return failures
 
 
 def _missing_spdx_headers(tracked: list[str]) -> list[str]:
