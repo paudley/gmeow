@@ -1,8 +1,22 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/blackcat-informatics/gmeow/main/docs/gmeow-logo.svg" alt="Gmeow logo" width="280">
+</p>
+
 # Gmeow
 
-Gmeow is a local Gmail intelligence server for agents and automation. It exposes a loopback REST API and an MCP Streamable HTTP endpoint over an authenticated Gmail mailbox, while maintaining a local PostgreSQL-backed cache, semantic index, attachment object store, and knowledge graph.
+Local Gmail intelligence for agents.
+
+Gmeow turns a Gmail mailbox into a local intelligence layer for agents and automation. It exposes a loopback REST API and an MCP Streamable HTTP endpoint over an authenticated Gmail mailbox, while maintaining a local PostgreSQL-backed cache, semantic index, attachment object store, and knowledge graph.
 
 Gmeow is designed for trusted single-user local systems. By default it binds to `127.0.0.1` and does not add application-level authentication. Do not expose it directly to an untrusted network.
+
+## What Gmeow Does
+
+- Gives agents a local MCP and REST interface to search, read, and act on Gmail without scraping a browser.
+- Builds a durable local archive with raw RFC822 messages, attachment payloads, labels, threads, sync state, and search indexes.
+- Adds semantic search, category discovery, and knowledge-graph views over mailbox content.
+- Extracts attachment metadata and text so documents, images, archives, PDFs, and calendar files become searchable context.
+- Serves the cached archive through read-only IMAP for tools that already speak mail protocols.
 
 ## Features
 
