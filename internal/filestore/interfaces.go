@@ -29,6 +29,23 @@ type Store interface {
 	Verify(ctx context.Context) (VerifyReport, error)
 }
 
+type ProjectionFinding struct {
+	Digest  contracts.ObjectDigest `json:"digest,omitempty"`
+	Path    string                 `json:"path,omitempty"`
+	Code    string                 `json:"code"`
+	Message string                 `json:"message"`
+}
+
+type ProjectionObject struct {
+	Digest      contracts.ObjectDigest
+	Path        string
+	Manifest    contracts.Manifest
+	Annotations []contracts.Annotation
+	Findings    []ProjectionFinding
+}
+
+type ProjectionFunc func(ProjectionObject) error
+
 type PutRequest struct {
 	Reader        io.Reader
 	MediaType     string

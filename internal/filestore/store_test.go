@@ -237,6 +237,54 @@ func TestWriteAnnotationMergesExistingData(t *testing.T) {
 	}
 }
 
+func TestWalkProjectionReadsAnnotationsAndIgnoresRecovery(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest: digest,
+		Kind:         "analysis",
+		Data:         map[string]any{"summary": "hello world"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		store.objectPath(digest, recoveryFilename),
+		[]byte("not json"),
+		0o640,
+	); err != nil {
+		t.Fatal(err)
+	}
+	objects := []ProjectionObject{}
+	if err := store.WalkProjection(ctx, func(object ProjectionObject) error {
+		objects = append(objects, object)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 {
+		t.Fatalf("expected one projected object, got %d", len(objects))
+	}
+	if len(objects[0].Findings) != 0 {
+		t.Fatalf(
+			"projection should ignore corrupt recovery sidecar: %#v",
+			objects[0].Findings,
+		)
+	}
+	if objects[0].Manifest.ObjectDigest != digest {
+		t.Fatalf("projection did not read manifest: %#v", objects[0].Manifest)
+	}
+	if len(objects[0].Annotations) != 1 || objects[0].Annotations[0].Kind != "analysis" {
+		t.Fatalf("projection did not read annotations: %#v", objects[0].Annotations)
+	}
+}
+
 func TestWriteAnnotationRejectsMissingObject(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	err := store.WriteAnnotation(context.Background(), contracts.Annotation{

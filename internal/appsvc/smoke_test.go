@@ -150,6 +150,14 @@ func (index *fakeIndex) Project(
 	return nil
 }
 
+func (index *fakeIndex) ProjectObject(
+	_ context.Context,
+	_ filestore.ProjectionObject,
+) error {
+	index.projected = true
+	return nil
+}
+
 func (index *fakeIndex) Search(
 	context.Context,
 	contracts.SearchRequest,
@@ -169,6 +177,47 @@ func (index *fakeIndex) Search(
 func (index *fakeIndex) Rebuild(context.Context) error {
 	index.projected = true
 	return nil
+}
+
+func (index *fakeIndex) Structure(
+	context.Context,
+	contracts.ObjectDigest,
+) (contracts.Structure, error) {
+	return contracts.Structure{SchemaVersion: contracts.SchemaVersionPhase00}, nil
+}
+
+func (index *fakeIndex) Relationships(
+	context.Context,
+	contracts.RelationshipRequest,
+) (contracts.RelationshipResponse, error) {
+	return contracts.RelationshipResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+	}, nil
+}
+
+func (index *fakeIndex) Graph(
+	context.Context,
+	contracts.GraphRequest,
+) (contracts.GraphResponse, error) {
+	return contracts.GraphResponse{SchemaVersion: contracts.SchemaVersionPhase00}, nil
+}
+
+func (index *fakeIndex) AnalysisStatus(
+	context.Context,
+	contracts.AnalysisStatusRequest,
+) (contracts.AnalysisStatusResponse, error) {
+	return contracts.AnalysisStatusResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+	}, nil
+}
+
+func (index *fakeIndex) VectorSearch(
+	context.Context,
+	contracts.VectorSearchRequest,
+) (contracts.VectorSearchResponse, error) {
+	return contracts.VectorSearchResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+	}, nil
 }
 
 type fakeAnalyzer struct{}

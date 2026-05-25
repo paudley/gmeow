@@ -40,6 +40,7 @@ func NewAdminCommand(out io.Writer, in io.Reader) *cobra.Command {
 	root.AddCommand(newStatusCommand("gmeow-admin", out, &configPath))
 	root.AddCommand(newConfigCommand(out, in, &configPath))
 	root.AddCommand(newFilestoreCommand(out, &configPath))
+	root.AddCommand(newQueryCommand(out, &configPath))
 	return root
 }
 

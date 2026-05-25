@@ -33,3 +33,60 @@ func TestManifestJSONRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected digest: %s", decoded.ObjectDigest)
 	}
 }
+
+func TestSearchRequestJSONUsesContractKeys(t *testing.T) {
+	encoded := []byte(`{
+		"schema_version": 1,
+		"query": "apollo",
+		"provenance": {
+			"source_names": ["fixture"],
+			"external_ids": ["id-1"]
+		},
+		"relationships": {
+			"types": ["mentions"],
+			"roles": ["topic"]
+		}
+	}`)
+	var request SearchRequest
+	if err := json.Unmarshal(encoded, &request); err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Provenance.SourceNames) != 1 ||
+		request.Provenance.SourceNames[0] != "fixture" ||
+		len(request.Relationships.Roles) != 1 ||
+		request.Relationships.Roles[0] != "topic" {
+		t.Fatalf("request did not unmarshal snake_case filters: %#v", request)
+	}
+	roundTrip, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonContainsKey(roundTrip, "provenance") ||
+		!jsonContainsKey(roundTrip, "relationships") {
+		t.Fatalf("request did not marshal contract keys: %s", roundTrip)
+	}
+}
+
+func TestAnalysisStatusJSONUsesDataKey(t *testing.T) {
+	encoded, err := json.Marshal(AnalysisStatus{
+		ObjectDigest: "digest",
+		AnalyzerName: "summary",
+		Status:       "complete",
+		Data:         map[string]any{"summary": "ok"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonContainsKey(encoded, "data") || jsonContainsKey(encoded, "Data") {
+		t.Fatalf("analysis status data used wrong JSON key: %s", encoded)
+	}
+}
+
+func jsonContainsKey(encoded []byte, key string) bool {
+	var value map[string]any
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return false
+	}
+	_, ok := value[key]
+	return ok
+}

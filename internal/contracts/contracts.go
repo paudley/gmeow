@@ -164,11 +164,16 @@ type Annotation struct {
 }
 
 type SearchRequest struct {
-	SchemaVersion SchemaVersion `json:"schema_version"`
-	Query         string        `json:"query"`
-	Facets        []string      `json:"facets,omitempty"`
-	Limit         int           `json:"limit,omitempty"`
-	Offset        int           `json:"offset,omitempty"`
+	SchemaVersion SchemaVersion      `json:"schema_version"`
+	Query         string             `json:"query"`
+	Facets        []string           `json:"facets,omitempty"`
+	Provenance    ProvenanceFilter   `json:"provenance,omitempty"`
+	Relationships RelationshipFilter `json:"relationships,omitempty"`
+	CompoundRoles []string           `json:"compound_roles,omitempty"`
+	AnalyzerNames []string           `json:"analyzer_names,omitempty"`
+	MediaTypes    []string           `json:"media_types,omitempty"`
+	Limit         int                `json:"limit,omitempty"`
+	Offset        int                `json:"offset,omitempty"`
 }
 
 type SearchResult struct {
@@ -184,4 +189,82 @@ type SearchResponse struct {
 	SchemaVersion SchemaVersion  `json:"schema_version"`
 	Results       []SearchResult `json:"results"`
 	Total         int            `json:"total"`
+}
+
+type ProvenanceFilter struct {
+	SourceKinds []string `json:"source_kinds,omitempty"`
+	SourceNames []string `json:"source_names,omitempty"`
+	ExternalIDs []string `json:"external_ids,omitempty"`
+}
+
+type RelationshipFilter struct {
+	Types []string     `json:"types,omitempty"`
+	From  ObjectDigest `json:"from,omitempty"`
+	To    ObjectDigest `json:"to,omitempty"`
+	Roles []string     `json:"roles,omitempty"`
+	Any   ObjectDigest `json:"any,omitempty"`
+}
+
+type RelationshipRequest struct {
+	SchemaVersion SchemaVersion      `json:"schema_version"`
+	Filter        RelationshipFilter `json:"filter"`
+	Limit         int                `json:"limit,omitempty"`
+}
+
+type RelationshipResponse struct {
+	SchemaVersion SchemaVersion  `json:"schema_version"`
+	Relationships []Relationship `json:"relationships"`
+}
+
+type GraphRequest struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Node          string        `json:"node,omitempty"`
+	Predicate     string        `json:"predicate,omitempty"`
+	Limit         int           `json:"limit,omitempty"`
+}
+
+type GraphResponse struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Facts         []GraphFact   `json:"facts"`
+}
+
+type AnalysisStatusRequest struct {
+	SchemaVersion SchemaVersion  `json:"schema_version"`
+	ObjectDigests []ObjectDigest `json:"object_digests,omitempty"`
+	AnalyzerNames []string       `json:"analyzer_names,omitempty"`
+	Limit         int            `json:"limit,omitempty"`
+}
+
+type AnalysisStatus struct {
+	ObjectDigest ObjectDigest   `json:"object_digest"`
+	AnalyzerName string         `json:"analyzer_name"`
+	AnalyzerVer  string         `json:"analyzer_version,omitempty"`
+	Status       string         `json:"status"`
+	GeneratedAt  time.Time      `json:"generated_at,omitempty"`
+	Data         map[string]any `json:"data,omitempty"`
+}
+
+type AnalysisStatusResponse struct {
+	SchemaVersion SchemaVersion    `json:"schema_version"`
+	Statuses      []AnalysisStatus `json:"statuses"`
+}
+
+type VectorSearchRequest struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Model         string        `json:"model"`
+	Dimensions    int           `json:"dimensions,omitempty"`
+	Vector        []float32     `json:"vector"`
+	Facets        []string      `json:"facets,omitempty"`
+	Limit         int           `json:"limit,omitempty"`
+}
+
+type VectorSearchResult struct {
+	ObjectDigest ObjectDigest `json:"object_digest"`
+	Model        string       `json:"model"`
+	Distance     float64      `json:"distance"`
+}
+
+type VectorSearchResponse struct {
+	SchemaVersion SchemaVersion        `json:"schema_version"`
+	Results       []VectorSearchResult `json:"results"`
 }

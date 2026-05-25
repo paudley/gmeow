@@ -29,7 +29,8 @@ not authority.
   - graph/relationship lookup;
   - compound expansion;
   - analyzer status;
-  - vector placeholder path or pgvector integration if embeddings exist.
+  - pgvector search for projected embeddings;
+  - read-only Apache AGE status and Cypher exploration over projected graph data.
 - Ensure all SQL uses parameterized `pgx` calls or generated/query-builder code.
 
 ## Retire Python Equivalent

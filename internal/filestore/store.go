@@ -262,6 +262,108 @@ func (store *FilesystemStore) WriteAnnotation(
 	)
 }
 
+func (store *FilesystemStore) WalkProjection(
+	ctx context.Context,
+	fn ProjectionFunc,
+) error {
+	if fn == nil {
+		return errors.New("projection callback is required")
+	}
+	base := filepath.Join(store.root, "objects", "blake3")
+	err := filepath.WalkDir(
+		base,
+		func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				if errors.Is(walkErr, os.ErrNotExist) && path == base {
+					return nil
+				}
+				return walkErr
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !entry.IsDir() || !looksLikeDigest(entry.Name()) {
+				return nil
+			}
+			digest := contracts.ObjectDigest(entry.Name())
+			object := ProjectionObject{
+				Digest: digest,
+				Path:   path,
+			}
+			if expectedPath := store.objectDir(digest); path != expectedPath {
+				object.Findings = append(object.Findings, ProjectionFinding{
+					Digest:  digest,
+					Path:    path,
+					Code:    "object_path_mismatch",
+					Message: fmt.Sprintf("expected %s", expectedPath),
+				})
+			} else {
+				store.readProjectionObject(&object)
+			}
+			if err := fn(object); err != nil {
+				return err
+			}
+			return filepath.SkipDir
+		},
+	)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func (store *FilesystemStore) readProjectionObject(object *ProjectionObject) {
+	manifestPath := filepath.Join(object.Path, manifestFilename)
+	if err := store.readCompressedJSON(manifestPath, &object.Manifest); err != nil {
+		object.Findings = append(object.Findings, ProjectionFinding{
+			Digest:  object.Digest,
+			Path:    manifestPath,
+			Code:    "manifest_read_failed",
+			Message: err.Error(),
+		})
+		return
+	}
+	if object.Manifest.ObjectDigest == "" {
+		object.Manifest.ObjectDigest = object.Digest
+	}
+	entries, err := os.ReadDir(object.Path)
+	if err != nil {
+		object.Findings = append(object.Findings, ProjectionFinding{
+			Digest:  object.Digest,
+			Path:    object.Path,
+			Code:    "annotation_list_failed",
+			Message: err.Error(),
+		})
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !isProjectionAnnotationFilename(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(object.Path, entry.Name())
+		var annotation contracts.Annotation
+		if err := store.readCompressedJSON(path, &annotation); err != nil {
+			object.Findings = append(object.Findings, ProjectionFinding{
+				Digest:  object.Digest,
+				Path:    path,
+				Code:    "annotation_read_failed",
+				Message: err.Error(),
+			})
+			continue
+		}
+		if annotation.ObjectDigest == "" {
+			annotation.ObjectDigest = object.Digest
+		}
+		if annotation.Kind == "" {
+			annotation.Kind = strings.TrimSuffix(entry.Name(), ".json.zst")
+		}
+		object.Annotations = append(object.Annotations, annotation)
+	}
+	sort.SliceStable(object.Annotations, func(left, right int) bool {
+		return object.Annotations[left].Kind < object.Annotations[right].Kind
+	})
+}
+
 func (store *FilesystemStore) Verify(ctx context.Context) (VerifyReport, error) {
 	report := VerifyReport{Status: VerifyStatusOK}
 	base := filepath.Join(store.root, "objects", "blake3")
@@ -882,6 +984,15 @@ func isReservedAnnotationKind(kind string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func isProjectionAnnotationFilename(name string) bool {
+	switch name {
+	case blobFilename, recoveryFilename, manifestFilename:
+		return false
+	default:
+		return strings.HasSuffix(name, ".json.zst")
 	}
 }
 
