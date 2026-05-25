@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 
 style:
   line_length: 140
@@ -10,7 +10,7 @@ repo:
   protected_branch_work:
     enabled: true
   license:
-    spdx_identifier: MIT
+    spdx_identifier: AGPL-3.0-only
     copyright: 2026 Blackcat Informatics® Inc.
     license_file: LICENSE
     extensions:
