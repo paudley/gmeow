@@ -33,3 +33,7 @@ htmlcov/
 
 .coding-ethos/code-intel.db-shm
 .coding-ethos/code-intel.db-wal
+
+.coding-ethos/code-intel.duckdb
+.coding-ethos/code-intel.duckdb.wal
+.coding-ethos/events/
