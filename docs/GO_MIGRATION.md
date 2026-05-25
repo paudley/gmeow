@@ -296,6 +296,9 @@ Rules:
 
 - bytes are immutable; manifests are mutable but must be written atomically;
 - blob emergency sidecars are immutable and must be written atomically with blob creation;
+- writes to an existing object are no-ops for `blob.zst` and `recovery.json`; they only merge
+  mutable authoritative annotations such as `manifest.json.zst`, `analysis.json.zst`, and
+  `overlays.json.zst`;
 - normal processes must ignore emergency sidecars and read authoritative manifests instead;
 - authoritative annotations live in the object directory and are the only normal reconstruction
   source;
@@ -558,6 +561,7 @@ Required behavior:
 - assign immutable object IDs and identity strategies before object creation;
 - create one object directory per digest;
 - write every object with `blob.zst` plus immutable emergency `recovery.json` sidecar;
+- treat existing-object writes as metadata merges only, never as blob or recovery sidecar repairs;
 - own dedupe for byte-bearing objects and canonical compound envelopes;
 - optional zstd compression by media type;
 - annotation read, atomic write, and merge for `manifest.json.zst`, `analysis.json.zst`,
@@ -1122,6 +1126,8 @@ Runtime layout rules:
 
 - every object key has exactly one object directory;
 - `blob.zst` and `recovery.json` are immutable after creation;
+- once `blob.zst` exists, normal writes must not create, replace, repair, or refresh
+  `recovery.json`;
 - authoritative annotations are compressed `*.json.zst` files in the object directory;
 - annotation files are independently and atomically written;
 - QUERY rebuilds by walking object directories and reading authoritative annotations;

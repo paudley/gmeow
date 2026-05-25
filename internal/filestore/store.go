@@ -250,8 +250,14 @@ func (store *FilesystemStore) WriteAnnotation(
 	if annotation.GeneratedAt.IsZero() {
 		annotation.GeneratedAt = time.Now().UTC()
 	}
+	annotationPath := store.objectPath(annotation.ObjectDigest, name)
+	if existing, err := store.readAnnotation(annotationPath); err == nil {
+		annotation = mergeAnnotation(existing, annotation)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read existing annotation: %w", err)
+	}
 	return store.writeCompressedJSON(
-		store.objectPath(annotation.ObjectDigest, name),
+		annotationPath,
 		annotation,
 	)
 }
@@ -325,44 +331,34 @@ func (store *FilesystemStore) writeObject(
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read existing manifest: %w", err)
 	}
-	finalContent := content
-	if manifest.IdentityStrategy == identityStrategyCompoundStableID {
+	blobExists := true
+	if _, err := os.Stat(blobPath); errors.Is(err, os.ErrNotExist) {
+		blobExists = false
+	} else if err != nil {
+		return fmt.Errorf("stat blob: %w", err)
+	}
+	if !blobExists && manifest.IdentityStrategy == identityStrategyCompoundStableID {
 		var err error
-		finalContent, err = compoundEnvelopeBytes(manifest)
+		content, err = compoundEnvelopeBytes(manifest)
 		if err != nil {
 			return err
 		}
-		manifest.Size = int64(len(finalContent))
+		manifest.Size = int64(len(content))
 	}
-	compressed, err := compressZstd(finalContent)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(blobPath); errors.Is(err, os.ErrNotExist) {
+	if !blobExists {
+		compressed, err := compressZstd(content)
+		if err != nil {
+			return err
+		}
 		if err := atomicWriteFile(blobPath, compressed, 0o640); err != nil {
 			return fmt.Errorf("write blob: %w", err)
 		}
 		if err := atomicWriteJSON(
 			recoveryPath,
-			recoverySidecarFor(digest, finalContent, compressed, sourceHint, manifest),
+			recoverySidecarFor(digest, content, compressed, sourceHint, manifest),
 		); err != nil {
 			return fmt.Errorf("write recovery sidecar: %w", err)
 		}
-	} else if err != nil {
-		return fmt.Errorf("stat blob: %w", err)
-	} else if manifest.IdentityStrategy == identityStrategyCompoundStableID {
-		if err := atomicWriteFile(blobPath, compressed, 0o640); err != nil {
-			return fmt.Errorf("write compound blob: %w", err)
-		}
-	} else if _, err := os.Stat(recoveryPath); errors.Is(err, os.ErrNotExist) {
-		if err := atomicWriteJSON(
-			recoveryPath,
-			recoverySidecarFor(digest, finalContent, compressed, sourceHint, manifest),
-		); err != nil {
-			return fmt.Errorf("write recovery sidecar: %w", err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("stat recovery sidecar: %w", err)
 	}
 	return store.writeCompressedJSON(manifestPath, manifest)
 }
@@ -574,6 +570,16 @@ func (store *FilesystemStore) readCompressedJSON(path string, value any) error {
 	return nil
 }
 
+func (store *FilesystemStore) readAnnotation(
+	path string,
+) (contracts.Annotation, error) {
+	var annotation contracts.Annotation
+	if err := store.readCompressedJSON(path, &annotation); err != nil {
+		return contracts.Annotation{}, err
+	}
+	return annotation, nil
+}
+
 func (store *FilesystemStore) objectPath(
 	digest contracts.ObjectDigest,
 	name string,
@@ -766,6 +772,34 @@ func mergeManifest(existing, incoming contracts.Manifest) contracts.Manifest {
 	}
 	if merged.Overlays == nil {
 		merged.Overlays = map[string]any{}
+	}
+	return merged
+}
+
+func mergeAnnotation(
+	existing contracts.Annotation,
+	incoming contracts.Annotation,
+) contracts.Annotation {
+	merged := existing
+	merged.SchemaVersion = contracts.SchemaVersionPhase00
+	merged.ObjectDigest = incoming.ObjectDigest
+	merged.Kind = incoming.Kind
+	merged.AnalyzerName = firstNonEmpty(incoming.AnalyzerName, existing.AnalyzerName)
+	merged.AnalyzerVer = firstNonEmpty(incoming.AnalyzerVer, existing.AnalyzerVer)
+	if !incoming.GeneratedAt.IsZero() {
+		merged.GeneratedAt = incoming.GeneratedAt
+	}
+	merged.Data = mergeMaps(existing.Data, incoming.Data)
+	return merged
+}
+
+func mergeMaps(existing, incoming map[string]any) map[string]any {
+	merged := map[string]any{}
+	for key, value := range existing {
+		merged[key] = value
+	}
+	for key, value := range incoming {
+		merged[key] = value
 	}
 	return merged
 }

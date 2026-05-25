@@ -99,7 +99,7 @@ func TestPutRejectsObjectWithoutFacet(t *testing.T) {
 	}
 }
 
-func TestPutRepairsMissingRecoverySidecarOnRetry(t *testing.T) {
+func TestPutDoesNotRepairMissingRecoverySidecarOnExistingObject(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	request := PutRequest{
@@ -121,15 +121,20 @@ func TestPutRepairsMissingRecoverySidecarOnRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(store.objectPath(digest, recoveryFilename)); err != nil {
-		t.Fatalf("recovery sidecar was not repaired: %v", err)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	} else {
+		t.Fatal("existing object write repaired immutable recovery sidecar")
 	}
 	report, err := store.Verify(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Status != VerifyStatusOK {
-		t.Fatalf("expected repaired store to verify cleanly: %#v", report)
+	if report.Status != VerifyStatusError {
+		t.Fatalf("expected missing recovery sidecar to remain visible: %#v", report)
 	}
+	assertFinding(t, report, "recovery_missing")
 }
 
 func TestPublicMethodsRejectMalformedDigests(t *testing.T) {
@@ -184,6 +189,51 @@ func TestWriteAnnotationWritesIndependentCompressedJSON(t *testing.T) {
 	}
 	if _, err := store.ReadManifest(ctx, digest); err != nil {
 		t.Fatalf("manifest should remain readable after annotation write: %v", err)
+	}
+}
+
+func TestWriteAnnotationMergesExistingData(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest: digest,
+		AnalyzerName: "summary",
+		AnalyzerVer:  "1",
+		Kind:         "analysis",
+		Data:         map[string]any{"summary": "ok", "score": float64(1)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest: digest,
+		AnalyzerName: "entities",
+		AnalyzerVer:  "2",
+		Kind:         "analysis",
+		Data:         map[string]any{"entities": []any{"alice"}, "score": float64(2)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var annotation contracts.Annotation
+	if err := store.readCompressedJSON(
+		store.objectPath(digest, "analysis.json.zst"),
+		&annotation,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if annotation.Data["summary"] != "ok" ||
+		annotation.Data["score"] != float64(2) ||
+		len(annotation.Data["entities"].([]any)) != 1 {
+		t.Fatalf("annotation data was not merged: %#v", annotation.Data)
+	}
+	if annotation.AnalyzerName != "entities" || annotation.AnalyzerVer != "2" {
+		t.Fatalf("annotation metadata was not refreshed: %#v", annotation)
 	}
 }
 
@@ -353,7 +403,7 @@ func TestCompoundStableIdentityAndStructure(t *testing.T) {
 	}
 }
 
-func TestCompoundMergeRewritesEnvelopeBlob(t *testing.T) {
+func TestCompoundMergePreservesBlobAndRecoverySidecar(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	firstPart, err := store.Put(ctx, PutRequest{
@@ -381,6 +431,10 @@ func TestCompoundMergeRewritesEnvelopeBlob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	originalBlob, err := os.ReadFile(store.objectPath(compound, blobFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
 	originalRecovery, err := os.ReadFile(store.objectPath(compound, recoveryFilename))
 	if err != nil {
 		t.Fatal(err)
@@ -396,9 +450,16 @@ func TestCompoundMergeRewritesEnvelopeBlob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	currentBlob, err := os.ReadFile(store.objectPath(compound, blobFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
 	currentRecovery, err := os.ReadFile(store.objectPath(compound, recoveryFilename))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Equal(currentBlob, originalBlob) {
+		t.Fatal("compound merge rewrote immutable blob")
 	}
 	if !bytes.Equal(currentRecovery, originalRecovery) {
 		t.Fatal("compound merge rewrote immutable recovery sidecar")
@@ -413,8 +474,8 @@ func TestCompoundMergeRewritesEnvelopeBlob(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(envelope), string(firstPart)) ||
-		!strings.Contains(string(envelope), string(secondPart)) {
-		t.Fatalf("compound blob did not include merged parts: %s", envelope)
+		strings.Contains(string(envelope), string(secondPart)) {
+		t.Fatalf("compound blob should remain the original envelope: %s", envelope)
 	}
 	structure, err := store.GetStructure(ctx, compound)
 	if err != nil {
@@ -428,11 +489,9 @@ func TestCompoundMergeRewritesEnvelopeBlob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Status != VerifyStatusError {
-		t.Fatalf("merged compound should report immutable recovery mismatch: %#v", report)
+	if report.Status != VerifyStatusOK {
+		t.Fatalf("merged compound should verify cleanly: %#v", report)
 	}
-	assertFinding(t, report, "recovery_uncompressed_hash_mismatch")
-	assertFinding(t, report, "recovery_compressed_hash_mismatch")
 }
 
 func TestCompoundWithoutStableObjectIDFailsBeforeWriting(t *testing.T) {
