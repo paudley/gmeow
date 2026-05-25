@@ -4,6 +4,9 @@
 style:
   line_length: 140
 
+go:
+  worktree: .
+
 repo:
   kind: python-service
   profiles: []

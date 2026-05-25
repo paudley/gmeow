@@ -1024,7 +1024,7 @@ def _gmail_attachment_ref_count(raw: object) -> int:
 
 
 def _payload_attachment_ref_count(payload: dict[str, Any]) -> int:
-    body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    body = body_raw if isinstance(body_raw := payload.get("body"), dict) else {}
     count = 1 if body.get("attachmentId") else 0
     for part in payload.get("parts") or []:
         if isinstance(part, dict):

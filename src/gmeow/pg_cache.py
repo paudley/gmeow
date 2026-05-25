@@ -230,7 +230,7 @@ class PgCache:
 
     def connection(self) -> _PgConnection:
         """Open a row-dict database connection for helper modules."""
-        return self._connect()
+        return cast(_PgConnection, self._connect())
 
     def close(self) -> None:
         """Close."""
