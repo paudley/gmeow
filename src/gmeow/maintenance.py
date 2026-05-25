@@ -186,6 +186,8 @@ class MaintenanceScheduler:
         if self.config.attachment_sidecars_seconds:
             specs.append(("attachment_sidecars", self.config.attachment_sidecars_seconds, self._refresh_attachment_sidecars))
         for name, interval, callback in specs:
+            if not interval or interval <= 0:
+                continue
             state = self._states.setdefault(name, TimedTaskState(name=name, interval_seconds=interval))
             self._tasks.append(asyncio.create_task(self._loop(state, callback), name=f"gmeow-maintenance-{name}"))
 

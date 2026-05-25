@@ -32,11 +32,30 @@ def age_sql(cypher: str, columns: str) -> sql.Composable:
 
 
 def age_cypher_sql(cypher: str) -> sql.Composable:
-    """Build an AGE-compatible dollar-quoted Cypher literal."""
+    """Build a safely dollar-quoted Cypher literal for Apache AGE."""
     tag = "gmeow_age"
     while f"${tag}$" in cypher:
         tag = f"_{tag}"
-    return sql.SQL("${}${}${}$").format(sql.SQL(tag), sql.SQL(cast(Any, cypher)), sql.SQL(tag))
+    return sql.SQL(f"${tag}${cypher}${tag}$")
+
+
+def apply_category_filters_sql(
+    where: list[str],
+    params: list[Any],
+    include_categories: list[str],
+    exclude_categories: list[str],
+    default_excluded_categories: set[str],
+) -> None:
+    """Append category include and exclude predicates to a message query."""
+    if include_categories:
+        where.append("EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
+        params.append(include_categories)
+    excluded = exclude_categories
+    if not excluded and not include_categories:
+        excluded = list(default_excluded_categories)
+    if excluded:
+        where.append("NOT EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
+        params.append(excluded)
 
 
 def import_insert_sql(

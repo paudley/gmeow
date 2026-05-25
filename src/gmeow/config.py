@@ -123,19 +123,19 @@ class MaintenanceConfig:
         raw = data or {}
         return cls(
             enabled=bool(raw.get("enabled", True)),
-            sync_history_seconds=_optional_int(raw.get("sync_history_seconds", 300)) or DEFAULT_INT,
+            sync_history_seconds=_interval_from_raw(raw, "sync_history_seconds", 300),
             sync_history_limit=int(raw.get("sync_history_limit", 500)),
-            sync_priority_seconds=_optional_int(raw.get("sync_priority_seconds", 3600)) or DEFAULT_INT,
+            sync_priority_seconds=_interval_from_raw(raw, "sync_priority_seconds", 3600),
             sync_priority_limit_per_rule=int(raw.get("sync_priority_limit_per_rule", 100)),
-            intelligence_seconds=_optional_int(raw.get("intelligence_seconds", 30)) or DEFAULT_INT,
+            intelligence_seconds=_interval_from_raw(raw, "intelligence_seconds", 30),
             intelligence_limit=int(raw.get("intelligence_limit", 25)),
             backfill_enabled=bool(raw.get("backfill_enabled", False)),
-            backfill_seconds=_optional_int(raw.get("backfill_seconds", 5)) or DEFAULT_INT,
+            backfill_seconds=_interval_from_raw(raw, "backfill_seconds", 5),
             backfill_batch_size=int(raw.get("backfill_batch_size", 50)),
             backfill_max_empty_windows=int(raw.get("backfill_max_empty_windows", 120)),
-            derived_refresh_seconds=_optional_int(raw.get("derived_refresh_seconds", 900)) or DEFAULT_INT,
-            analyze_seconds=_optional_int(raw.get("analyze_seconds", 3600)) or DEFAULT_INT,
-            attachment_sidecars_seconds=_optional_int(raw.get("attachment_sidecars_seconds")) or DEFAULT_INT,
+            derived_refresh_seconds=_interval_from_raw(raw, "derived_refresh_seconds", 900),
+            analyze_seconds=_interval_from_raw(raw, "analyze_seconds", 3600),
+            attachment_sidecars_seconds=_interval_from_raw(raw, "attachment_sidecars_seconds", DEFAULT_INT),
             run_on_startup=bool(raw.get("run_on_startup", False)),
         )
 
@@ -392,6 +392,14 @@ def _optional_int(value: object) -> int:
         return max(int(value), 0)
     msg = f"Expected integer-compatible value, got {type(value).__name__}"
     raise TypeError(msg)
+
+
+def _interval_from_raw(raw: dict[str, Any], key: str, default: int) -> int:
+    value = raw[key] if key in raw else default
+    if value is None or value is False:
+        return DEFAULT_INT
+    interval = _optional_int(value)
+    return interval if interval > 0 else DEFAULT_INT
 
 
 def _string_list(value: object) -> list[str]:

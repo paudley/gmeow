@@ -71,6 +71,9 @@ from .pg_cache_helpers import (
     apply_address_filters as _apply_address_filters,
 )
 from .pg_cache_helpers import (
+    apply_category_filters_sql as _apply_category_filters_sql,
+)
+from .pg_cache_helpers import (
     apply_date_filters as _apply_date_filters,
 )
 from .pg_cache_helpers import (
@@ -849,14 +852,7 @@ class PgCache:
     def _apply_category_filters(
         self, where: list[str], params: list[Any], include_categories: list[str], exclude_categories: list[str]
     ) -> None:
-        if include_categories:
-            where.append("EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
-            params.append(include_categories)
-            return
-        excluded = exclude_categories or list(self.default_excluded_categories())
-        if excluded:
-            where.append("NOT EXISTS (SELECT 1 FROM message_categories mc WHERE mc.message_id = messages.id AND mc.category = ANY(%s))")
-            params.append(excluded)
+        _apply_category_filters_sql(where, params, include_categories, exclude_categories, self.default_excluded_categories())
 
     def address_messages(
         self,

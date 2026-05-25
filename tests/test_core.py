@@ -34,6 +34,7 @@ from gmeow.toon import dumps as toon_dumps
 from tests._test_config import TEST_POSTGRES_DSN
 
 DEFAULT_LIST_STR = cast(list[str], None)
+DEFAULT_INT = cast(int, None)
 DEFAULT_STR = cast(str, None)
 DEFAULT_DICT_ANY = cast(dict[str, Any], None)
 DEFAULT_FAKE_GMAIL_METADATA = cast(dict[str, dict[str, Any]], None)
@@ -83,6 +84,22 @@ def test_maintenance_backfill_defaults_off() -> None:
 
     assert config.backfill_enabled is False
     assert config.backfill_seconds == 5
+
+
+def test_maintenance_zero_intervals_are_disabled() -> None:
+    config = MaintenanceConfig.from_dict(
+        {
+            "sync_history_seconds": 0,
+            "sync_priority_seconds": None,
+            "intelligence_seconds": 30,
+            "attachment_sidecars_seconds": False,
+        }
+    )
+
+    assert config.sync_history_seconds is DEFAULT_INT
+    assert config.sync_priority_seconds is DEFAULT_INT
+    assert config.intelligence_seconds == 30
+    assert config.attachment_sidecars_seconds is DEFAULT_INT
 
 
 @pytest.fixture(autouse=True)
@@ -1063,13 +1080,13 @@ def test_backfill_validation_rehydrates_changed_metadata(tmp_path: Path) -> None
     cache.close()
 
 
-def test_backfill_does_not_advance_dead_intelligence_jobs(tmp_path: Path) -> None:
+def test_backfill_advances_dead_intelligence_jobs(tmp_path: Path) -> None:
     cache = make_cache(tmp_path)
     gmail = FakeGmail({"m1": gmail_fixture()})
     sync = SyncService(config=GmeowConfig(), cache=cache, attachments=make_attachments(tmp_path), semantic=RecordingSemantic(), gmail=gmail)
     sync.hydrate_message("m1", update_history_cursor=False)
     with cache._connect() as conn:
-        conn.execute("UPDATE intelligence_jobs SET max_attempts = 1 WHERE kind = 'message' AND target_id = 'm1'")
+        conn.execute("UPDATE intelligence_jobs SET max_attempts = 1 WHERE kind IN ('message', 'attachment')")
     cache.set_state(
         "backfill.current_batch",
         json.dumps(
@@ -1091,10 +1108,10 @@ def test_backfill_does_not_advance_dead_intelligence_jobs(tmp_path: Path) -> Non
 
     result = failing_sync.backfill_batch(batch_size=1)
 
-    assert result["advanced"] is False
-    assert result["target_status"]["dead"] == [{"kind": "message", "target_id": "m1", "status": "dead"}]
-    assert cache.get_state("backfill.current_batch") != ""
-    assert cache.get_state("backfill.window_start") == ""
+    assert result["advanced"] is True
+    assert sorted(item["kind"] for item in result["target_status"]["dead"]) == ["attachment", "message"]
+    assert cache.get_state("backfill.current_batch") == ""
+    assert cache.get_state("backfill.window_start") == "2026-06-01"
     cache.close()
 
 
