@@ -94,7 +94,6 @@ def startup_self_check(
     features["postgres"] = _check("ok", "PostgreSQL cache opened and migrations ran.")
     features["job_recovery"] = _job_recovery_check(cache)
     features["age"] = _age_check(cache)
-    features["object_store"] = _writable_dir_check(config.object_store_dir, ".gmeow-write-check", "Object store is writable.")
     features["tantivy"] = _directory_check(config.tantivy_dir, "Tantivy directory is present.")
     features["materialized_views"] = _materialized_view_check(cache)
     features["gmail"] = _gmail_check(sync)

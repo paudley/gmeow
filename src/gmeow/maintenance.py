@@ -19,7 +19,7 @@ from googleapiclient.errors import HttpError
 
 from .runtime_config import MaintenanceConfig
 from .intelligence import IntelligenceWorker
-from .object_store import StoredAttachmentObject
+from .protocols import StoredAttachmentObject
 
 DEFAULT_ANY = cast(Any, None)
 DEFAULT_FLOAT = cast(float, None)

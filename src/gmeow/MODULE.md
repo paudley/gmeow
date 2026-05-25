@@ -1,8 +1,8 @@
 # Gmeow Source Package
 
-The `gmeow` package implements the local Gmail intelligence server: durable PostgreSQL cache,
-content-addressed attachment storage, semantic and lexical search, knowledge-graph projection,
-and a Gmail mutation surface exposed over HTTP, MCP, IMAP, and CLI.
+The `gmeow` package implements the transitional local Gmail intelligence server: durable PostgreSQL
+cache, semantic and lexical search, knowledge-graph projection, and a Gmail mutation surface exposed
+over HTTP, MCP, IMAP, and CLI.
 
 ## Package Layout
 
@@ -21,8 +21,6 @@ and a Gmail mutation surface exposed over HTTP, MCP, IMAP, and CLI.
   [`sync_backfill.py`](./sync_backfill.py).
 - **Gmail client** — [`gmail.py`](./gmail.py) plus shared mutations in
   [`gmail_actions.py`](./gmail_actions.py).
-- **Object storage** — [`object_store.py`](./object_store.py) with derived analysis in
-  [`attachment_analysis.py`](./attachment_analysis.py).
 - **Intelligence and graph** — [`intelligence.py`](./intelligence.py),
   [`graph.py`](./graph.py), [`kg.py`](./kg.py),
   [`categories.py`](./categories.py), [`semantic_pg.py`](./semantic_pg.py),

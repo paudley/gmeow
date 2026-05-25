@@ -9,6 +9,7 @@ scheduler, and sync service.
 
 import json
 from collections.abc import Iterator
+from dataclasses import dataclass
 from email.utils import getaddresses
 from pathlib import Path
 from typing import Any, Protocol, Self, cast
@@ -54,7 +55,6 @@ from .cache import (
 from .categories import deterministic_assignments
 from .db import run_migrations
 from .graph import DOAP, ONTOLOGY_PROFILE, RDF_TYPE, GraphProjector, WeightedGraphProjector
-from .object_store import ObjectStore, StoredObject
 from .parser import ParsedMessage
 from .pg_cache_helpers import (
     PROJECT_TABLES,
@@ -112,6 +112,42 @@ DEFAULT_TARGETS = cast(list[tuple[str, str]], None)
 
 PG_CACHE_EXCEPTIONS = (psycopg.Error, OSError, ValueError, KeyError, TypeError, RuntimeError)
 MIN_GRAPH_CYCLE_LENGTH = 2
+
+
+@dataclass(frozen=True, slots=True)
+class StoredObject:
+    """Stored object metadata needed by the transitional PostgreSQL cache."""
+
+    digest: str
+    path: Path
+    media_type: str
+    compression: str
+    original_size: int
+    stored_size: int
+
+
+class ObjectStore(Protocol):
+    """Object storage surface still consumed by transitional Python cache code."""
+
+    def put(self, content: bytes, media_type: str = "application/octet-stream") -> StoredObject:
+        """Store bytes."""
+        ...
+
+    def put_json(self, value: object, media_type: str = "application/json") -> StoredObject:
+        """Store canonical JSON bytes."""
+        ...
+
+    def put_text(self, value: str, media_type: str = "text/plain; charset=utf-8") -> StoredObject:
+        """Store text bytes."""
+        ...
+
+    def get(self, digest: str, compression: str = "identity") -> bytes:
+        """Read object bytes."""
+        ...
+
+    def get_text(self, digest: str, compression: str = "identity") -> str:
+        """Read object text."""
+        ...
 
 
 class _PgContext(Protocol):

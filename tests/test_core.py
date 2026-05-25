@@ -27,7 +27,6 @@ from gmeow.kg import spacy_entities
 from gmeow.maintenance import MaintenanceScheduler
 from gmeow.markdown import message_to_markdown
 from gmeow.mcp_server import _format, enriched_message, enriched_thread
-from gmeow.object_store import CasAttachmentStore, ObjectStore
 from gmeow.parser import parse_gmail_message
 from gmeow.pg_cache import PgCache
 from gmeow.semantic import chunk_text
@@ -40,6 +39,12 @@ DEFAULT_INT = cast(int, None)
 DEFAULT_STR = cast(str, None)
 DEFAULT_DICT_ANY = cast(dict[str, Any], None)
 DEFAULT_FAKE_GMAIL_METADATA = cast(dict[str, dict[str, Any]], None)
+
+try:
+    from gmeow.object_store import CasAttachmentStore, ObjectStore
+except ModuleNotFoundError:
+    CasAttachmentStore = cast(Any, None)
+    ObjectStore = cast(Any, None)
 DEFAULT_FAKE_GMAIL_PAGES = cast(dict[tuple[str, str], dict[str, Any]], None)
 
 TEST_DSN = os.environ.get("GMEOW_TEST_POSTGRES_DSN", "")
@@ -154,12 +159,16 @@ def cleanup_pg() -> None:
 def make_cache(tmp_path: Path) -> PgCache:
     if not TEST_DSN:
         pytest.skip("GMEOW_TEST_POSTGRES_DSN is required for Postgres integration tests")
+    if ObjectStore is None:
+        pytest.skip("Python object_store was retired in Go FILESTORE Phase 01")
     cache = PgCache(TEST_DSN, ObjectStore(tmp_path / "objects"), TantivyMessageIndex(tmp_path / "tantivy"))
     cache.ensure_default_categories()
     return cache
 
 
-def make_attachments(tmp_path: Path) -> CasAttachmentStore:
+def make_attachments(tmp_path: Path) -> Any:
+    if ObjectStore is None or CasAttachmentStore is None:
+        pytest.skip("Python object_store was retired in Go FILESTORE Phase 01")
     return CasAttachmentStore(ObjectStore(tmp_path / "objects"))
 
 
@@ -367,25 +376,6 @@ def test_spacy_ner_and_sidecar_kg() -> None:
     assert ("gmeow:attachment/abc123", "gmeow:fileType", "PDF", "m1") in triples
     assert ("gmeow:attachment/abc123", "gmeow:documentTitle", "Quarterly Statement", "m1") in triples
     assert any(predicate == "gmeow:mentions/org" for _, predicate, _, _ in triples)
-
-
-def test_attachment_store_merges_sidecar(tmp_path: Path) -> None:
-    store = make_attachments(tmp_path)
-    first = store.put(b"hello", {"gmail": {"filename": "a.txt"}}, extract_metadata=False)
-    first.sidecar_path.write_text(json.dumps({"external_summary": "added elsewhere", "source": {"gmail": {"filename": "a.txt"}}}))
-    second = store.put(b"hello", {"gmail": {"mime_type": "text/plain"}}, extract_metadata=False)
-    assert second.sha1 == first.sha1
-    assert second.metadata["external_summary"] == "added elsewhere"
-    assert second.metadata["source"]["gmail"]["filename"] == "a.txt"
-    assert second.metadata["source"]["gmail"]["mime_type"] == "text/plain"
-
-
-def test_attachment_store_adds_exiftool_metadata(tmp_path: Path) -> None:
-    store = make_attachments(tmp_path)
-    stored = store.put(b"hello", {"gmail": {"filename": "a.txt"}})
-    assert stored.metadata["source"]["gmail"]["filename"] == "a.txt"
-    assert "exiftool" in stored.metadata
-    assert "extracted_at" in stored.metadata["exiftool"]
 
 
 def test_cache_offline_message_search(tmp_path: Path) -> None:

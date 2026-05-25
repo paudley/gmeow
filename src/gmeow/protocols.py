@@ -9,9 +9,10 @@ each subsystem needs, while the individual subsystem protocols (e.g. :class:`Syn
 :class:`IntelligenceCache`) stay available for narrower call sites.
 """
 
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, cast
 
-from .object_store import StoredAttachmentObject
 from .parser import ParsedMessage
 
 GraphTriple = tuple[str, str, str, Any]
@@ -19,6 +20,19 @@ GraphTriple = tuple[str, str, str, Any]
 DEFAULT_STR = cast(str, None)
 DEFAULT_DICT_ANY = cast(dict[str, Any], None)
 DEFAULT_LIST_STR = cast(list[str], None)
+
+
+@dataclass(frozen=True, slots=True)
+class StoredAttachmentObject:
+    """Attachment object metadata returned by transitional attachment services."""
+
+    sha1: str
+    digest: str
+    path: Path
+    sidecar_path: Path
+    size: int
+    metadata: dict[str, Any]
+    compression: str
 
 
 class SyncCache(Protocol):

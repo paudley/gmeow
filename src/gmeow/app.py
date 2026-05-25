@@ -23,7 +23,6 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from .runtime_config import RuntimeConfig
-from .gmail import GmailClient, GoogleGmailClient, UserOAuthGmailClient
 from .gmail_actions import (
     apply_message_label,
     archive_message,
@@ -33,13 +32,11 @@ from .gmail_actions import (
 )
 from .maintenance import MaintenanceScheduler
 from .mcp_server import build_mcp_app
-from .object_store import CasAttachmentStore, ObjectStore
 from .pg_cache import PgCache
-from .protocols import IntelligenceGraph, NoGraph
+from .protocols import IntelligenceGraph
 from .resilience import degraded_status, readiness, startup_self_check
 from .semantic_pg import PgSemanticIndex
-from .sync import MissingGmailClient, SyncService
-from .text_index import TantivyMessageIndex
+from .sync import SyncService
 
 DEFAULT_FLOAT = cast(float, None)
 DEFAULT_INT = cast(int, None)
@@ -138,33 +135,10 @@ class RetentionRequest(BaseModel):
     dry_run: bool = True
 
 
-def build_services(config: RuntimeConfig) -> tuple[PgCache, CasAttachmentStore, PgSemanticIndex, IntelligenceGraph, SyncService]:
+def build_services(config: RuntimeConfig) -> tuple[PgCache, Any, PgSemanticIndex, IntelligenceGraph, SyncService]:
     """Build services."""
-    config.ensure_dirs()
-    objects = ObjectStore(config.object_store_dir)
-    attachments = CasAttachmentStore(objects, analysis_config=config.attachment_analysis)
-    text_index = TantivyMessageIndex(config.tantivy_dir)
-    postgres_dsn = config.database_dsn()
-    cache = PgCache(postgres_dsn, objects, text_index)
-    semantic = PgSemanticIndex(
-        postgres_dsn, config.embedding_model, config.embedding_endpoint, config.semantic_chunk_size, config.semantic_chunk_overlap
-    )
-    graph: IntelligenceGraph = NoGraph()
-    gmail: GmailClient = MissingGmailClient()
-    service_account_info = config.service_account_info()
-    user_credentials_info = config.user_credentials_info()
-    if config.auth_mode == "service_account" and config.subject and (service_account_info or config.service_account_file.exists()):
-        if service_account_info:
-            gmail = GoogleGmailClient.from_service_account_info(service_account_info, config.subject)
-        else:
-            gmail = GoogleGmailClient.from_service_account_file(config.service_account_file, config.subject)
-    elif config.auth_mode == "user_oauth" and (user_credentials_info or config.user_credentials_file.exists()):
-        if user_credentials_info:
-            gmail = UserOAuthGmailClient.from_credentials_info(user_credentials_info)
-        else:
-            gmail = UserOAuthGmailClient.from_credentials_file(config.user_credentials_file)
-    sync = SyncService(config, cache, attachments, semantic, gmail, graph=graph)
-    return cache, attachments, semantic, graph, sync
+    _ = config
+    raise RuntimeError("Python object_store was retired; use the Go FILESTORE service path")
 
 
 def list_messages_endpoint(request: Request, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
@@ -681,7 +655,7 @@ def _register_raw_message_routes(app: FastAPI, cache: PgCache, sync: SyncService
     _ = _route_refs
 
 
-def _register_attachment_routes(app: FastAPI, cache: PgCache, attachments: CasAttachmentStore) -> None:
+def _register_attachment_routes(app: FastAPI, cache: PgCache, attachments: Any) -> None:
     @app.get("/api/v1/attachments/{sha1}", response_model=None)
     def attachment(sha1: str) -> Response | FileResponse:
         """Attachment."""
@@ -702,7 +676,7 @@ def _register_attachment_routes(app: FastAPI, cache: PgCache, attachments: CasAt
     @app.get("/api/v1/attachments/{sha1}/metadata")
     def attachment_metadata(sha1: str) -> dict[str, Any]:
         """Attachment metadata."""
-        return attachments.read_metadata(sha1)
+        return cast(dict[str, Any], attachments.read_metadata(sha1))
 
     @app.get("/api/v1/messages/{message_id}/attachments")
     def message_attachments(message_id: str, *, include_metadata: bool = True) -> list[dict[str, Any]]:
