@@ -463,7 +463,7 @@ Directive: Keep public behavior documented as part of the interface contract.
 
 Quick ref:
 - Public docs must not include mailbox data, local machine paths, private credentials, OAuth client IDs, or production DSNs.
-- Source files must keep AGPL SPDX headers with Blackcat Informatics copyright.
+- Source files must keep AGPL SPDX headers with Blackcat Informatics® copyright.
 - Runtime config examples must stay sanitized and loadable.
 
 #### Overview

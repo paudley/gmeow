@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/blackcat-informatics/gmeow/main/docs/gmeow-logo.svg" alt="Gmeow logo" width="280">
+  <img src="https://raw.githubusercontent.com/paudley/gmeow/main/docs/gmeow-logo.svg" alt="Gmeow logo" width="280">
 </p>
 
 # Gmeow
@@ -55,37 +55,21 @@ data_dir = "data"
 root = "data/filestore"
 
 [postgres]
-enabled = true
+enabled = false
 host = "127.0.0.1"
 port = 5432
 database = "gmeow"
 user = "gmeow"
-password_secret = "postgres_password"
+password_secret = ""
 ssl_mode = "disable"
 
 [secrets]
-postgres_password = "replace-with-sops-encrypted-leaf"
 ```
 
-Do not put `secrets.file`, `secrets.sops_file`, or `config.file` inside `gmeow.toml`. Config source selection belongs to `--config`, `GMEOW_CONFIG`, or the default `gmeow.toml`.
+Do not put `secrets.file`, `secrets.sops_file`, or `config.file` inside `gmeow.toml`. Config source selection belongs to `--config`, `GMEOW_CONFIG`, or the default `gmeow.toml`. Any enabled component that references a secret requires the selected config file to be SOPS-protected; plaintext secret leaves are rejected.
 
-Generate Google Cloud service-account provisioning commands:
-
-```bash
-uv run gmeow provision-plan YOUR_PROJECT_ID
-```
-
-Authorize the generated service-account OAuth client ID in Google Admin Console for:
-
-```text
-https://www.googleapis.com/auth/gmail.modify
-```
-
-As a local fallback, set `auth_mode = "user_oauth"` under `[gmeow]` and create Gmail-scoped ADC credentials:
-
-```bash
-gcloud auth application-default login --scopes=https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/cloud-platform
-```
+Gmail provisioning and source runtime behavior move in later Go migration phases. Phase 00 only
+validates foundation contracts and startup configuration.
 
 ## Run
 
@@ -96,82 +80,34 @@ go run ./cmd/gmeow --config gmeow.toml status
 
 Phase 00 binaries validate config and report startup status without initializing unimplemented components.
 
-For persistent local operation under your user account, see [docs/systemd.md](docs/systemd.md).
+## Distribution
 
-Useful commands:
-
-```bash
-uv run gmeow status
-uv run gmeow doctor
-uv run gmeow sync
-uv run gmeow sync-history
-uv run gmeow refresh-attachment-sidecars
-uv run gmeow enqueue-intelligence
-uv run gmeow run-intelligence-worker
-uv run gmeow rebuild-intelligence
-uv run gmeow discover-categories --since-hours 48
-uv run gmeow seed-categories
-uv run gmeow recategorize
-uv run gmeow category-stats
-```
-
-`gmeow serve` starts timed maintenance tasks from `[gmeow.maintenance]`. Use `GET /api/v1/maintenance/timed` for scheduler state and `POST /api/v1/maintenance/timed/{task_name}/run` to run one task immediately.
+Go binaries and future container images are released outside PyPI. The only planned PyPI package is
+`python/` (`gmeow-intel`), which contains Python-native ANALYSIS workers and shared job/annotation
+contract validation.
 
 ## MCP
 
-Most MCP read/search tools return compact TOON by default. Pass `format: "json"` when an agent needs JSON-shaped results.
-
-Example local agent configuration:
-
-```json
-{
-  "mcpServers": {
-    "gmeow": {
-      "type": "http",
-      "url": "http://127.0.0.1:8765/mcp"
-    }
-  }
-}
-```
-
-Useful MCP tools include text/semantic/hybrid search, attachment text search, message/thread reads, attachment metadata, contacts/people, category tools, graph search/path/rank/project tools, status/help, history sync, priority sync, and limited mailbox actions.
+MCP returns in the Go INTERFACE phase. Phase 00 does not start MCP, REST, or IMAP services.
 
 ## Local Data
 
 By default, local data is ignored by git and stored under `data/`:
 
-- PostgreSQL stores labels, threads, message headers/metadata, MIME structure, sync state, categories, graph triples, async jobs, and pgvector embedding chunks. Schema changes are versioned through Alembic migrations under `migrations/`.
-- `data/objects/blake3/aa/bb/<digest>[.zst]` stores canonical payload bytes in the BLAKE3 content-addressed store.
-- `data/objects/sidecars/aa/bb/<digest>.json` stores attachment sidecar metadata, source metadata, extracted text, and external enrichment.
-- `data/tantivy/` stores the local lexical search index.
-- `data/secrets/` stores local credential files only when you choose file-based credentials instead of SOPS.
+- `data/filestore/` is the planned Go FILESTORE root.
+- PostgreSQL, RabbitMQ, object storage, query indexes, and source state are wired in later phases.
 
 ## Archive and IMAP
 
-Archive-complete messages require both Gmail full JSON and canonical raw RFC822 bytes. New Gmail hydrations fetch RFC822 automatically. Existing cached messages can be completed in bounded batches:
-
-```bash
-uv run gmeow complete-archive --limit 25
-uv run gmeow archive-status
-uv run gmeow verify-objects
-```
-
-Read-only IMAP is available as a loopback service. It exposes Gmail labels as folders, assigns stable per-folder UIDs, serves RFC822 from CAS, and rejects mutating IMAP commands.
-
-```bash
-printf 'choose-a-local-password\n' > data/secrets/imap-password
-uv run gmeow serve-imap --host 127.0.0.1 --port 1143
-```
+Archive and IMAP behavior return in later Go phases. They are not operator-facing Phase 00 runtime
+surfaces.
 
 ## Development
 
+The canonical local quality gate is one command:
+
 ```bash
-uv sync --extra test
-make go-check
-uv run python -m compileall main.py src migrations tests
-uv run pytest
-uv build
-uv run python scripts/public_release_check.py
+make check
 ```
 
 PostgreSQL-backed integration tests are skipped unless `GMEOW_TEST_POSTGRES_DSN` points at a disposable test database. Tests must not use a production database.

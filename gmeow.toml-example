@@ -7,21 +7,19 @@ data_dir = "data"
 root = "data/filestore"
 
 [postgres]
-enabled = true
+enabled = false
 host = "127.0.0.1"
 port = 5432
 database = "gmeow"
 user = "gmeow"
-password_secret = "postgres_password"
+password_secret = ""
 ssl_mode = "disable"
 
 [rabbitmq]
-enabled = true
-url_secret = "rabbitmq_url"
+enabled = false
+url_secret = ""
 
 [secrets]
-postgres_password = "replace-with-sops-encrypted-leaf"
-rabbitmq_url = "amqp://guest:guest@127.0.0.1:5672/"
 
 [[interfaces]]
 name = "rest"

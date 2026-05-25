@@ -19,7 +19,7 @@ REQUIRED_FILES = [
     "SECURITY.md",
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",
-    "config.toml-example",
+    "gmeow.toml-example",
     "docs/PUBLIC_RELEASE_CHECKLIST.md",
     ".github/dependabot.yml",
     ".github/workflows/ci.yml",
@@ -31,6 +31,7 @@ FORBIDDEN_TRACKED_PATHS = {
     "config/gmeow.yaml",
     "config/gmeow.example.yaml",
 }
+
 
 def main() -> int:
     """Run public release checks."""
@@ -59,16 +60,20 @@ def _forbidden_tracked_paths(tracked_set: set[str]) -> list[str]:
 
 
 def _missing_spdx_headers(tracked: list[str]) -> list[str]:
-    return [f"missing SPDX header: {rel}" for rel in tracked if _needs_spdx(rel) and SPDX not in _read_text(ROOT / rel, default="")]
+    return [
+        f"missing SPDX header: {rel}"
+        for rel in tracked
+        if (ROOT / rel).exists() and _needs_spdx(rel) and SPDX not in _read_text(ROOT / rel, default="")
+    ]
 
 
 def _example_config_failures() -> list[str]:
     failures: list[str] = []
-    example = _read_text(ROOT / "config.toml-example", default="")
-    if "[gmeow]" not in example:
-        failures.append("config.toml-example must contain a [gmeow] table")
-    if "[gmeow]" in example and any(value in example for value in ["user@your-domain.example", "paud" + "ley"]):
-        failures.append("config.toml-example contains non-public identity placeholders")
+    example = _read_text(ROOT / "gmeow.toml-example", default="")
+    if "[system]" not in example:
+        failures.append("gmeow.toml-example must contain a [system] table")
+    if any(value in example for value in ["user@your-domain.example", "paud" + "ley"]):
+        failures.append("gmeow.toml-example contains non-public identity placeholders")
     return failures
 
 
@@ -82,13 +87,11 @@ def _needs_spdx(rel: str) -> bool:
     return path.suffix in SOURCE_SUFFIXES or rel in SOURCE_EXTRA
 
 
-def _skip_text_scan(rel: str) -> bool:
-    return rel in {".gitmodules", "uv.lock", "scripts/public_release_check.py"}
-
-
 def _read_text(path: Path, default: str = "") -> str:
     try:
         return path.read_text()
+    except FileNotFoundError:
+        return default
     except UnicodeDecodeError:
         return default
 
