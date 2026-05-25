@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Analyze attachment content for the Gmeow archive.
 
 The analyzer extracts text, OCR, archive listings, and optional vision captions from cached

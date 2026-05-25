@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Postgres-free unit tests for the backfill helper module.
 
 These tests exercise the pure functions in :mod:`gmeow.sync_backfill` (history extraction,

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Internal typing helpers used to narrow dynamic dict payloads.
 
 Gmeow ingests Gmail, OpenAI, and exiftool payloads that all arrive as ``dict[str, Any]``. Several

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 
 """Versioned Alembic migrations for the Gmeow database schema.
 

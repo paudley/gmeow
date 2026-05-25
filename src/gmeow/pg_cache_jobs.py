@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Manage intelligence job persistence for the PostgreSQL cache.
 
 The module isolates enqueue, claim, retry, dead-letter, and backfill-completion queries for analysis

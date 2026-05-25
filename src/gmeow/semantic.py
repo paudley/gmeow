@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Embedding client and text-chunking primitives for Gmeow.
 
 This module wraps the Nomic embedding endpoint and provides the chunking helpers used by both

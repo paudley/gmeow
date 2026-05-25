@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Wrap Gmail API access for Gmeow.
 
 The module defines the Gmail client protocol and concrete delegated-service-account and OAuth

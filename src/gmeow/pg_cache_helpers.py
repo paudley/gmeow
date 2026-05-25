@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Provide shared SQL and cache helper routines.
 
 The module contains query builders, normalization helpers, date filters, and graph profile utilities

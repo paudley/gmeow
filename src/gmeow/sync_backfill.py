@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Helper routines for Gmail history and oldest-first backfill sync.
 
 The functions here keep Gmail pagination, monthly window math, and lightweight metadata drift

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Shared Protocol declarations for Gmeow cache, semantic, and graph dependencies.
 
 This module hosts the structural typing surface used by both ``SyncService`` and

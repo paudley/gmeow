@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Schedule and execute Gmeow maintenance tasks.
 
 The module coordinates periodic sync, backfill, analysis, archive refresh, and derived-data refresh

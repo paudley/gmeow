@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Shared Gmail message actions for API and MCP surfaces.
 
 The HTTP API and MCP tools expose the same Gmail mutations with different request framing. This

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Compute and expose the message knowledge graph for Gmeow.
 
 This module builds RDF-style triples, registers them with rustworkx, and exposes weighted/ranked

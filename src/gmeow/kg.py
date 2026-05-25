@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Build knowledge-graph triples from messages and attachment sidecars.
 
 This module turns parsed mail content and sidecar analysis output into RDF-style triples that

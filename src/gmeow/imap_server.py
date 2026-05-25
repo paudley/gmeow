@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Provide read-only IMAP access to the Gmeow archive.
 
 Implements a minimal RFC 3501 server that exposes cached Gmail bodies through standard IMAP

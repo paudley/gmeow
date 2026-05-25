@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """HTTP JSON helpers.
 
 Provides a tiny wrapper around ``http.client`` that posts JSON payloads and parses JSON responses

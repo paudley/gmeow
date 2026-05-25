@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Provide cache functionality for Gmeow.
 
 This module keeps pure parsing, categorization, and graph display helpers separate from the

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Gmeow local Gmail intelligence server.
 
 This package wires a durable PostgreSQL cache, content-addressed attachment store, semantic and

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Build the FastAPI application for Gmeow.
 
 This module wires configuration, storage, Gmail clients, search indexes, and maintenance services

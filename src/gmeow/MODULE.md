@@ -49,12 +49,10 @@ and a Gmail mutation surface exposed over HTTP, MCP, IMAP, and CLI.
 
 ## Integration Test Prerequisites
 
-Integration tests load the Postgres DSN from `config.toml` via
-[`tests/_test_config.py`](../../tests/_test_config.py). The local config must contain:
+Integration tests load the Postgres DSN from `GMEOW_TEST_POSTGRES_DSN`:
 
-```toml
-[gmeow.testing]
-postgres_dsn = "postgresql://gmeow-test:gmeow-test@127.0.0.1:5432/gmeow-test"
+```bash
+export GMEOW_TEST_POSTGRES_DSN="postgresql://gmeow-test:gmeow-test@127.0.0.1:5432/gmeow-test"
 ```
 
 The DSN target must be a disposable database — the test suite truncates every table during setup.

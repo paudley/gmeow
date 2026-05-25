@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Persist and query the PostgreSQL cache for Gmeow.
 
 The module owns message, attachment, graph, category, archive, sync, and operational database

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Alembic migration wiring for the Gmeow PostgreSQL schema.
 
 This module exposes the small wrapper that resolves the alembic config and runs upgrades on the

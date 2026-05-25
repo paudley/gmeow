@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Unit tests for the shared Gmail mutation dispatch module.
 
 The wrappers in :mod:`gmeow.gmail_actions` exist so the HTTP API and the MCP tool surface route

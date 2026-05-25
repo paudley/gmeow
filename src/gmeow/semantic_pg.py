@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Persist semantic embeddings in PostgreSQL with pgvector.
 
 The PgSemanticIndex manages embedding chunks, similarity search, and metadata lookups so MCP and

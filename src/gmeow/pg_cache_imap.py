@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """IMAP projection helpers for PgCache.
 
 This module exposes the cache surface used by the read-only IMAP server, including mailbox

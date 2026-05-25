@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Exercise the Gmeow HTTP API surface.
 
 These integration tests build the application against PostgreSQL and verify request behavior for key
 endpoints. They document API contracts that must remain stable while sync and backfill features
 evolve."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -13,9 +14,8 @@ from fastapi.testclient import TestClient
 
 from gmeow.app import create_app
 from gmeow.config import GmeowConfig
-from tests._test_config import TEST_POSTGRES_DSN
 
-TEST_DSN = TEST_POSTGRES_DSN
+TEST_DSN = os.environ.get("GMEOW_TEST_POSTGRES_DSN", "")
 
 
 def test_health_and_no_delete_or_send_routes(tmp_path: Path) -> None:

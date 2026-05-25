@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Synchronize Gmail data into the Gmeow cache.
 
 The module implements priority sync, history sync, oldest-first backfill, hydration, archive

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Maintain the Tantivy text index for cached messages.
 
 The index complements the PostgreSQL full-text search by giving sync and MCP callers a faster,

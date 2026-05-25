@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Store immutable attachment and raw content objects.
 
 The module manages compressed content-addressed storage and sidecar metadata refreshes. It connects

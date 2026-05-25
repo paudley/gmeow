@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Expose Gmeow through MCP tools and resources.
 
 The module registers Gmail search, graph, category, archive, backfill, and operational tools against

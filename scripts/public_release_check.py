@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Pre-publication scanner for the Gmeow repository.
 
 This script asserts that no private mailbox data, credentials, machine paths, or production
@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SPDX = "SPDX-License-Identifier: MIT"
+SPDX = "SPDX-License-Identifier: AGPL-3.0-only"
 REQUIRED_FILES = [
     "LICENSE",
     "README.md",

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Alembic environment hook for the Gmeow PostgreSQL schema.
 
 The environment resolves the configured DSN through :mod:`gmeow.db` and runs the offline / online

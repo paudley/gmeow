@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Archive and object verification helpers for PgCache.
 
 Exposes the cache surface used to materialize archive exports, reconcile object-store contents,

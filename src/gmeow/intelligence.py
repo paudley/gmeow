@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Run intelligence jobs for cached Gmail artifacts.
 
 The module processes message and attachment jobs, updating semantic indexes, graph triples,

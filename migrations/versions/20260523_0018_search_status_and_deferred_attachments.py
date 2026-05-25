@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Alembic revision: search status and deferred attachment hydration.
 
 This revision is part of the Gmeow PostgreSQL schema history. It is applied in order by

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Parse and classify Gmail message headers.
 
 This module turns raw RFC822 header rows into the ``HeaderIntelligence`` record that downstream

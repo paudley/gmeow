@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Bootstrap helpers for local Gmeow installations.
 
 The provisioning helpers manifest OAuth client/service-account files, ensure data directories

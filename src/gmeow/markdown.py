@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Render Gmail messages as Gmeow markdown summaries.
 
 The renderer formats parsed messages and header intelligence into the markdown shape used by the

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Compute and persist categorization decisions for Gmeow messages.
 
 This module owns the deterministic category vocabulary, learned-category discovery, and the

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Extract attachment metadata via external probes.
 
 This module shells out to ``exiftool`` (when available) and parses its JSON output into the

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Entry point that delegates to the Gmeow CLI.
 
 This module exists so ``python main.py`` and ``python -m main`` route through the same

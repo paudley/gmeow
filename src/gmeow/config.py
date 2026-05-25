@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Load and normalize Gmeow configuration.
 
 The module defines typed configuration records for Gmail, maintenance, storage, analysis, and server

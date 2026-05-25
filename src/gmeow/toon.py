@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Encode Gmeow responses as the compact TOON format.
 
 TOON is the default MCP/HTTP response shape because it stays under the context-window budget that

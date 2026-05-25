@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Exercise core Gmeow cache and sync behavior.
 
 These tests validate parsing, storage, graph, category, archive, intelligence, and backfill
@@ -8,6 +8,7 @@ across the mailbox ingestion pipeline."""
 
 import base64
 import json
+import os
 from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
@@ -33,7 +34,6 @@ from gmeow.semantic import chunk_text
 from gmeow.sync import SyncService, message_matches_rule, should_search_gmail
 from gmeow.text_index import TantivyMessageIndex
 from gmeow.toon import dumps as toon_dumps
-from tests._test_config import TEST_POSTGRES_DSN
 
 DEFAULT_LIST_STR = cast(list[str], None)
 DEFAULT_INT = cast(int, None)
@@ -42,7 +42,7 @@ DEFAULT_DICT_ANY = cast(dict[str, Any], None)
 DEFAULT_FAKE_GMAIL_METADATA = cast(dict[str, dict[str, Any]], None)
 DEFAULT_FAKE_GMAIL_PAGES = cast(dict[tuple[str, str], dict[str, Any]], None)
 
-TEST_DSN = TEST_POSTGRES_DSN
+TEST_DSN = os.environ.get("GMEOW_TEST_POSTGRES_DSN", "")
 
 
 def test_gmeow_config_loads_namespaced_toml(tmp_path: Path) -> None:

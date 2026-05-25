@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Provide resilience functionality for Gmeow.
 
 This module runs startup checks for cache, graph, storage, Gmail, and embedding dependencies. It

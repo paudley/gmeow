@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Parse Gmail API payloads into the Gmeow ``ParsedMessage`` shape.
 
 The parser folds Gmail JSON, header intelligence, body parts, and attachment references into a

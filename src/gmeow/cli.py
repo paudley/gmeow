@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 """Provide the command line interface for Gmeow.
 
 The module maps operator commands to the same application services used by the HTTP server. It
