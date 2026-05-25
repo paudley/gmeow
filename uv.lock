@@ -440,12 +440,14 @@ dependencies = [
     { name = "mcp" },
     { name = "pgvector" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "psycopg-pool" },
     { name = "pydantic" },
     { name = "rustworkx" },
     { name = "scikit-learn" },
     { name = "semchunk" },
     { name = "spacy" },
     { name = "tantivy" },
+    { name = "tenacity" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "zstandard" },
 ]
@@ -469,6 +471,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.8" },
     { name = "pgvector", specifier = ">=0.3" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "psycopg-pool", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3" },
     { name = "rustworkx", specifier = ">=0.15" },
@@ -476,6 +479,7 @@ requires-dist = [
     { name = "semchunk", specifier = ">=4.0.0" },
     { name = "spacy", specifier = ">=3.8.14" },
     { name = "tantivy", specifier = ">=0.22" },
+    { name = "tenacity", specifier = ">=9.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
     { name = "zstandard", specifier = ">=0.23" },
 ]
@@ -1117,6 +1121,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4e/2c/c1547871be3790676e8868b38655496422f94f0978dfb66b74bdba2f1676/psycopg_binary-3.3.4-cp314-cp314-musllinux_1_2_riscv64.whl", hash = "sha256:6b9016b1714da4dd5ecaaa75b82098aa5a0b87854ce9b092e21c27c4ae23e014", size = 3946204, upload-time = "2026-05-01T23:31:39.626Z" },
     { url = "https://files.pythonhosted.org/packages/c4/b1/f6670f00fa7ea601584623f6c11602ab92117d83eaff885e0210f6de7418/psycopg_binary-3.3.4-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:47c656a8a7ba6eb0cff1801a4caaa9c8bdc12d03080e273aff1c8ac39971a77e", size = 4255811, upload-time = "2026-05-01T23:31:44.986Z" },
     { url = "https://files.pythonhosted.org/packages/eb/e6/5fff07a70d1f945ed90ae131c3bd76cab32beff7c58c6db15ad5820b6d1f/psycopg_binary-3.3.4-cp314-cp314-win_amd64.whl", hash = "sha256:c37e024c07308cd06cf3ec51bfd0e7f6157585a4d84d1bce4a7f5f7913719bf8", size = 3666849, upload-time = "2026-05-01T23:31:51.165Z" },
+]
+
+[[package]]
+name = "psycopg-pool"
+version = "3.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/90/82/7a23d26039827ecd4ebe93905651029ddd307c5182ad59296dfb6f67b528/psycopg_pool-3.3.1.tar.gz", hash = "sha256:b10b10b7a175d5cc1592147dc5b7eec8a9e0834eb3ed2c4a92c858e2f51eb63c", size = 31661, upload-time = "2026-05-01T23:31:59.809Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/ed/89c2c620af0e1660354cd8aabf9f5b21f911597ce22acb37c805d6c86bc8/psycopg_pool-3.3.1-py3-none-any.whl", hash = "sha256:2af5b432941c4c9ad5c87b3fa410aec910ec8f7c122855897983a06c45f2e4b5", size = 40023, upload-time = "2026-05-01T23:31:53.136Z" },
 ]
 
 [[package]]
@@ -1783,6 +1799,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ef/4b/fbc1293fc8108eaa2f11718d77070e09cefe4aac4055fd2036548a776946/tantivy-0.26.0-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:22f6acf0c4d9dff2aecb161071db921c9a0bd3e2485dbc8304fd4561fe50c6a7", size = 4622332, upload-time = "2026-04-29T11:51:25.483Z" },
     { url = "https://files.pythonhosted.org/packages/86/68/d1ae76c42b523b076434a357b675c37fd9684ac0fc6e0e63f703a1f1014a/tantivy-0.26.0-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a92825f3215fc4b5ef55da8a577eb9ad30c7ee5c7371daea82329e67aa4c7d12", size = 4573494, upload-time = "2026-04-29T11:51:27.512Z" },
     { url = "https://files.pythonhosted.org/packages/be/3b/6f1ababc26839b3baa0299da2319567ffbecfe0c1b295de1e75e605d98e4/tantivy-0.26.0-cp314-cp314-win_amd64.whl", hash = "sha256:0c9ce6c5a04c4a18244f38601ea18a94044c07f8e713894d456dcbfccd3fa0f5", size = 3761380, upload-time = "2026-04-29T11:51:29.546Z" },
+]
+
+[[package]]
+name = "tenacity"
+version = "9.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
 ]
 
 [[package]]

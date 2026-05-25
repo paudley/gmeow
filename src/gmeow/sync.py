@@ -13,6 +13,9 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, NoReturn, cast
+from uuid import uuid4
+
+from googleapiclient.errors import HttpError
 
 from .categories import CategoryEngine
 from .config import GmeowConfig, PriorityRule
@@ -38,7 +41,8 @@ DEFAULT_OBJECT = cast(object, None)
 DEFAULT_PRIORITY_RULE = cast(PriorityRule, None)
 DEFAULT_STR = cast(str, None)
 
-SYNC_EXCEPTIONS = (RuntimeError, ValueError, KeyError, TypeError, OSError, TimeoutError)
+SYNC_EXCEPTIONS = (RuntimeError, ValueError, KeyError, TypeError, OSError, TimeoutError, HttpError)
+GMAIL_LIVE_SEARCH_PAUSE_SECONDS = 60
 BACKFILL_BATCH_STATE = "backfill.current_batch"
 BACKFILL_WINDOW_STATE = "backfill.window_start"
 BACKFILL_PAGE_STATE = "backfill.page_token"
@@ -197,16 +201,34 @@ class SyncService:
             message_ids = history_message_ids(result.get("history", []))
             deleted_ids = history_deleted_message_ids(result.get("history", []))
             hydrated = 0
+            unavailable = 0
+            targets: list[tuple[str, str]] = []
             for message_id in message_ids:
-                if self.hydrate_message(message_id, update_history_cursor=False):
-                    hydrated += 1
+                try:
+                    if self.hydrate_message(message_id, update_history_cursor=False):
+                        hydrated += 1
+                        message_targets = self._backfill_targets_for_message(message_id)
+                        targets.extend(target for target in message_targets if target not in targets)
+                except HttpError as exc:
+                    if not _gmail_not_found(exc):
+                        raise
+                    unavailable += 1
+                    if self.cache.get_message(message_id):
+                        self.cache.apply_retention_policy(message_id, source="gmail_history_missing", dry_run=False)
             deleted = 0
             for message_id in deleted_ids:
                 if self.cache.get_message(message_id):
                     self.cache.apply_retention_policy(message_id, source="gmail_history", dry_run=False)
                     deleted += 1
             truncated = bool(result.get("truncated"))
-            if result.get("history_id") and not truncated:
+            target_status = self.cache.intelligence_target_status(targets)
+            if targets and not target_status["terminal"]:
+                worker = IntelligenceWorker(self.cache, self.semantic, self.graph)
+                worker.run_until_empty(targets=targets)
+                target_status = self.cache.intelligence_target_status(targets)
+            target_status = self._wait_for_running_backfill_targets(targets, target_status)
+            cursor_advanced = bool(result.get("history_id")) and not truncated and target_status["terminal"]
+            if cursor_advanced:
                 self.cache.set_state("gmail_history_id", str(result["history_id"]))
             summary = {
                 "start_history_id": start,
@@ -214,9 +236,11 @@ class SyncService:
                 "history_records": len(result.get("history", [])),
                 "messages": len(message_ids),
                 "hydrated": hydrated,
+                "unavailable": unavailable,
                 "deleted": deleted,
                 "truncated": truncated,
-                "cursor_advanced": bool(result.get("history_id")) and not truncated,
+                "cursor_advanced": cursor_advanced,
+                "target_status": target_status,
             }
             self.cache.set_state("last_history_sync", datetime.now(UTC).isoformat())
             self.cache.set_state("last_history_summary", json.dumps(summary, sort_keys=True))
@@ -388,7 +412,15 @@ class SyncService:
         return status
 
     def hydrate_message(
-        self, message_id: str, rule: PriorityRule = DEFAULT_PRIORITY_RULE, *, update_history_cursor: bool = True
+        self,
+        message_id: str,
+        rule: PriorityRule = DEFAULT_PRIORITY_RULE,
+        *,
+        update_history_cursor: bool = True,
+        download_attachments: bool = True,
+        hydrate_raw: bool = True,
+        analysis_payload: dict[str, Any] = DEFAULT_DICT_ANY,
+        search_id: str = DEFAULT_STR,
     ) -> dict[str, Any]:
         """Hydrate message."""
         if not self.gmail_available():
@@ -405,20 +437,29 @@ class SyncService:
             raise
         if rule and not message_matches_rule(parsed, rule):
             return {}
-        attachment_sha1s = self._download_attachments(parsed)
+        attachment_sha1s = self._download_attachments(parsed) if download_attachments else []
         markdown = message_to_markdown(parsed, attachment_sha1s)
         self.cache.upsert_thread({"id": parsed.thread_id or parsed.gmail_id, "snippet": parsed.snippet})
         self.cache.upsert_message(parsed, raw, markdown=markdown, hydrated=True)
-        try:
-            self.hydrate_raw_rfc822(parsed.gmail_id)
-        except SYNC_EXCEPTIONS as exc:
-            self._record_ingest_issue(parsed.gmail_id, "gmail.raw", "warning", f"raw RFC822 hydration failed: {exc!r}", raw)
+        if hydrate_raw:
+            try:
+                self.hydrate_raw_rfc822(parsed.gmail_id)
+            except SYNC_EXCEPTIONS as exc:
+                self._record_ingest_issue(parsed.gmail_id, "gmail.raw", "warning", f"raw RFC822 hydration failed: {exc!r}", raw)
         if update_history_cursor and raw.get("historyId"):
             current = self.cache.get_state("gmail_history_id")
             if not current or int(raw["historyId"]) > int(current):
                 self.cache.set_state("gmail_history_id", str(raw["historyId"]))
         CategoryEngine(self.cache).categorize_message(parsed.gmail_id, manual_profiles={})
-        self.cache.enqueue_intelligence_job("message", parsed.gmail_id)
+        payload = analysis_payload or {}
+        if not download_attachments:
+            deferred = self._deferred_attachment_refs(parsed)
+            if deferred:
+                payload = {**payload, "deferred_attachments": deferred}
+                for ref in deferred:
+                    queued_ref = {**ref, "search_id": search_id, "priority": 1000 if search_id else 100}
+                    self.cache.enqueue_deferred_attachment_hydration(queued_ref, payload)
+        self.cache.enqueue_intelligence_job("message", parsed.gmail_id, payload)
         for sha1 in attachment_sha1s:
             self.cache.enqueue_intelligence_job("attachment", sha1)
         return self.cache.get_message(parsed.gmail_id) or {}
@@ -431,26 +472,51 @@ class SyncService:
             return
         recorder(message_id=message_id, source=source, severity=severity, detail=detail, artifact=artifact)
 
-    def search_gmail(self, query: str, limit: int = 20) -> dict[str, Any]:
+    def search_gmail(self, query: str, limit: int = 20, *, search_id: str = DEFAULT_STR) -> dict[str, Any]:
         """Search gmail."""
         if not self.gmail_available():
             msg = "Gmail client is not configured."
             raise RuntimeError(msg)
-        labels = self.gmail.list_labels()
-        for label in labels:
-            self.cache.upsert_label(label)
+        self._refresh_labels_for_search()
         ids = self.gmail.search_messages(query, limit=limit)
         hydrated_ids: list[str] = []
+        deferred_attachments = 0
         for message_id in ids:
             message = self.cache.get_message(message_id)
             if not message or not message.get("hydrated"):
-                message = self.hydrate_message(message_id)
+                message = self.hydrate_message(
+                    message_id,
+                    download_attachments=False,
+                    hydrate_raw=False,
+                    analysis_payload={"source": "live_search", "query": query},
+                    search_id=search_id,
+                )
             if message:
                 hydrated_ids.append(message["id"])
+                deferred_attachments += _gmail_attachment_ref_count(message.get("raw", {}))
+        self._enqueue_missing_message_analysis(hydrated_ids, {"source": "live_search", "query": query})
+        analysis = self.analysis_status_for_messages(hydrated_ids)
         self.cache.set_state(
-            "last_gmail_search", json.dumps({"query": query, "matched": len(ids), "hydrated": len(hydrated_ids)}, sort_keys=True)
+            "last_gmail_search",
+            json.dumps(
+                {
+                    "query": query,
+                    "matched": len(ids),
+                    "hydrated": len(hydrated_ids),
+                    "deferred_attachments": deferred_attachments,
+                    "analysis_pending": analysis["pending"],
+                },
+                sort_keys=True,
+            ),
         )
-        return {"query": query, "matched": len(ids), "hydrated": len(hydrated_ids), "message_ids": hydrated_ids}
+        return {
+            "query": query,
+            "matched": len(ids),
+            "hydrated": len(hydrated_ids),
+            "message_ids": hydrated_ids,
+            "deferred_attachments": deferred_attachments,
+            "analysis": analysis,
+        }
 
     def search(
         self,
@@ -462,7 +528,23 @@ class SyncService:
         exclude_categories: list[str] = DEFAULT_LIST_STR,
     ) -> dict[str, Any]:
         """Search."""
+        search_id = uuid4().hex
+        started = time.monotonic()
+        phases: dict[str, int] = {}
         live = should_search_gmail(query, after=after, before=before)
+        source = "gmail+cache" if live else "cache"
+        self.cache.record_search_run(
+            search_id,
+            query,
+            source,
+            {
+                "limit": limit,
+                "after": after,
+                "before": before,
+                "include_categories": include_categories or [],
+                "exclude_categories": exclude_categories or [],
+            },
+        )
         live_result: dict[str, Any] = {}
         live_ids: list[str] = []
         if live:
@@ -471,15 +553,39 @@ class SyncService:
                 gmail_query = f"({gmail_query}) after:{after}"
             if before and f"before:{before}" not in gmail_query:
                 gmail_query = f"({gmail_query}) before:{before}"
-            try:
-                live_result = self.search_gmail(gmail_query, limit=limit)
-                live_ids = live_result.get("message_ids", [])
-            except SYNC_EXCEPTIONS as exc:
-                live_result = {"query": gmail_query, "error": repr(exc), "matched": 0, "hydrated": 0, "message_ids": []}
+            pause_remaining = self._gmail_live_search_pause_remaining()
+            if pause_remaining > 0:
+                live_result = {
+                    "query": gmail_query,
+                    "degraded": True,
+                    "reason": "gmail live search temporarily paused after recent errors",
+                    "retry_after_seconds": pause_remaining,
+                    "matched": 0,
+                    "hydrated": 0,
+                    "message_ids": [],
+                }
+            else:
+                try:
+                    live_started = time.monotonic()
+                    live_result = self.search_gmail(gmail_query, limit=limit, search_id=search_id)
+                    phases["live_ms"] = _elapsed_ms(live_started)
+                    live_ids = live_result.get("message_ids", [])
+                except SYNC_EXCEPTIONS as exc:
+                    self._pause_gmail_live_search(exc)
+                    live_result = {
+                        "query": gmail_query,
+                        "error": repr(exc),
+                        "degraded": True,
+                        "retry_after_seconds": GMAIL_LIVE_SEARCH_PAUSE_SECONDS,
+                        "matched": 0,
+                        "hydrated": 0,
+                        "message_ids": [],
+                    }
         if live_ids:
             messages = [message for message_id in live_ids if (message := self.cache.get_message(message_id))]
             messages = _filter_messages(messages, include_categories=include_categories, exclude_categories=exclude_categories)
         else:
+            cache_started = time.monotonic()
             messages = self.cache.text_search(
                 query,
                 limit=limit,
@@ -488,7 +594,121 @@ class SyncService:
                 include_categories=include_categories,
                 exclude_categories=exclude_categories,
             )
-        return {"query": query, "source": "gmail+cache" if live else "cache", "live": live_result, "messages": messages}
+            phases["cache_ms"] = _elapsed_ms(cache_started)
+        message_ids = [str(message["id"]) for message in messages if message.get("id")]
+        self._enqueue_missing_message_analysis(message_ids, {"source": "search", "query": query})
+        analysis = self.analysis_status_for_messages(message_ids)
+        attachment_hydration = self.cache.deferred_attachment_hydration_status(message_ids)
+        phases["total_ms"] = _elapsed_ms(started)
+        status = "degraded" if live_result.get("degraded") else "complete"
+        self.cache.finish_search_run(
+            search_id,
+            status=status,
+            source=source,
+            live=live_result,
+            message_ids=message_ids,
+            analysis=analysis,
+            attachment_hydration=attachment_hydration,
+            phase_timings=phases,
+            error=str(live_result.get("error") or ""),
+        )
+        return {
+            "search_id": search_id,
+            "query": query,
+            "source": source,
+            "live": live_result,
+            "messages": messages,
+            "analysis": analysis,
+            "attachment_hydration": attachment_hydration,
+            "phase_timings_ms": phases,
+        }
+
+    def analysis_status_for_messages(self, message_ids: list[str]) -> dict[str, Any]:
+        """Return queued analysis status and check-back location for search results."""
+        unique_ids = list(dict.fromkeys(message_id for message_id in message_ids if message_id))
+        targets = [("message", message_id) for message_id in unique_ids]
+        status = self.cache.intelligence_target_status(targets)
+        pending = bool(status["pending"] or status["running"] or status["missing"])
+        query = ",".join(unique_ids)
+        return {
+            "pending": pending,
+            "message": "analysis pending; check back later" if pending else "analysis complete",
+            "status_url": f"/api/v1/search/analysis-status?message_ids={query}" if query else "",
+            "target_status": status,
+        }
+
+    def search_status(self, search_id: str) -> dict[str, Any]:
+        """Return current status for a previous search."""
+        status = self.cache.search_run(search_id)
+        if not status:
+            return {}
+        message_ids = [str(message_id) for message_id in status.get("message_ids", [])]
+        status["analysis"] = self.analysis_status_for_messages(message_ids)
+        status["attachment_hydration"] = self.cache.deferred_attachment_hydration_status(message_ids)
+        status["messages"] = [message for message_id in message_ids if (message := self.cache.get_message(message_id))]
+        return status
+
+    def _enqueue_missing_message_analysis(self, message_ids: list[str], payload: dict[str, Any]) -> None:
+        unique_ids = list(dict.fromkeys(message_id for message_id in message_ids if message_id))
+        status = self.cache.intelligence_target_status([("message", message_id) for message_id in unique_ids])
+        for item in status["missing"]:
+            if item["kind"] == "message":
+                self.cache.enqueue_intelligence_job("message", item["target_id"], payload)
+
+    def hydrate_deferred_attachment(self, job: dict[str, Any]) -> str:
+        """Download a deferred Gmail attachment, write the sidecar, and return its digest."""
+        content = self.gmail.get_attachment(str(job["message_id"]), str(job["gmail_attachment_id"]))
+        stored = self.attachments.put(
+            content=content,
+            metadata={
+                "gmail": {
+                    "message_id": job["message_id"],
+                    "thread_id": job.get("thread_id"),
+                    "part_id": job.get("part_id"),
+                    "attachment_id": job.get("gmail_attachment_id"),
+                    "filename": job.get("filename"),
+                    "mime_type": job.get("mime_type"),
+                    "size": len(content),
+                }
+            },
+        )
+        self.cache.add_attachment(
+            {
+                "sha1": stored.sha1,
+                "digest": getattr(stored, "digest", stored.sha1),
+                "message_id": job["message_id"],
+                "part_id": job.get("part_id"),
+                "gmail_attachment_id": job.get("gmail_attachment_id"),
+                "filename": job.get("filename"),
+                "mime_type": job.get("mime_type"),
+                "size": len(content),
+                "stored_size": getattr(stored, "stored_size", len(content)),
+                "compression": getattr(stored, "compression", "identity"),
+                "metadata": stored.metadata,
+                "path": str(stored.path),
+            }
+        )
+        return stored.sha1
+
+    def _refresh_labels_for_search(self) -> None:
+        refreshed_at = self.cache.get_state("gmail.labels.refreshed_at")
+        if refreshed_at and time.time() - _parse_epoch(refreshed_at) < 3600:
+            return
+        for label in self.gmail.list_labels():
+            self.cache.upsert_label(label)
+        self.cache.set_state("gmail.labels.refreshed_at", str(time.time()))
+
+    def _gmail_live_search_pause_remaining(self) -> int:
+        paused_until = _parse_epoch(self.cache.get_state("gmail.live_search.paused_until"))
+        return max(0, int(paused_until - time.time()))
+
+    def _pause_gmail_live_search(self, exc: BaseException) -> None:
+        paused_until = time.time() + GMAIL_LIVE_SEARCH_PAUSE_SECONDS
+        self.cache.set_state("gmail.live_search.paused_until", str(paused_until))
+        self.cache.set_state(
+            "gmail.live_search.last_error",
+            json.dumps({"error": repr(exc), "paused_until": paused_until}, sort_keys=True),
+        )
 
     def hybrid_search(
         self,
@@ -579,6 +799,21 @@ class SyncService:
             )
             sha1s.append(stored.sha1)
         return sha1s
+
+    def _deferred_attachment_refs(self, parsed: ParsedMessage) -> list[dict[str, Any]]:
+        return [
+            {
+                "message_id": parsed.gmail_id,
+                "thread_id": parsed.thread_id,
+                "part_id": part.part_id,
+                "attachment_id": part.attachment_id,
+                "filename": part.filename,
+                "mime_type": part.mime_type,
+                "size": part.size,
+            }
+            for part in parsed.parts
+            if part.attachment_id
+        ]
 
     def apply_label(self, message_id: str, label_id: str) -> dict[str, Any]:
         """Apply label."""
@@ -775,6 +1010,37 @@ def _semantic_message_id(result: dict[str, Any]) -> str:
     metadata: object = result.get("metadata") or {}
     metadata_message_id = str(cast(dict[str, Any], metadata).get("message_id") or "") if isinstance(metadata, dict) else ""
     return str(result.get("message_id") or metadata_message_id or str(result.get("id", "")).split(":", 1)[0])
+
+
+def _gmail_not_found(exc: HttpError) -> bool:
+    return getattr(getattr(exc, "resp", None), "status", None) == 404
+
+
+def _gmail_attachment_ref_count(raw: object) -> int:
+    if not isinstance(raw, dict):
+        return 0
+    payload = raw.get("payload")
+    return _payload_attachment_ref_count(payload if isinstance(payload, dict) else {})
+
+
+def _payload_attachment_ref_count(payload: dict[str, Any]) -> int:
+    body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    count = 1 if body.get("attachmentId") else 0
+    for part in payload.get("parts") or []:
+        if isinstance(part, dict):
+            count += _payload_attachment_ref_count(part)
+    return count
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
+
+
+def _parse_epoch(value: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _score_graph_results(

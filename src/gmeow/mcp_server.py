@@ -8,9 +8,14 @@ services as the API.
 """
 
 import json
+import logging
+import time
 from dataclasses import asdict
+from functools import partial
 from typing import Any, Protocol, cast
+from collections.abc import Callable
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 
@@ -24,6 +29,8 @@ DEFAULT_INT = cast(int, None)
 DEFAULT_LIST_STR = cast(list[str], None)
 DEFAULT_STR = cast(str, None)
 DEFAULT_OPTIONS = cast(dict[str, Any], None)
+LOGGER = logging.getLogger(__name__)
+SLOW_TOOL_SECONDS = 5.0
 
 
 class AttachmentMetadataReader(Protocol):
@@ -49,7 +56,23 @@ def build_mcp_app(cache: PgCache, sync: SyncService, attachments: AttachmentMeta
     _register_mcp_storage_tools(mcp, cache)
     _register_mcp_category_help_tools(mcp, cache, sync)
     _register_mcp_sync_action_tools(mcp, sync)
+    _run_sync_tools_in_worker_threads(mcp)
     return _mcp_http_app(mcp)
+
+
+def _run_sync_tools_in_worker_threads(mcp: FastMCP) -> None:
+    """Keep synchronous tool bodies off the MCP HTTP event loop."""
+    tool_manager = cast(Any, mcp)._tool_manager
+    for tool in tool_manager._tools.values():
+        if tool.is_async:
+            continue
+        tool.fn = partial(_run_sync_tool_in_worker_thread, tool.fn)
+        tool.is_async = True
+
+
+async def _run_sync_tool_in_worker_thread(original: Callable[..., Any], **kwargs: Any) -> Any:
+    """Run a synchronous MCP tool without blocking the HTTP event loop."""
+    return await anyio.to_thread.run_sync(partial(original, **kwargs))
 
 
 def _register_mcp_resources(mcp: FastMCP, cache: PgCache, attachments: AttachmentMetadataReader) -> None:
@@ -85,20 +108,33 @@ def _register_mcp_search_tools(mcp: FastMCP, cache: PgCache, sync: SyncService) 
     @mcp.tool()
     def gmail_text_search(query: str, options: dict[str, Any] = DEFAULT_OPTIONS) -> object:
         """Gmail text search."""
+        started = time.monotonic()
         opts = _options(options)
-        result = sync.search(
-            query,
-            limit=opts["limit"],
-            after=opts["after"],
-            before=opts["before"],
-            include_categories=opts["include_categories"],
-            exclude_categories=opts["exclude_categories"],
-        )
-        results = result["messages"]
-        if opts["compact"]:
-            results = cache.compact_messages(results, body_chars=opts["body_chars"])
-        result["messages"] = results
-        return _format(result, opts["output_format"])
+        try:
+            result = sync.search(
+                query,
+                limit=opts["limit"],
+                after=opts["after"],
+                before=opts["before"],
+                include_categories=opts["include_categories"],
+                exclude_categories=opts["exclude_categories"],
+            )
+            results = result["messages"]
+            if opts["compact"]:
+                results = cache.compact_messages(results, body_chars=opts["body_chars"])
+            result["messages"] = results
+            return _format(result, opts["output_format"])
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed >= SLOW_TOOL_SECONDS:
+                LOGGER.warning(
+                    "Slow MCP tool gmail_text_search elapsed=%.3fs query=%r limit=%s after=%r before=%r",
+                    elapsed,
+                    query,
+                    opts["limit"],
+                    opts["after"],
+                    opts["before"],
+                )
 
     @mcp.tool()
     def gmail_attachment_text_search(query: str, limit: int = 20, output_format: str = "toon") -> object:
@@ -455,6 +491,21 @@ def _register_mcp_status_tools(mcp: FastMCP, cache: PgCache, sync: SyncService) 
         return _format(status, output_format)
 
     @mcp.tool()
+    def gmail_search_analysis_status(message_ids: list[str], output_format: str = "toon") -> object:
+        """Gmail search analysis status."""
+        status = sync.analysis_status_for_messages(message_ids)
+        status["messages"] = [message for message_id in message_ids if (message := cache.get_message(message_id))]
+        return _format(status, output_format)
+
+    @mcp.tool()
+    def gmail_search_status(search_id: str, output_format: str = "toon") -> object:
+        """Gmail search status."""
+        status = sync.search_status(search_id)
+        if not status:
+            return _format({"search_id": search_id, "error": "search not found"}, output_format)
+        return _format(status, output_format)
+
+    @mcp.tool()
     def gmail_summaries(scope_kind: str = DEFAULT_STR, limit: int = 50, output_format: str = "toon") -> object:
         """Gmail summaries."""
         return _format(cache.list_summary_items(scope_kind=scope_kind, limit=limit), output_format)
@@ -485,6 +536,8 @@ def _register_mcp_status_tools(mcp: FastMCP, cache: PgCache, sync: SyncService) 
 
     _registered = (
         gmail_status,
+        gmail_search_analysis_status,
+        gmail_search_status,
         gmail_summaries,
         gmail_timeline_daily,
         gmail_emerging_entities,
