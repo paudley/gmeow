@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 license = "AGPL-3.0-only"
 authors = [
-    { name = "Blackcat Informatics Inc." },
+    { name = "Blackcat Informatics® Inc." },
 ]
 keywords = ["gmail", "mcp", "email", "agents", "archive", "semantic-search", "knowledge-graph"]
 classifiers = [
@@ -50,9 +50,9 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/blackcat-informatics/gmeow"
-Repository = "https://github.com/blackcat-informatics/gmeow"
-Issues = "https://github.com/blackcat-informatics/gmeow/issues"
+Homepage = "https://github.com/paudley/gmeow"
+Repository = "https://github.com/paudley/gmeow"
+Issues = "https://github.com/paudley/gmeow/issues"
 PyPI = "https://pypi.org/project/gmeow/"
 
 [build-system]

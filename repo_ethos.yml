@@ -36,7 +36,7 @@ principles:
     documentation-as-contract:
       quick_ref:
         - Public docs must not include mailbox data, local machine paths, private credentials, OAuth client IDs, or production DSNs.
-        - Source files must keep AGPL SPDX headers with Blackcat Informatics copyright.
+        - Source files must keep AGPL SPDX headers with Blackcat Informatics® copyright.
         - Runtime config examples must stay sanitized and loadable.
       append: |
         Gmeow is prepared for public release and future PyPI publication. Documentation, examples, generated agent surfaces, and test fixtures are part of the public contract and must remain free of personal mailbox data and local-only credentials.

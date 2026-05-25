@@ -39,6 +39,8 @@ class Request:
     app: FastAPI
     client: _Client
     headers: _Headers
+    method: str
+    url: Incomplete
 
 class Response:
     def __init__(self, content: Incomplete = ..., status_code: int = ..., media_type: str = ..., **kwargs: Incomplete) -> None: ...
