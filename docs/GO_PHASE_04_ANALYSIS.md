@@ -72,6 +72,9 @@ contract parity.
 - Unregistered Python/model analyzers fail closed rather than falling back to lower-quality Go
   placeholders.
 - Python/model analyzers without an explicit external adapter command fail at worker startup.
+- Embedding jobs call the configured endpoint and record model, vector, and dimension metadata in
+  FILESTORE analysis annotations.
+- Summary jobs either write an extractive summary or an explicit placeholder status.
 
 ## Exit Gate
 
@@ -80,3 +83,6 @@ contract parity.
 - Old Python analysis modules are deleted incrementally as their Go replacements are verified.
 - NER and categorization either meet or exceed the Python implementation in shared fixtures, or remain
   external Python/model adapters managed by the Go worker runtime.
+- The configured phase-4 analyzer set includes text, RFC822/header, metadata, graph facts,
+  embeddings, summary, and explicit external adapters for NER and categorization when Go parity is
+  not proven.

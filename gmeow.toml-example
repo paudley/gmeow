@@ -71,6 +71,10 @@ kind = "mcp"
 host = "127.0.0.1"
 port = 8765
 
+[analysis.embeddings]
+endpoint = "http://127.0.0.1:8090/v1/embeddings"
+model = "nomic-embed-text-v1.5"
+
 [[analysis.analyzers]]
 name = "text.extract"
 version = "phase04"
@@ -91,6 +95,16 @@ name = "graph.facts"
 version = "phase04"
 worker_kind = "go"
 
+[[analysis.analyzers]]
+name = "embedding.endpoint"
+version = "phase04"
+worker_kind = "go"
+
+[[analysis.analyzers]]
+name = "summary.centroid"
+version = "phase04"
+worker_kind = "go"
+
 # Quality-critical Python/model analyzers must be explicit external adapters.
 # They are managed by the Go worker, which owns RabbitMQ, gRPC FILESTORE access, and ack/nack.
 # [[analysis.analyzers]]
@@ -99,6 +113,14 @@ worker_kind = "go"
 # worker_kind = "python"
 # command = "gmeow-intel"
 # args = ["analyze", "ner.spacy"]
+# timeout = "2m"
+#
+# [[analysis.analyzers]]
+# name = "categories.sklearn"
+# version = "python-current"
+# worker_kind = "python"
+# command = "gmeow-intel"
+# args = ["analyze", "categories.sklearn"]
 # timeout = "2m"
 
 [[search.backends]]

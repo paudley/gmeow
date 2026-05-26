@@ -58,7 +58,7 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 				return err
 			}
 			defer store.Close()
-			registry, err := workerRegistryFromConfig(loaded.Config.Analysis.Analyzers)
+			registry, err := workerRegistryFromConfig(loaded.Config.Analysis)
 			if err != nil {
 				return err
 			}
@@ -79,7 +79,7 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 }
 
 func workerRegistryFromConfig(
-	analyzers []config.AnalyzerConfig,
+	analysisConfig config.AnalysisConfig,
 ) (*analysis.Registry, error) {
 	defaultRegistry, err := analysis.DefaultRegistry()
 	if err != nil {
@@ -93,17 +93,13 @@ func workerRegistryFromConfig(
 		}
 	}
 	registered := []analysis.Analyzer{}
-	for _, configured := range analyzers {
+	for _, configured := range analysisConfig.Analyzers {
 		spec := analyzerSpecFromConfig(configured)
 		switch configured.WorkerKind {
 		case "", "go":
-			analyzer, ok := defaults[analysis.SpecKey(spec)]
-			if !ok {
-				return nil, fmt.Errorf(
-					"go analyzer %s version %s is not registered",
-					spec.Name,
-					spec.Version,
-				)
+			analyzer, err := goAnalyzerFromConfig(configured, spec, defaults, analysisConfig)
+			if err != nil {
+				return nil, err
 			}
 			registered = append(registered, analyzer)
 		case "external", "python":
@@ -120,6 +116,29 @@ func workerRegistryFromConfig(
 		return nil, errors.New("at least one analysis analyzer must be configured")
 	}
 	return analysis.NewRegistry(registered...)
+}
+
+func goAnalyzerFromConfig(
+	configured config.AnalyzerConfig,
+	spec contracts.AnalyzerSpec,
+	defaults map[string]analysis.Analyzer,
+	analysisConfig config.AnalysisConfig,
+) (analysis.Analyzer, error) {
+	if spec.Name == analysis.EmbeddingName {
+		return analysis.NewEmbeddingAnalyzer(analysis.EmbeddingConfig{
+			Endpoint: analysisConfig.Embeddings.Endpoint,
+			Model:    analysisConfig.Embeddings.Model,
+		})
+	}
+	analyzer, ok := defaults[analysis.SpecKey(spec)]
+	if !ok {
+		return nil, fmt.Errorf(
+			"go analyzer %s version %s is not registered",
+			configured.Name,
+			configured.Version,
+		)
+	}
+	return analyzer, nil
 }
 
 func analyzerSpecFromConfig(configured config.AnalyzerConfig) contracts.AnalyzerSpec {

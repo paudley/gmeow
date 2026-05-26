@@ -1296,7 +1296,7 @@ Deliverables:
 - text extraction analyzer;
 - RFC822/header analyzer;
 - metadata extraction analyzer;
-- embedding analyzer using configured endpoint;
+- embedding analyzer using configured endpoint and model;
 - graph fact analyzer;
 - NER analyzer, either equal-or-better Go-native or Python/model-backed through the external adapter;
 - categorization analyzer, either equal-or-better Go-native or Python/model-backed through the
@@ -1314,6 +1314,8 @@ Exit criteria:
 - Python/model analyzers without an explicit external adapter command fail at worker startup;
 - Go-native replacements for Python-backed analyzers pass equal-or-better fixture gates before the
   Python implementation is retired.
+- the configured analyzer set covers text, RFC822/header, metadata, graph facts, embeddings,
+  summary, and explicit NER/category adapters unless Go parity has been proven.
 
 ### Phase 5 - SOURCE Adapters
 

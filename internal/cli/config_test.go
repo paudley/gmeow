@@ -86,14 +86,16 @@ func TestAdminSecretUnsetRefusesReferencedSecret(t *testing.T) {
 }
 
 func TestWorkerRegistrySupportsConfiguredExternalAnalyzer(t *testing.T) {
-	registry, err := workerRegistryFromConfig([]config.AnalyzerConfig{{
-		Name:       "ner.spacy",
-		Version:    "python-current",
-		WorkerKind: "python",
-		Command:    "gmeow-intel",
-		Args:       []string{"analyze", "ner.spacy"},
-		Timeout:    "30s",
-	}})
+	registry, err := workerRegistryFromConfig(config.AnalysisConfig{
+		Analyzers: []config.AnalyzerConfig{{
+			Name:       "ner.spacy",
+			Version:    "python-current",
+			WorkerKind: "python",
+			Command:    "gmeow-intel",
+			Args:       []string{"analyze", "ner.spacy"},
+			Timeout:    "30s",
+		}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,15 +109,83 @@ func TestWorkerRegistrySupportsConfiguredExternalAnalyzer(t *testing.T) {
 }
 
 func TestWorkerRegistryRejectsPythonAnalyzerWithoutExplicitAdapter(t *testing.T) {
-	_, err := workerRegistryFromConfig([]config.AnalyzerConfig{{
-		Name:       "ner.spacy",
-		Version:    "python-current",
-		WorkerKind: "python",
-	}})
+	_, err := workerRegistryFromConfig(config.AnalysisConfig{
+		Analyzers: []config.AnalyzerConfig{{
+			Name:       "ner.spacy",
+			Version:    "python-current",
+			WorkerKind: "python",
+		}},
+	})
 	if err == nil {
 		t.Fatal("expected Python analyzer without command to fail closed")
 	}
 	if !strings.Contains(err.Error(), "external analyzer command is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWorkerRegistryCoversPhaseFourAnalyzerSet(t *testing.T) {
+	registry, err := workerRegistryFromConfig(config.AnalysisConfig{
+		Embeddings: config.EmbeddingConfig{
+			Endpoint: "http://127.0.0.1:8090/v1/embeddings",
+			Model:    "test-embed",
+		},
+		Analyzers: []config.AnalyzerConfig{
+			{Name: "text.extract", Version: "phase04", WorkerKind: "go"},
+			{Name: "rfc822.headers", Version: "phase04", WorkerKind: "go"},
+			{Name: "metadata.extract", Version: "phase04", WorkerKind: "go"},
+			{Name: "graph.facts", Version: "phase04", WorkerKind: "go"},
+			{Name: "embedding.endpoint", Version: "phase04", WorkerKind: "go"},
+			{Name: "summary.centroid", Version: "phase04", WorkerKind: "go"},
+			{
+				Name:       "ner.spacy",
+				Version:    "python-current",
+				WorkerKind: "python",
+				Command:    "gmeow-intel",
+				Args:       []string{"analyze", "ner.spacy"},
+				Timeout:    "2m",
+			},
+			{
+				Name:       "categories.sklearn",
+				Version:    "python-current",
+				WorkerKind: "python",
+				Command:    "gmeow-intel",
+				Args:       []string{"analyze", "categories.sklearn"},
+				Timeout:    "2m",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, configured := range []config.AnalyzerConfig{
+		{Name: "text.extract", Version: "phase04", WorkerKind: "go"},
+		{Name: "rfc822.headers", Version: "phase04", WorkerKind: "go"},
+		{Name: "metadata.extract", Version: "phase04", WorkerKind: "go"},
+		{Name: "graph.facts", Version: "phase04", WorkerKind: "go"},
+		{Name: "embedding.endpoint", Version: "phase04", WorkerKind: "go"},
+		{Name: "summary.centroid", Version: "phase04", WorkerKind: "go"},
+		{Name: "ner.spacy", Version: "python-current", WorkerKind: "python"},
+		{Name: "categories.sklearn", Version: "python-current", WorkerKind: "python"},
+	} {
+		if _, ok := registry.Analyzer(analyzerSpecFromConfig(configured)); !ok {
+			t.Fatalf("expected analyzer to be registered: %#v", configured)
+		}
+	}
+}
+
+func TestWorkerRegistryRequiresEmbeddingEndpointConfig(t *testing.T) {
+	_, err := workerRegistryFromConfig(config.AnalysisConfig{
+		Analyzers: []config.AnalyzerConfig{{
+			Name:       "embedding.endpoint",
+			Version:    "phase04",
+			WorkerKind: "go",
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected missing embedding endpoint config to fail")
+	}
+	if !strings.Contains(err.Error(), "embedding endpoint is required") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

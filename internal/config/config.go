@@ -127,7 +127,13 @@ type SourceConfig struct {
 }
 
 type AnalysisConfig struct {
-	Analyzers []AnalyzerConfig `toml:"analyzers"`
+	Embeddings EmbeddingConfig  `toml:"embeddings"`
+	Analyzers  []AnalyzerConfig `toml:"analyzers"`
+}
+
+type EmbeddingConfig struct {
+	Endpoint string `toml:"endpoint"`
+	Model    string `toml:"model"`
 }
 
 type AnalyzerConfig struct {

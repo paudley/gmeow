@@ -22,6 +22,7 @@ const (
 	HeadersName     = "rfc822.headers"
 	MetadataName    = "metadata.extract"
 	GraphFactsName  = "graph.facts"
+	SummaryName     = "summary.centroid"
 	Phase04Version  = "phase04"
 )
 
@@ -199,12 +200,50 @@ func (GraphFactAnalyzer) Analyze(
 	return contracts.Annotation{Data: map[string]any{"facts": facts}}, nil
 }
 
+type SummaryAnalyzer struct{}
+
+func (SummaryAnalyzer) Spec() contracts.AnalyzerSpec {
+	return contracts.AnalyzerSpec{
+		Name:               SummaryName,
+		Version:            Phase04Version,
+		OutputSections:     []string{"summary"},
+		Deterministic:      true,
+		WorkerKind:         "go",
+		RequiredInputs:     []string{"blob"},
+		IdempotencyFormula: "digest+analyzer+version",
+	}
+}
+
+func (SummaryAnalyzer) Analyze(
+	ctx context.Context,
+	store ObjectStore,
+	job contracts.AnalyzerJob,
+) (contracts.Annotation, error) {
+	content, manifest, err := readObject(ctx, store, job.ObjectDigest)
+	if err != nil {
+		return contracts.Annotation{}, err
+	}
+	text := extractText(content, manifest.MediaType)
+	summary := firstSentences(text, 2)
+	status := "complete"
+	if summary == "" {
+		status = "placeholder"
+	}
+	return contracts.Annotation{Data: map[string]any{
+		"status":     status,
+		"summary":    summary,
+		"algorithm":  "extractive_first_sentences",
+		"media_type": manifest.MediaType,
+	}}, nil
+}
+
 func DefaultRegistry() (*Registry, error) {
 	return NewRegistry(
 		TextExtractAnalyzer{},
 		RFC822HeaderAnalyzer{},
 		MetadataAnalyzer{},
 		GraphFactAnalyzer{},
+		SummaryAnalyzer{},
 	)
 }
 
@@ -304,4 +343,22 @@ func stripTags(value string) string {
 
 func normalizeWhitespace(value string) string {
 	return strings.TrimSpace(whitespacePattern.ReplaceAllString(value, " "))
+}
+
+func firstSentences(text string, limit int) string {
+	text = normalizeWhitespace(text)
+	if text == "" || limit <= 0 {
+		return ""
+	}
+	endCount := 0
+	for index, char := range text {
+		switch char {
+		case '.', '!', '?':
+			endCount++
+			if endCount >= limit {
+				return strings.TrimSpace(text[:index+1])
+			}
+		}
+	}
+	return text
 }
