@@ -20,5 +20,4 @@ jobs:
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v7
-      - run: uv sync --extra test
       - run: make check

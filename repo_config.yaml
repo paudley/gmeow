@@ -8,7 +8,7 @@ go:
   worktree: .
 
 repo:
-  kind: python-service
+  kind: go-service
   profiles: []
   protected_branch_work:
     enabled: true
@@ -116,7 +116,6 @@ git:
     enabled: true
     basenames:
       - Makefile
-      - pyproject.toml
       - repo_config.yaml
       - repo_ethos.yml
     dirs:
@@ -126,14 +125,14 @@ python:
   uv_exclude_newer:
     enabled: false
   source_paths:
-    - src/gmeow
+    - python/gmeow_intel
     - scripts
   test_paths:
-    - tests
+    - python/tests
   stub_paths:
     - typings
   extra_paths:
-    - src/gmeow
+    - python/gmeow_intel
   venv_path: .
   venv: .venv
   module_docs:

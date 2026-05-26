@@ -95,40 +95,33 @@ advice: ## Print setup advice and current local readiness.
 	@if command -v tesseract >/dev/null 2>&1; then printf '  $(GREEN)ok$(RESET) tesseract available\n'; else printf '  $(YELLOW)note$(RESET) tesseract missing; image OCR will be skipped.\n'; fi
 	@if command -v pdftotext >/dev/null 2>&1; then printf '  $(GREEN)ok$(RESET) poppler pdftotext available\n'; else printf '  $(YELLOW)note$(RESET) pdftotext missing; PDF text extraction will be reduced.\n'; fi
 
-install: ## Install/sync development dependencies with uv.
+install: ## Install/sync Go and analyzer development dependencies.
 	$(call section,Syncing development environment)
-	$(UV) sync --extra test
+	$(GO) mod download
+	cd python && $(UV) sync
 
-update: ## Upgrade dependencies and refresh uv.lock.
+update: ## Upgrade analyzer dependencies and refresh python/uv.lock.
 	$(call section,Updating dependencies)
-	$(UV) lock --upgrade
-	$(UV) sync --extra test
+	cd python && $(UV) lock --upgrade
+	cd python && $(UV) sync
 
-lock: ## Resolve uv.lock without upgrading.
+lock: ## Resolve python/uv.lock without upgrading.
 	$(call section,Resolving lockfile)
-	$(UV) lock
+	cd python && $(UV) lock
 
 doctor: ## Validate Go Phase 00 config.
 	$(call section,Validating Go config)
 	$(GMEOW_ADMIN) --config "$(CONFIG)" config validate
 
-compile: ## Compile Python sources.
-	$(call section,Compiling Python)
-	$(UV) run $(PYTHON) -m compileall main.py src migrations tests scripts
+compile: python-intel-test ## Compile/check retained Python analyzer sources.
 
-test: ## Run tests.
-	$(call section,Running tests)
-	$(UV) run pytest tests
+test: go-test python-intel-test ## Run Go and retained analyzer tests.
 
-type-check: ## Run Python static type checks.
-	$(call section,Running Python type checks)
-	$(UV) run mypy
+type-check: go-vet ## Run static checks.
 
-quick-check: compile type-check test ## Run compile, type checks, and tests.
+quick-check: go-vet go-test python-intel-test ## Run focused checks.
 
-build: ## Build wheel and sdist.
-	$(call section,Building package)
-	$(UV) build
+build: go-build python-intel-build ## Build Go binaries and retained analyzer package.
 
 go-format: ## Format Go sources.
 	$(call section,Formatting Go)
@@ -158,9 +151,9 @@ python-intel-build: ## Build gmeow-intel distribution.
 
 release-check: ## Run public release hygiene checks.
 	$(call section,Running public release hygiene check)
-	$(UV) run $(PYTHON) scripts/public_release_check.py
+	$(PYTHON) scripts/public_release_check.py
 
-release-audit: compile type-check test build python-intel-test python-intel-build release-check ## Run the full local release gate.
+release-audit: python-intel-test python-intel-build release-check ## Run the local release hygiene gate.
 	$(call section,Checking whitespace)
 	git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab diff --check
 

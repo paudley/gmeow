@@ -3,7 +3,7 @@
 
 repo:
   name: Gmeow
-  overview: Local Gmail MCP and REST intelligence server with durable cache, semantic search, attachment CAS, and knowledge graph tooling.
+  overview: FILESTORE-first local knowledge services for agents with Go runtimes and retained Python ANALYSIS adapters.
   commands:
     install:
       - make install
@@ -14,12 +14,12 @@ repo:
     check:
       - make check
   paths:
-    source: src/gmeow/
-    tests: tests/
+    source: internal/
+    tests: internal/
   notes:
     - Treat `config.toml`, SOPS files, mailbox exports, and `data/` as local-only secrets/runtime data.
     - Gmail actions are intentionally limited; do not add send, draft, trash, delete, or filter mutation endpoints without an explicit product decision.
-    - MCP responses default to TOON; JSON is an explicit agent choice.
+    - MCP, REST, IMAP, and CLI use shared Go application services.
 
 agent_notes:
   codex:
@@ -68,7 +68,7 @@ principles:
         - Gmail authority
         - MCP safety
       agent_hints:
-        codex: Check `src/gmeow/app.py`, `src/gmeow/mcp_server.py`, and `src/gmeow/gmail.py` before changing exposed authority.
+        codex: Check `internal/interface`, `internal/appsvc`, and `internal/source` before changing exposed authority.
         claude: Prefer read/search improvements over new mailbox mutations unless the requested operation is explicit.
         gemini: Review endpoint changes for accidental remote exposure or new destructive Gmail capabilities.
       sections:

@@ -1,7 +1,7 @@
 {
     "typeCheckingMode": "strict",
     "include": [
-        "src/gmeow",
+        "python/gmeow_intel",
         "scripts"
     ],
     "exclude": [
@@ -11,7 +11,7 @@
         "**/.venv/**"
     ],
     "extraPaths": [
-        "src/gmeow"
+        "python/gmeow_intel"
     ],
     "venvPath": ".",
     "venv": ".venv",
