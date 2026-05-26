@@ -5,13 +5,22 @@ package query
 
 import (
 	"context"
+	"time"
 
-	"blackat.ca/gmeow/internal/contracts"
-	"blackat.ca/gmeow/internal/filestore"
+	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
 )
 
 type ProjectionSource interface {
 	WalkProjection(ctx context.Context, fn filestore.ProjectionFunc) error
+}
+
+type IncrementalProjectionSource interface {
+	WalkChangedProjection(
+		ctx context.Context,
+		since time.Time,
+		fn filestore.ProjectionFunc,
+	) error
 }
 
 type SourceCursorProjectionSource interface {
@@ -55,4 +64,5 @@ type Index interface {
 		request contracts.SourceCursorRequest,
 	) (contracts.SourceCursorResponse, error)
 	Rebuild(ctx context.Context) error
+	ProjectChanged(ctx context.Context, since time.Time) error
 }

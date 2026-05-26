@@ -6,8 +6,9 @@ package filestore
 import (
 	"context"
 	"io"
+	"time"
 
-	"blackat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/contracts"
 )
 
 type Store interface {
@@ -26,7 +27,19 @@ type Store interface {
 		digest contracts.ObjectDigest,
 	) (contracts.Structure, error)
 	WriteAnnotation(ctx context.Context, annotation contracts.Annotation) error
+	WriteOverlays(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+		overlays map[string]any,
+	) error
 	WriteSourceCursor(ctx context.Context, cursor contracts.SourceCursor) error
+	WalkProjection(ctx context.Context, fn ProjectionFunc) error
+	WalkChangedProjection(
+		ctx context.Context,
+		since time.Time,
+		fn ProjectionFunc,
+	) error
+	WalkSourceCursors(ctx context.Context, fn SourceCursorProjectionFunc) error
 	Verify(ctx context.Context) (VerifyReport, error)
 }
 

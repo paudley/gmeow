@@ -1,4 +1,4 @@
-module blackat.ca/gmeow
+module blackcat.ca/gmeow
 
 go 1.26
 

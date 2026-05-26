@@ -79,6 +79,9 @@ go run ./cmd/gmeow --config gmeow.toml status
 ```
 
 Phase 00 binaries validate config and report startup status without initializing unimplemented components.
+Phase 01/02 development commands include `gmeow-admin filestore verify`,
+`gmeow-admin query rebuild`, and `gmeow-admin query project-changed --since <RFC3339>` for
+FILESTORE verification and QUERY projection work.
 
 ## Distribution
 

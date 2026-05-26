@@ -21,9 +21,9 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
-	"blackat.ca/gmeow/internal/contracts"
-	"blackat.ca/gmeow/internal/filestore"
-	"blackat.ca/gmeow/internal/query"
+	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
+	"blackcat.ca/gmeow/internal/query"
 )
 
 const defaultLimit = 50
@@ -240,6 +240,54 @@ func (index *Index) Rebuild(ctx context.Context) error {
 	return err
 }
 
+func (index *Index) ProjectChanged(ctx context.Context, since time.Time) error {
+	report, err := index.ProjectChangedReport(ctx, since)
+	if err != nil {
+		return err
+	}
+	_ = report
+	return nil
+}
+
+func (index *Index) ProjectChangedReport(
+	ctx context.Context,
+	since time.Time,
+) (RebuildReport, error) {
+	if index.source == nil {
+		return RebuildReport{}, errors.New(
+			"projection source is required for incremental projection",
+		)
+	}
+	source, ok := index.source.(query.IncrementalProjectionSource)
+	if !ok {
+		return RebuildReport{}, errors.New(
+			"projection source does not support incremental projection",
+		)
+	}
+	started := time.Now()
+	report := RebuildReport{}
+	err := source.WalkChangedProjection(
+		ctx,
+		since,
+		func(object filestore.ProjectionObject) error {
+			report.Scanned++
+			if len(object.Findings) > 0 {
+				report.Failed++
+			}
+			if err := index.ProjectObject(ctx, object); err != nil {
+				report.Failed++
+				return err
+			}
+			if len(object.Findings) == 0 {
+				report.Projected++
+			}
+			return nil
+		},
+	)
+	report.Elapsed = time.Since(started)
+	return report, err
+}
+
 func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 	if index.source == nil {
 		return RebuildReport{}, errors.New("projection source is required for rebuild")
@@ -255,7 +303,7 @@ func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 		"query_source_cursors",
 		"query_objects",
 	} {
-		if _, err := tx.Exec(ctx, "TRUNCATE "+table+" CASCADE"); err != nil {
+		if _, err := tx.Exec(ctx, truncateProjectionTableSQL(table)); err != nil {
 			tx.Rollback(ctx)
 			return RebuildReport{}, fmt.Errorf("truncate %s: %w", table, err)
 		}
@@ -1089,7 +1137,7 @@ func projectObjectTx(
 	} {
 		if _, err := tx.Exec(
 			ctx,
-			"DELETE FROM "+table+" WHERE object_digest = $1",
+			deleteProjectionRowsSQL(table),
 			object.Manifest.ObjectDigest,
 		); err != nil {
 			return fmt.Errorf("clear %s: %w", table, err)
@@ -1135,6 +1183,48 @@ func projectObjectTx(
 		return err
 	}
 	return nil
+}
+
+func truncateProjectionTableSQL(table string) string {
+	switch table {
+	case "query_projection_state":
+		return "TRUNCATE query_projection_state CASCADE"
+	case "query_summaries":
+		return "TRUNCATE query_summaries CASCADE"
+	case "query_source_cursors":
+		return "TRUNCATE query_source_cursors CASCADE"
+	case "query_objects":
+		return "TRUNCATE query_objects CASCADE"
+	default:
+		panic("unsupported query projection truncate table: " + table)
+	}
+}
+
+func deleteProjectionRowsSQL(table string) string {
+	switch table {
+	case "query_object_facets":
+		return "DELETE FROM query_object_facets WHERE object_digest = $1"
+	case "query_object_provenance":
+		return "DELETE FROM query_object_provenance WHERE object_digest = $1"
+	case "query_object_relationships":
+		return "DELETE FROM query_object_relationships WHERE object_digest = $1"
+	case "query_object_compound_parts":
+		return "DELETE FROM query_object_compound_parts WHERE object_digest = $1"
+	case "query_object_analysis":
+		return "DELETE FROM query_object_analysis WHERE object_digest = $1"
+	case "query_object_graph_edges":
+		return "DELETE FROM query_object_graph_edges WHERE object_digest = $1"
+	case "query_object_keywords":
+		return "DELETE FROM query_object_keywords WHERE object_digest = $1"
+	case "query_object_embeddings":
+		return "DELETE FROM query_object_embeddings WHERE object_digest = $1"
+	case "query_object_overlays":
+		return "DELETE FROM query_object_overlays WHERE object_digest = $1"
+	case "query_summaries":
+		return "DELETE FROM query_summaries WHERE object_digest = $1"
+	default:
+		panic("unsupported query projection delete table: " + table)
+	}
 }
 
 func deleteAgeFactsForDigest(
@@ -1195,7 +1285,7 @@ func insertProvenanceRows(
 	manifest contracts.Manifest,
 ) error {
 	for _, item := range manifest.Provenance {
-		attributes, err := json.Marshal(nonNilMap(item.Attributes))
+		attributes, err := json.Marshal(nonNilMap(firstMap(item.Metadata, item.Attributes)))
 		if err != nil {
 			return err
 		}

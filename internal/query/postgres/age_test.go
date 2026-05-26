@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"blackat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/contracts"
 )
 
 func TestReadOnlyCypherValidation(t *testing.T) {
@@ -80,5 +80,23 @@ func TestRelationshipFilterActive(t *testing.T) {
 	}
 	if !relationshipFilterActive(contracts.RelationshipFilter{Roles: []string{"body"}}) {
 		t.Fatal("role relationship filter should be active")
+	}
+}
+
+func TestProjectionSQLDoesNotConcatenateTableNames(t *testing.T) {
+	content, err := os.ReadFile("index.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(content)
+	for _, unsafe := range []string{
+		`"TRUNCATE "+`,
+		`"DELETE FROM "+`,
+		"`TRUNCATE \" +",
+		"`DELETE FROM \" +",
+	} {
+		if strings.Contains(sql, unsafe) {
+			t.Fatalf("projection SQL must use fixed table-name helpers, found %s", unsafe)
+		}
 	}
 }

@@ -67,7 +67,7 @@ Every FILESTORE object key maps to an object directory. At minimum, each object 
 the immutable blob and emergency sidecar. Compound objects without natural source bytes use their
 canonical JSON envelope as the blob payload, so they get the same resilience treatment:
 
-- `blob.zst`: the compressed object bytes;
+- `blob.zstd`: the compressed object bytes;
 - `recovery.json`: a small emergency sidecar.
 
 The emergency sidecar is **not** the manifest. It is write-once, never updated, and not read by
@@ -296,7 +296,7 @@ Rules:
 
 - bytes are immutable; manifests are mutable but must be written atomically;
 - blob emergency sidecars are immutable and must be written atomically with blob creation;
-- writes to an existing object are no-ops for `blob.zst` and `recovery.json`; they only merge
+- writes to an existing object are no-ops for `blob.zstd` and `recovery.json`; they only merge
   mutable authoritative annotations such as `manifest.json.zst`, `analysis.json.zst`, and
   `overlays.json.zst`;
 - normal processes must ignore emergency sidecars and read authoritative manifests instead;
@@ -560,7 +560,7 @@ Required behavior:
 - put/get CAS objects by BLAKE3 digest;
 - assign immutable object IDs and identity strategies before object creation;
 - create one object directory per digest;
-- write every object with `blob.zst` plus immutable emergency `recovery.json` sidecar;
+- write every object with `blob.zstd` plus immutable emergency `recovery.json` sidecar;
 - treat existing-object writes as metadata merges only, never as blob or recovery sidecar repairs;
 - own dedupe for byte-bearing objects and canonical compound envelopes;
 - optional zstd compression by media type;
@@ -617,7 +617,8 @@ Projection tables should be greenfield and object-centric:
 Capabilities:
 
 - full rebuild by walking FILESTORE object directories and reading authoritative annotations;
-- incremental upsert from changed annotation files;
+- incremental upsert from changed authoritative annotations, exposed by
+  `gmeow-admin query project-changed --since <RFC3339>`;
 - text search over extracted/source text;
 - vector search via pgvector;
 - graph traversal and analytics over object relationships and extracted graph facts;
@@ -1108,7 +1109,7 @@ data/
         ab/
           cd/
             <digest>/
-              blob.zst
+              blob.zstd
               recovery.json
               manifest.json.zst
               analysis.json.zst
@@ -1125,8 +1126,8 @@ data/
 Runtime layout rules:
 
 - every object key has exactly one object directory;
-- `blob.zst` and `recovery.json` are immutable after creation;
-- once `blob.zst` exists, normal writes must not create, replace, repair, or refresh
+- `blob.zstd` and `recovery.json` are immutable after creation;
+- once `blob.zstd` exists, normal writes must not create, replace, repair, or refresh
   `recovery.json`;
 - authoritative annotations are compressed `*.json.zst` files in the object directory;
 - annotation files are independently and atomically written;
@@ -1478,7 +1479,7 @@ Ownership boundaries:
 
 1. Operator finds object directories but manifests or QUERY are damaged.
 2. Normal system processes still ignore `recovery.json`.
-3. Human reads `recovery.json` beside `blob.zst` to identify media type, source hint, observed
+3. Human reads `recovery.json` beside `blob.zstd` to identify media type, source hint, observed
    filename/title, sizes, hashes, compression, and writer version.
 4. Operator can manually triage or rebuild enough context to reimport/recover data.
 

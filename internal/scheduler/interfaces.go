@@ -6,7 +6,7 @@ package scheduler
 import (
 	"context"
 
-	"blackat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/contracts"
 )
 
 type Scheduler interface {

@@ -10,7 +10,7 @@ provenance, relationships, compound objects, immutable recovery sidecars, and at
 - Implement BLAKE3 object directories under `objects/blake3/aa/bb/<digest>/`.
 - Implement byte-bearing object writes:
   - canonical uncompressed BLAKE3 identity;
-  - zstd `blob.zst`;
+  - zstd `blob.zstd`;
   - immutable `recovery.json`;
   - media type and source hints.
 - Implement compound object writes:
@@ -25,6 +25,7 @@ provenance, relationships, compound objects, immutable recovery sidecars, and at
 - Enforce at least one facet on every object.
 - Implement dedupe and merge rules inside FILESTORE only.
 - Implement structure queries such as `GetStructure(digest)`.
+- Implement changed-object projection walks and overlay writes from FILESTORE authority.
 - Implement `gmeow-admin filestore verify` with operator-facing reports.
 
 ## Retire Python Equivalent
@@ -45,7 +46,7 @@ phase replaces them.
 - Writing the same file bytes twice creates one object directory.
 - Two compound writes with the same stable object ID resolve to one digest.
 - Compound creation without a stable object ID is rejected before writing.
-- Every object directory contains `blob.zst` and `recovery.json`.
+- Every object directory contains `blob.zstd` and `recovery.json`.
 - Normal FILESTORE reads ignore `recovery.json`.
 - Corrupt bytes or mismatched hashes are reported by verify.
 - A compound object can return role-mapped parts and subobject digests.

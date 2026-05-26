@@ -6,7 +6,7 @@ package analysis
 import (
 	"context"
 
-	"blackat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/contracts"
 )
 
 type Analyzer interface {

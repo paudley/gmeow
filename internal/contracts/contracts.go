@@ -63,11 +63,14 @@ type Timestamps struct {
 }
 
 type Provenance struct {
-	SourceName string         `json:"source_name"`
-	SourceKind string         `json:"source_kind"`
-	ExternalID string         `json:"external_id,omitempty"`
-	ObservedAt time.Time      `json:"observed_at"`
-	Attributes map[string]any `json:"attributes,omitempty"`
+	SourceName       string         `json:"source_name"`
+	SourceKind       string         `json:"source_kind"`
+	ExternalID       string         `json:"external_id,omitempty"`
+	ExternalVersion  string         `json:"external_version,omitempty"`
+	ObservedAt       time.Time      `json:"observed_at"`
+	CapabilitiesSeen []string       `json:"capabilities_seen,omitempty"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
+	Attributes       map[string]any `json:"attributes,omitempty"`
 }
 
 type Relationship struct {
@@ -127,30 +130,46 @@ type SourceEvent struct {
 	EventID       string         `json:"event_id"`
 	SourceName    string         `json:"source_name"`
 	SourceKind    string         `json:"source_kind"`
+	EventKind     string         `json:"event_kind"`
+	ExternalID    string         `json:"external_id,omitempty"`
+	Cursor        map[string]any `json:"cursor,omitempty"`
 	ObservedAt    time.Time      `json:"observed_at"`
 	ObjectDigest  ObjectDigest   `json:"object_digest,omitempty"`
 	Capabilities  []string       `json:"capabilities,omitempty"`
+	Relationships []Relationship `json:"relationships,omitempty"`
 	Payload       map[string]any `json:"payload,omitempty"`
 }
 
 type AnalyzerSpec struct {
-	Name         string   `json:"name"`
-	Version      string   `json:"version"`
-	MediaTypes   []string `json:"media_types,omitempty"`
-	ContentRoles []string `json:"content_roles,omitempty"`
-	Priority     int      `json:"priority,omitempty"`
-	WorkerKind   string   `json:"worker_kind,omitempty"`
-	Enabled      bool     `json:"enabled"`
+	Name               string   `json:"name"`
+	Version            string   `json:"version"`
+	MediaTypes         []string `json:"media_types,omitempty"`
+	ContentRoles       []string `json:"content_roles,omitempty"`
+	RequiredInputs     []string `json:"required_inputs,omitempty"`
+	OutputSections     []string `json:"output_sections,omitempty"`
+	Dependencies       []string `json:"dependencies,omitempty"`
+	Priority           int      `json:"priority,omitempty"`
+	IdempotencyFormula string   `json:"idempotency_key_formula,omitempty"`
+	Deterministic      bool     `json:"deterministic,omitempty"`
+	WorkerKind         string   `json:"worker_kind,omitempty"`
+	Enabled            bool     `json:"enabled"`
 }
 
 type AnalyzerJob struct {
-	SchemaVersion SchemaVersion `json:"schema_version"`
-	JobID         string        `json:"job_id"`
-	Analyzer      AnalyzerSpec  `json:"analyzer"`
-	ObjectDigest  ObjectDigest  `json:"object_digest"`
-	Forced        bool          `json:"forced"`
-	Priority      int           `json:"priority"`
-	CreatedAt     time.Time     `json:"created_at"`
+	SchemaVersion  SchemaVersion `json:"schema_version"`
+	JobID          string        `json:"job_id"`
+	IdempotencyKey string        `json:"idempotency_key,omitempty"`
+	Analyzer       AnalyzerSpec  `json:"analyzer"`
+	ObjectDigest   ObjectDigest  `json:"object_digest"`
+	PriorityClass  string        `json:"priority_class,omitempty"`
+	RequestedBy    string        `json:"requested_by,omitempty"`
+	Reason         string        `json:"reason,omitempty"`
+	Attempt        int           `json:"attempt,omitempty"`
+	TraceID        string        `json:"trace_id,omitempty"`
+	Deadline       time.Time     `json:"deadline,omitempty"`
+	Forced         bool          `json:"forced"`
+	Priority       int           `json:"priority"`
+	CreatedAt      time.Time     `json:"created_at"`
 }
 
 type Annotation struct {

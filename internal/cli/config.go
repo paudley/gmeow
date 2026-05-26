@@ -13,7 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"blackat.ca/gmeow/internal/config"
+	"blackcat.ca/gmeow/internal/config"
 )
 
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)

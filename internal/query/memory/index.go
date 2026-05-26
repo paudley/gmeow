@@ -10,10 +10,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
-	"blackat.ca/gmeow/internal/contracts"
-	"blackat.ca/gmeow/internal/filestore"
-	"blackat.ca/gmeow/internal/query"
+	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
+	"blackcat.ca/gmeow/internal/query"
 )
 
 type Index struct {
@@ -93,6 +94,25 @@ func (index *Index) Rebuild(ctx context.Context) error {
 	return cursorSource.WalkSourceCursors(ctx, func(cursor contracts.SourceCursor) error {
 		return index.ProjectSourceCursor(ctx, cursor)
 	})
+}
+
+func (index *Index) ProjectChanged(ctx context.Context, since time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if index.source == nil {
+		return nil
+	}
+	if source, ok := index.source.(query.IncrementalProjectionSource); ok {
+		return source.WalkChangedProjection(
+			ctx,
+			since,
+			func(object filestore.ProjectionObject) error {
+				return index.ProjectObject(ctx, object)
+			},
+		)
+	}
+	return index.Rebuild(ctx)
 }
 
 func (index *Index) ProjectSourceCursor(

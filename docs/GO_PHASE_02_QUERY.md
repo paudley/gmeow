@@ -21,7 +21,8 @@ not authority.
   - overlays;
   - source cursors.
 - Implement full rebuild from FILESTORE only.
-- Implement incremental projection from changed annotations.
+- Implement incremental projection from changed authoritative annotations via `gmeow-admin query
+  project-changed --since <RFC3339>`.
 - Implement query interfaces for:
   - lexical search;
   - facet filters;
@@ -54,6 +55,7 @@ schema and query code is retired:
 - QUERY can search by text, facet, provenance, relationship, and compound part.
 - QUERY can report missing/stale analysis state without owning analysis output.
 - QUERY rebuild does not read `recovery.json`.
+- Incremental projection reads manifests and authoritative annotation files, not `recovery.json`.
 - String-formatted SQL is rejected by review or static checks.
 
 ## Exit Gate

@@ -11,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"blackat.ca/gmeow/internal/config"
-	"blackat.ca/gmeow/internal/filestore"
+	"blackcat.ca/gmeow/internal/config"
+	"blackcat.ca/gmeow/internal/filestore"
 )
 
 func newFilestoreCommand(out io.Writer, configPath *string) *cobra.Command {

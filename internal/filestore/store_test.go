@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"blackat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/contracts"
 )
 
 func TestPutSameBytesDedupesToOneObjectDirectory(t *testing.T) {
@@ -192,6 +192,45 @@ func TestWriteAnnotationWritesIndependentCompressedJSON(t *testing.T) {
 	}
 }
 
+func TestWriteOverlaysUpdatesManifestAndAnnotation(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteOverlays(ctx, digest, map[string]any{
+		"category": "review",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteOverlays(ctx, digest, map[string]any{
+		"visible": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := store.ReadManifest(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Overlays["category"] != "review" || manifest.Overlays["visible"] != true {
+		t.Fatalf("overlays were not merged into manifest: %#v", manifest.Overlays)
+	}
+	var overlay contracts.Annotation
+	if err := store.readCompressedJSON(
+		store.objectPath(digest, "overlays.json.zst"),
+		&overlay,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if overlay.Kind != "overlays" || overlay.Data["category"] != "review" {
+		t.Fatalf("overlay annotation was not written: %#v", overlay)
+	}
+}
+
 func TestWriteAnalysisAnnotationPreservesPerAnalyzerOutputs(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
@@ -269,6 +308,57 @@ func TestWriteAnalysisAnnotationPreservesPerAnalyzerOutputs(t *testing.T) {
 	}
 }
 
+func TestAnalysisAnnotationRefreshesCompoundParent(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	body, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("body text"),
+		Facets: []contracts.Facet{{Kind: "email_part"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := store.PutCompound(ctx, CompoundPutRequest{
+		ObjectID: "mail_message:<refresh@example.test>",
+		Facets:   []contracts.Facet{{Kind: "mail_message"}},
+		Parts: []contracts.CompoundPart{{
+			Digest: body,
+			Role:   "email_body",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.ReadManifest(ctx, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest: body,
+		Kind:         "analysis",
+		AnalyzerName: "summary",
+		AnalyzerVer:  "1",
+		Data:         map[string]any{"summary": "body summary"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.ReadManifest(ctx, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.UpdatedAt.After(before.UpdatedAt) {
+		t.Fatalf(
+			"parent manifest was not refreshed: before=%s after=%s",
+			before.UpdatedAt,
+			after.UpdatedAt,
+		)
+	}
+	partAnalysis, ok := after.Analysis["part_analysis"].(map[string]any)
+	if !ok || partAnalysis[string(body)] == nil {
+		t.Fatalf("parent analysis did not reference refreshed part: %#v", after.Analysis)
+	}
+}
+
 func TestWalkProjectionReadsAnnotationsAndIgnoresRecovery(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
@@ -314,6 +404,49 @@ func TestWalkProjectionReadsAnnotationsAndIgnoresRecovery(t *testing.T) {
 	}
 	if len(objects[0].Annotations) != 1 || objects[0].Annotations[0].Kind != "analysis" {
 		t.Fatalf("projection did not read annotations: %#v", objects[0].Annotations)
+	}
+}
+
+func TestWalkChangedProjectionFiltersByManifestAndAnnotationTimes(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	older, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("older"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().UTC()
+	time.Sleep(time.Millisecond)
+	newer, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("newer"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest: older,
+		Kind:         "analysis",
+		AnalyzerName: "summary",
+		Data:         map[string]any{"summary": "changed after cutoff"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	changed := map[contracts.ObjectDigest]bool{}
+	if err := store.WalkChangedProjection(
+		ctx,
+		cutoff,
+		func(object ProjectionObject) error {
+			changed[object.Digest] = true
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !changed[older] || !changed[newer] {
+		t.Fatalf("expected changed manifest and annotation objects, got %#v", changed)
 	}
 }
 

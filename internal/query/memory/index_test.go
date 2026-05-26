@@ -5,10 +5,12 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
-	"blackat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
 )
 
 func TestSearchFiltersProjectedObjects(t *testing.T) {
@@ -110,5 +112,50 @@ func TestSearchFiltersProjectedObjects(t *testing.T) {
 	}
 	if len(cursors.Cursors) != 1 || cursors.Cursors[0].SourceName != "unit" {
 		t.Fatalf("expected source cursor, got %#v", cursors)
+	}
+}
+
+func TestProjectChangedUsesIncrementalProjectionSource(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	oldDigest, err := store.Put(ctx, filestore.PutRequest{
+		Reader: strings.NewReader("old"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().UTC()
+	time.Sleep(time.Millisecond)
+	newDigest, err := store.Put(ctx, filestore.PutRequest{
+		Reader: strings.NewReader("new apollo"),
+		Facets: []contracts.Facet{{
+			Kind:     "file",
+			Metadata: map[string]any{"display_name": "apollo"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := New(store)
+	if err := index.ProjectChanged(ctx, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	response, err := index.Search(ctx, contracts.SearchRequest{Query: "apollo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 1 || response.Results[0].ObjectDigest != newDigest {
+		t.Fatalf("expected only new digest to be projected, got %#v", response)
+	}
+	oldResponse, err := index.Search(
+		ctx,
+		contracts.SearchRequest{Query: string(oldDigest)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldResponse.Total != 0 {
+		t.Fatalf("old object was unexpectedly projected: %#v", oldResponse)
 	}
 }

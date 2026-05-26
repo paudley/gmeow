@@ -21,14 +21,14 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/zeebo/blake3"
 
-	"blackat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/contracts"
 )
 
 const (
 	identityStrategyFileBlake3       = "file_blake3"
 	identityStrategyCompoundStableID = "compound_stable_id"
 	compressionZstd                  = "zstd"
-	blobFilename                     = "blob.zst"
+	blobFilename                     = "blob.zstd"
 	recoveryFilename                 = "recovery.json"
 	manifestFilename                 = "manifest.json.zst"
 	sourceCursorFilename             = "cursor.json.zst"
@@ -257,9 +257,53 @@ func (store *FilesystemStore) WriteAnnotation(
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read existing annotation: %w", err)
 	}
-	return store.writeCompressedJSON(
+	if err := store.writeCompressedJSON(
 		annotationPath,
 		annotation,
+	); err != nil {
+		return err
+	}
+	if annotation.Kind == "analysis" {
+		return store.refreshParentsForSubobject(ctx, annotation.ObjectDigest)
+	}
+	return nil
+}
+
+func (store *FilesystemStore) WriteOverlays(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	overlays map[string]any,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateObjectDigest(digest); err != nil {
+		return err
+	}
+	if overlays == nil {
+		overlays = map[string]any{}
+	}
+	manifest, err := store.ReadManifest(ctx, digest)
+	if err != nil {
+		return fmt.Errorf("read overlay target manifest: %w", err)
+	}
+	manifest.Overlays = mergeMaps(manifest.Overlays, overlays)
+	manifest.UpdatedAt = time.Now().UTC()
+	if err := store.writeCompressedJSON(
+		store.objectPath(digest, manifestFilename),
+		manifest,
+	); err != nil {
+		return err
+	}
+	return store.writeCompressedJSON(
+		store.objectPath(digest, "overlays.json.zst"),
+		contracts.Annotation{
+			SchemaVersion: contracts.SchemaVersionPhase00,
+			ObjectDigest:  digest,
+			Kind:          "overlays",
+			GeneratedAt:   manifest.UpdatedAt,
+			Data:          manifest.Overlays,
+		},
 	)
 }
 
@@ -284,6 +328,87 @@ func (store *FilesystemStore) WriteSourceCursor(
 		cursor.Cursor = map[string]any{}
 	}
 	return store.writeCompressedJSON(store.sourceCursorPath(cursor), cursor)
+}
+
+func (store *FilesystemStore) refreshParentsForSubobject(
+	ctx context.Context,
+	childDigest contracts.ObjectDigest,
+) error {
+	childAnnotations, err := store.readObjectAnnotations(childDigest)
+	if err != nil {
+		return err
+	}
+	summaries := []map[string]any{}
+	for _, annotation := range childAnnotations {
+		if annotation.Kind != "analysis" {
+			continue
+		}
+		summaries = append(summaries, map[string]any{
+			"analyzer_name":    annotation.AnalyzerName,
+			"analyzer_version": annotation.AnalyzerVer,
+			"generated_at":     annotation.GeneratedAt,
+			"status": firstNonEmpty(
+				stringFromAny(annotation.Data["status"]),
+				"complete",
+			),
+		})
+	}
+	if len(summaries) == 0 {
+		return nil
+	}
+	return store.WalkProjection(ctx, func(object ProjectionObject) error {
+		if len(object.Findings) > 0 || !manifestContainsPart(object.Manifest, childDigest) {
+			return nil
+		}
+		manifest := object.Manifest
+		if manifest.Analysis == nil {
+			manifest.Analysis = map[string]any{}
+		}
+		partAnalysis, ok := manifest.Analysis["part_analysis"].(map[string]any)
+		if !ok {
+			partAnalysis = map[string]any{}
+		}
+		partAnalysis[string(childDigest)] = map[string]any{
+			"refreshed_at": time.Now().UTC(),
+			"annotations":  summaries,
+		}
+		manifest.Analysis["part_analysis"] = partAnalysis
+		manifest.UpdatedAt = time.Now().UTC()
+		return store.writeCompressedJSON(
+			store.objectPath(manifest.ObjectDigest, manifestFilename),
+			manifest,
+		)
+	})
+}
+
+func (store *FilesystemStore) readObjectAnnotations(
+	digest contracts.ObjectDigest,
+) ([]contracts.Annotation, error) {
+	object := ProjectionObject{
+		Digest: digest,
+		Path:   store.objectDir(digest),
+	}
+	store.readProjectionObject(&object)
+	if len(object.Findings) > 0 {
+		return nil, fmt.Errorf(
+			"read annotations for %s: %s",
+			digest,
+			object.Findings[0].Message,
+		)
+	}
+	return object.Annotations, nil
+}
+
+func manifestContainsPart(
+	manifest contracts.Manifest,
+	digest contracts.ObjectDigest,
+) bool {
+	for _, part := range manifest.Compound.Parts {
+		if part.Digest == digest {
+			return true
+		}
+	}
+	return false
 }
 
 func (store *FilesystemStore) WalkProjection(
@@ -334,6 +459,22 @@ func (store *FilesystemStore) WalkProjection(
 		return nil
 	}
 	return err
+}
+
+func (store *FilesystemStore) WalkChangedProjection(
+	ctx context.Context,
+	since time.Time,
+	fn ProjectionFunc,
+) error {
+	if fn == nil {
+		return errors.New("projection callback is required")
+	}
+	return store.WalkProjection(ctx, func(object ProjectionObject) error {
+		if len(object.Findings) > 0 || projectionObjectChangedAfter(object, since) {
+			return fn(object)
+		}
+		return nil
+	})
 }
 
 func (store *FilesystemStore) WalkSourceCursors(
@@ -1255,11 +1396,33 @@ func cloneMap(value map[string]any) map[string]any {
 	return clone
 }
 
+func projectionObjectChangedAfter(object ProjectionObject, since time.Time) bool {
+	if since.IsZero() {
+		return true
+	}
+	if object.Manifest.UpdatedAt.After(since) || object.Manifest.CreatedAt.After(since) {
+		return true
+	}
+	for _, annotation := range object.Annotations {
+		if annotation.GeneratedAt.After(since) {
+			return true
+		}
+	}
+	return false
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
 		}
+	}
+	return ""
+}
+
+func stringFromAny(value any) string {
+	if typed, ok := value.(string); ok {
+		return typed
 	}
 	return ""
 }

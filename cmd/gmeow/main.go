@@ -6,7 +6,7 @@ package main
 import (
 	"os"
 
-	"blackat.ca/gmeow/internal/cli"
+	"blackcat.ca/gmeow/internal/cli"
 )
 
 func main() {

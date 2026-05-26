@@ -11,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"blackat.ca/gmeow/internal/config"
-	"blackat.ca/gmeow/internal/version"
+	"blackcat.ca/gmeow/internal/config"
+	"blackcat.ca/gmeow/internal/version"
 )
 
 type ConfigCommand func(*config.Loaded) error

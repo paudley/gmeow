@@ -13,13 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/spf13/cobra"
 
-	"blackat.ca/gmeow/internal/config"
-	"blackat.ca/gmeow/internal/contracts"
-	"blackat.ca/gmeow/internal/filestore"
-	querypg "blackat.ca/gmeow/internal/query/postgres"
+	"blackcat.ca/gmeow/internal/config"
+	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
+	querypg "blackcat.ca/gmeow/internal/query/postgres"
 )
 
 func newQueryCommand(out io.Writer, configPath *string) *cobra.Command {
@@ -29,6 +30,7 @@ func newQueryCommand(out io.Writer, configPath *string) *cobra.Command {
 	}
 	command.AddCommand(newQueryMigrateCommand(configPath))
 	command.AddCommand(newQueryRebuildCommand(out, configPath))
+	command.AddCommand(newQueryProjectChangedCommand(out, configPath))
 	command.AddCommand(newQueryProjectCommand(out, configPath))
 	command.AddCommand(newQuerySearchCommand(out, configPath))
 	command.AddCommand(newQueryAgeCommand(out, configPath))
@@ -80,6 +82,45 @@ func newQueryRebuildCommand(out io.Writer, configPath *string) *cobra.Command {
 	}
 }
 
+func newQueryProjectChangedCommand(out io.Writer, configPath *string) *cobra.Command {
+	var sinceValue string
+	command := &cobra.Command{
+		Use:   "project-changed",
+		Short: "Project changed FILESTORE annotations into QUERY",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			since, err := parseSince(sinceValue)
+			if err != nil {
+				return err
+			}
+			index, err := openQueryIndex(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer index.Close()
+			report, err := index.ProjectChangedReport(command.Context(), since)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(
+				out,
+				"query project-changed: scanned=%d projected=%d failed=%d elapsed=%s\n",
+				report.Scanned,
+				report.Projected,
+				report.Failed,
+				report.Elapsed,
+			)
+			return err
+		},
+	}
+	command.Flags().
+		StringVar(&sinceValue, "since", "", "only project objects changed after RFC3339 timestamp")
+	return command
+}
+
 func newQueryProjectCommand(out io.Writer, configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "project <digest>",
@@ -120,6 +161,17 @@ func newQueryProjectCommand(out io.Writer, configPath *string) *cobra.Command {
 			return err
 		},
 	}
+}
+
+func parseSince(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse --since as RFC3339 timestamp: %w", err)
+	}
+	return parsed, nil
 }
 
 func newQuerySearchCommand(out io.Writer, configPath *string) *cobra.Command {

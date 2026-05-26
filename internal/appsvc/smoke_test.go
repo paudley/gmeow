@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"blackat.ca/gmeow/internal/analysis"
-	"blackat.ca/gmeow/internal/contracts"
-	"blackat.ca/gmeow/internal/filestore"
-	"blackat.ca/gmeow/internal/query"
+	"blackcat.ca/gmeow/internal/analysis"
+	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
+	"blackcat.ca/gmeow/internal/query"
 )
 
 func TestPhase00FakeStackSmoke(t *testing.T) {
@@ -133,9 +133,39 @@ func (store *fakeStore) WriteAnnotation(context.Context, contracts.Annotation) e
 	return nil
 }
 
+func (store *fakeStore) WriteOverlays(
+	context.Context,
+	contracts.ObjectDigest,
+	map[string]any,
+) error {
+	return nil
+}
+
 func (store *fakeStore) WriteSourceCursor(
 	context.Context,
 	contracts.SourceCursor,
+) error {
+	return nil
+}
+
+func (store *fakeStore) WalkProjection(
+	context.Context,
+	filestore.ProjectionFunc,
+) error {
+	return nil
+}
+
+func (store *fakeStore) WalkChangedProjection(
+	context.Context,
+	time.Time,
+	filestore.ProjectionFunc,
+) error {
+	return nil
+}
+
+func (store *fakeStore) WalkSourceCursors(
+	context.Context,
+	filestore.SourceCursorProjectionFunc,
 ) error {
 	return nil
 }
@@ -189,6 +219,11 @@ func (index *fakeIndex) Search(
 }
 
 func (index *fakeIndex) Rebuild(context.Context) error {
+	index.projected = true
+	return nil
+}
+
+func (index *fakeIndex) ProjectChanged(context.Context, time.Time) error {
 	index.projected = true
 	return nil
 }

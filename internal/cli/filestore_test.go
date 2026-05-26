@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"blackat.ca/gmeow/internal/contracts"
-	"blackat.ca/gmeow/internal/filestore"
+	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
 )
 
 func TestAdminFilestoreVerifyReportsCleanStore(t *testing.T) {
