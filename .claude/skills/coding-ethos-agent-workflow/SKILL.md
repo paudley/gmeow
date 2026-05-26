@@ -516,7 +516,7 @@ async def reset_database(conn: Connection) -> None:
             f"Refusing to reset production database: {db_name}",
             database=db_name,
     )
-    await conn.execute("DROP SCHEMA public CASCADE")
+    await conn.execute("TRUNCATE application_owned_table RESTART IDENTITY")
 ```
 
 #### Automated Security Gates

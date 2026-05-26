@@ -45,11 +45,6 @@ class _ResilienceConfig(Protocol):
 class _ResilienceCache(Protocol):
     """Cache surface needed for resilience checks."""
 
-    def reclaim_stale_intelligence_jobs(self, stale_after_seconds: int = 900) -> dict[str, int]:
-        """Reclaim jobs left running by a dead worker."""
-        _ = stale_after_seconds
-        raise NotImplementedError
-
     def age_status(self) -> dict[str, Any]:
         """Return AGE graph status."""
         ...
@@ -94,7 +89,6 @@ def startup_self_check(
     """Startup self check."""
     features: dict[str, dict[str, Any]] = {}
     features["postgres"] = _check("ok", "PostgreSQL cache opened and migrations ran.")
-    features["job_recovery"] = _job_recovery_check(cache)
     features["age"] = _age_check(cache)
     features["tantivy"] = _directory_check(config.tantivy_dir, "Tantivy directory is present.")
     features["materialized_views"] = _materialized_view_check(cache)
@@ -130,14 +124,6 @@ def degraded_status(cache: _ResilienceCache, startup_status: dict[str, Any] = DE
         "resilience": resilience,
         "features": features,
     }
-
-
-def _job_recovery_check(cache: _ResilienceCache) -> dict[str, Any]:
-    try:
-        cache.reclaim_stale_intelligence_jobs()
-        return _check("ok", "Stale intelligence jobs reclaimed.")
-    except CHECK_EXCEPTIONS as exc:
-        return _check("degraded", repr(exc))
 
 
 def _age_check(cache: _ResilienceCache) -> dict[str, Any]:

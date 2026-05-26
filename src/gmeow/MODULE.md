@@ -9,16 +9,16 @@ Alembic runtime have been retired.
 - **Runtime settings** — [`runtime_config.py`](./runtime_config.py) contains resolved settings
   records for transitional Python tests and later-phase worker behavior. It does not parse TOML,
   SOPS, or operator config files.
-- **Protocols** — [`protocols.py`](./protocols.py) hosts the shared `SyncCache`, `IntelligenceCache`,
-  `GmeowCache`, `SyncSemantic`, `IntelligenceSemantic`, `GmeowSemantic`, `IntelligenceGraph`,
-  `NoGraph`, and `SyncAttachments` structural types used across sync and intelligence.
+- **Protocols** — [`protocols.py`](./protocols.py) hosts the shared `SyncCache`, `GmeowCache`,
+  `SyncSemantic`, `GmeowSemantic`, `IntelligenceGraph`, `NoGraph`, and `SyncAttachments`
+  structural types used by transitional sync code. RabbitMQ-backed Python analysis workers return
+  in the Go Phase 04 worker package.
 - **Cache helpers** — [`cache.py`](./cache.py).
 - **Sync orchestration** — [`sync.py`](./sync.py) and
   [`sync_backfill.py`](./sync_backfill.py).
 - **Gmail client** — [`gmail.py`](./gmail.py) plus shared mutations in
   [`gmail_actions.py`](./gmail_actions.py).
-- **Intelligence and graph** — [`intelligence.py`](./intelligence.py),
-  [`graph.py`](./graph.py), [`kg.py`](./kg.py),
+- **Graph and analysis helpers** — [`graph.py`](./graph.py), [`kg.py`](./kg.py),
   [`categories.py`](./categories.py), [`semantic.py`](./semantic.py), [`text_index.py`](./text_index.py).
 - **Operations** — [`resilience.py`](./resilience.py), [`provision.py`](./provision.py),
   [`metadata.py`](./metadata.py), [`headers.py`](./headers.py),

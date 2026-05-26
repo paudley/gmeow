@@ -4,7 +4,7 @@
 
 The module implements priority sync, history sync, oldest-first backfill, hydration, archive
 completion, and user-visible Gmail mutations. It coordinates raw saves, attachment storage,
-intelligence job enqueueing, and checkpoint advancement.
+and checkpoint advancement.
 """
 
 import base64
@@ -18,12 +18,11 @@ from uuid import uuid4
 from googleapiclient.errors import HttpError
 
 from .categories import CategoryEngine
-from .runtime_config import RuntimeConfig, PriorityRule
 from .gmail import GmailClient
-from .intelligence import IntelligenceWorker
 from .markdown import message_to_markdown
 from .parser import ParsedMessage, parse_gmail_message
 from .protocols import GmeowCache, GmeowSemantic, IntelligenceGraph, NoGraph, SyncAttachments
+from .runtime_config import PriorityRule, RuntimeConfig
 from .sync_backfill import (
     backfill_query,
     current_month_start,
@@ -222,12 +221,7 @@ class SyncService:
                     deleted += 1
             truncated = bool(result.get("truncated"))
             target_status = self.cache.intelligence_target_status(targets)
-            if targets and not target_status["terminal"]:
-                worker = IntelligenceWorker(self.cache, self.semantic, self.graph)
-                worker.run_until_empty(targets=targets)
-                target_status = self.cache.intelligence_target_status(targets)
-            target_status = self._wait_for_running_backfill_targets(targets, target_status)
-            cursor_advanced = bool(result.get("history_id")) and not truncated and target_status["terminal"]
+            cursor_advanced = bool(result.get("history_id")) and not truncated
             if cursor_advanced:
                 self.cache.set_state("gmail_history_id", str(result["history_id"]))
             summary = {
@@ -299,19 +293,6 @@ class SyncService:
             message_targets = self._backfill_targets_for_message(message_id)
             targets.extend(target for target in message_targets if target not in targets)
         target_status = self.cache.intelligence_target_status(targets)
-        if targets and not target_status["terminal"]:
-            worker = IntelligenceWorker(self.cache, self.semantic, self.graph)
-            worker.run_until_empty(targets=targets)
-            target_status = self.cache.intelligence_target_status(targets)
-        target_status = self._wait_for_running_backfill_targets(targets, target_status)
-        if not target_status["terminal"]:
-            return {
-                **batch,
-                "validate": validate,
-                **stats,
-                "advanced": False,
-                "target_status": target_status,
-            }
         self._advance_backfill_checkpoint(batch)
         return {
             **batch,
@@ -337,8 +318,6 @@ class SyncService:
                 stats["hydrated"] += 1
             return
         stats["skipped"] += 1
-        if completion.get("target_status", {}).get("missing"):
-            self.cache.enqueue_intelligence_job("message", message_id)
 
     def _next_backfill_batch(self, *, batch_size: int, max_empty_windows: int) -> dict[str, Any]:
         window_start = parse_window_start(self.cache.get_state(BACKFILL_WINDOW_STATE))
@@ -459,9 +438,6 @@ class SyncService:
                 for ref in deferred:
                     queued_ref = {**ref, "search_id": search_id, "priority": 1000 if search_id else 100}
                     self.cache.enqueue_deferred_attachment_hydration(queued_ref, payload)
-        self.cache.enqueue_intelligence_job("message", parsed.gmail_id, payload)
-        for sha1 in attachment_sha1s:
-            self.cache.enqueue_intelligence_job("attachment", sha1)
         return self.cache.get_message(parsed.gmail_id) or {}
 
     def _record_ingest_issue(
@@ -649,11 +625,7 @@ class SyncService:
         return status
 
     def _enqueue_missing_message_analysis(self, message_ids: list[str], payload: dict[str, Any]) -> None:
-        unique_ids = list(dict.fromkeys(message_id for message_id in message_ids if message_id))
-        status = self.cache.intelligence_target_status([("message", message_id) for message_id in unique_ids])
-        for item in status["missing"]:
-            if item["kind"] == "message":
-                self.cache.enqueue_intelligence_job("message", item["target_id"], payload)
+        _ = (message_ids, payload)
 
     def hydrate_deferred_attachment(self, job: dict[str, Any]) -> str:
         """Download a deferred Gmail attachment, write the sidecar, and return its digest."""

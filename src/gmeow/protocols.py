@@ -2,11 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Shared Protocol declarations for Gmeow cache, semantic, and graph dependencies.
 
-This module hosts the structural typing surface used by both ``SyncService`` and
-``IntelligenceWorker`` so they can take the same cache and semantic backends without casts. The
-combined :class:`GmeowCache` and :class:`GmeowSemantic` protocols collect the methods
-each subsystem needs, while the individual subsystem protocols (e.g. :class:`SyncCache`,
-:class:`IntelligenceCache`) stay available for narrower call sites.
+This module hosts the structural typing surface used by ``SyncService`` while Go takes over
+analysis scheduling and worker dispatch.
 """
 
 from dataclasses import dataclass
@@ -95,11 +92,6 @@ class SyncCache(Protocol):
     def upsert_message(self, message: ParsedMessage, raw_json: dict[str, Any], markdown: str, *, hydrated: bool) -> None:
         """Store or update a parsed message."""
         _ = (message, raw_json, markdown, hydrated)
-        ...
-
-    def enqueue_intelligence_job(self, kind: str, target_id: str, payload: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
-        """Queue intelligence processing for a target."""
-        _ = (kind, target_id, payload)
         ...
 
     def intelligence_target_status(self, targets: list[tuple[str, str]]) -> dict[str, Any]:
@@ -201,31 +193,6 @@ class SyncCache(Protocol):
         ...
 
 
-class IntelligenceCache(Protocol):
-    """Cache surface required by ``IntelligenceWorker``."""
-
-    def enqueue_all_intelligence_jobs(self) -> dict[str, int]:
-        """Enqueue every eligible cached artifact for analysis."""
-        ...
-
-    def claim_next_intelligence_job(self, worker_id: str, targets: list[tuple[str, str]]) -> dict[str, Any]:
-        """Claim the next available intelligence job."""
-        ...
-
-    def fail_intelligence_job(self, job_id: int, error: str) -> None:
-        """Record an intelligence job failure."""
-        _ = (job_id, error)
-        ...
-
-    def complete_intelligence_job(self, job_id: int) -> None:
-        """Mark an intelligence job complete."""
-        _ = job_id
-        ...
-
-    def intelligence_job_status(self) -> dict[str, int]:
-        """Return intelligence queue status counts."""
-        ...
-
     def get_message(self, message_id: str) -> dict[str, Any]:
         """Return a cached message mapping."""
         ...
@@ -251,8 +218,8 @@ class IntelligenceCache(Protocol):
         ...
 
 
-class GmeowCache(SyncCache, IntelligenceCache, Protocol):
-    """Combined cache contract used wherever both sync and intelligence surfaces are required."""
+class GmeowCache(SyncCache, Protocol):
+    """Combined cache contract used by sync surfaces."""
 
 
 class SyncSemantic(Protocol):
@@ -267,20 +234,8 @@ class SyncSemantic(Protocol):
         ...
 
 
-class IntelligenceSemantic(Protocol):
-    """Semantic index write surface used by ``IntelligenceWorker``."""
-
-    def index_message(self, message_id: str, text: str, metadata: dict[str, Any]) -> None:
-        """Index a message document."""
-        ...
-
-    def index_attachment(self, sha1: str, text: str, metadata: dict[str, Any]) -> None:
-        """Index an attachment document."""
-        ...
-
-
-class GmeowSemantic(SyncSemantic, IntelligenceSemantic, Protocol):
-    """Combined semantic contract satisfied by the concrete pgvector-backed index."""
+class GmeowSemantic(SyncSemantic, Protocol):
+    """Semantic search contract satisfied by the concrete pgvector-backed index."""
 
 
 class IntelligenceGraph(Protocol):
