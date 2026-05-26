@@ -40,3 +40,4 @@ htmlcov/
 .coding-ethos/tool-config-hashes.json
 .coding-ethos/gemini
 gmeow.toml
+.coding-ethos/*.lock
