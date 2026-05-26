@@ -100,18 +100,6 @@ filesystem:
       - .coding-ethos/
 
 git:
-  signed_operations:
-    enabled: false
-  hook_bypass:
-    enabled: true
-  history_rewrite_prevention:
-    enabled: true
-  stash_blocked:
-    enabled: true
-  protected_submodule_update:
-    enabled: true
-    paths:
-      - coding-ethos
   staged_admin_files:
     enabled: true
     basenames:
