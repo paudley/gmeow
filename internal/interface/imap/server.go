@@ -25,7 +25,10 @@ type Server struct {
 	password string
 }
 
-func New(address, username, password string, services *appsvc.Services) (*Server, error) {
+func New(
+	address, username, password string,
+	services *appsvc.Services,
+) (*Server, error) {
 	if strings.TrimSpace(address) == "" {
 		return nil, errors.New("IMAP address is required")
 	}
@@ -159,7 +162,10 @@ func (server *Server) handleCommand(
 		if strings.EqualFold(query, "ALL") {
 			query = ""
 		}
-		results, err := server.services.MailSearch(ctx, appsvc.SearchOptions{Query: query, Limit: 100})
+		results, err := server.services.MailSearch(
+			ctx,
+			appsvc.SearchOptions{Query: query, Limit: 100},
+		)
 		if err != nil {
 			_, _ = fmt.Fprintf(writer, "%s NO %s\r\n", tag, err)
 			return nil

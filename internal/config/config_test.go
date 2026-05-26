@@ -202,7 +202,14 @@ func TestValidateInterfaceConfig(t *testing.T) {
 	valid.Interfaces = []InterfaceConfig{
 		{Name: "mcp", Kind: "mcp"},
 		{Name: "rest", Kind: "rest", Host: "127.0.0.1", Port: 8765},
-		{Name: "imap", Kind: "imap", Host: "127.0.0.1", Port: 1143, Username: "reader", Facets: []string{"mail_message"}},
+		{
+			Name:     "imap",
+			Kind:     "imap",
+			Host:     "127.0.0.1",
+			Port:     1143,
+			Username: "reader",
+			Facets:   []string{"mail_message"},
+		},
 	}
 	if err := validateConfig(valid); err != nil {
 		t.Fatal(err)
@@ -211,8 +218,21 @@ func TestValidateInterfaceConfig(t *testing.T) {
 	cases := map[string]InterfaceConfig{
 		"unsupported kind": {Name: "bad", Kind: "smtp", Host: "127.0.0.1", Port: 2525},
 		"non-loopback":     {Name: "rest", Kind: "rest", Host: "0.0.0.0", Port: 8765},
-		"imap username":    {Name: "imap", Kind: "imap", Host: "127.0.0.1", Port: 1143, Facets: []string{"mail_message"}},
-		"imap facet":       {Name: "imap", Kind: "imap", Host: "127.0.0.1", Port: 1143, Username: "reader", Facets: []string{"file"}},
+		"imap username": {
+			Name:   "imap",
+			Kind:   "imap",
+			Host:   "127.0.0.1",
+			Port:   1143,
+			Facets: []string{"mail_message"},
+		},
+		"imap facet": {
+			Name:     "imap",
+			Kind:     "imap",
+			Host:     "127.0.0.1",
+			Port:     1143,
+			Username: "reader",
+			Facets:   []string{"file"},
+		},
 	}
 	for name, iface := range cases {
 		t.Run(name, func(t *testing.T) {

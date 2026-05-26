@@ -15,7 +15,10 @@ type SchedulerClient struct {
 	client     pb.SchedulerServiceClient
 }
 
-func NewSchedulerClient(ctx context.Context, endpoint Endpoint) (*SchedulerClient, error) {
+func NewSchedulerClient(
+	ctx context.Context,
+	endpoint Endpoint,
+) (*SchedulerClient, error) {
 	connection, err := dial(ctx, endpoint)
 	if err != nil {
 		return nil, err
@@ -54,7 +57,10 @@ func (client *SchedulerClient) Scan(
 	return fromPBSchedulerScanResponse(response), nil
 }
 
-func (client *SchedulerClient) Enqueue(ctx context.Context, job contracts.AnalyzerJob) error {
+func (client *SchedulerClient) Enqueue(
+	ctx context.Context,
+	job contracts.AnalyzerJob,
+) error {
 	_, err := client.client.Enqueue(ctx, ToPBAnalyzerJob(job))
 
 	return err
@@ -125,7 +131,9 @@ func (client *SchedulerClient) DeadLetters(
 	}, nil
 }
 
-func (client *SchedulerClient) Status(ctx context.Context) (contracts.SchedulerStatus, error) {
+func (client *SchedulerClient) Status(
+	ctx context.Context,
+) (contracts.SchedulerStatus, error) {
 	response, err := client.client.Status(ctx, &pb.Empty{})
 	if err != nil {
 		return contracts.SchedulerStatus{}, err
@@ -140,7 +148,9 @@ func (client *SchedulerClient) Status(ctx context.Context) (contracts.SchedulerS
 	}, nil
 }
 
-func fromPBSchedulerScanResponse(response *pb.SchedulerScanResponse) contracts.SchedulerScanResponse {
+func fromPBSchedulerScanResponse(
+	response *pb.SchedulerScanResponse,
+) contracts.SchedulerScanResponse {
 	return contracts.SchedulerScanResponse{
 		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
 		Scanned:       int(response.GetScanned()),

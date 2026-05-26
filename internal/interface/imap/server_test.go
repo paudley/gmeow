@@ -128,7 +128,7 @@ func mustReadContains(t *testing.T, reader *bufio.Reader, needle string) {
 	}
 }
 
-func mustReadUntilTag(t *testing.T, reader *bufio.Reader, tag string, status string) string {
+func mustReadUntilTag(t *testing.T, reader *bufio.Reader, tag, status string) string {
 	t.Helper()
 	var builder strings.Builder
 	for {

@@ -22,7 +22,7 @@ type digestInput struct {
 }
 
 type retrieveInput struct {
-	Digest         contracts.ObjectDigest `json:"digest" jsonschema:"FILESTORE object digest"`
+	Digest         contracts.ObjectDigest `json:"digest"                    jsonschema:"FILESTORE object digest"`
 	IncludeContent bool                   `json:"include_content,omitempty" jsonschema:"include up to 1MiB of object content"`
 }
 
@@ -41,7 +41,12 @@ func New(services *appsvc.Services) (*Server, error) {
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "gmeow", Version: "phase-6"}, nil)
 	addTool(server, "object_search", "search projected objects", services.ObjectSearch)
-	addTool(server, "mail_search", "search mail messages across index and live sources", services.MailSearch)
+	addTool(
+		server,
+		"mail_search",
+		"search mail messages across index and live sources",
+		services.MailSearch,
+	)
 	addTool(server, "object_retrieve", "retrieve an object manifest and optional content",
 		func(ctx context.Context, input retrieveInput) (appsvc.RetrieveResponse, error) {
 			return services.Retrieve(ctx, input.Digest, input.IncludeContent)
@@ -60,11 +65,26 @@ func New(services *appsvc.Services) (*Server, error) {
 			return facetsOutput{Facets: facets}, err
 		},
 	)
-	addDigestTool(server, "compound_expand", "expand compound object parts", services.Compound)
-	addTool(server, "graph_explore", "explore projected graph facts", services.GraphExplore)
+	addDigestTool(
+		server,
+		"compound_expand",
+		"expand compound object parts",
+		services.Compound,
+	)
+	addTool(
+		server,
+		"graph_explore",
+		"explore projected graph facts",
+		services.GraphExplore,
+	)
 	addTool(server, "analysis_status", "inspect analysis status", services.AnalysisStatus)
 	addTool(server, "force_analysis", "force analyzer scheduling", services.ForceAnalysis)
-	addTool(server, "source_action", "apply a source-specific action", services.SourceAction)
+	addTool(
+		server,
+		"source_action",
+		"apply a source-specific action",
+		services.SourceAction,
+	)
 	addTool(server, "ops_status", "inspect operational status",
 		func(ctx context.Context, _ map[string]any) (appsvc.OpsStatusResponse, error) {
 			return services.OpsStatus(ctx)
@@ -84,9 +104,14 @@ func addDigestTool[Out any](
 	description string,
 	handler func(context.Context, contracts.ObjectDigest) (Out, error),
 ) {
-	addTool(server, name, description, func(ctx context.Context, input digestInput) (Out, error) {
-		return handler(ctx, input.Digest)
-	})
+	addTool(
+		server,
+		name,
+		description,
+		func(ctx context.Context, input digestInput) (Out, error) {
+			return handler(ctx, input.Digest)
+		},
+	)
 }
 
 func addTool[In, Out any](
@@ -95,7 +120,9 @@ func addTool[In, Out any](
 	description string,
 	handler func(context.Context, In) (Out, error),
 ) {
-	mcp.AddTool(server, &mcp.Tool{Name: name, Description: description},
+	mcp.AddTool(
+		server,
+		&mcp.Tool{Name: name, Description: description},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
 			output, err := handler(ctx, input)
 

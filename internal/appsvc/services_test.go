@@ -91,7 +91,10 @@ func TestMailSearchUsesRealQueryAndGmailAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	response, err := services.MailSearch(ctx, appsvc.SearchOptions{Query: "bob", Limit: 10})
+	response, err := services.MailSearch(
+		ctx,
+		appsvc.SearchOptions{Query: "bob", Limit: 10},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +162,10 @@ func TestSourceActionUsesRealGmailAdapterAndRejectsWrongFacet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := services.SourceAction(ctx, appsvc.SourceActionRequest{Digest: fileDigest, Action: "archive"}); err == nil {
+	if _, err := services.SourceAction(
+		ctx,
+		appsvc.SourceActionRequest{Digest: fileDigest, Action: "archive"},
+	); err == nil {
 		t.Fatal("expected non-mail object action rejection")
 	}
 }
@@ -179,7 +185,9 @@ func TestForceAnalysisUsesRealSchedulerService(t *testing.T) {
 	service, err := scheduler.NewService(
 		store,
 		scheduler.NewMemoryBroker(),
-		[]contracts.AnalyzerSpec{{Name: "summary", Version: "1", WorkerKind: "go", Deterministic: true}},
+		[]contracts.AnalyzerSpec{
+			{Name: "summary", Version: "1", WorkerKind: "go", Deterministic: true},
+		},
 		scheduler.Config{},
 	)
 	if err != nil {
@@ -309,7 +317,10 @@ func startFilestoreRPC(
 	}
 }
 
-func hasPendingFreshResult(results []appsvc.ObjectSearchResult, externalID string) bool {
+func hasPendingFreshResult(
+	results []appsvc.ObjectSearchResult,
+	externalID string,
+) bool {
 	for _, result := range results {
 		if result.Attributes["external_id"] == externalID &&
 			result.AnalysisPending &&
@@ -357,7 +368,11 @@ func cleanupQueryObjects(t *testing.T, digests ...contracts.ObjectDigest) {
 	defer conn.Close(ctx)
 
 	for _, digest := range digests {
-		if _, err := conn.Exec(ctx, "DELETE FROM query_objects WHERE object_digest = $1", string(digest)); err != nil {
+		if _, err := conn.Exec(
+			ctx,
+			"DELETE FROM query_objects WHERE object_digest = $1",
+			string(digest),
+		); err != nil {
 			t.Fatalf("cleanup query object %s: %v", digest, err)
 		}
 	}

@@ -618,11 +618,17 @@ func validateInterface(iface InterfaceConfig) error {
 			return fmt.Errorf("interface %q kind imap requires username", iface.Name)
 		}
 		if len(iface.Facets) == 0 {
-			return fmt.Errorf("interface %q kind imap requires facets = [\"mail_message\"]", iface.Name)
+			return fmt.Errorf(
+				"interface %q kind imap requires facets = [\"mail_message\"]",
+				iface.Name,
+			)
 		}
 		for _, facet := range iface.Facets {
 			if facet != "mail_message" {
-				return fmt.Errorf("interface %q kind imap may only expose mail_message facet", iface.Name)
+				return fmt.Errorf(
+					"interface %q kind imap may only expose mail_message facet",
+					iface.Name,
+				)
 			}
 		}
 	default:

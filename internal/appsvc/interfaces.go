@@ -16,12 +16,18 @@ type QueryReader interface {
 		ctx context.Context,
 		request contracts.SearchRequest,
 	) (contracts.SearchResponse, error)
-	Structure(ctx context.Context, digest contracts.ObjectDigest) (contracts.Structure, error)
+	Structure(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+	) (contracts.Structure, error)
 	Relationships(
 		ctx context.Context,
 		request contracts.RelationshipRequest,
 	) (contracts.RelationshipResponse, error)
-	Graph(ctx context.Context, request contracts.GraphRequest) (contracts.GraphResponse, error)
+	Graph(
+		ctx context.Context,
+		request contracts.GraphRequest,
+	) (contracts.GraphResponse, error)
 	AnalysisStatus(
 		ctx context.Context,
 		request contracts.AnalysisStatusRequest,
@@ -33,8 +39,14 @@ type QueryReader interface {
 }
 
 type ObjectReader interface {
-	ReadManifest(ctx context.Context, digest contracts.ObjectDigest) (contracts.Manifest, error)
-	GetStructure(ctx context.Context, digest contracts.ObjectDigest) (contracts.Structure, error)
+	ReadManifest(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+	) (contracts.Manifest, error)
+	GetStructure(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+	) (contracts.Structure, error)
 	Open(ctx context.Context, digest contracts.ObjectDigest) (io.ReadCloser, error)
 }
 
@@ -55,6 +67,12 @@ type SourceRegistry interface {
 }
 
 type SourceIngestService interface {
-	Ingest(ctx context.Context, object source.IngestObject) (contracts.ObjectDigest, bool, error)
-	LookupSourceObject(ctx context.Context, ref contracts.SourceObjectRef) (contracts.ObjectDigest, bool, error)
+	Ingest(
+		ctx context.Context,
+		object source.IngestObject,
+	) (contracts.ObjectDigest, bool, error)
+	LookupSourceObject(
+		ctx context.Context,
+		ref contracts.SourceObjectRef,
+	) (contracts.ObjectDigest, bool, error)
 }

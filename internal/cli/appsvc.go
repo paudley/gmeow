@@ -73,7 +73,8 @@ func newMailSearchCommand(out io.Writer, configPath *string) *cobra.Command {
 		},
 	}
 	command.Flags().IntVar(&limit, "limit", 20, "maximum results")
-	command.Flags().BoolVar(&fullMessage, "full-msg", false, "include structure for mail results")
+	command.Flags().
+		BoolVar(&fullMessage, "full-msg", false, "include structure for mail results")
 
 	return command
 }
@@ -92,12 +93,17 @@ func newObjectRetrieveCommand(out io.Writer, configPath *string) *cobra.Command 
 			}
 			defer closeFn()
 
-			result, err := services.Retrieve(command.Context(), contracts.ObjectDigest(args[0]), includeContent)
+			result, err := services.Retrieve(
+				command.Context(),
+				contracts.ObjectDigest(args[0]),
+				includeContent,
+			)
 
 			return writeAppJSON(out, result, err)
 		},
 	}
-	command.Flags().BoolVar(&includeContent, "content", false, "include up to 1MiB object content")
+	command.Flags().
+		BoolVar(&includeContent, "content", false, "include up to 1MiB object content")
 
 	return command
 }
@@ -148,7 +154,8 @@ func newForceAnalysisCommand(out io.Writer, configPath *string) *cobra.Command {
 		},
 	}
 	command.Flags().StringSliceVar(&analyzers, "analyzer", nil, "analyzer name to force")
-	command.Flags().StringVar(&traceID, "trace-id", "", "trace identifier to include in jobs")
+	command.Flags().
+		StringVar(&traceID, "trace-id", "", "trace identifier to include in jobs")
 
 	return command
 }

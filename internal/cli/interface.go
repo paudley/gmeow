@@ -123,7 +123,10 @@ func openInterfaceServicesLoaded(
 	ctx context.Context,
 	loaded *config.Loaded,
 ) (*appsvc.Services, func(), error) {
-	filestoreClient, err := rpc.NewFilestoreClient(ctx, rpcEndpoint(loaded.Resolved.RPC.Filestore))
+	filestoreClient, err := rpc.NewFilestoreClient(
+		ctx,
+		rpcEndpoint(loaded.Resolved.RPC.Filestore),
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -135,7 +138,10 @@ func openInterfaceServicesLoaded(
 		return nil, nil, err
 	}
 
-	schedulerClient, err := rpc.NewSchedulerClient(ctx, rpcEndpoint(loaded.Resolved.RPC.Scheduler))
+	schedulerClient, err := rpc.NewSchedulerClient(
+		ctx,
+		rpcEndpoint(loaded.Resolved.RPC.Scheduler),
+	)
 	if err != nil {
 		_ = queryClient.Close()
 		_ = filestoreClient.Close()
@@ -182,7 +188,10 @@ func openInterfaceServicesLoaded(
 	}, nil
 }
 
-func interfaceByKind(interfaces []config.InterfaceConfig, kind string) (config.InterfaceConfig, error) {
+func interfaceByKind(
+	interfaces []config.InterfaceConfig,
+	kind string,
+) (config.InterfaceConfig, error) {
 	for _, iface := range interfaces {
 		if iface.Kind == kind {
 			return iface, nil

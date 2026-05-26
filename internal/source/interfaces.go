@@ -149,7 +149,10 @@ type Service struct {
 
 type IngestService interface {
 	Ingest(ctx context.Context, object IngestObject) (contracts.ObjectDigest, bool, error)
-	LookupSourceObject(ctx context.Context, ref contracts.SourceObjectRef) (contracts.ObjectDigest, bool, error)
+	LookupSourceObject(
+		ctx context.Context,
+		ref contracts.SourceObjectRef,
+	) (contracts.ObjectDigest, bool, error)
 }
 
 func NewService(store FilestoreClient) (*Service, error) {

@@ -115,7 +115,9 @@ func NewStaticSourceRegistry(adapters ...source.Adapter) *StaticSourceRegistry {
 	return &StaticSourceRegistry{adapters: append([]source.Adapter{}, adapters...)}
 }
 
-func (registry *StaticSourceRegistry) LiveSearchBackends(facet string) []source.LiveSearchAdapter {
+func (registry *StaticSourceRegistry) LiveSearchBackends(
+	facet string,
+) []source.LiveSearchAdapter {
 	if registry == nil {
 		return nil
 	}
@@ -136,7 +138,9 @@ func (registry *StaticSourceRegistry) LiveSearchBackends(facet string) []source.
 	return backends
 }
 
-func (registry *StaticSourceRegistry) ActionBackend(kind, name string) (source.ActionAdapter, bool) {
+func (registry *StaticSourceRegistry) ActionBackend(
+	kind, name string,
+) (source.ActionAdapter, bool) {
 	if registry == nil {
 		return nil, false
 	}
@@ -163,7 +167,11 @@ func (services *Services) ObjectSearch(
 		return ObjectSearchResponse{}, err
 	}
 
-	results, err := services.expandSearchResults(ctx, response.Results, options.FullMessage)
+	results, err := services.expandSearchResults(
+		ctx,
+		response.Results,
+		options.FullMessage,
+	)
 	if err != nil {
 		return ObjectSearchResponse{}, err
 	}
@@ -328,7 +336,9 @@ func (services *Services) ForceAnalysis(
 	request ForceAnalysisRequest,
 ) (contracts.SchedulerScanResponse, error) {
 	if services.scheduler == nil {
-		return contracts.SchedulerScanResponse{}, errors.New("scheduler client is not configured")
+		return contracts.SchedulerScanResponse{}, errors.New(
+			"scheduler client is not configured",
+		)
 	}
 
 	requestedBy := strings.TrimSpace(request.RequestedBy)
@@ -336,7 +346,13 @@ func (services *Services) ForceAnalysis(
 		requestedBy = "interface"
 	}
 
-	return services.scheduler.Force(ctx, request.Digest, request.Analyzers, requestedBy, request.TraceID)
+	return services.scheduler.Force(
+		ctx,
+		request.Digest,
+		request.Analyzers,
+		requestedBy,
+		request.TraceID,
+	)
 }
 
 func (services *Services) SourceAction(
@@ -352,11 +368,17 @@ func (services *Services) SourceAction(
 		return source.ActionResult{}, err
 	}
 	if !manifestHasFacet(manifest, MailMessageFacet) {
-		return source.ActionResult{}, fmt.Errorf("object %s is not a mail message", request.Digest)
+		return source.ActionResult{}, fmt.Errorf(
+			"object %s is not a mail message",
+			request.Digest,
+		)
 	}
 
 	for _, provenance := range manifest.Provenance {
-		backend, ok := services.sources.ActionBackend(provenance.SourceKind, provenance.SourceName)
+		backend, ok := services.sources.ActionBackend(
+			provenance.SourceKind,
+			provenance.SourceName,
+		)
 		if !ok {
 			continue
 		}
@@ -376,7 +398,10 @@ func (services *Services) SourceAction(
 		})
 	}
 
-	return source.ActionResult{}, fmt.Errorf("no action-capable source for object %s", request.Digest)
+	return source.ActionResult{}, fmt.Errorf(
+		"no action-capable source for object %s",
+		request.Digest,
+	)
 }
 
 func (services *Services) OpsStatus(ctx context.Context) (OpsStatusResponse, error) {
@@ -420,7 +445,8 @@ func (services *Services) liveMailSearch(
 
 	var hits []source.LiveSearchResult
 	var err error
-	if hydrater, ok := backend.(source.HydratingLiveSearchAdapter); ok && services.ingest != nil {
+	if hydrater, ok := backend.(source.HydratingLiveSearchAdapter); ok &&
+		services.ingest != nil {
 		hits, err = hydrater.SearchAndHydrate(ctx, services.ingest, source.LiveSearchRequest{
 			Query: options.Query,
 			Limit: limit,

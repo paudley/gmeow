@@ -47,10 +47,13 @@ func NewHandler(services *appsvc.Services) http.Handler {
 	mux.HandleFunc("POST /v1/analysis_status", handleJSON(services.AnalysisStatus))
 	mux.HandleFunc("POST /v1/force_analysis", handleJSON(services.ForceAnalysis))
 	mux.HandleFunc("POST /v1/source_action", handleJSON(services.SourceAction))
-	mux.HandleFunc("GET /v1/ops_status", func(writer http.ResponseWriter, request *http.Request) {
-		output, err := services.OpsStatus(request.Context())
-		writeJSON(writer, output, err)
-	})
+	mux.HandleFunc(
+		"GET /v1/ops_status",
+		func(writer http.ResponseWriter, request *http.Request) {
+			output, err := services.OpsStatus(request.Context())
+			writeJSON(writer, output, err)
+		},
+	)
 
 	return mux
 }
@@ -128,9 +131,11 @@ func handleDigest[Out any](
 }
 
 func handleRetrieve(services *appsvc.Services) http.HandlerFunc {
-	return handleJSON(func(ctx context.Context, request retrieveRequest) (appsvc.RetrieveResponse, error) {
-		return services.Retrieve(ctx, request.Digest, request.IncludeContent)
-	})
+	return handleJSON(
+		func(ctx context.Context, request retrieveRequest) (appsvc.RetrieveResponse, error) {
+			return services.Retrieve(ctx, request.Digest, request.IncludeContent)
+		},
+	)
 }
 
 func writeJSON[Out any](writer http.ResponseWriter, output Out, err error) {

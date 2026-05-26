@@ -144,7 +144,10 @@ func (client *QueryClient) Structure(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 ) (contracts.Structure, error) {
-	response, err := client.client.Structure(ctx, &pb.StructureRequest{Digest: string(digest)})
+	response, err := client.client.Structure(
+		ctx,
+		&pb.StructureRequest{Digest: string(digest)},
+	)
 	if err != nil {
 		return contracts.Structure{}, err
 	}
@@ -320,7 +323,9 @@ func (client *QueryClient) ProjectChanged(ctx context.Context, since time.Time) 
 	return err
 }
 
-func toPBRelationshipFilter(filter contracts.RelationshipFilter) *pb.RelationshipFilter {
+func toPBRelationshipFilter(
+	filter contracts.RelationshipFilter,
+) *pb.RelationshipFilter {
 	return &pb.RelationshipFilter{
 		Types: append([]string{}, filter.Types...),
 		From:  string(filter.From),

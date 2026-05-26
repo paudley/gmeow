@@ -214,7 +214,8 @@ func TestPhaseSixInterfacesDependOnAppServices(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+		if entry.IsDir() || filepath.Ext(path) != ".go" ||
+			strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		content, err := os.ReadFile(path)
@@ -222,7 +223,8 @@ func TestPhaseSixInterfacesDependOnAppServices(t *testing.T) {
 			return err
 		}
 		text := string(content)
-		if !strings.Contains(text, "internal/appsvc") && !strings.HasSuffix(path, "interfaces.go") {
+		if !strings.Contains(text, "internal/appsvc") &&
+			!strings.HasSuffix(path, "interfaces.go") {
 			t.Fatalf("%s does not import appsvc", path)
 		}
 		for _, dependency := range forbidden {
