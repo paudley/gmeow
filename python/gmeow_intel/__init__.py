@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Python analysis worker package for Gmeow.
+"""Python external analyzer adapter package for Gmeow.
 
-The package is intentionally small in Phase 00 because runtime queue consumption is introduced
-in the ANALYSIS migration phase. It publishes the import surface that Go-side scheduler contracts
-can target without starting a worker process.
+The Go worker owns queue consumption, FILESTORE access, config loading, and ack/nack behavior.
+This package provides the narrow command surface used for explicitly configured Python/model
+analyzers such as NER and categorization.
 
 See Also:
-    MODULE.md: Package contract for the Phase 00 Python analysis package.
+    MODULE.md: Package contract for Python ANALYSIS external adapters.
 
 """
 

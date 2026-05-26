@@ -170,6 +170,54 @@ func TestLoadRejectsWrongRabbitMQVHost(t *testing.T) {
 	}
 }
 
+func TestValidateSourceCapabilitiesByKind(t *testing.T) {
+	valid := Config{
+		System: SystemConfig{
+			ConfigVersion: currentConfigVersion,
+			InstanceID:    "test",
+			DataDir:       "data",
+		},
+		Filestore: FilestoreConfig{Root: "data/filestore"},
+		Postgres: PostgresConfig{
+			Host:     "127.0.0.1",
+			Port:     5432,
+			Database: "gmeow",
+			User:     "gmeow",
+		},
+		RabbitMQ: RabbitMQConfig{
+			Host:      "127.0.0.1",
+			Port:      5672,
+			User:      "gmeow",
+			VHost:     "gmeow",
+			TestUser:  "gmeow-test",
+			TestVHost: "gmeow-test",
+		},
+		Sources: []SourceConfig{{
+			Name:         "primary",
+			Kind:         "gmail",
+			Capabilities: []string{"hydrate", "live_search", "actions"},
+		}},
+	}
+	if err := validateConfig(valid); err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := valid
+	invalid.Sources = []SourceConfig{{
+		Name:         "drive",
+		Kind:         "drive",
+		Capabilities: []string{"live_search"},
+	}}
+
+	err := validateConfig(invalid)
+	if err == nil {
+		t.Fatal("expected unsupported Drive capability to fail")
+	}
+	if !strings.Contains(err.Error(), "does not support capability") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLoadDefaultsRPCUnixSocketEndpoints(t *testing.T) {
 	configPath := writeConfig(t, minimalConfig())
 	t.Setenv(unlockEnvName, "test-key")

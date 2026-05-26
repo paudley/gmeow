@@ -574,6 +574,55 @@ func validateConfig(parsed Config) error {
 		if strings.TrimSpace(source.Kind) == "" {
 			return fmt.Errorf("source %q requires kind", source.Name)
 		}
+
+		if err := validateSourceCapabilities(source); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateSourceCapabilities(source SourceConfig) error {
+	allowed := map[string]map[string]bool{
+		"filesystem": {
+			"backfill": true,
+		},
+		"gmail": {
+			"actions":       true,
+			"backfill":      true,
+			"hydrate":       true,
+			"live_retrieve": true,
+			"live_search":   true,
+		},
+		"ringme": {
+			"push": true,
+		},
+		"drive": {
+			"export": true,
+		},
+	}
+
+	sourceKind := strings.TrimSpace(source.Kind)
+	allowedForKind, ok := allowed[sourceKind]
+	if !ok {
+		return fmt.Errorf("source %q has unsupported kind %q", source.Name, source.Kind)
+	}
+
+	for _, capability := range source.Capabilities {
+		capability = strings.TrimSpace(capability)
+		if capability == "" {
+			return fmt.Errorf("source %q has empty capability", source.Name)
+		}
+
+		if !allowedForKind[capability] {
+			return fmt.Errorf(
+				"source %q kind %q does not support capability %q",
+				source.Name,
+				source.Kind,
+				capability,
+			)
+		}
 	}
 
 	return nil

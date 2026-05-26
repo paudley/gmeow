@@ -1,6 +1,6 @@
-# Tests
+# Root Python Tests
 
-The `tests` package contains API and core integration tests for Gmeow.
+The root `tests` package now verifies that the retired Python runtime stays retired. Go packages own
+runtime behavior, FILESTORE, QUERY, SCHEDULER, ANALYSIS, and SOURCE tests.
 
-These tests validate PostgreSQL-backed cache behavior, Gmail sync behavior, archive flows, and API
-contracts. They require the configured test database DSN when exercising integration paths.
+Python analyzer contract tests live under `python/tests`.

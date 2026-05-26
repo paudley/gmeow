@@ -1,41 +1,29 @@
 # Gmeow Source Package
 
-The `gmeow` package contains transitional Python support code that remains useful while the Go
-runtime takes over source, analysis, and interface behavior. The old Python PostgreSQL cache and
-Alembic runtime have been retired.
+The `gmeow` package contains only narrow transitional Python helpers that are still useful after
+Go phases 0-5. The old Python PostgreSQL cache, Gmail/source ingestion, analysis modules, and
+Alembic runtime have been retired. Runtime entrypoints now point operators to the Go binaries.
 
 ## Package Layout
 
 - **Runtime settings** — [`runtime_config.py`](./runtime_config.py) contains resolved settings
-  records for transitional Python tests and later-phase worker behavior. It does not parse TOML,
-  SOPS, or operator config files.
-- **Protocols** — [`protocols.py`](./protocols.py) hosts the shared `SyncCache`, `GmeowCache`,
-  `SyncSemantic`, `GmeowSemantic`, `IntelligenceGraph`, `NoGraph`, and `SyncAttachments`
-  structural types used by transitional sync code. RabbitMQ-backed Python analysis workers return
-  in the Go Phase 04 worker package.
-- **Cache helpers** — [`cache.py`](./cache.py).
-- **Sync orchestration** — [`sync.py`](./sync.py) and
-  [`sync_backfill.py`](./sync_backfill.py).
-- **Gmail client** — [`gmail.py`](./gmail.py) plus shared mutations in
-  [`gmail_actions.py`](./gmail_actions.py).
-- **Graph and analysis helpers** — [`graph.py`](./graph.py), [`kg.py`](./kg.py),
-  [`categories.py`](./categories.py), [`semantic.py`](./semantic.py), [`text_index.py`](./text_index.py).
-- **Operations** — [`resilience.py`](./resilience.py), [`provision.py`](./provision.py),
-  [`metadata.py`](./metadata.py), [`headers.py`](./headers.py),
-  [`http_json.py`](./http_json.py), [`markdown.py`](./markdown.py),
-  [`parser.py`](./parser.py), [`toon.py`](./toon.py), [`_typing.py`](./_typing.py).
+  records retained for transitional helpers. It does not parse TOML, SOPS, or operator config
+  files.
+- **Protocols** — [`protocols.py`](./protocols.py) hosts structural protocol types used by
+  retained helper modules.
+- **Object helpers** — [`cache.py`](./cache.py), [`parser.py`](./parser.py),
+  [`graph.py`](./graph.py), [`kg.py`](./kg.py), [`metadata.py`](./metadata.py), and
+  [`resilience.py`](./resilience.py) remain until later phases remove the final presentation and
+  operations helpers.
+- **Utility helpers** — [`http_json.py`](./http_json.py), [`toon.py`](./toon.py), and
+  [`_typing.py`](./_typing.py).
 
 ## External Tool Prerequisites
 
-- **Tesseract** for OCR on image attachments when enabled by resolved runtime settings.
-- **Pandoc** for `.docx` / `.odt` / `.rtf` extraction when enabled by resolved runtime settings.
-- **Exiftool** for image and document metadata (optional, surfaces in
-  `metadata.extract_exiftool_metadata`).
-- **Nomic embedding endpoint** running locally at the resolved runtime endpoint when transitional
-  Python semantic tests exercise that path.
+- **Exiftool** for optional metadata helper behavior.
+- Python model dependencies live in `python/gmeow_intel` external analyzer adapters.
 
 ## Operational Notes
 
-- The Gmail mutation helper surface is intentionally narrow: only label, archive, mark-read, and
-  star.
+- Gmail/source behavior is implemented in Go SOURCE adapters.
 - The compact response encoding helper is TOON; see [`toon.py`](./toon.py) for the encoding rules.

@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Analyzer namespace for Python-native analysis implementations.
+"""Analyzer namespace for Python-native external adapters.
 
-Phase 00 keeps analyzer modules as placeholders so package layout and release workflows are
-stable before worker execution exists. Later phases add concrete categorization, named-entity,
-and attachment analyzers behind this namespace.
+The Go ANALYSIS worker invokes these modules through the `gmeow-intel analyze <name>` command
+only when an analyzer is explicitly configured as an external Python/model adapter.
 
 See Also:
-    MODULE.md: Analyzer namespace contract for later ANALYSIS work.
+    MODULE.md: Analyzer namespace contract for external ANALYSIS adapters.
 
 """

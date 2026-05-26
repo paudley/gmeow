@@ -10,10 +10,10 @@ requirements of the Gmeow source and test packages.
 
 ## Python Analysis Package
 
-- [python/gmeow_intel/MODULE.md](../python/gmeow_intel/MODULE.md) — Phase 00 Python ANALYSIS
-  package contract.
+- [python/gmeow_intel/MODULE.md](../python/gmeow_intel/MODULE.md) — Python ANALYSIS external
+  adapter package contract.
 - [python/gmeow_intel/analyzers/MODULE.md](../python/gmeow_intel/analyzers/MODULE.md) — Analyzer
-  namespace contract for later ANALYSIS work.
+  namespace contract for external ANALYSIS adapters.
 - [python/gmeow_intel/contracts/MODULE.md](../python/gmeow_intel/contracts/MODULE.md) — Python
   validation models mirrored from Go contracts.
 - [python/tests/MODULE.md](../python/tests/MODULE.md) — Python package test contract.

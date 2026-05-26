@@ -4,6 +4,7 @@
 
 This module hosts the structural typing surface used by ``SyncService`` while Go takes over
 analysis scheduling and worker dispatch.
+Protocol methods intentionally avoid runtime behavior; concrete implementations provide storage.
 """
 
 from dataclasses import dataclass
@@ -71,6 +72,7 @@ class SyncCache(Protocol):
 
     def upsert_rule(self, name: str, priority: int, rule: dict[str, Any]) -> None:
         """Store or update a priority rule."""
+        _ = (name, priority, rule)
         ...
 
     def get_state(self, key: str) -> str:
@@ -96,7 +98,8 @@ class SyncCache(Protocol):
 
     def intelligence_target_status(self, targets: list[tuple[str, str]]) -> dict[str, Any]:
         """Return aggregate intelligence status for targets."""
-        ...
+        _ = targets
+        raise NotImplementedError
 
     def message_backfill_complete(self, message_id: str, *, require_raw: bool = True) -> dict[str, Any]:
         """Return backfill completeness for a message."""
@@ -113,7 +116,8 @@ class SyncCache(Protocol):
         exclude_categories: list[str] = DEFAULT_LIST_STR,
     ) -> list[dict[str, Any]]:
         """Search cached message text."""
-        ...
+        _ = (query, limit, after, before, include_categories, exclude_categories)
+        raise NotImplementedError
 
     def graph_search(
         self,
@@ -131,7 +135,8 @@ class SyncCache(Protocol):
 
     def category_allowed(self, categories: list[str], include_categories: list[str], exclude_categories: list[str]) -> bool:
         """Return whether categories satisfy visibility filters."""
-        ...
+        _ = (categories, include_categories, exclude_categories)
+        raise NotImplementedError
 
     def raw_rfc822(self, message_id: str) -> bytes:
         """Return cached raw RFC822 bytes."""
@@ -169,6 +174,7 @@ class SyncCache(Protocol):
 
     def add_attachment(self, record: dict[str, Any]) -> None:
         """Store attachment metadata."""
+        _ = record
         ...
 
     def record_search_run(self, search_id: str, query: str, source: str, request: dict[str, Any], status: str = "running") -> None:
@@ -186,11 +192,13 @@ class SyncCache(Protocol):
 
     def enqueue_deferred_attachment_hydration(self, ref: dict[str, Any], payload: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
         """Queue deferred attachment hydration."""
+        _ = (ref, payload)
         ...
 
     def deferred_attachment_hydration_status(self, message_ids: list[str] = DEFAULT_LIST_STR) -> dict[str, Any]:
         """Return deferred attachment hydration status."""
-        ...
+        _ = message_ids
+        raise NotImplementedError
 
     def get_message(self, message_id: str) -> dict[str, Any]:
         """Return a cached message mapping."""

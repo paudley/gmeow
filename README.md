@@ -6,7 +6,7 @@
 
 FILESTORE-first local knowledge services for agents.
 
-Gmeow is in a Go rewrite. Phases 0-3 provide the greenfield foundation: shared contracts, SOPS-backed config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, and RabbitMQ-backed SCHEDULER work derivation.
+Gmeow is in a Go rewrite. Phases 0-5 provide the greenfield foundation: shared contracts, SOPS-backed config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, Go ANALYSIS worker runtime, and Go SOURCE adapters.
 
 Gmeow is designed for trusted single-user local systems. By default it binds to `127.0.0.1` and does not add application-level authentication. Do not expose it directly to an untrusted network.
 
@@ -18,8 +18,10 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Derives analysis work through SCHEDULER and publishes durable RabbitMQ jobs with retry and dead-letter handling.
 - Runs typed gRPC service endpoints for FILESTORE, QUERY, and SCHEDULER over Unix sockets by default.
 - Provides admin commands for config, FILESTORE verification, QUERY projection, and SCHEDULER operations.
+- Runs Go ANALYSIS workers that consume scheduler jobs, read/write FILESTORE through typed gRPC, and support explicit `gmeow-intel` external analyzer adapters for Python/model behavior.
+- Provides Go SOURCE adapters for local filesystem fixtures, push/ringme records, the Gmail SOURCE adapter for ingest/hydrate/live search/live retrieve/actions, and design-only Drive capability checks.
 
-MCP, REST, IMAP, Gmail SOURCE adapters, and ANALYSIS workers return in later Go migration phases.
+MCP, REST, and IMAP return in the Go INTERFACE phase.
 
 ## Features
 
@@ -28,7 +30,8 @@ MCP, REST, IMAP, Gmail SOURCE adapters, and ANALYSIS workers return in later Go 
 - Rebuildable PostgreSQL projection for facets, provenance, relationships, compound parts, analysis status, graph facts, keywords, embeddings, overlays, and source cursors.
 - Read-only Apache AGE graph inspection over projected graph facts.
 - Go SCHEDULER work derivation with RabbitMQ priority, retry, and dead-letter queues.
-- Transitional Python code remains only as reference/support for later SOURCE, ANALYSIS, and INTERFACE phases.
+- Go SOURCE adapters submit normalized content to FILESTORE and use source lookup/ingest claims before payload streaming.
+- Transitional Python runtime code is retired. The remaining `python/` package is the explicit ANALYSIS external adapter package.
 
 ## Install
 
@@ -95,8 +98,9 @@ rabbitmq_test_password = '''
 
 Do not put `secrets.file`, `secrets.sops_file`, or `config.file` inside `gmeow.toml`. Config source selection belongs to `--config`, `GMEOW_CONFIG`, or the default `gmeow.toml`. Mandatory password leaves must be SOPS-encrypted; plaintext password leaves are rejected.
 
-Gmail provisioning and source runtime behavior move in later Go migration phases. Phase 00 only
-validates foundation contracts and startup configuration.
+Gmail SOURCE behavior is implemented by the Go adapter. Gmail actions remain deliberately narrow:
+apply/remove label, archive, mark read, and star. SOURCE actions are gated by adapter capability and
+matching object provenance/facets.
 
 ## Run
 
@@ -111,9 +115,14 @@ go run ./cmd/gmeow --config gmeow.toml scheduler-serve
 Phase 01/02 development commands include `gmeow-admin filestore verify`,
 `gmeow-admin query rebuild`, and `gmeow-admin query project-changed --since <RFC3339>` for
 FILESTORE verification and QUERY projection work.
-Phase 03 adds `gmeow-admin scheduler scan`, `status`, `dead-letter`, `requeue`, and `force`;
+SCHEDULER provides `gmeow-admin scheduler scan`, `status`, `dead-letter`, `requeue`, and `force`;
 RabbitMQ is mandatory. Production queues use the `gmeow.` prefix on the `gmeow` vhost; integration
 tests use the `gmeow.test.` prefix on the `gmeow-test` vhost.
+
+ANALYSIS workers are started with `go run ./cmd/gmeow-worker --config gmeow.toml analysis`.
+Python/model analyzers must be configured as explicit external adapters, for example
+`gmeow-intel analyze ner.spacy` or `gmeow-intel analyze categories.sklearn`; commandless Python
+analyzers fail closed at startup.
 
 The gRPC service protocol is typed protobuf. JSON is limited to dynamic metadata leaf fields, not
 whole request or response envelopes. See `proto/gmeow/v1/` and `docs/systemd.md`.
@@ -132,13 +141,14 @@ MCP returns in the Go INTERFACE phase. Phase 00 does not start MCP, REST, or IMA
 
 By default, local data is ignored by git and stored under `data/`:
 
-- `data/filestore/` is the planned Go FILESTORE root.
-- PostgreSQL, RabbitMQ, object storage, query indexes, and source state are wired in later phases.
+- `data/filestore/` is the Go FILESTORE root.
+- PostgreSQL, RabbitMQ, object storage, query indexes, analysis annotations, and source state are
+  runtime data.
 
 ## Archive and IMAP
 
-Archive and IMAP behavior return in later Go phases. They are not operator-facing Phase 00 runtime
-surfaces.
+Archive and IMAP behavior return in the Go INTERFACE phase. They are not operator-facing phase 0-5
+runtime surfaces.
 
 ## Development
 

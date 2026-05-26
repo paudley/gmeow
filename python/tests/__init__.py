@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Tests for the Phase 00 Python analysis package.
+"""Tests for the Python external analyzer package.
 
 The package exists so pytest imports resolve as an explicit package under the repo policy. The
-tests validate schema behavior only; runtime worker integration belongs to later migration phases.
+tests validate contract models and deterministic adapter behavior; Go tests cover runtime worker
+integration.
 
 See Also:
-    MODULE.md: Test package contract for the Phase 00 Python package.
+    MODULE.md: Test package contract for the Python external analyzer package.
 
 """

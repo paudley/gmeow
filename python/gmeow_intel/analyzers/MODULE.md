@@ -1,8 +1,9 @@
 # Analyzer Modules
 
-This package reserves the namespace for Python-native analyzers such as categorization and
-named-entity extraction. Phase 00 modules are placeholders because analyzer execution and RabbitMQ
-delivery are introduced in the ANALYSIS phase.
+This package contains Python-native external analyzer adapters such as categorization and
+named-entity extraction. They are invoked by the Go ANALYSIS worker only when explicitly configured
+with a command, arguments, timeout, analyzer name, and analyzer version.
 
-Analyzer implementations added later must consume validated contract models from
-`gmeow_intel.contracts` and emit JSON-shaped annotations that match the Go scheduler contract.
+Analyzer implementations consume validated contract models from `gmeow_intel.contracts` and emit
+JSON-shaped annotations that match the Go FILESTORE annotation contract. They must not parse
+operator config, connect to RabbitMQ, or write FILESTORE state directly.

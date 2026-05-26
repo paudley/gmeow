@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Contract tests for the Phase 00 Python analysis package.
+"""Contract tests for the Python external analyzer package.
 
-The tests exercise the minimal Pydantic models shipped for package and release validation. They do
-not start worker processes or queues because Phase 00 only defines contracts.
+The tests exercise the Pydantic models and analyzer command functions used by the Go ANALYSIS
+external adapter path. Queue consumption and FILESTORE writes remain owned by Go tests.
 """
 
 from gmeow_intel.analyzers import categories, ner

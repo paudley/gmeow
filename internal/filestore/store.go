@@ -162,6 +162,11 @@ func (store *FilesystemStore) PutCompound(
 	}
 
 	digest := contracts.ObjectDigest(blake3Hex([]byte("compound:" + objectID)))
+	relationships := relationshipsWithCompoundParts(
+		digest,
+		request.Relationships,
+		parts,
+	)
 
 	envelope, err := canonicalJSON(compoundEnvelope{
 		SchemaVersion:    int(contracts.SchemaVersionPhase00),
@@ -183,7 +188,7 @@ func (store *FilesystemStore) PutCompound(
 		request.ContentRoles,
 		request.Facets,
 		request.Provenance,
-		request.Relationships,
+		relationships,
 		contracts.Compound{IsCompound: true, Parts: parts},
 	)
 	if err := store.writeObject(
@@ -1386,6 +1391,37 @@ func normalizedRelationships(
 
 		return result[left].To < result[right].To
 	})
+
+	return result
+}
+
+func relationshipsWithCompoundParts(
+	compoundDigest contracts.ObjectDigest,
+	relationships []contracts.Relationship,
+	parts []contracts.CompoundPart,
+) []contracts.Relationship {
+	result := append([]contracts.Relationship(nil), relationships...)
+	for _, part := range parts {
+		result = append(
+			result,
+			contracts.Relationship{
+				Type:   "contains",
+				From:   compoundDigest,
+				To:     part.Digest,
+				Role:   part.Role,
+				Order:  part.Order,
+				Source: "filestore.compound",
+			},
+			contracts.Relationship{
+				Type:   "part_of",
+				From:   part.Digest,
+				To:     compoundDigest,
+				Role:   part.Role,
+				Order:  part.Order,
+				Source: "filestore.compound",
+			},
+		)
+	}
 
 	return result
 }
