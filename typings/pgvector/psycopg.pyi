@@ -1,3 +1,0 @@
-from _typeshed import Incomplete
-
-def register_vector(conn: Incomplete) -> None: ...
