@@ -41,3 +41,4 @@ htmlcov/
 .coding-ethos/gemini
 gmeow.toml
 .coding-ethos/*.lock
+.claude/settings.local.json
