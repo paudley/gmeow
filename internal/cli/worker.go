@@ -19,6 +19,7 @@ import (
 
 func NewWorkerCommand(out io.Writer) *cobra.Command {
 	var configPath string
+
 	root := &cobra.Command{
 		Use:   "gmeow-worker",
 		Short: "Gmeow analysis worker",
@@ -27,6 +28,7 @@ func NewWorkerCommand(out io.Writer) *cobra.Command {
 	root.AddCommand(newVersionCommand(out))
 	root.AddCommand(newStatusCommand("gmeow-worker", out, &configPath))
 	root.AddCommand(newWorkerRunCommand(out, &configPath))
+
 	return root
 }
 
@@ -39,6 +41,7 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			source, err := analysis.NewRabbitMQSource(
 				command.Context(),
 				analysis.RabbitMQSourceConfig{
@@ -50,6 +53,7 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 				return err
 			}
 			defer source.Close()
+
 			store, err := rpc.NewFilestoreClient(
 				command.Context(),
 				rpcEndpoint(loaded.Resolved.RPC.Filestore),
@@ -58,10 +62,12 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 				return err
 			}
 			defer store.Close()
+
 			registry, err := workerRegistryFromConfig(loaded.Config.Analysis)
 			if err != nil {
 				return err
 			}
+
 			runtime, err := analysis.NewRuntime(
 				source,
 				store,
@@ -70,9 +76,11 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			if _, err := fmt.Fprintln(out, "analysis worker: started"); err != nil {
 				return err
 			}
+
 			return runtime.Run(command.Context())
 		},
 	}
@@ -85,14 +93,18 @@ func workerRegistryFromConfig(
 	if err != nil {
 		return nil, err
 	}
+
 	defaults := map[string]analysis.Analyzer{}
+
 	for _, spec := range defaultRegistry.Specs() {
 		analyzer, ok := defaultRegistry.Analyzer(spec)
 		if ok {
 			defaults[analysis.SpecKey(spec)] = analyzer
 		}
 	}
+
 	registered := []analysis.Analyzer{}
+
 	for _, configured := range analysisConfig.Analyzers {
 		spec := analyzerSpecFromConfig(configured)
 		switch configured.WorkerKind {
@@ -101,20 +113,24 @@ func workerRegistryFromConfig(
 			if err != nil {
 				return nil, err
 			}
+
 			registered = append(registered, analyzer)
 		case "external", "python":
 			analyzer, err := externalAnalyzerFromConfig(configured, spec)
 			if err != nil {
 				return nil, err
 			}
+
 			registered = append(registered, analyzer)
 		default:
 			return nil, fmt.Errorf("unsupported analyzer worker_kind %q", configured.WorkerKind)
 		}
 	}
+
 	if len(registered) == 0 {
 		return nil, errors.New("at least one analysis analyzer must be configured")
 	}
+
 	return analysis.NewRegistry(registered...)
 }
 
@@ -130,6 +146,7 @@ func goAnalyzerFromConfig(
 			Model:    analysisConfig.Embeddings.Model,
 		})
 	}
+
 	analyzer, ok := defaults[analysis.SpecKey(spec)]
 	if !ok {
 		return nil, fmt.Errorf(
@@ -138,6 +155,7 @@ func goAnalyzerFromConfig(
 			configured.Version,
 		)
 	}
+
 	return analyzer, nil
 }
 
@@ -158,6 +176,7 @@ func externalAnalyzerFromConfig(
 	if err != nil {
 		return nil, err
 	}
+
 	return analysis.NewExternalCommandAnalyzer(analysis.ExternalCommandConfig{
 		Spec:    spec,
 		Command: configured.Command,
@@ -170,9 +189,11 @@ func parseAnalyzerTimeout(raw string) (time.Duration, error) {
 	if raw == "" {
 		return 0, nil
 	}
+
 	timeout, err := time.ParseDuration(raw)
 	if err != nil {
 		return 0, fmt.Errorf("parse analyzer timeout: %w", err)
 	}
+
 	return timeout, nil
 }

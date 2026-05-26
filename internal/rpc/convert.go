@@ -26,6 +26,7 @@ func FromPBSourceObjectRef(ref *pb.SourceObjectRef) contracts.SourceObjectRef {
 	if ref == nil {
 		return contracts.SourceObjectRef{}
 	}
+
 	return contracts.SourceObjectRef{
 		SourceKind:      ref.GetSourceKind(),
 		SourceName:      ref.GetSourceName(),
@@ -48,10 +49,12 @@ func FromPBSourceIngestClaim(
 	if claim == nil {
 		return contracts.SourceIngestClaim{}, nil
 	}
+
 	acquiredAt, err := parseTime(claim.GetAcquiredAt())
 	if err != nil {
 		return contracts.SourceIngestClaim{}, fmt.Errorf("parse acquired_at: %w", err)
 	}
+
 	return contracts.SourceIngestClaim{
 		SourceObject: FromPBSourceObjectRef(claim.GetSourceObject()),
 		ClaimID:      claim.GetClaimId(),
@@ -64,27 +67,34 @@ func ToPBManifest(manifest contracts.Manifest) (*pb.Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	overlays, err := encodeMap(manifest.Overlays)
 	if err != nil {
 		return nil, err
 	}
+
 	facets, err := ToPBFacets(manifest.Facets)
 	if err != nil {
 		return nil, err
 	}
+
 	provenance, err := ToPBProvenance(manifest.Provenance)
 	if err != nil {
 		return nil, err
 	}
+
 	relationships := ToPBRelationships(manifest.Relationships)
+
 	parts, err := ToPBCompoundParts(manifest.Compound.Parts)
 	if err != nil {
 		return nil, err
 	}
+
 	graph, err := ToPBGraphFacts(manifest.Graph)
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.Manifest{
 		SchemaVersion:    int32(manifest.SchemaVersion),
 		Digest:           string(manifest.ObjectDigest),
@@ -117,38 +127,47 @@ func FromPBManifest(manifest *pb.Manifest) (contracts.Manifest, error) {
 	if manifest == nil {
 		return contracts.Manifest{}, nil
 	}
+
 	analysis, err := decodeMap(manifest.GetAnalysisJson())
 	if err != nil {
 		return contracts.Manifest{}, err
 	}
+
 	overlays, err := decodeMap(manifest.GetOverlaysJson())
 	if err != nil {
 		return contracts.Manifest{}, err
 	}
+
 	facets, err := FromPBFacets(manifest.GetFacets())
 	if err != nil {
 		return contracts.Manifest{}, err
 	}
+
 	provenance, err := FromPBProvenance(manifest.GetProvenance())
 	if err != nil {
 		return contracts.Manifest{}, err
 	}
+
 	parts, err := FromPBCompoundParts(manifest.GetCompound().GetParts())
 	if err != nil {
 		return contracts.Manifest{}, err
 	}
+
 	graph, err := FromPBGraphFacts(manifest.GetGraph())
 	if err != nil {
 		return contracts.Manifest{}, err
 	}
+
 	createdAt, err := parseTime(manifest.GetCreatedAt())
 	if err != nil {
 		return contracts.Manifest{}, fmt.Errorf("parse created_at: %w", err)
 	}
+
 	updatedAt, err := parseTime(manifest.GetUpdatedAt())
 	if err != nil {
 		return contracts.Manifest{}, fmt.Errorf("parse updated_at: %w", err)
 	}
+
 	return contracts.Manifest{
 		SchemaVersion:    contracts.SchemaVersion(manifest.GetSchemaVersion()),
 		ObjectDigest:     contracts.ObjectDigest(manifest.GetDigest()),
@@ -184,10 +203,12 @@ func ToPBFacets(facets []contracts.Facet) ([]*pb.Facet, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		attributes, err := encodeMap(facet.Attributes)
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, &pb.Facet{
 			Kind:           facet.Kind,
 			Name:           facet.Name,
@@ -196,6 +217,7 @@ func ToPBFacets(facets []contracts.Facet) ([]*pb.Facet, error) {
 			AttributesJson: attributes,
 		})
 	}
+
 	return out, nil
 }
 
@@ -206,10 +228,12 @@ func FromPBFacets(facets []*pb.Facet) ([]contracts.Facet, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		attributes, err := decodeMap(facet.GetAttributesJson())
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, contracts.Facet{
 			Kind:       facet.GetKind(),
 			Name:       facet.GetName(),
@@ -218,6 +242,7 @@ func FromPBFacets(facets []*pb.Facet) ([]contracts.Facet, error) {
 			Attributes: attributes,
 		})
 	}
+
 	return out, nil
 }
 
@@ -228,10 +253,12 @@ func ToPBProvenance(provenance []contracts.Provenance) ([]*pb.Provenance, error)
 		if err != nil {
 			return nil, err
 		}
+
 		attributes, err := encodeMap(item.Attributes)
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, &pb.Provenance{
 			SourceName:       item.SourceName,
 			SourceKind:       item.SourceKind,
@@ -243,6 +270,7 @@ func ToPBProvenance(provenance []contracts.Provenance) ([]*pb.Provenance, error)
 			AttributesJson:   attributes,
 		})
 	}
+
 	return out, nil
 }
 
@@ -253,14 +281,17 @@ func FromPBProvenance(provenance []*pb.Provenance) ([]contracts.Provenance, erro
 		if err != nil {
 			return nil, fmt.Errorf("parse provenance observed_at: %w", err)
 		}
+
 		metadata, err := decodeMap(item.GetMetadataJson())
 		if err != nil {
 			return nil, err
 		}
+
 		attributes, err := decodeMap(item.GetAttributesJson())
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, contracts.Provenance{
 			SourceName:       item.GetSourceName(),
 			SourceKind:       item.GetSourceKind(),
@@ -272,6 +303,7 @@ func FromPBProvenance(provenance []*pb.Provenance) ([]contracts.Provenance, erro
 			Attributes:       attributes,
 		})
 	}
+
 	return out, nil
 }
 
@@ -287,6 +319,7 @@ func ToPBRelationships(relationships []contracts.Relationship) []*pb.Relationshi
 			Source: relationship.Source,
 		})
 	}
+
 	return out
 }
 
@@ -302,6 +335,7 @@ func FromPBRelationships(relationships []*pb.Relationship) []contracts.Relations
 			Source: relationship.GetSource(),
 		})
 	}
+
 	return out
 }
 
@@ -312,6 +346,7 @@ func ToPBCompoundParts(parts []contracts.CompoundPart) ([]*pb.CompoundPart, erro
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, &pb.CompoundPart{
 			Digest:       string(part.Digest),
 			Role:         part.Role,
@@ -320,6 +355,7 @@ func ToPBCompoundParts(parts []contracts.CompoundPart) ([]*pb.CompoundPart, erro
 			MetadataJson: metadata,
 		})
 	}
+
 	return out, nil
 }
 
@@ -330,6 +366,7 @@ func FromPBCompoundParts(parts []*pb.CompoundPart) ([]contracts.CompoundPart, er
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, contracts.CompoundPart{
 			Digest:   contracts.ObjectDigest(part.GetDigest()),
 			Role:     part.GetRole(),
@@ -338,6 +375,7 @@ func FromPBCompoundParts(parts []*pb.CompoundPart) ([]contracts.CompoundPart, er
 			Metadata: metadata,
 		})
 	}
+
 	return out, nil
 }
 
@@ -346,6 +384,7 @@ func ToPBAnnotation(annotation contracts.Annotation) (*pb.Annotation, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.Annotation{
 		SchemaVersion:   int32(annotation.SchemaVersion),
 		ObjectDigest:    string(annotation.ObjectDigest),
@@ -361,14 +400,17 @@ func FromPBAnnotation(annotation *pb.Annotation) (contracts.Annotation, error) {
 	if annotation == nil {
 		return contracts.Annotation{}, nil
 	}
+
 	generatedAt, err := parseTime(annotation.GetGeneratedAt())
 	if err != nil {
 		return contracts.Annotation{}, fmt.Errorf("parse generated_at: %w", err)
 	}
+
 	data, err := decodeMap(annotation.GetDataJson())
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
+
 	return contracts.Annotation{
 		SchemaVersion: contracts.SchemaVersion(annotation.GetSchemaVersion()),
 		ObjectDigest:  contracts.ObjectDigest(annotation.GetObjectDigest()),
@@ -387,8 +429,10 @@ func ToPBAnnotations(annotations []contracts.Annotation) ([]*pb.Annotation, erro
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, converted)
 	}
+
 	return out, nil
 }
 
@@ -399,8 +443,10 @@ func FromPBAnnotations(annotations []*pb.Annotation) ([]contracts.Annotation, er
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, converted)
 	}
+
 	return out, nil
 }
 
@@ -411,10 +457,12 @@ func ToPBProjectionObject(
 	if err != nil {
 		return nil, err
 	}
+
 	annotations, err := ToPBAnnotations(object.Annotations)
 	if err != nil {
 		return nil, err
 	}
+
 	findings := make([]*pb.ProjectionFinding, 0, len(object.Findings))
 	for _, finding := range object.Findings {
 		findings = append(findings, &pb.ProjectionFinding{
@@ -424,6 +472,7 @@ func ToPBProjectionObject(
 			Message: finding.Message,
 		})
 	}
+
 	return &pb.ProjectionObject{
 		Digest:      string(object.Digest),
 		Path:        object.Path,
@@ -439,14 +488,17 @@ func FromPBProjectionObject(
 	if object == nil {
 		return filestore.ProjectionObject{}, nil
 	}
+
 	manifest, err := FromPBManifest(object.GetManifest())
 	if err != nil {
 		return filestore.ProjectionObject{}, err
 	}
+
 	annotations, err := FromPBAnnotations(object.GetAnnotations())
 	if err != nil {
 		return filestore.ProjectionObject{}, err
 	}
+
 	findings := make([]filestore.ProjectionFinding, 0, len(object.GetFindings()))
 	for _, finding := range object.GetFindings() {
 		findings = append(findings, filestore.ProjectionFinding{
@@ -456,6 +508,7 @@ func FromPBProjectionObject(
 			Message: finding.GetMessage(),
 		})
 	}
+
 	return filestore.ProjectionObject{
 		Digest:      contracts.ObjectDigest(object.GetDigest()),
 		Path:        object.GetPath(),
@@ -474,6 +527,7 @@ func ToPBStructure(structure contracts.Structure) (*pb.Structure, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			convertedParts = append(convertedParts, &pb.StructurePart{
 				Digest:       string(part.Digest),
 				Role:         part.Role,
@@ -483,8 +537,10 @@ func ToPBStructure(structure contracts.Structure) (*pb.Structure, error) {
 				MetadataJson: metadata,
 			})
 		}
+
 		roles = append(roles, &pb.StructureRoleParts{Role: role, Parts: convertedParts})
 	}
+
 	return &pb.Structure{
 		SchemaVersion: int32(structure.SchemaVersion),
 		Digest:        string(structure.ObjectDigest),
@@ -498,7 +554,9 @@ func FromPBStructure(structure *pb.Structure) (contracts.Structure, error) {
 	if structure == nil {
 		return contracts.Structure{}, nil
 	}
+
 	partsByRole := map[string][]contracts.StructurePart{}
+
 	for _, roleParts := range structure.GetPartsByRole() {
 		parts := make([]contracts.StructurePart, 0, len(roleParts.GetParts()))
 		for _, part := range roleParts.GetParts() {
@@ -506,6 +564,7 @@ func FromPBStructure(structure *pb.Structure) (contracts.Structure, error) {
 			if err != nil {
 				return contracts.Structure{}, err
 			}
+
 			parts = append(parts, contracts.StructurePart{
 				Digest:   contracts.ObjectDigest(part.GetDigest()),
 				Role:     part.GetRole(),
@@ -515,8 +574,10 @@ func FromPBStructure(structure *pb.Structure) (contracts.Structure, error) {
 				Metadata: metadata,
 			})
 		}
+
 		partsByRole[roleParts.GetRole()] = parts
 	}
+
 	return contracts.Structure{
 		SchemaVersion: contracts.SchemaVersion(structure.GetSchemaVersion()),
 		ObjectDigest:  contracts.ObjectDigest(structure.GetDigest()),
@@ -531,6 +592,7 @@ func ToPBSourceCursor(cursor contracts.SourceCursor) (*pb.SourceCursor, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.SourceCursor{
 		SchemaVersion: int32(cursor.SchemaVersion),
 		SourceKind:    cursor.SourceKind,
@@ -544,14 +606,17 @@ func FromPBSourceCursor(cursor *pb.SourceCursor) (contracts.SourceCursor, error)
 	if cursor == nil {
 		return contracts.SourceCursor{}, nil
 	}
+
 	cursorMap, err := decodeMap(cursor.GetCursorJson())
 	if err != nil {
 		return contracts.SourceCursor{}, err
 	}
+
 	updatedAt, err := parseTime(cursor.GetUpdatedAt())
 	if err != nil {
 		return contracts.SourceCursor{}, fmt.Errorf("parse source cursor updated_at: %w", err)
 	}
+
 	return contracts.SourceCursor{
 		SchemaVersion: contracts.SchemaVersion(cursor.GetSchemaVersion()),
 		SourceKind:    cursor.GetSourceKind(),
@@ -581,6 +646,7 @@ func FromPBAnalyzerSpec(spec *pb.AnalyzerSpec) contracts.AnalyzerSpec {
 	if spec == nil {
 		return contracts.AnalyzerSpec{}
 	}
+
 	return contracts.AnalyzerSpec{
 		Name:               spec.GetName(),
 		Version:            spec.GetVersion(),
@@ -619,14 +685,17 @@ func FromPBAnalyzerJob(job *pb.AnalyzerJob) (contracts.AnalyzerJob, error) {
 	if job == nil {
 		return contracts.AnalyzerJob{}, nil
 	}
+
 	deadline, err := parseTime(job.GetDeadline())
 	if err != nil {
 		return contracts.AnalyzerJob{}, fmt.Errorf("parse deadline: %w", err)
 	}
+
 	createdAt, err := parseTime(job.GetCreatedAt())
 	if err != nil {
 		return contracts.AnalyzerJob{}, fmt.Errorf("parse created_at: %w", err)
 	}
+
 	return contracts.AnalyzerJob{
 		SchemaVersion:  contracts.SchemaVersion(job.GetSchemaVersion()),
 		JobID:          job.GetJobId(),
@@ -654,6 +723,7 @@ func ToPBTitles(titles []contracts.Title) []*pb.Title {
 			Confidence: title.Confidence,
 		})
 	}
+
 	return out
 }
 
@@ -666,6 +736,7 @@ func FromPBTitles(titles []*pb.Title) []contracts.Title {
 			Confidence: title.GetConfidence(),
 		})
 	}
+
 	return out
 }
 
@@ -681,6 +752,7 @@ func FromPBTimestamps(timestamps *pb.Timestamps) contracts.Timestamps {
 	if timestamps == nil {
 		return contracts.Timestamps{}
 	}
+
 	return contracts.Timestamps{
 		Created:  mustParseTime(timestamps.GetCreated()),
 		Modified: mustParseTime(timestamps.GetModified()),
@@ -695,6 +767,7 @@ func ToPBGraphFacts(facts []contracts.GraphFact) ([]*pb.GraphFact, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, &pb.GraphFact{
 			Subject:      fact.Subject,
 			Predicate:    fact.Predicate,
@@ -702,6 +775,7 @@ func ToPBGraphFacts(facts []contracts.GraphFact) ([]*pb.GraphFact, error) {
 			MetadataJson: metadata,
 		})
 	}
+
 	return out, nil
 }
 
@@ -712,6 +786,7 @@ func FromPBGraphFacts(facts []*pb.GraphFact) ([]contracts.GraphFact, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, contracts.GraphFact{
 			Subject:   fact.GetSubject(),
 			Predicate: fact.GetPredicate(),
@@ -719,6 +794,7 @@ func FromPBGraphFacts(facts []*pb.GraphFact) ([]contracts.GraphFact, error) {
 			Metadata:  metadata,
 		})
 	}
+
 	return out, nil
 }
 
@@ -731,6 +807,7 @@ func ToPBEmbeddingRefs(refs []contracts.EmbeddingRef) []*pb.EmbeddingRef {
 			Dimensions:   int32(ref.Dimensions),
 		})
 	}
+
 	return out
 }
 
@@ -743,6 +820,7 @@ func FromPBEmbeddingRefs(refs []*pb.EmbeddingRef) []contracts.EmbeddingRef {
 			Dimensions:   int(ref.GetDimensions()),
 		})
 	}
+
 	return out
 }
 
@@ -750,10 +828,12 @@ func encodeMap(value map[string]any) ([]byte, error) {
 	if len(value) == 0 {
 		return nil, nil
 	}
+
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("encode dynamic metadata json: %w", err)
 	}
+
 	return encoded, nil
 }
 
@@ -761,10 +841,13 @@ func decodeMap(value []byte) (map[string]any, error) {
 	if len(value) == 0 {
 		return nil, nil
 	}
+
 	var decoded map[string]any
-	if err := json.Unmarshal(value, &decoded); err != nil {
+	err := json.Unmarshal(value, &decoded)
+	if err != nil {
 		return nil, fmt.Errorf("decode dynamic metadata json: %w", err)
 	}
+
 	return decoded, nil
 }
 
@@ -772,6 +855,7 @@ func formatTime(value time.Time) string {
 	if value.IsZero() {
 		return ""
 	}
+
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
@@ -779,10 +863,12 @@ func parseTime(value string) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
 	}
+
 	return time.Parse(time.RFC3339Nano, value)
 }
 
 func mustParseTime(value string) time.Time {
 	parsed, _ := parseTime(value)
+
 	return parsed
 }

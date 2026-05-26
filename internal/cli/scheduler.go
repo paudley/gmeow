@@ -34,11 +34,13 @@ func newSchedulerCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newSchedulerForceCommand(out, configPath))
 	command.AddCommand(newSchedulerRunCommand(out, configPath, "run"))
 	command.AddCommand(newSchedulerServeCommand(out, configPath, "serve"))
+
 	return command
 }
 
 func newSchedulerScanCommand(out io.Writer, configPath *string) *cobra.Command {
 	var priority string
+
 	command := &cobra.Command{
 		Use:   "scan",
 		Short: "Scan FILESTORE and enqueue missing or stale analysis work",
@@ -48,6 +50,7 @@ func newSchedulerScanCommand(out io.Writer, configPath *string) *cobra.Command {
 				return err
 			}
 			defer closeFn()
+
 			response, err := service.Scan(command.Context(), contracts.SchedulerScanRequest{
 				SchemaVersion: contracts.SchemaVersionPhase00,
 				PriorityClass: priority,
@@ -57,6 +60,7 @@ func newSchedulerScanCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			_, err = fmt.Fprintf(
 				out,
 				"scheduler scan: scanned=%d enqueued=%d skipped=%d failed=%d\n",
@@ -65,11 +69,13 @@ func newSchedulerScanCommand(out io.Writer, configPath *string) *cobra.Command {
 				response.Skipped,
 				response.Failed,
 			)
+
 			return err
 		},
 	}
 	command.Flags().
 		StringVar(&priority, "priority", contracts.PriorityBackground, "priority class")
+
 	return command
 }
 
@@ -83,10 +89,12 @@ func newSchedulerStatusCommand(out io.Writer, configPath *string) *cobra.Command
 				return err
 			}
 			defer closeFn()
+
 			status, err := service.Status(command.Context())
 			if err != nil {
 				return err
 			}
+
 			_, err = fmt.Fprintf(
 				out,
 				"scheduler status: pending=%d retry=%d failed=%d dead_letter=%d\n",
@@ -95,6 +103,7 @@ func newSchedulerStatusCommand(out io.Writer, configPath *string) *cobra.Command
 				status.Failed,
 				status.DeadLetter,
 			)
+
 			return err
 		},
 	}
@@ -102,6 +111,7 @@ func newSchedulerStatusCommand(out io.Writer, configPath *string) *cobra.Command
 
 func newSchedulerDeadLetterCommand(out io.Writer, configPath *string) *cobra.Command {
 	var limit int
+
 	command := &cobra.Command{
 		Use:   "dead-letter",
 		Short: "Inspect dead-lettered analysis jobs",
@@ -111,6 +121,7 @@ func newSchedulerDeadLetterCommand(out io.Writer, configPath *string) *cobra.Com
 				return err
 			}
 			defer closeFn()
+
 			response, err := service.DeadLetters(command.Context(), contracts.DeadLetterRequest{
 				SchemaVersion: contracts.SchemaVersionPhase00,
 				Limit:         limit,
@@ -118,20 +129,25 @@ func newSchedulerDeadLetterCommand(out io.Writer, configPath *string) *cobra.Com
 			if err != nil {
 				return err
 			}
+
 			encoded, err := json.MarshalIndent(response, "", "  ")
 			if err != nil {
 				return err
 			}
+
 			_, err = fmt.Fprintln(out, string(encoded))
+
 			return err
 		},
 	}
 	command.Flags().IntVar(&limit, "limit", 20, "maximum dead-letter jobs to inspect")
+
 	return command
 }
 
 func newSchedulerRequeueCommand(out io.Writer, configPath *string) *cobra.Command {
 	var limit int
+
 	command := &cobra.Command{
 		Use:   "requeue",
 		Short: "Requeue dead-lettered analysis jobs",
@@ -141,6 +157,7 @@ func newSchedulerRequeueCommand(out io.Writer, configPath *string) *cobra.Comman
 				return err
 			}
 			defer closeFn()
+
 			response, err := service.Requeue(command.Context(), contracts.RequeueRequest{
 				SchemaVersion: contracts.SchemaVersionPhase00,
 				Limit:         limit,
@@ -148,17 +165,23 @@ func newSchedulerRequeueCommand(out io.Writer, configPath *string) *cobra.Comman
 			if err != nil {
 				return err
 			}
+
 			_, err = fmt.Fprintf(out, "scheduler requeue: requeued=%d\n", response.Requeued)
+
 			return err
 		},
 	}
 	command.Flags().IntVar(&limit, "limit", 20, "maximum dead-letter jobs to requeue")
+
 	return command
 }
 
 func newSchedulerForceCommand(out io.Writer, configPath *string) *cobra.Command {
-	var analyzers []string
-	var traceID string
+	var (
+		analyzers []string
+		traceID   string
+	)
+
 	command := &cobra.Command{
 		Use:   "force <digest>",
 		Short: "Force reanalysis for a FILESTORE object",
@@ -169,6 +192,7 @@ func newSchedulerForceCommand(out io.Writer, configPath *string) *cobra.Command 
 				return err
 			}
 			defer closeFn()
+
 			response, err := service.Force(
 				command.Context(),
 				contracts.ObjectDigest(args[0]),
@@ -179,6 +203,7 @@ func newSchedulerForceCommand(out io.Writer, configPath *string) *cobra.Command 
 			if err != nil {
 				return err
 			}
+
 			_, err = fmt.Fprintf(
 				out,
 				"scheduler force: scanned=%d enqueued=%d skipped=%d failed=%d\n",
@@ -187,12 +212,14 @@ func newSchedulerForceCommand(out io.Writer, configPath *string) *cobra.Command 
 				response.Skipped,
 				response.Failed,
 			)
+
 			return err
 		},
 	}
 	command.Flags().StringSliceVar(&analyzers, "analyzer", nil, "analyzer name to force")
 	command.Flags().
 		StringVar(&traceID, "trace-id", "", "trace identifier to include in jobs")
+
 	return command
 }
 
@@ -210,9 +237,11 @@ func newSchedulerRunCommand(
 				return err
 			}
 			defer closeFn()
+
 			if _, err := fmt.Fprintln(out, "scheduler run: started"); err != nil {
 				return err
 			}
+
 			return service.Run(command.Context())
 		},
 	}
@@ -231,11 +260,13 @@ func newSchedulerServeCommand(
 			if err != nil {
 				return err
 			}
+
 			service, closeFn, err := openSchedulerLoaded(command.Context(), loaded)
 			if err != nil {
 				return err
 			}
 			defer closeFn()
+
 			endpoint := rpcEndpoint(loaded.Resolved.RPC.Scheduler)
 			if _, err := fmt.Fprintf(
 				out,
@@ -245,6 +276,7 @@ func newSchedulerServeCommand(
 			); err != nil {
 				return err
 			}
+
 			return rpc.Serve(command.Context(), endpoint, func(server *grpc.Server) {
 				pb.RegisterSchedulerServiceServer(server, rpc.NewSchedulerServer(service))
 			})
@@ -260,6 +292,7 @@ func openScheduler(
 	if err != nil {
 		return nil, nil, err
 	}
+
 	return openSchedulerLoaded(ctx, loaded)
 }
 
@@ -271,7 +304,9 @@ func openSchedulerLoaded(
 	if err != nil {
 		return nil, nil, err
 	}
+
 	store := filestore.NewFilesystemStore(root)
+
 	broker, err := schedmq.New(ctx, schedmq.ConfigFromResolved(
 		loaded.Resolved.RabbitMQ,
 		loaded.Resolved.Scheduler,
@@ -279,11 +314,14 @@ func openSchedulerLoaded(
 	if err != nil {
 		return nil, nil, err
 	}
+
 	schedulerConfig, err := schedulerConfigFromResolved(loaded.Resolved.Scheduler)
 	if err != nil {
 		broker.Close()
+
 		return nil, nil, err
 	}
+
 	service, err := scheduler.NewService(
 		store,
 		broker,
@@ -292,8 +330,10 @@ func openSchedulerLoaded(
 	)
 	if err != nil {
 		broker.Close()
+
 		return nil, nil, err
 	}
+
 	return service, func() { _ = broker.Close() }, nil
 }
 
@@ -304,6 +344,7 @@ func schedulerConfigFromResolved(
 	if err != nil {
 		return scheduler.Config{}, fmt.Errorf("parse scheduler.scan_interval: %w", err)
 	}
+
 	return scheduler.Config{
 		ScanInterval: scanInterval,
 		RetryBackoff: retryBackoffDuration(resolved.RetryBackoff),
@@ -316,5 +357,6 @@ func retryBackoffDuration(raw string) time.Duration {
 	if err != nil || duration <= 0 {
 		return 30 * time.Second
 	}
+
 	return duration
 }

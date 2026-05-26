@@ -9,9 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"math"
-	"strconv"
 	"strings"
 	"time"
 
@@ -46,19 +43,15 @@ type RebuildReport struct {
 }
 
 type AgeStatus struct {
-	Available bool
 	Graph     string
-	GraphID   int64
 	Nodes     string
 	Error     string
+	GraphID   int64
+	Available bool
 }
 
 type ageSearchPathExecutor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-}
-
-type embeddingObjectReader interface {
-	Open(context.Context, contracts.ObjectDigest) (io.ReadCloser, error)
 }
 
 func New(
@@ -69,18 +62,24 @@ func New(
 	if strings.TrimSpace(config.ConnString) == "" {
 		return nil, errors.New("postgres connection string is required")
 	}
+
 	pool, err := pgxpool.New(ctx, config.ConnString)
 	if err != nil {
 		return nil, fmt.Errorf("create postgres pool: %w", err)
 	}
+
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
+
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
+
 	if err := validateRequiredProjectionCapabilities(ctx, pool); err != nil {
 		pool.Close()
+
 		return nil, err
 	}
+
 	return &Index{pool: pool, source: source}, nil
 }
 
@@ -92,20 +91,25 @@ func Migrate(ctx context.Context, config Config) error {
 	if strings.TrimSpace(config.MigrationsDir) == "" {
 		return errors.New("query migrations directory is required")
 	}
+
 	db, err := sql.Open("pgx", config.ConnString)
 	if err != nil {
 		return fmt.Errorf("open migration database: %w", err)
 	}
 	defer db.Close()
+
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping migration database: %w", err)
 	}
+
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("set goose dialect: %w", err)
 	}
+
 	if err := goose.UpContext(ctx, db, config.MigrationsDir); err != nil {
 		return fmt.Errorf("run query migrations: %w", err)
 	}
+
 	return nil
 }
 
@@ -115,22 +119,26 @@ func validateRequiredProjectionCapabilities(
 ) error {
 	for _, extension := range []string{"vector", "age"} {
 		var exists bool
-		if err := pool.QueryRow(
+		err := pool.QueryRow(
 			ctx,
 			"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1)",
 			extension,
-		).Scan(&exists); err != nil {
+		).Scan(&exists)
+		if err != nil {
 			return fmt.Errorf("validate %s extension: %w", extension, err)
 		}
+
 		if !exists {
 			return fmt.Errorf("required PostgreSQL extension %q is not enabled", extension)
 		}
 	}
+
 	conn, err := acquireAgeConn(ctx, pool)
 	if err != nil {
 		return err
 	}
 	defer conn.Release()
+
 	var graphExists bool
 	if err := conn.QueryRow(
 		ctx,
@@ -138,9 +146,11 @@ func validateRequiredProjectionCapabilities(
 	).Scan(&graphExists); err != nil {
 		return fmt.Errorf("validate AGE graph: %w", err)
 	}
+
 	if !graphExists {
 		return errors.New("required AGE graph \"gmeow_graph\" is not initialized")
 	}
+
 	return nil
 }
 
@@ -152,15 +162,19 @@ func acquireAgeConn(
 	if err != nil {
 		return nil, fmt.Errorf("acquire AGE connection: %w", err)
 	}
+
 	if err := setAgeSearchPath(ctx, conn); err != nil {
 		conn.Release()
+
 		return nil, fmt.Errorf("set AGE search path: %w", err)
 	}
+
 	return conn, nil
 }
 
 func setAgeSearchPath(ctx context.Context, execer ageSearchPathExecutor) error {
 	_, err := execer.Exec(ctx, "SET search_path=ag_catalog, public")
+
 	return err
 }
 
@@ -183,23 +197,29 @@ func (index *Index) ProjectObject(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if len(object.Findings) > 0 {
 		return index.recordProjectionFindings(ctx, object)
 	}
+
 	tx, err := index.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin projection transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
 	if err := deleteAgeFactsForDigest(ctx, tx, object.Manifest.ObjectDigest); err != nil {
 		return err
 	}
+
 	if err := projectObjectTx(ctx, tx, object, index.source); err != nil {
 		return err
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit projection transaction: %w", err)
 	}
+
 	return nil
 }
 
@@ -210,13 +230,16 @@ func (index *Index) ProjectSourceCursor(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	encoded, err := json.Marshal(nonNilMap(cursor.Cursor))
 	if err != nil {
 		return err
 	}
+
 	if cursor.UpdatedAt.IsZero() {
 		cursor.UpdatedAt = time.Now().UTC()
 	}
+
 	if _, err := index.pool.Exec(
 		ctx,
 		`INSERT INTO query_source_cursors(source_name, source_kind, cursor_json, updated_at)
@@ -232,11 +255,13 @@ func (index *Index) ProjectSourceCursor(
 	); err != nil {
 		return fmt.Errorf("project source cursor %s: %w", cursor.SourceName, err)
 	}
+
 	return nil
 }
 
 func (index *Index) Rebuild(ctx context.Context) error {
 	_, err := index.RebuildReport(ctx)
+
 	return err
 }
 
@@ -245,7 +270,9 @@ func (index *Index) ProjectChanged(ctx context.Context, since time.Time) error {
 	if err != nil {
 		return err
 	}
+
 	_ = report
+
 	return nil
 }
 
@@ -258,12 +285,14 @@ func (index *Index) ProjectChangedReport(
 			"projection source is required for incremental projection",
 		)
 	}
+
 	source, ok := index.source.(query.IncrementalProjectionSource)
 	if !ok {
 		return RebuildReport{}, errors.New(
 			"projection source does not support incremental projection",
 		)
 	}
+
 	started := time.Now()
 	report := RebuildReport{}
 	err := source.WalkChangedProjection(
@@ -274,17 +303,23 @@ func (index *Index) ProjectChangedReport(
 			if len(object.Findings) > 0 {
 				report.Failed++
 			}
-			if err := index.ProjectObject(ctx, object); err != nil {
+
+			err := index.ProjectObject(ctx, object)
+			if err != nil {
 				report.Failed++
+
 				return err
 			}
+
 			if len(object.Findings) == 0 {
 				report.Projected++
 			}
+
 			return nil
 		},
 	)
 	report.Elapsed = time.Since(started)
+
 	return report, err
 }
 
@@ -292,11 +327,14 @@ func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 	if index.source == nil {
 		return RebuildReport{}, errors.New("projection source is required for rebuild")
 	}
+
 	started := time.Now()
+
 	tx, err := index.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return RebuildReport{}, fmt.Errorf("begin rebuild transaction: %w", err)
 	}
+
 	for _, table := range []string{
 		"query_projection_state",
 		"query_summaries",
@@ -305,40 +343,54 @@ func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 	} {
 		if _, err := tx.Exec(ctx, truncateProjectionTableSQL(table)); err != nil {
 			tx.Rollback(ctx)
+
 			return RebuildReport{}, fmt.Errorf("truncate %s: %w", table, err)
 		}
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return RebuildReport{}, fmt.Errorf("commit rebuild truncate: %w", err)
 	}
+
 	if err := index.clearAgeGraph(ctx); err != nil {
 		return RebuildReport{}, err
 	}
+
 	report := RebuildReport{}
+
 	err = index.source.WalkProjection(ctx, func(object filestore.ProjectionObject) error {
 		report.Scanned++
 		if len(object.Findings) > 0 {
 			report.Failed++
 		}
-		if err := index.ProjectObject(ctx, object); err != nil {
+
+		err := index.ProjectObject(ctx, object)
+		if err != nil {
 			report.Failed++
+
 			return err
 		}
+
 		if len(object.Findings) == 0 {
 			report.Projected++
 		}
+
 		return nil
 	})
 	if err != nil {
 		report.Elapsed = time.Since(started)
+
 		return report, err
 	}
+
 	if cursorSource, ok := index.source.(query.SourceCursorProjectionSource); ok {
 		err = cursorSource.WalkSourceCursors(ctx, func(cursor contracts.SourceCursor) error {
 			return index.ProjectSourceCursor(ctx, cursor)
 		})
 	}
+
 	report.Elapsed = time.Since(started)
+
 	return report, err
 }
 
@@ -348,6 +400,7 @@ func (index *Index) Search(
 ) (contracts.SearchResponse, error) {
 	args := []any{}
 	where := []string{"true"}
+
 	if queryText := strings.TrimSpace(request.Query); queryText != "" {
 		args = append(args, queryText)
 		where = append(
@@ -355,6 +408,7 @@ func (index *Index) Search(
 			fmt.Sprintf("search_tsv @@ websearch_to_tsquery('simple', $%d)", len(args)),
 		)
 	}
+
 	if len(request.Facets) > 0 {
 		args = append(args, request.Facets)
 		where = append(where, fmt.Sprintf(
@@ -362,10 +416,12 @@ func (index *Index) Search(
 			len(args),
 		))
 	}
+
 	if len(request.MediaTypes) > 0 {
 		args = append(args, request.MediaTypes)
 		where = append(where, fmt.Sprintf("o.media_type = ANY($%d)", len(args)))
 	}
+
 	if len(request.Provenance.SourceKinds) > 0 {
 		args = append(args, request.Provenance.SourceKinds)
 		where = append(where, fmt.Sprintf(
@@ -373,6 +429,7 @@ func (index *Index) Search(
 			len(args),
 		))
 	}
+
 	if len(request.Provenance.SourceNames) > 0 {
 		args = append(args, request.Provenance.SourceNames)
 		where = append(where, fmt.Sprintf(
@@ -380,6 +437,7 @@ func (index *Index) Search(
 			len(args),
 		))
 	}
+
 	if len(request.Provenance.ExternalIDs) > 0 {
 		args = append(args, request.Provenance.ExternalIDs)
 		where = append(where, fmt.Sprintf(
@@ -387,8 +445,10 @@ func (index *Index) Search(
 			len(args),
 		))
 	}
+
 	if relationshipFilterActive(request.Relationships) {
 		predicates := []string{"r.object_digest = o.object_digest"}
+
 		if len(request.Relationships.Types) > 0 {
 			args = append(args, request.Relationships.Types)
 			predicates = append(
@@ -396,14 +456,17 @@ func (index *Index) Search(
 				fmt.Sprintf("r.relationship_type = ANY($%d)", len(args)),
 			)
 		}
+
 		if request.Relationships.From != "" {
 			args = append(args, request.Relationships.From)
 			predicates = append(predicates, fmt.Sprintf("r.from_digest = $%d", len(args)))
 		}
+
 		if request.Relationships.To != "" {
 			args = append(args, request.Relationships.To)
 			predicates = append(predicates, fmt.Sprintf("r.to_digest = $%d", len(args)))
 		}
+
 		if request.Relationships.Any != "" {
 			args = append(args, request.Relationships.Any)
 			predicates = append(
@@ -411,15 +474,18 @@ func (index *Index) Search(
 				fmt.Sprintf("(r.from_digest = $%d OR r.to_digest = $%d)", len(args), len(args)),
 			)
 		}
+
 		if len(request.Relationships.Roles) > 0 {
 			args = append(args, request.Relationships.Roles)
 			predicates = append(predicates, fmt.Sprintf("r.role = ANY($%d)", len(args)))
 		}
+
 		where = append(where, fmt.Sprintf(
 			"EXISTS (SELECT 1 FROM query_object_relationships r WHERE %s)",
 			strings.Join(predicates, " AND "),
 		))
 	}
+
 	if len(request.CompoundRoles) > 0 {
 		args = append(args, request.CompoundRoles)
 		where = append(where, fmt.Sprintf(
@@ -427,6 +493,7 @@ func (index *Index) Search(
 			len(args),
 		))
 	}
+
 	if len(request.AnalyzerNames) > 0 {
 		args = append(args, request.AnalyzerNames)
 		where = append(where, fmt.Sprintf(
@@ -434,11 +501,14 @@ func (index *Index) Search(
 			len(args),
 		))
 	}
+
 	limit := normalizedLimit(request.Limit)
+
 	offset := request.Offset
 	if offset < 0 {
 		offset = 0
 	}
+
 	args = append(args, limit, offset)
 	sqlText := fmt.Sprintf(
 		`SELECT o.object_digest, o.object_id, o.media_type,
@@ -453,32 +523,41 @@ func (index *Index) Search(
 		len(args)-1,
 		len(args),
 	)
+
 	rows, err := index.pool.Query(ctx, sqlText, args...)
 	if err != nil {
 		return contracts.SearchResponse{}, fmt.Errorf("search query projection: %w", err)
 	}
 	defer rows.Close()
+
 	results := []contracts.SearchResult{}
 	total := 0
+
 	for rows.Next() {
-		var result contracts.SearchResult
-		var facets []string
-		var objectID, mediaType string
-		if err := rows.Scan(
+		var (
+			result              contracts.SearchResult
+			facets              []string
+			objectID, mediaType string
+		)
+
+		err := rows.Scan(
 			&result.ObjectDigest,
 			&objectID,
 			&mediaType,
 			&result.Title,
 			&facets,
 			&total,
-		); err != nil {
+		)
+		if err != nil {
 			return contracts.SearchResponse{}, fmt.Errorf("scan search result: %w", err)
 		}
+
 		result.Score = 1
 		result.Facets = facets
 		result.Attributes = map[string]any{"object_id": objectID, "media_type": mediaType}
 		results = append(results, result)
 	}
+
 	return contracts.SearchResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Results:       results,
@@ -498,12 +577,14 @@ func (index *Index) Structure(
 	).Scan(&objectID); err != nil {
 		return contracts.Structure{}, fmt.Errorf("read structure object: %w", err)
 	}
+
 	structure := contracts.Structure{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		ObjectDigest:  digest,
 		ObjectID:      objectID,
 		PartsByRole:   map[string][]contracts.StructurePart{},
 	}
+
 	facetRows, err := index.pool.Query(
 		ctx,
 		"SELECT kind FROM query_object_facets WHERE object_digest = $1 ORDER BY kind",
@@ -512,15 +593,21 @@ func (index *Index) Structure(
 	if err != nil {
 		return contracts.Structure{}, err
 	}
+
 	for facetRows.Next() {
 		var kind string
-		if err := facetRows.Scan(&kind); err != nil {
+		err := facetRows.Scan(&kind)
+		if err != nil {
 			facetRows.Close()
+
 			return contracts.Structure{}, err
 		}
+
 		structure.Facets = append(structure.Facets, kind)
 	}
+
 	facetRows.Close()
+
 	partRows, err := index.pool.Query(
 		ctx,
 		`SELECT c.part_digest, c.role, c.part_order, c.required, c.metadata_json,
@@ -534,24 +621,33 @@ func (index *Index) Structure(
 		return contracts.Structure{}, err
 	}
 	defer partRows.Close()
+
 	for partRows.Next() {
-		var part contracts.StructurePart
-		var metadata []byte
-		if err := partRows.Scan(
+		var (
+			part     contracts.StructurePart
+			metadata []byte
+		)
+
+		err := partRows.Scan(
 			&part.Digest,
 			&part.Role,
 			&part.Order,
 			&part.Required,
 			&metadata,
 			&part.Facets,
-		); err != nil {
+		)
+		if err != nil {
 			return contracts.Structure{}, err
 		}
-		if err := json.Unmarshal(metadata, &part.Metadata); err != nil {
+
+		err = json.Unmarshal(metadata, &part.Metadata)
+		if err != nil {
 			return contracts.Structure{}, err
 		}
+
 		structure.PartsByRole[part.Role] = append(structure.PartsByRole[part.Role], part)
 	}
+
 	return structure, partRows.Err()
 }
 
@@ -561,19 +657,23 @@ func (index *Index) Relationships(
 ) (contracts.RelationshipResponse, error) {
 	args := []any{}
 	where := []string{"true"}
+
 	filter := request.Filter
 	if len(filter.Types) > 0 {
 		args = append(args, filter.Types)
 		where = append(where, fmt.Sprintf("relationship_type = ANY($%d)", len(args)))
 	}
+
 	if filter.From != "" {
 		args = append(args, filter.From)
 		where = append(where, fmt.Sprintf("from_digest = $%d", len(args)))
 	}
+
 	if filter.To != "" {
 		args = append(args, filter.To)
 		where = append(where, fmt.Sprintf("to_digest = $%d", len(args)))
 	}
+
 	if filter.Any != "" {
 		args = append(args, filter.Any)
 		where = append(
@@ -581,11 +681,14 @@ func (index *Index) Relationships(
 			fmt.Sprintf("(from_digest = $%d OR to_digest = $%d)", len(args), len(args)),
 		)
 	}
+
 	if len(filter.Roles) > 0 {
 		args = append(args, filter.Roles)
 		where = append(where, fmt.Sprintf("role = ANY($%d)", len(args)))
 	}
+
 	args = append(args, normalizedLimit(request.Limit))
+
 	rows, err := index.pool.Query(ctx, fmt.Sprintf(
 		`SELECT relationship_type, from_digest, to_digest, role, relationship_order, source
 		   FROM query_object_relationships
@@ -599,21 +702,26 @@ func (index *Index) Relationships(
 		return contracts.RelationshipResponse{}, err
 	}
 	defer rows.Close()
+
 	relationships := []contracts.Relationship{}
+
 	for rows.Next() {
 		var relationship contracts.Relationship
-		if err := rows.Scan(
+		err := rows.Scan(
 			&relationship.Type,
 			&relationship.From,
 			&relationship.To,
 			&relationship.Role,
 			&relationship.Order,
 			&relationship.Source,
-		); err != nil {
+		)
+		if err != nil {
 			return contracts.RelationshipResponse{}, err
 		}
+
 		relationships = append(relationships, relationship)
 	}
+
 	return contracts.RelationshipResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Relationships: relationships,
@@ -626,6 +734,7 @@ func (index *Index) Graph(
 ) (contracts.GraphResponse, error) {
 	args := []any{}
 	where := []string{"true"}
+
 	if request.Node != "" {
 		args = append(args, request.Node)
 		where = append(
@@ -633,11 +742,14 @@ func (index *Index) Graph(
 			fmt.Sprintf("(subject = $%d OR object_value = $%d)", len(args), len(args)),
 		)
 	}
+
 	if request.Predicate != "" {
 		args = append(args, request.Predicate)
 		where = append(where, fmt.Sprintf("predicate = $%d", len(args)))
 	}
+
 	args = append(args, normalizedLimit(request.Limit))
+
 	rows, err := index.pool.Query(ctx, fmt.Sprintf(
 		`SELECT subject, predicate, object_value, metadata_json
 		   FROM query_object_graph_edges
@@ -651,23 +763,33 @@ func (index *Index) Graph(
 		return contracts.GraphResponse{}, err
 	}
 	defer rows.Close()
+
 	facts := []contracts.GraphFact{}
+
 	for rows.Next() {
-		var fact contracts.GraphFact
-		var metadata []byte
-		if err := rows.Scan(
+		var (
+			fact     contracts.GraphFact
+			metadata []byte
+		)
+
+		err := rows.Scan(
 			&fact.Subject,
 			&fact.Predicate,
 			&fact.Object,
 			&metadata,
-		); err != nil {
+		)
+		if err != nil {
 			return contracts.GraphResponse{}, err
 		}
-		if err := json.Unmarshal(metadata, &fact.Metadata); err != nil {
+
+		err = json.Unmarshal(metadata, &fact.Metadata)
+		if err != nil {
 			return contracts.GraphResponse{}, err
 		}
+
 		facts = append(facts, fact)
 	}
+
 	return contracts.GraphResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Facts:         facts,
@@ -681,17 +803,22 @@ func (index *Index) AnalysisStatus(
 	if len(request.Analyzers) > 0 {
 		return index.analysisStatusWithRequirements(ctx, request)
 	}
+
 	args := []any{}
 	where := []string{"true"}
+
 	if len(request.ObjectDigests) > 0 {
 		args = append(args, request.ObjectDigests)
 		where = append(where, fmt.Sprintf("object_digest = ANY($%d)", len(args)))
 	}
+
 	if len(request.AnalyzerNames) > 0 {
 		args = append(args, request.AnalyzerNames)
 		where = append(where, fmt.Sprintf("analyzer_name = ANY($%d)", len(args)))
 	}
+
 	args = append(args, normalizedLimit(request.Limit))
+
 	rows, err := index.pool.Query(ctx, fmt.Sprintf(
 		`SELECT object_digest, analyzer_name, analyzer_version, status, generated_at, data_json
 		   FROM query_object_analysis
@@ -705,25 +832,35 @@ func (index *Index) AnalysisStatus(
 		return contracts.AnalysisStatusResponse{}, err
 	}
 	defer rows.Close()
+
 	statuses := []contracts.AnalysisStatus{}
+
 	for rows.Next() {
-		var status contracts.AnalysisStatus
-		var data []byte
-		if err := rows.Scan(
+		var (
+			status contracts.AnalysisStatus
+			data   []byte
+		)
+
+		err := rows.Scan(
 			&status.ObjectDigest,
 			&status.AnalyzerName,
 			&status.AnalyzerVer,
 			&status.Status,
 			&status.GeneratedAt,
 			&data,
-		); err != nil {
+		)
+		if err != nil {
 			return contracts.AnalysisStatusResponse{}, err
 		}
-		if err := json.Unmarshal(data, &status.Data); err != nil {
+
+		err = json.Unmarshal(data, &status.Data)
+		if err != nil {
 			return contracts.AnalysisStatusResponse{}, err
 		}
+
 		statuses = append(statuses, status)
 	}
+
 	return contracts.AnalysisStatusResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Statuses:      statuses,
@@ -738,17 +875,21 @@ func (index *Index) analysisStatusWithRequirements(
 	if err != nil {
 		return contracts.AnalysisStatusResponse{}, err
 	}
+
 	existing, err := index.analysisStatusRowsFor(ctx, request)
 	if err != nil {
 		return contracts.AnalysisStatusResponse{}, err
 	}
+
 	statuses := []contracts.AnalysisStatus{}
+
 	for _, digest := range objects {
 		for _, analyzer := range request.Analyzers {
 			if len(request.AnalyzerNames) > 0 &&
 				!containsString(request.AnalyzerNames, analyzer.Name) {
 				continue
 			}
+
 			status, ok := existing[digest][analyzer.Name]
 			if !ok {
 				statuses = append(statuses, contracts.AnalysisStatus{
@@ -758,8 +899,10 @@ func (index *Index) analysisStatusWithRequirements(
 					Status:       "missing",
 					Data:         map[string]any{"required_version": analyzer.Version},
 				})
+
 				continue
 			}
+
 			if analyzer.Version != "" && status.AnalyzerVer != analyzer.Version {
 				status.Status = "stale"
 				status.Data = map[string]any{
@@ -767,13 +910,16 @@ func (index *Index) analysisStatusWithRequirements(
 					"required_version": analyzer.Version,
 				}
 			}
+
 			statuses = append(statuses, status)
 		}
 	}
+
 	limit := normalizedLimit(request.Limit)
 	if len(statuses) > limit {
 		statuses = statuses[:limit]
 	}
+
 	return contracts.AnalysisStatusResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Statuses:      statuses,
@@ -786,10 +932,12 @@ func (index *Index) analysisStatusObjects(
 ) ([]contracts.ObjectDigest, error) {
 	args := []any{}
 	where := "true"
+
 	if len(digests) > 0 {
 		args = append(args, digests)
 		where = fmt.Sprintf("object_digest = ANY($%d)", len(args))
 	}
+
 	rows, err := index.pool.Query(
 		ctx,
 		fmt.Sprintf(
@@ -805,14 +953,19 @@ func (index *Index) analysisStatusObjects(
 		return nil, err
 	}
 	defer rows.Close()
+
 	objects := []contracts.ObjectDigest{}
+
 	for rows.Next() {
 		var digest contracts.ObjectDigest
-		if err := rows.Scan(&digest); err != nil {
+		err := rows.Scan(&digest)
+		if err != nil {
 			return nil, err
 		}
+
 		objects = append(objects, digest)
 	}
+
 	return objects, rows.Err()
 }
 
@@ -823,10 +976,12 @@ func (index *Index) analysisStatusRowsFor(
 	analyzerNames := analyzerSpecNames(request.Analyzers)
 	args := []any{analyzerNames}
 	where := []string{"analyzer_name = ANY($1)"}
+
 	if len(request.ObjectDigests) > 0 {
 		args = append(args, request.ObjectDigests)
 		where = append(where, fmt.Sprintf("object_digest = ANY($%d)", len(args)))
 	}
+
 	rows, err := index.pool.Query(ctx, fmt.Sprintf(
 		`SELECT object_digest, analyzer_name, analyzer_version, status, generated_at, data_json
 		   FROM query_object_analysis
@@ -838,28 +993,39 @@ func (index *Index) analysisStatusRowsFor(
 		return nil, err
 	}
 	defer rows.Close()
+
 	statuses := map[contracts.ObjectDigest]map[string]contracts.AnalysisStatus{}
+
 	for rows.Next() {
-		var status contracts.AnalysisStatus
-		var data []byte
-		if err := rows.Scan(
+		var (
+			status contracts.AnalysisStatus
+			data   []byte
+		)
+
+		err := rows.Scan(
 			&status.ObjectDigest,
 			&status.AnalyzerName,
 			&status.AnalyzerVer,
 			&status.Status,
 			&status.GeneratedAt,
 			&data,
-		); err != nil {
+		)
+		if err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal(data, &status.Data); err != nil {
+
+		err = json.Unmarshal(data, &status.Data)
+		if err != nil {
 			return nil, err
 		}
+
 		if statuses[status.ObjectDigest] == nil {
 			statuses[status.ObjectDigest] = map[string]contracts.AnalysisStatus{}
 		}
+
 		statuses[status.ObjectDigest][status.AnalyzerName] = status
 	}
+
 	return statuses, rows.Err()
 }
 
@@ -868,6 +1034,7 @@ func analyzerSpecNames(analyzers []contracts.AnalyzerSpec) []string {
 	for _, analyzer := range analyzers {
 		names = append(names, analyzer.Name)
 	}
+
 	return names
 }
 
@@ -880,18 +1047,23 @@ func (index *Index) VectorSearch(
 			SchemaVersion: contracts.SchemaVersionPhase00,
 		}, nil
 	}
+
 	args := []any{vectorLiteral(request.Vector)}
 	where := []string{"e.embedding IS NOT NULL"}
+
 	args = append(args, len(request.Vector))
+
 	where = append(where, fmt.Sprintf("e.dimensions = $%d", len(args)))
 	if request.Model != "" {
 		args = append(args, request.Model)
 		where = append(where, fmt.Sprintf("e.model = $%d", len(args)))
 	}
+
 	if request.Dimensions > 0 {
 		args = append(args, request.Dimensions)
 		where = append(where, fmt.Sprintf("e.dimensions = $%d", len(args)))
 	}
+
 	if len(request.Facets) > 0 {
 		args = append(args, request.Facets)
 		where = append(where, fmt.Sprintf(
@@ -899,6 +1071,7 @@ func (index *Index) VectorSearch(
 			len(args),
 		))
 	}
+
 	args = append(args, normalizedLimit(request.Limit))
 	sqlText := fmt.Sprintf(
 		`SELECT e.object_digest, e.model, e.embedding <=> $1::vector AS distance
@@ -909,23 +1082,29 @@ func (index *Index) VectorSearch(
 		strings.Join(where, " AND "),
 		len(args),
 	)
+
 	rows, err := index.pool.Query(ctx, sqlText, args...)
 	if err != nil {
 		return contracts.VectorSearchResponse{}, fmt.Errorf("vector search: %w", err)
 	}
 	defer rows.Close()
+
 	results := []contracts.VectorSearchResult{}
+
 	for rows.Next() {
 		var result contracts.VectorSearchResult
-		if err := rows.Scan(
+		err := rows.Scan(
 			&result.ObjectDigest,
 			&result.Model,
 			&result.Distance,
-		); err != nil {
+		)
+		if err != nil {
 			return contracts.VectorSearchResponse{}, err
 		}
+
 		results = append(results, result)
 	}
+
 	return contracts.VectorSearchResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Results:       results,
@@ -938,15 +1117,19 @@ func (index *Index) SourceCursors(
 ) (contracts.SourceCursorResponse, error) {
 	args := []any{}
 	where := []string{"true"}
+
 	if len(request.SourceKinds) > 0 {
 		args = append(args, request.SourceKinds)
 		where = append(where, fmt.Sprintf("source_kind = ANY($%d)", len(args)))
 	}
+
 	if len(request.SourceNames) > 0 {
 		args = append(args, request.SourceNames)
 		where = append(where, fmt.Sprintf("source_name = ANY($%d)", len(args)))
 	}
+
 	args = append(args, normalizedLimit(request.Limit))
+
 	rows, err := index.pool.Query(ctx, fmt.Sprintf(
 		`SELECT source_kind, source_name, cursor_json, updated_at
 		   FROM query_source_cursors
@@ -960,123 +1143,38 @@ func (index *Index) SourceCursors(
 		return contracts.SourceCursorResponse{}, err
 	}
 	defer rows.Close()
+
 	cursors := []contracts.SourceCursor{}
+
 	for rows.Next() {
-		var cursor contracts.SourceCursor
-		var data []byte
-		if err := rows.Scan(
+		var (
+			cursor contracts.SourceCursor
+			data   []byte
+		)
+
+		err := rows.Scan(
 			&cursor.SourceKind,
 			&cursor.SourceName,
 			&data,
 			&cursor.UpdatedAt,
-		); err != nil {
+		)
+		if err != nil {
 			return contracts.SourceCursorResponse{}, err
 		}
+
 		cursor.SchemaVersion = contracts.SchemaVersionPhase00
-		if err := json.Unmarshal(data, &cursor.Cursor); err != nil {
+		err = json.Unmarshal(data, &cursor.Cursor)
+		if err != nil {
 			return contracts.SourceCursorResponse{}, err
 		}
+
 		cursors = append(cursors, cursor)
 	}
+
 	return contracts.SourceCursorResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Cursors:       cursors,
 	}, rows.Err()
-}
-
-func (index *Index) AgeStatus(ctx context.Context) AgeStatus {
-	conn, err := acquireAgeConn(ctx, index.pool)
-	if err != nil {
-		return AgeStatus{Graph: "gmeow_graph", Error: err.Error()}
-	}
-	defer conn.Release()
-	var status AgeStatus
-	status.Graph = "gmeow_graph"
-	err = conn.QueryRow(
-		ctx,
-		"SELECT graphid, name FROM ag_graph WHERE name = 'gmeow_graph'",
-	).Scan(&status.GraphID, &status.Graph)
-	if err != nil {
-		status.Error = err.Error()
-		return status
-	}
-	var nodes string
-	if err := conn.QueryRow(
-		ctx,
-		"SELECT * FROM cypher('gmeow_graph', $$MATCH (n) RETURN count(n)$$) AS (nodes agtype)",
-	).Scan(&nodes); err != nil {
-		status.Error = err.Error()
-		return status
-	}
-	status.Available = true
-	status.Nodes = nodes
-	return status
-}
-
-func (index *Index) AgeCypher(
-	ctx context.Context,
-	cypher string,
-	columns string,
-	limit int,
-) ([]map[string]string, error) {
-	if !readOnlyCypher(cypher) {
-		return nil, errors.New("only read-only MATCH/RETURN Cypher queries are allowed")
-	}
-	if strings.TrimSpace(columns) == "" {
-		columns = "value agtype"
-	}
-	if err := validateAgeColumns(columns); err != nil {
-		return nil, err
-	}
-	cypher = strings.TrimSpace(strings.TrimSuffix(cypher, ";"))
-	if !strings.Contains(" "+strings.ToLower(cypher)+" ", " limit ") {
-		cypher = fmt.Sprintf("%s LIMIT %d", cypher, normalizedLimit(limit))
-	}
-	conn, err := acquireAgeConn(ctx, index.pool)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Release()
-	rows, err := conn.Query(ctx, ageSQL(cypher, columns))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	fieldDescriptions := rows.FieldDescriptions()
-	results := []map[string]string{}
-	for rows.Next() {
-		values, err := rows.Values()
-		if err != nil {
-			return nil, err
-		}
-		row := map[string]string{}
-		for index, value := range values {
-			row[string(fieldDescriptions[index].Name)] = fmt.Sprint(value)
-		}
-		results = append(results, row)
-	}
-	return results, rows.Err()
-}
-
-func (index *Index) clearAgeGraph(ctx context.Context) error {
-	conn, err := acquireAgeConn(ctx, index.pool)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(
-		ctx,
-		"SELECT * FROM cypher('gmeow_graph', $$MATCH ()-[r]->() DELETE r$$) AS (value agtype)",
-	); err != nil {
-		return fmt.Errorf("clear AGE graph edges: %w", err)
-	}
-	if _, err := conn.Exec(
-		ctx,
-		"SELECT * FROM cypher('gmeow_graph', $$MATCH (n) DELETE n$$) AS (value agtype)",
-	); err != nil {
-		return fmt.Errorf("clear AGE graph nodes: %w", err)
-	}
-	return nil
 }
 
 func projectObjectTx(
@@ -1089,10 +1187,12 @@ func projectObjectTx(
 	if err != nil {
 		return err
 	}
+
 	annotationsJSON, err := json.Marshal(object.Annotations)
 	if err != nil {
 		return err
 	}
+
 	if _, err := tx.Exec(
 		ctx,
 		`INSERT INTO query_objects(
@@ -1123,6 +1223,7 @@ func projectObjectTx(
 	); err != nil {
 		return fmt.Errorf("upsert query object: %w", err)
 	}
+
 	for _, table := range []string{
 		"query_object_facets",
 		"query_object_provenance",
@@ -1143,30 +1244,39 @@ func projectObjectTx(
 			return fmt.Errorf("clear %s: %w", table, err)
 		}
 	}
+
 	if err := insertFacetRows(ctx, tx, object.Manifest); err != nil {
 		return err
 	}
+
 	if err := insertProvenanceRows(ctx, tx, object.Manifest); err != nil {
 		return err
 	}
+
 	if err := insertRelationshipRows(ctx, tx, object.Manifest); err != nil {
 		return err
 	}
+
 	if err := insertCompoundRows(ctx, tx, object.Manifest); err != nil {
 		return err
 	}
+
 	if err := insertAnalysisRows(ctx, tx, object.Annotations); err != nil {
 		return err
 	}
+
 	if err := insertGraphRows(ctx, tx, object.Manifest); err != nil {
 		return err
 	}
+
 	if err := insertAgeGraphRows(ctx, tx, object.Manifest); err != nil {
 		return err
 	}
+
 	if err := insertKeywordRows(ctx, tx, object.Manifest); err != nil {
 		return err
 	}
+
 	if err := insertEmbeddingRows(
 		ctx,
 		tx,
@@ -1176,12 +1286,15 @@ func projectObjectTx(
 	); err != nil {
 		return err
 	}
+
 	if err := insertOverlayRows(ctx, tx, object.Manifest, object.Annotations); err != nil {
 		return err
 	}
+
 	if err := insertSummaryRows(ctx, tx, object.Manifest, object.Annotations); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -1232,9 +1345,11 @@ func deleteAgeFactsForDigest(
 	tx pgx.Tx,
 	digest contracts.ObjectDigest,
 ) error {
-	if err := setAgeSearchPath(ctx, tx); err != nil {
+	err := setAgeSearchPath(ctx, tx)
+	if err != nil {
 		return fmt.Errorf("set AGE search path: %w", err)
 	}
+
 	cypher := fmt.Sprintf(
 		`MATCH ()-[r]->() WHERE r.object_digest = %s DELETE r`,
 		ageStringLiteral(string(digest)),
@@ -1242,12 +1357,14 @@ func deleteAgeFactsForDigest(
 	if _, err := tx.Exec(ctx, ageSQL(cypher, "value agtype")); err != nil {
 		return fmt.Errorf("delete AGE facts for %s: %w", digest, err)
 	}
+
 	if _, err := tx.Exec(
 		ctx,
 		ageSQL(`MATCH (n) WHERE NOT EXISTS((n)--()) DELETE n`, "value agtype"),
 	); err != nil {
 		return fmt.Errorf("delete stale AGE nodes for %s: %w", digest, err)
 	}
+
 	return nil
 }
 
@@ -1261,6 +1378,7 @@ func insertFacetRows(
 		if err != nil {
 			return err
 		}
+
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO query_object_facets(object_digest, kind, version, metadata_json)
@@ -1276,6 +1394,7 @@ func insertFacetRows(
 			return fmt.Errorf("insert facet projection: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1289,6 +1408,7 @@ func insertProvenanceRows(
 		if err != nil {
 			return err
 		}
+
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO query_object_provenance(
@@ -1304,6 +1424,7 @@ func insertProvenanceRows(
 			return fmt.Errorf("insert provenance projection: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1329,6 +1450,7 @@ func insertRelationshipRows(
 			return fmt.Errorf("insert relationship projection: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1342,6 +1464,7 @@ func insertCompoundRows(
 		if err != nil {
 			return err
 		}
+
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO query_object_compound_parts(
@@ -1360,6 +1483,7 @@ func insertCompoundRows(
 			return fmt.Errorf("insert compound projection: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1372,14 +1496,17 @@ func insertAnalysisRows(
 		if annotation.Kind != "analysis" {
 			continue
 		}
+
 		data, err := json.Marshal(nonNilMap(annotation.Data))
 		if err != nil {
 			return err
 		}
+
 		status := "complete"
 		if value, ok := annotation.Data["status"].(string); ok && value != "" {
 			status = value
 		}
+
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO query_object_analysis(
@@ -1395,6 +1522,7 @@ func insertAnalysisRows(
 			return fmt.Errorf("insert analysis projection: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1408,6 +1536,7 @@ func insertGraphRows(
 		if err != nil {
 			return err
 		}
+
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO query_object_graph_edges(
@@ -1422,6 +1551,7 @@ func insertGraphRows(
 			return fmt.Errorf("insert graph projection: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1433,9 +1563,12 @@ func insertAgeGraphRows(
 	if len(manifest.Graph) == 0 {
 		return nil
 	}
-	if err := setAgeSearchPath(ctx, tx); err != nil {
+
+	err := setAgeSearchPath(ctx, tx)
+	if err != nil {
 		return fmt.Errorf("set AGE search path: %w", err)
 	}
+
 	for _, fact := range manifest.Graph {
 		cypher := fmt.Sprintf(
 			`MERGE (subject:gmeow_node {id: %s})
@@ -1462,6 +1595,7 @@ func insertAgeGraphRows(
 			return fmt.Errorf("insert AGE graph projection: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1482,6 +1616,7 @@ func insertKeywordRows(
 			return fmt.Errorf("insert keyword projection: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1511,6 +1646,7 @@ func insertEmbeddingRows(
 			return fmt.Errorf("insert embedding projection: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1521,6 +1657,7 @@ func insertOverlayRows(
 	annotations []contracts.Annotation,
 ) error {
 	overlays := nonNilMap(manifest.Overlays)
+
 	for _, annotation := range annotations {
 		if annotation.Kind == "overlays" {
 			for key, value := range annotation.Data {
@@ -1528,10 +1665,12 @@ func insertOverlayRows(
 			}
 		}
 	}
+
 	encoded, err := json.Marshal(overlays)
 	if err != nil {
 		return err
 	}
+
 	if _, err := tx.Exec(
 		ctx,
 		`INSERT INTO query_object_overlays(object_digest, overlays_json)
@@ -1542,6 +1681,7 @@ func insertOverlayRows(
 	); err != nil {
 		return fmt.Errorf("insert overlays projection: %w", err)
 	}
+
 	return nil
 }
 
@@ -1556,6 +1696,7 @@ func insertSummaryRows(
 		if err != nil {
 			return err
 		}
+
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO query_summaries(object_digest, summary_kind, summary_text, metadata_json)
@@ -1571,6 +1712,7 @@ func insertSummaryRows(
 			return fmt.Errorf("insert summary projection: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1582,14 +1724,17 @@ func (index *Index) recordProjectionFindings(
 	if err != nil {
 		return err
 	}
+
 	tx, err := index.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin projection finding transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
 	if err := deleteAgeFactsForDigest(ctx, tx, object.Digest); err != nil {
 		return err
 	}
+
 	if _, err := tx.Exec(
 		ctx,
 		"DELETE FROM query_objects WHERE object_digest = $1",
@@ -1597,6 +1742,7 @@ func (index *Index) recordProjectionFindings(
 	); err != nil {
 		return fmt.Errorf("delete stale projection for %s: %w", object.Digest, err)
 	}
+
 	if _, err := tx.Exec(
 		ctx,
 		`INSERT INTO query_projection_state(key, value_json, updated_at)
@@ -1609,108 +1755,18 @@ func (index *Index) recordProjectionFindings(
 	); err != nil {
 		return fmt.Errorf("record projection findings for %s: %w", object.Digest, err)
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit projection findings for %s: %w", object.Digest, err)
 	}
-	return nil
-}
 
-type embeddingRow struct {
-	model      string
-	digest     contracts.ObjectDigest
-	dimensions int
-	vector     *string
-}
-
-func embeddingRowsFrom(
-	ctx context.Context,
-	source query.ProjectionSource,
-	manifest contracts.Manifest,
-	annotations []contracts.Annotation,
-) []embeddingRow {
-	rows := []embeddingRow{}
-	for _, item := range manifest.Embeddings {
-		vector := embeddingVectorFromSource(ctx, source, item.ObjectDigest)
-		rows = append(rows, embeddingRow{
-			model:      item.Model,
-			digest:     item.ObjectDigest,
-			dimensions: item.Dimensions,
-			vector:     vector,
-		})
-	}
-	for _, annotation := range annotations {
-		values, ok := annotation.Data["embeddings"].([]any)
-		if !ok {
-			continue
-		}
-		for _, value := range values {
-			item, ok := value.(map[string]any)
-			if !ok {
-				continue
-			}
-			vector := vectorAnyLiteral(item["vector"])
-			rows = append(rows, embeddingRow{
-				model:      stringFromAny(item["model"]),
-				digest:     contracts.ObjectDigest(stringFromAny(item["object_digest"])),
-				dimensions: intFromAny(item["dimensions"]),
-				vector:     vector,
-			})
-		}
-	}
-	return rows
-}
-
-func embeddingVectorFromSource(
-	ctx context.Context,
-	source query.ProjectionSource,
-	digest contracts.ObjectDigest,
-) *string {
-	reader, ok := source.(embeddingObjectReader)
-	if !ok || digest == "" {
-		return nil
-	}
-	opened, err := reader.Open(ctx, digest)
-	if err != nil {
-		return nil
-	}
-	defer opened.Close()
-	content, err := io.ReadAll(opened)
-	if err != nil {
-		return nil
-	}
-	return vectorJSONLiteral(content)
-}
-
-func vectorJSONLiteral(content []byte) *string {
-	var value any
-	if err := json.Unmarshal(content, &value); err != nil {
-		return nil
-	}
-	return vectorValueLiteral(value)
-}
-
-func vectorValueLiteral(value any) *string {
-	switch typed := value.(type) {
-	case []any:
-		return vectorAnyLiteral(typed)
-	case map[string]any:
-		for _, key := range []string{"vector", "embedding"} {
-			if vector := vectorValueLiteral(typed[key]); vector != nil {
-				return vector
-			}
-		}
-		values, ok := typed["embeddings"].([]any)
-		if ok && len(values) > 0 {
-			return vectorValueLiteral(values[0])
-		}
-	}
 	return nil
 }
 
 type summaryRow struct {
+	metadata map[string]any
 	kind     string
 	text     string
-	metadata map[string]any
 }
 
 func summaryRowsFrom(
@@ -1718,10 +1774,12 @@ func summaryRowsFrom(
 	annotations []contracts.Annotation,
 ) []summaryRow {
 	rows := []summaryRow{}
+
 	for _, annotation := range annotations {
 		if annotation.Kind != "analysis" {
 			continue
 		}
+
 		if summary := stringFromAny(annotation.Data["summary"]); summary != "" {
 			rows = append(rows, summaryRow{
 				kind:     firstNonEmpty(annotation.AnalyzerName, "analysis"),
@@ -1730,9 +1788,11 @@ func summaryRowsFrom(
 			})
 		}
 	}
+
 	if summary := stringFromAny(manifest.Analysis["summary"]); summary != "" {
 		rows = append(rows, summaryRow{kind: "manifest", text: summary})
 	}
+
 	return rows
 }
 
@@ -1749,9 +1809,11 @@ func searchText(
 	for _, title := range manifest.Titles {
 		parts = append(parts, title.Value)
 	}
+
 	for _, facet := range manifest.Facets {
 		parts = append(parts, facet.Kind, facet.Name)
 	}
+
 	for _, provenance := range manifest.Provenance {
 		parts = append(
 			parts,
@@ -1760,109 +1822,22 @@ func searchText(
 			provenance.ExternalID,
 		)
 	}
+
 	encoded, _ := json.Marshal(annotations)
 	parts = append(parts, string(encoded))
+
 	return strings.Join(parts, "\n")
-}
-
-func ageSQL(cypher, columns string) string {
-	return fmt.Sprintf(
-		"SELECT * FROM cypher('gmeow_graph', %s) AS (%s)",
-		dollarQuote(cypher),
-		columns,
-	)
-}
-
-func dollarQuote(value string) string {
-	tag := "gmeow_age"
-	for strings.Contains(value, "$"+tag+"$") {
-		tag = "_" + tag
-	}
-	return "$" + tag + "$" + value + "$" + tag + "$"
-}
-
-func ageStringLiteral(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "\\'") + "'"
-}
-
-func readOnlyCypher(query string) bool {
-	lowered := strings.ToLower(strings.TrimSpace(query))
-	if !strings.HasPrefix(lowered, "match ") {
-		return false
-	}
-	padded := " " + lowered + " "
-	for _, word := range []string{
-		" create ", " merge ", " delete ", " detach ", " set ", " remove ", " drop ", " call ",
-	} {
-		if strings.Contains(padded, word) {
-			return false
-		}
-	}
-	return strings.Contains(padded, " return ")
-}
-
-func validateAgeColumns(columns string) error {
-	for _, char := range columns {
-		if (char >= 'a' && char <= 'z') ||
-			(char >= 'A' && char <= 'Z') ||
-			(char >= '0' && char <= '9') ||
-			char == '_' ||
-			char == ',' ||
-			char == ' ' {
-			continue
-		}
-		return fmt.Errorf("invalid AGE column declaration %q", columns)
-	}
-	for _, part := range strings.Split(columns, ",") {
-		fields := strings.Fields(part)
-		if len(fields) != 2 {
-			return fmt.Errorf("invalid AGE column declaration %q", columns)
-		}
-		switch fields[1] {
-		case "agtype", "text", "bigint", "int", "float8", "boolean":
-		default:
-			return fmt.Errorf("unsupported AGE column type %q", fields[1])
-		}
-	}
-	return nil
-}
-
-func vectorLiteral(values []float32) string {
-	parts := make([]string, 0, len(values))
-	for _, value := range values {
-		parts = append(parts, strconv.FormatFloat(float64(value), 'f', -1, 32))
-	}
-	return "[" + strings.Join(parts, ",") + "]"
-}
-
-func vectorAnyLiteral(value any) *string {
-	items, ok := value.([]any)
-	if !ok || len(items) == 0 {
-		return nil
-	}
-	values := make([]float32, 0, len(items))
-	for _, item := range items {
-		switch typed := item.(type) {
-		case float64:
-			if math.IsNaN(typed) || math.IsInf(typed, 0) {
-				return nil
-			}
-			values = append(values, float32(typed))
-		case float32:
-			values = append(values, typed)
-		}
-	}
-	literal := vectorLiteral(values)
-	return &literal
 }
 
 func normalizedLimit(limit int) int {
 	if limit <= 0 {
 		return defaultLimit
 	}
+
 	if limit > 1000 {
 		return 1000
 	}
+
 	return limit
 }
 
@@ -1878,6 +1853,7 @@ func firstMap(left, right map[string]any) map[string]any {
 	if left != nil {
 		return left
 	}
+
 	return right
 }
 
@@ -1885,6 +1861,7 @@ func nonNilMap(value map[string]any) map[string]any {
 	if value == nil {
 		return map[string]any{}
 	}
+
 	return value
 }
 
@@ -1894,6 +1871,7 @@ func containsString(values []string, value string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -1903,6 +1881,7 @@ func firstNonEmpty(values ...string) string {
 			return value
 		}
 	}
+
 	return ""
 }
 
@@ -1910,6 +1889,7 @@ func stringFromAny(value any) string {
 	if typed, ok := value.(string); ok {
 		return typed
 	}
+
 	return ""
 }
 

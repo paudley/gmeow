@@ -11,12 +11,12 @@ import (
 )
 
 type MemoryBroker struct {
-	mutex             sync.Mutex
 	jobs              map[string]contracts.AnalyzerJob
 	failed            []contracts.AnalyzerJob
 	deadLetters       []contracts.AnalyzerJob
 	projectionRefresh []contracts.ObjectDigest
 	retryLimit        int
+	mutex             sync.Mutex
 }
 
 func NewMemoryBroker() *MemoryBroker {
@@ -31,12 +31,16 @@ func (broker *MemoryBroker) Publish(
 	ctx context.Context,
 	job contracts.AnalyzerJob,
 ) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	broker.jobs[job.IdempotencyKey] = job
+
 	return nil
 }
 
@@ -44,12 +48,16 @@ func (broker *MemoryBroker) PublishProjectionRefresh(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 ) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	broker.projectionRefresh = append(broker.projectionRefresh, digest)
+
 	return nil
 }
 
@@ -57,18 +65,25 @@ func (broker *MemoryBroker) RouteFailure(
 	ctx context.Context,
 	job contracts.AnalyzerJob,
 ) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	delete(broker.jobs, job.IdempotencyKey)
+
 	job.Attempt++
 	if job.Attempt > 3 {
 		broker.deadLetters = append(broker.deadLetters, job)
+
 		return nil
 	}
+
 	broker.jobs[job.IdempotencyKey] = job
+
 	return nil
 }
 
@@ -76,29 +91,38 @@ func (broker *MemoryBroker) ProcessFailures(
 	ctx context.Context,
 	limit int,
 ) (int, error) {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return 0, err
 	}
+
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	if limit <= 0 || limit > len(broker.failed) {
 		limit = len(broker.failed)
 	}
+
 	for _, job := range broker.failed[:limit] {
 		job.Attempt++
 		if job.Attempt > broker.retryLimit {
 			broker.deadLetters = append(broker.deadLetters, job)
+
 			continue
 		}
+
 		broker.jobs[job.IdempotencyKey] = job
 	}
+
 	broker.failed = append([]contracts.AnalyzerJob(nil), broker.failed[limit:]...)
+
 	return limit, nil
 }
 
 func (broker *MemoryBroker) Status(context.Context) (contracts.SchedulerStatus, error) {
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	return contracts.SchedulerStatus{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Pending:       len(broker.jobs),
@@ -113,9 +137,11 @@ func (broker *MemoryBroker) DeadLetters(
 ) ([]contracts.AnalyzerJob, error) {
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	if limit <= 0 || limit > len(broker.deadLetters) {
 		limit = len(broker.deadLetters)
 	}
+
 	return append([]contracts.AnalyzerJob(nil), broker.deadLetters[:limit]...), nil
 }
 
@@ -123,20 +149,26 @@ func (broker *MemoryBroker) RequeueDeadLetters(
 	ctx context.Context,
 	limit int,
 ) (int, error) {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return 0, err
 	}
+
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	if limit <= 0 || limit > len(broker.deadLetters) {
 		limit = len(broker.deadLetters)
 	}
+
 	for _, job := range broker.deadLetters[:limit] {
 		broker.jobs[job.IdempotencyKey] = job
 	}
+
 	broker.deadLetters = append(
 		[]contracts.AnalyzerJob(nil),
 		broker.deadLetters[limit:]...)
+
 	return limit, nil
 }
 
@@ -147,28 +179,33 @@ func (broker *MemoryBroker) Close() error {
 func (broker *MemoryBroker) Jobs() []contracts.AnalyzerJob {
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	jobs := make([]contracts.AnalyzerJob, 0, len(broker.jobs))
 	for _, job := range broker.jobs {
 		jobs = append(jobs, job)
 	}
+
 	return jobs
 }
 
 func (broker *MemoryBroker) AddDeadLetter(job contracts.AnalyzerJob) {
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	broker.deadLetters = append(broker.deadLetters, job)
 }
 
 func (broker *MemoryBroker) AddFailed(job contracts.AnalyzerJob) {
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	broker.failed = append(broker.failed, job)
 }
 
 func (broker *MemoryBroker) ProjectionRefreshes() []contracts.ObjectDigest {
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
+
 	return append([]contracts.ObjectDigest(nil), broker.projectionRefresh...)
 }
 

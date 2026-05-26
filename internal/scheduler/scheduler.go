@@ -28,9 +28,9 @@ type Service struct {
 	store     filestore.Store
 	broker    Broker
 	projector ProjectionRefresher
+	now       func() time.Time
 	specs     []contracts.AnalyzerSpec
 	config    Config
-	now       func() time.Time
 }
 
 type Option func(*Service)
@@ -45,13 +45,16 @@ func NewService(
 	if store == nil {
 		return nil, errors.New("scheduler filestore is required")
 	}
+
 	if broker == nil {
 		return nil, errors.New("scheduler broker is required")
 	}
+
 	normalized, err := NormalizeSpecs(specs)
 	if err != nil {
 		return nil, err
 	}
+
 	service := &Service{
 		store:  store,
 		broker: broker,
@@ -62,12 +65,15 @@ func NewService(
 	if service.config.ScanInterval <= 0 {
 		service.config.ScanInterval = 30 * time.Second
 	}
+
 	if service.config.RetryBackoff <= 0 {
 		service.config.RetryBackoff = 30 * time.Second
 	}
+
 	for _, option := range options {
 		option(service)
 	}
+
 	return service, nil
 }
 
@@ -96,31 +102,40 @@ func SpecsFromConfig(analyzers []config.AnalyzerConfig) []contracts.AnalyzerSpec
 			Deterministic: true,
 		})
 	}
+
 	return specs
 }
 
 func NormalizeSpecs(specs []contracts.AnalyzerSpec) ([]contracts.AnalyzerSpec, error) {
 	normalized := make([]contracts.AnalyzerSpec, 0, len(specs))
 	seen := map[string]bool{}
+
 	for _, spec := range specs {
 		spec.Name = strings.TrimSpace(spec.Name)
+
 		spec.Version = strings.TrimSpace(spec.Version)
 		if spec.Name == "" {
 			return nil, errors.New("analyzer spec name is required")
 		}
+
 		if spec.Version == "" {
 			return nil, fmt.Errorf("analyzer %q version is required", spec.Name)
 		}
+
 		key := spec.Name + "\x00" + spec.Version
 		if seen[key] {
 			continue
 		}
+
 		seen[key] = true
+
 		normalized = append(normalized, spec)
 	}
+
 	sort.SliceStable(normalized, func(left, right int) bool {
 		return normalized[left].Name < normalized[right].Name
 	})
+
 	return normalized, nil
 }
 
@@ -134,50 +149,64 @@ func (service *Service) Scan(
 	if err := service.broker.Declare(ctx); err != nil {
 		return response, err
 	}
+
 	if _, err := service.broker.ProcessFailures(ctx, 100); err != nil {
 		return response, err
 	}
+
 	err := service.store.WalkProjection(
 		ctx,
 		func(object filestore.ProjectionObject) error {
 			response.Scanned++
 			if len(object.Findings) > 0 {
 				response.Failed++
+
 				return nil
 			}
+
 			jobs := service.jobsForObject(object, request)
 			if len(jobs) == 0 {
 				response.Skipped++
+
 				return nil
 			}
+
 			schedulerAnnotation := schedulerAnnotationFor(object)
 			for _, job := range jobs {
 				enqueued, err := service.enqueueForObject(ctx, job, schedulerAnnotation)
 				if err != nil {
 					response.Failed++
+
 					return err
 				}
+
 				if enqueued {
 					response.Enqueued++
 				} else {
 					response.Skipped++
 				}
 			}
-			if err := service.broker.PublishProjectionRefresh(
+
+			err := service.broker.PublishProjectionRefresh(
 				ctx,
 				object.Manifest.ObjectDigest,
-			); err != nil {
+			)
+			if err != nil {
 				response.Failed++
+
 				return err
 			}
+
 			return nil
 		},
 	)
+
 	return response, err
 }
 
 func (service *Service) Enqueue(ctx context.Context, job contracts.AnalyzerJob) error {
 	job = service.normalizeJob(job)
+
 	return service.broker.Publish(ctx, job)
 }
 
@@ -185,21 +214,27 @@ func (service *Service) normalizeJob(job contracts.AnalyzerJob) contracts.Analyz
 	if job.SchemaVersion == 0 {
 		job.SchemaVersion = contracts.SchemaVersionPhase00
 	}
+
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = service.now()
 	}
+
 	if job.IdempotencyKey == "" {
 		job.IdempotencyKey = IdempotencyKey(job)
 	}
+
 	if job.JobID == "" {
 		job.JobID = job.IdempotencyKey
 	}
+
 	if job.PriorityClass == "" {
 		job.PriorityClass = contracts.PriorityBackground
 	}
+
 	if job.Priority == 0 {
 		job.Priority = service.priorityValue(job.PriorityClass)
 	}
+
 	return job
 }
 
@@ -217,19 +252,28 @@ func (service *Service) enqueueForObject(
 	) {
 		return false, nil
 	}
+
 	updated := withSchedulerMarker(*schedulerAnnotation, job, "publishing", service.now())
-	if err := service.store.WriteAnnotation(ctx, updated); err != nil {
+	err := service.store.WriteAnnotation(ctx, updated)
+	if err != nil {
 		return false, err
 	}
+
 	*schedulerAnnotation = updated
-	if err := service.broker.Publish(ctx, job); err != nil {
+
+	err = service.broker.Publish(ctx, job)
+	if err != nil {
 		return false, err
 	}
+
 	updated = withSchedulerMarker(*schedulerAnnotation, job, "enqueued", service.now())
-	if err := service.store.WriteAnnotation(ctx, updated); err != nil {
+	err = service.store.WriteAnnotation(ctx, updated)
+	if err != nil {
 		return false, err
 	}
+
 	*schedulerAnnotation = updated
+
 	return true, nil
 }
 
@@ -244,25 +288,30 @@ func (service *Service) Force(
 	if err != nil {
 		return contracts.SchedulerScanResponse{}, err
 	}
+
 	object := filestore.ProjectionObject{
 		Digest:   digest,
 		Manifest: manifest,
 	}
+
 	if err := service.store.WalkProjection(
 		ctx,
 		func(candidate filestore.ProjectionObject) error {
 			if candidate.Manifest.ObjectDigest == digest {
 				object = candidate
 			}
+
 			return nil
 		},
 	); err != nil {
 		return contracts.SchedulerScanResponse{}, err
 	}
+
 	filter := map[string]bool{}
 	for _, name := range analyzerNames {
 		filter[name] = true
 	}
+
 	response := contracts.SchedulerScanResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Scanned:       1,
@@ -275,11 +324,13 @@ func (service *Service) Force(
 		Forced:        true,
 		TraceID:       traceID,
 	}
+
 	schedulerAnnotation := schedulerAnnotationFor(object)
 	for _, job := range service.jobsForObject(object, request) {
 		if len(filter) > 0 && !filter[job.Analyzer.Name] {
 			continue
 		}
+
 		enqueued, err := service.enqueueForObject(
 			ctx,
 			job,
@@ -287,17 +338,21 @@ func (service *Service) Force(
 		)
 		if err != nil {
 			response.Failed++
+
 			return response, err
 		}
+
 		if enqueued {
 			response.Enqueued++
 		} else {
 			response.Skipped++
 		}
 	}
+
 	if response.Enqueued == 0 && response.Skipped == 0 {
 		response.Skipped = 1
 	}
+
 	return response, nil
 }
 
@@ -309,7 +364,9 @@ func (service *Service) Requeue(
 	if limit <= 0 {
 		limit = 20
 	}
+
 	requeued, err := service.broker.RequeueDeadLetters(ctx, limit)
+
 	return contracts.RequeueResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Requeued:      requeued,
@@ -324,7 +381,9 @@ func (service *Service) DeadLetters(
 	if limit <= 0 {
 		limit = 20
 	}
+
 	jobs, err := service.broker.DeadLetters(ctx, limit)
+
 	return contracts.DeadLetterResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Jobs:          jobs,
@@ -338,6 +397,7 @@ func (service *Service) Status(ctx context.Context) (contracts.SchedulerStatus, 
 func (service *Service) Run(ctx context.Context) error {
 	ticker := time.NewTicker(service.config.ScanInterval)
 	defer ticker.Stop()
+
 	for {
 		if _, err := service.Scan(ctx, contracts.SchedulerScanRequest{
 			SchemaVersion: contracts.SchemaVersionPhase00,
@@ -347,6 +407,7 @@ func (service *Service) Run(ctx context.Context) error {
 		}); err != nil {
 			return err
 		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -367,6 +428,7 @@ func schedulerAnnotationFor(object filestore.ProjectionObject) *contracts.Annota
 			}
 		}
 	}
+
 	return &contracts.Annotation{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		ObjectDigest:  object.Manifest.ObjectDigest,
@@ -385,19 +447,23 @@ func schedulerMarkerActive(
 	if !ok {
 		return false
 	}
+
 	if job.Priority > markerPriority(marker, job.Priority) {
 		return false
 	}
+
 	status, _ := marker["status"].(string)
 	switch status {
 	case "enqueued":
 		return true
 	case "publishing":
 		updatedAt, _ := marker["updated_at"].(string)
+
 		parsed, err := time.Parse(time.RFC3339Nano, updatedAt)
 		if err != nil {
 			return false
 		}
+
 		return now.Sub(parsed) <= lease
 	default:
 		return false
@@ -429,6 +495,7 @@ func withSchedulerMarker(
 	}
 	data["scheduled_jobs"] = markers
 	annotation.Data = data
+
 	return annotation
 }
 
@@ -449,15 +516,18 @@ func markerPriority(marker map[string]any, fallback int) int {
 
 func schedulerMarkers(annotation contracts.Annotation) map[string]map[string]any {
 	result := map[string]map[string]any{}
+
 	raw, ok := annotation.Data["scheduled_jobs"].(map[string]any)
 	if !ok {
 		return result
 	}
+
 	for key, value := range raw {
 		if marker, ok := value.(map[string]any); ok {
 			result[key] = copyMap(marker)
 		}
 	}
+
 	return result
 }
 
@@ -466,6 +536,7 @@ func copyMap(input map[string]any) map[string]any {
 	for key, value := range input {
 		output[key] = value
 	}
+
 	return output
 }
 
@@ -474,15 +545,18 @@ func (service *Service) jobsForObject(
 	request contracts.SchedulerScanRequest,
 ) []contracts.AnalyzerJob {
 	jobs := []contracts.AnalyzerJob{}
+
 	annotations := analysisAnnotationsByName(object.Annotations)
 	for _, spec := range service.specs {
 		if !specMatchesObject(spec, object.Manifest) {
 			continue
 		}
+
 		reason := analysisReason(spec, annotations[spec.Name], request)
 		if reason == "" {
 			continue
 		}
+
 		job := contracts.AnalyzerJob{
 			SchemaVersion: contracts.SchemaVersionPhase00,
 			Analyzer:      spec,
@@ -499,6 +573,7 @@ func (service *Service) jobsForObject(
 		job.JobID = job.IdempotencyKey
 		jobs = append(jobs, job)
 	}
+
 	return jobs
 }
 
@@ -506,11 +581,13 @@ func analysisAnnotationsByName(
 	annotations []contracts.Annotation,
 ) map[string]contracts.Annotation {
 	result := map[string]contracts.Annotation{}
+
 	for _, annotation := range annotations {
 		if annotation.Kind == "analysis" && annotation.AnalyzerName != "" {
 			result[annotation.AnalyzerName] = annotation
 		}
 	}
+
 	return result
 }
 
@@ -522,18 +599,22 @@ func analysisReason(
 	if request.Forced {
 		return "forced"
 	}
+
 	if annotation.AnalyzerName == "" {
 		return "missing"
 	}
+
 	if annotation.AnalyzerVer != spec.Version {
 		return "stale"
 	}
+
 	if status, ok := annotation.Data["status"].(string); ok {
 		switch status {
 		case "failed", "error", "invalid":
 			return "repair"
 		}
 	}
+
 	return ""
 }
 
@@ -541,10 +622,12 @@ func specMatchesObject(spec contracts.AnalyzerSpec, manifest contracts.Manifest)
 	if len(spec.MediaTypes) > 0 && !containsString(spec.MediaTypes, manifest.MediaType) {
 		return false
 	}
+
 	if len(spec.ContentRoles) > 0 &&
 		!containsAny(spec.ContentRoles, manifest.ContentRoles) {
 		return false
 	}
+
 	return true
 }
 
@@ -555,6 +638,7 @@ func IdempotencyKey(job contracts.AnalyzerJob) string {
 		job.Analyzer.Version,
 	}, "\x00")
 	sum := sha256.Sum256([]byte(input))
+
 	return hex.EncodeToString(sum[:])
 }
 
@@ -590,6 +674,7 @@ func containsAny(wanted, available []string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -599,6 +684,7 @@ func containsString(values []string, value string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -608,6 +694,7 @@ func firstNonEmpty(values ...string) string {
 			return strings.TrimSpace(value)
 		}
 	}
+
 	return ""
 }
 

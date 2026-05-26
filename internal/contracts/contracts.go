@@ -20,41 +20,42 @@ const (
 type ObjectDigest string
 
 type Manifest struct {
-	SchemaVersion    SchemaVersion  `json:"schema_version"`
+	Timestamps       Timestamps     `json:"timestamps,omitempty"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	CreatedAt        time.Time      `json:"created_at"`
+	Overlays         map[string]any `json:"overlays,omitempty"`
+	Analysis         map[string]any `json:"analysis,omitempty"`
 	ObjectDigest     ObjectDigest   `json:"digest"`
 	ObjectID         string         `json:"object_id"`
 	IdentityStrategy string         `json:"identity_strategy"`
 	MediaType        string         `json:"media_type,omitempty"`
-	Size             int64          `json:"size"`
 	Compression      string         `json:"compression"`
-	ContentRoles     []string       `json:"content_roles,omitempty"`
-	Facets           []Facet        `json:"facets"`
-	Titles           []Title        `json:"titles,omitempty"`
-	Timestamps       Timestamps     `json:"timestamps,omitempty"`
-	Provenance       []Provenance   `json:"provenance,omitempty"`
-	Relationships    []Relationship `json:"relationships,omitempty"`
 	Compound         Compound       `json:"compound"`
-	Analysis         map[string]any `json:"analysis,omitempty"`
 	Graph            []GraphFact    `json:"graph,omitempty"`
+	Relationships    []Relationship `json:"relationships,omitempty"`
+	Provenance       []Provenance   `json:"provenance,omitempty"`
+	Titles           []Title        `json:"titles,omitempty"`
 	Keywords         []string       `json:"keywords,omitempty"`
 	Embeddings       []EmbeddingRef `json:"embeddings,omitempty"`
-	Overlays         map[string]any `json:"overlays,omitempty"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
+	Facets           []Facet        `json:"facets"`
+	ContentRoles     []string       `json:"content_roles,omitempty"`
+	SchemaVersion    SchemaVersion  `json:"schema_version"`
+	Size             int64          `json:"size"`
 }
 
 type Facet struct {
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	Attributes map[string]any `json:"attributes,omitempty"`
 	Kind       string         `json:"kind"`
 	Name       string         `json:"name,omitempty"`
 	Version    string         `json:"version,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
-	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
 func (facet Facet) FacetKind() string {
 	if facet.Kind != "" {
 		return facet.Kind
 	}
+
 	return facet.Name
 }
 
@@ -71,14 +72,14 @@ type Timestamps struct {
 }
 
 type Provenance struct {
+	ObservedAt       time.Time      `json:"observed_at"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
+	Attributes       map[string]any `json:"attributes,omitempty"`
 	SourceName       string         `json:"source_name"`
 	SourceKind       string         `json:"source_kind"`
 	ExternalID       string         `json:"external_id,omitempty"`
 	ExternalVersion  string         `json:"external_version,omitempty"`
-	ObservedAt       time.Time      `json:"observed_at"`
 	CapabilitiesSeen []string       `json:"capabilities_seen,omitempty"`
-	Metadata         map[string]any `json:"metadata,omitempty"`
-	Attributes       map[string]any `json:"attributes,omitempty"`
 }
 
 type SourceObjectRef struct {
@@ -89,9 +90,9 @@ type SourceObjectRef struct {
 }
 
 type SourceIngestClaim struct {
+	AcquiredAt   time.Time       `json:"acquired_at"`
 	SourceObject SourceObjectRef `json:"source_object"`
 	ClaimID      string          `json:"claim_id"`
-	AcquiredAt   time.Time       `json:"acquired_at"`
 }
 
 type Relationship struct {
@@ -99,28 +100,28 @@ type Relationship struct {
 	From   ObjectDigest `json:"from"`
 	To     ObjectDigest `json:"to"`
 	Role   string       `json:"role,omitempty"`
-	Order  int          `json:"order,omitempty"`
 	Source string       `json:"source,omitempty"`
+	Order  int          `json:"order,omitempty"`
 }
 
 type Compound struct {
-	IsCompound bool           `json:"is_compound"`
 	Parts      []CompoundPart `json:"parts,omitempty"`
+	IsCompound bool           `json:"is_compound"`
 }
 
 type CompoundPart struct {
+	Metadata map[string]any `json:"metadata,omitempty"`
 	Digest   ObjectDigest   `json:"digest"`
 	Role     string         `json:"role"`
 	Order    int            `json:"order,omitempty"`
 	Required bool           `json:"required,omitempty"`
-	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 type GraphFact struct {
+	Metadata  map[string]any `json:"metadata,omitempty"`
 	Subject   string         `json:"subject"`
 	Predicate string         `json:"predicate"`
 	Object    string         `json:"object"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 type EmbeddingRef struct {
@@ -130,75 +131,75 @@ type EmbeddingRef struct {
 }
 
 type StructurePart struct {
+	Metadata map[string]any `json:"metadata,omitempty"`
 	Digest   ObjectDigest   `json:"digest"`
 	Role     string         `json:"role"`
+	Facets   []string       `json:"facets,omitempty"`
 	Order    int            `json:"order,omitempty"`
 	Required bool           `json:"required,omitempty"`
-	Facets   []string       `json:"facets,omitempty"`
-	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 type Structure struct {
-	SchemaVersion SchemaVersion              `json:"schema_version"`
+	PartsByRole   map[string][]StructurePart `json:"parts_by_role"`
 	ObjectDigest  ObjectDigest               `json:"digest"`
 	ObjectID      string                     `json:"object_id"`
 	Facets        []string                   `json:"facets"`
-	PartsByRole   map[string][]StructurePart `json:"parts_by_role"`
+	SchemaVersion SchemaVersion              `json:"schema_version"`
 }
 
 type SourceEvent struct {
-	SchemaVersion SchemaVersion  `json:"schema_version"`
+	ObservedAt    time.Time      `json:"observed_at"`
+	Cursor        map[string]any `json:"cursor,omitempty"`
+	Payload       map[string]any `json:"payload,omitempty"`
 	EventID       string         `json:"event_id"`
 	SourceName    string         `json:"source_name"`
 	SourceKind    string         `json:"source_kind"`
 	EventKind     string         `json:"event_kind"`
 	ExternalID    string         `json:"external_id,omitempty"`
-	Cursor        map[string]any `json:"cursor,omitempty"`
-	ObservedAt    time.Time      `json:"observed_at"`
 	ObjectDigest  ObjectDigest   `json:"object_digest,omitempty"`
 	Capabilities  []string       `json:"capabilities,omitempty"`
 	Relationships []Relationship `json:"relationships,omitempty"`
-	Payload       map[string]any `json:"payload,omitempty"`
+	SchemaVersion SchemaVersion  `json:"schema_version"`
 }
 
 type AnalyzerSpec struct {
 	Name               string   `json:"name"`
 	Version            string   `json:"version"`
+	IdempotencyFormula string   `json:"idempotency_key_formula,omitempty"`
+	WorkerKind         string   `json:"worker_kind,omitempty"`
 	MediaTypes         []string `json:"media_types,omitempty"`
 	ContentRoles       []string `json:"content_roles,omitempty"`
 	RequiredInputs     []string `json:"required_inputs,omitempty"`
 	OutputSections     []string `json:"output_sections,omitempty"`
 	Dependencies       []string `json:"dependencies,omitempty"`
 	Priority           int      `json:"priority,omitempty"`
-	IdempotencyFormula string   `json:"idempotency_key_formula,omitempty"`
 	Deterministic      bool     `json:"deterministic,omitempty"`
-	WorkerKind         string   `json:"worker_kind,omitempty"`
 }
 
 type AnalyzerJob struct {
-	SchemaVersion  SchemaVersion `json:"schema_version"`
-	JobID          string        `json:"job_id"`
-	IdempotencyKey string        `json:"idempotency_key,omitempty"`
+	CreatedAt      time.Time     `json:"created_at"`
+	Deadline       time.Time     `json:"deadline,omitempty"`
 	Analyzer       AnalyzerSpec  `json:"analyzer"`
+	RequestedBy    string        `json:"requested_by,omitempty"`
 	ObjectDigest   ObjectDigest  `json:"object_digest"`
 	PriorityClass  string        `json:"priority_class,omitempty"`
-	RequestedBy    string        `json:"requested_by,omitempty"`
 	Reason         string        `json:"reason,omitempty"`
-	Attempt        int           `json:"attempt,omitempty"`
 	TraceID        string        `json:"trace_id,omitempty"`
-	Deadline       time.Time     `json:"deadline,omitempty"`
-	Forced         bool          `json:"forced"`
+	IdempotencyKey string        `json:"idempotency_key,omitempty"`
+	JobID          string        `json:"job_id"`
+	SchemaVersion  SchemaVersion `json:"schema_version"`
+	Attempt        int           `json:"attempt,omitempty"`
 	Priority       int           `json:"priority"`
-	CreatedAt      time.Time     `json:"created_at"`
+	Forced         bool          `json:"forced"`
 }
 
 type SchedulerScanRequest struct {
-	SchemaVersion SchemaVersion `json:"schema_version"`
 	PriorityClass string        `json:"priority_class,omitempty"`
 	RequestedBy   string        `json:"requested_by,omitempty"`
 	Reason        string        `json:"reason,omitempty"`
-	Forced        bool          `json:"forced,omitempty"`
 	TraceID       string        `json:"trace_id,omitempty"`
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Forced        bool          `json:"forced,omitempty"`
 }
 
 type SchedulerScanResponse struct {
@@ -223,8 +224,8 @@ type DeadLetterRequest struct {
 }
 
 type DeadLetterResponse struct {
-	SchemaVersion SchemaVersion `json:"schema_version"`
 	Jobs          []AnalyzerJob `json:"jobs"`
+	SchemaVersion SchemaVersion `json:"schema_version"`
 }
 
 type RequeueRequest struct {
@@ -238,40 +239,40 @@ type RequeueResponse struct {
 }
 
 type Annotation struct {
-	SchemaVersion SchemaVersion  `json:"schema_version"`
+	GeneratedAt   time.Time      `json:"generated_at"`
+	Data          map[string]any `json:"data,omitempty"`
 	ObjectDigest  ObjectDigest   `json:"object_digest"`
 	AnalyzerName  string         `json:"analyzer_name,omitempty"`
 	AnalyzerVer   string         `json:"analyzer_version,omitempty"`
 	Kind          string         `json:"kind"`
-	GeneratedAt   time.Time      `json:"generated_at"`
-	Data          map[string]any `json:"data,omitempty"`
+	SchemaVersion SchemaVersion  `json:"schema_version"`
 }
 
 type SearchRequest struct {
-	SchemaVersion SchemaVersion      `json:"schema_version"`
-	Query         string             `json:"query"`
-	Facets        []string           `json:"facets,omitempty"`
-	Provenance    ProvenanceFilter   `json:"provenance,omitempty"`
 	Relationships RelationshipFilter `json:"relationships,omitempty"`
+	Query         string             `json:"query"`
+	Provenance    ProvenanceFilter   `json:"provenance,omitempty"`
+	Facets        []string           `json:"facets,omitempty"`
 	CompoundRoles []string           `json:"compound_roles,omitempty"`
 	AnalyzerNames []string           `json:"analyzer_names,omitempty"`
 	MediaTypes    []string           `json:"media_types,omitempty"`
+	SchemaVersion SchemaVersion      `json:"schema_version"`
 	Limit         int                `json:"limit,omitempty"`
 	Offset        int                `json:"offset,omitempty"`
 }
 
 type SearchResult struct {
+	Attributes   map[string]any `json:"attributes,omitempty"`
 	ObjectDigest ObjectDigest   `json:"object_digest"`
-	Score        float64        `json:"score,omitempty"`
 	Title        string         `json:"title,omitempty"`
 	Snippet      string         `json:"snippet,omitempty"`
 	Facets       []string       `json:"facets,omitempty"`
-	Attributes   map[string]any `json:"attributes,omitempty"`
+	Score        float64        `json:"score,omitempty"`
 }
 
 type SearchResponse struct {
-	SchemaVersion SchemaVersion  `json:"schema_version"`
 	Results       []SearchResult `json:"results"`
+	SchemaVersion SchemaVersion  `json:"schema_version"`
 	Total         int            `json:"total"`
 }
 
@@ -282,64 +283,64 @@ type ProvenanceFilter struct {
 }
 
 type RelationshipFilter struct {
-	Types []string     `json:"types,omitempty"`
 	From  ObjectDigest `json:"from,omitempty"`
 	To    ObjectDigest `json:"to,omitempty"`
-	Roles []string     `json:"roles,omitempty"`
 	Any   ObjectDigest `json:"any,omitempty"`
+	Types []string     `json:"types,omitempty"`
+	Roles []string     `json:"roles,omitempty"`
 }
 
 type RelationshipRequest struct {
-	SchemaVersion SchemaVersion      `json:"schema_version"`
 	Filter        RelationshipFilter `json:"filter"`
+	SchemaVersion SchemaVersion      `json:"schema_version"`
 	Limit         int                `json:"limit,omitempty"`
 }
 
 type RelationshipResponse struct {
-	SchemaVersion SchemaVersion  `json:"schema_version"`
 	Relationships []Relationship `json:"relationships"`
+	SchemaVersion SchemaVersion  `json:"schema_version"`
 }
 
 type GraphRequest struct {
-	SchemaVersion SchemaVersion `json:"schema_version"`
 	Node          string        `json:"node,omitempty"`
 	Predicate     string        `json:"predicate,omitempty"`
+	SchemaVersion SchemaVersion `json:"schema_version"`
 	Limit         int           `json:"limit,omitempty"`
 }
 
 type GraphResponse struct {
-	SchemaVersion SchemaVersion `json:"schema_version"`
 	Facts         []GraphFact   `json:"facts"`
+	SchemaVersion SchemaVersion `json:"schema_version"`
 }
 
 type AnalysisStatusRequest struct {
-	SchemaVersion SchemaVersion  `json:"schema_version"`
 	ObjectDigests []ObjectDigest `json:"object_digests,omitempty"`
 	AnalyzerNames []string       `json:"analyzer_names,omitempty"`
 	Analyzers     []AnalyzerSpec `json:"analyzers,omitempty"`
+	SchemaVersion SchemaVersion  `json:"schema_version"`
 	Limit         int            `json:"limit,omitempty"`
 }
 
 type AnalysisStatus struct {
+	GeneratedAt  time.Time      `json:"generated_at,omitempty"`
+	Data         map[string]any `json:"data,omitempty"`
 	ObjectDigest ObjectDigest   `json:"object_digest"`
 	AnalyzerName string         `json:"analyzer_name"`
 	AnalyzerVer  string         `json:"analyzer_version,omitempty"`
 	Status       string         `json:"status"`
-	GeneratedAt  time.Time      `json:"generated_at,omitempty"`
-	Data         map[string]any `json:"data,omitempty"`
 }
 
 type AnalysisStatusResponse struct {
-	SchemaVersion SchemaVersion    `json:"schema_version"`
 	Statuses      []AnalysisStatus `json:"statuses"`
+	SchemaVersion SchemaVersion    `json:"schema_version"`
 }
 
 type VectorSearchRequest struct {
-	SchemaVersion SchemaVersion `json:"schema_version"`
 	Model         string        `json:"model"`
-	Dimensions    int           `json:"dimensions,omitempty"`
 	Vector        []float32     `json:"vector"`
 	Facets        []string      `json:"facets,omitempty"`
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Dimensions    int           `json:"dimensions,omitempty"`
 	Limit         int           `json:"limit,omitempty"`
 }
 
@@ -350,26 +351,26 @@ type VectorSearchResult struct {
 }
 
 type VectorSearchResponse struct {
-	SchemaVersion SchemaVersion        `json:"schema_version"`
 	Results       []VectorSearchResult `json:"results"`
+	SchemaVersion SchemaVersion        `json:"schema_version"`
 }
 
 type SourceCursor struct {
-	SchemaVersion SchemaVersion  `json:"schema_version"`
+	UpdatedAt     time.Time      `json:"updated_at,omitempty"`
+	Cursor        map[string]any `json:"cursor"`
 	SourceKind    string         `json:"source_kind"`
 	SourceName    string         `json:"source_name"`
-	Cursor        map[string]any `json:"cursor"`
-	UpdatedAt     time.Time      `json:"updated_at,omitempty"`
+	SchemaVersion SchemaVersion  `json:"schema_version"`
 }
 
 type SourceCursorRequest struct {
-	SchemaVersion SchemaVersion `json:"schema_version"`
 	SourceKinds   []string      `json:"source_kinds,omitempty"`
 	SourceNames   []string      `json:"source_names,omitempty"`
+	SchemaVersion SchemaVersion `json:"schema_version"`
 	Limit         int           `json:"limit,omitempty"`
 }
 
 type SourceCursorResponse struct {
-	SchemaVersion SchemaVersion  `json:"schema_version"`
 	Cursors       []SourceCursor `json:"cursors"`
+	SchemaVersion SchemaVersion  `json:"schema_version"`
 }

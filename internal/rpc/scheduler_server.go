@@ -16,6 +16,7 @@ import (
 
 type SchedulerServer struct {
 	pb.UnimplementedSchedulerServiceServer
+
 	service scheduler.Scheduler
 }
 
@@ -38,6 +39,7 @@ func (server *SchedulerServer) Scan(
 	if err != nil {
 		return nil, err
 	}
+
 	return toPBSchedulerScanResponse(response), nil
 }
 
@@ -49,6 +51,7 @@ func (server *SchedulerServer) Enqueue(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	return &pb.Empty{}, server.service.Enqueue(ctx, job)
 }
 
@@ -66,6 +69,7 @@ func (server *SchedulerServer) Force(
 	if err != nil {
 		return nil, err
 	}
+
 	return toPBSchedulerScanResponse(response), nil
 }
 
@@ -80,6 +84,7 @@ func (server *SchedulerServer) Requeue(
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.RequeueResponse{
 		SchemaVersion: int32(response.SchemaVersion),
 		Requeued:      int32(response.Requeued),
@@ -97,10 +102,12 @@ func (server *SchedulerServer) DeadLetters(
 	if err != nil {
 		return nil, err
 	}
+
 	jobs := make([]*pb.AnalyzerJob, 0, len(response.Jobs))
 	for _, job := range response.Jobs {
 		jobs = append(jobs, ToPBAnalyzerJob(job))
 	}
+
 	return &pb.DeadLetterResponse{
 		SchemaVersion: int32(response.SchemaVersion),
 		Jobs:          jobs,
@@ -115,6 +122,7 @@ func (server *SchedulerServer) Status(
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.SchedulerStatus{
 		SchemaVersion: int32(status.SchemaVersion),
 		Pending:       int32(status.Pending),
@@ -131,6 +139,7 @@ func (server *SchedulerServer) NotifyObjectsChanged(
 	response := contracts.SchedulerScanResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 	}
+
 	for _, digest := range request.GetDigests() {
 		scanned, err := server.service.Force(
 			ctx,
@@ -142,11 +151,13 @@ func (server *SchedulerServer) NotifyObjectsChanged(
 		response.Scanned += scanned.Scanned
 		response.Enqueued += scanned.Enqueued
 		response.Skipped += scanned.Skipped
+
 		response.Failed += scanned.Failed
 		if err != nil {
 			response.Failed++
 		}
 	}
+
 	return toPBSchedulerScanResponse(response), nil
 }
 

@@ -19,6 +19,7 @@ type ConfigCommand func(*config.Loaded) error
 
 func NewServiceCommand(name, summary string, out io.Writer) *cobra.Command {
 	var configPath string
+
 	root := &cobra.Command{
 		Use:   name,
 		Short: summary,
@@ -29,11 +30,13 @@ func NewServiceCommand(name, summary string, out io.Writer) *cobra.Command {
 	root.AddCommand(newFilestoreServeCommand(out, &configPath, "filestore-serve"))
 	root.AddCommand(newSchedulerServeCommand(out, &configPath, "scheduler-serve"))
 	root.AddCommand(newQueryServeCommand(out, &configPath, "query-serve"))
+
 	return root
 }
 
 func NewAdminCommand(out io.Writer, in io.Reader) *cobra.Command {
 	var configPath string
+
 	root := &cobra.Command{
 		Use:   "gmeow-admin",
 		Short: "Gmeow administrative commands",
@@ -45,11 +48,13 @@ func NewAdminCommand(out io.Writer, in io.Reader) *cobra.Command {
 	root.AddCommand(newFilestoreCommand(out, &configPath))
 	root.AddCommand(newQueryCommand(out, &configPath))
 	root.AddCommand(newSchedulerCommand(out, &configPath))
+
 	return root
 }
 
 func Execute(cmd *cobra.Command) {
-	if err := cmd.Execute(); err != nil {
+	err := cmd.Execute()
+	if err != nil {
 		slog.Error("command failed", "error", err)
 		os.Exit(1)
 	}
@@ -61,6 +66,7 @@ func newVersionCommand(out io.Writer) *cobra.Command {
 		Short: "Print version",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			_, err := fmt.Fprintln(out, version.Version)
+
 			return err
 		},
 	}
@@ -75,12 +81,14 @@ func newStatusCommand(name string, out io.Writer, configPath *string) *cobra.Com
 			if err != nil {
 				return err
 			}
+
 			_, err = fmt.Fprintf(
 				out,
 				"%s: config valid for instance %s\n",
 				name,
 				loaded.Config.System.InstanceID,
 			)
+
 			return err
 		},
 	}

@@ -25,6 +25,7 @@ func newFilestoreCommand(out io.Writer, configPath *string) *cobra.Command {
 	}
 	command.AddCommand(newFilestoreVerifyCommand(out, configPath))
 	command.AddCommand(newFilestoreServeCommand(out, configPath, "serve"))
+
 	return command
 }
 
@@ -41,11 +42,14 @@ func newFilestoreServeCommand(
 			if err != nil {
 				return err
 			}
+
 			root, err := resolvedFilestoreRoot(loaded)
 			if err != nil {
 				return err
 			}
+
 			store := filestore.NewFilesystemStore(root)
+
 			endpoint := rpcEndpoint(loaded.Resolved.RPC.Filestore)
 			if _, err := fmt.Fprintf(
 				out,
@@ -55,6 +59,7 @@ func newFilestoreServeCommand(
 			); err != nil {
 				return err
 			}
+
 			return rpc.Serve(command.Context(), endpoint, func(server *grpc.Server) {
 				pb.RegisterFilestoreServiceServer(server, rpc.NewFilestoreServer(store))
 			})
@@ -71,15 +76,19 @@ func newFilestoreVerifyCommand(out io.Writer, configPath *string) *cobra.Command
 			if err != nil {
 				return err
 			}
+
 			root, err := resolvedFilestoreRoot(loaded)
 			if err != nil {
 				return err
 			}
+
 			store := filestore.NewFilesystemStore(root)
+
 			report, err := store.Verify(command.Context())
 			if err != nil {
 				return err
 			}
+
 			if _, err := fmt.Fprintf(
 				out,
 				"filestore verify: status=%s checked=%d findings=%d\n",
@@ -89,6 +98,7 @@ func newFilestoreVerifyCommand(out io.Writer, configPath *string) *cobra.Command
 			); err != nil {
 				return err
 			}
+
 			for _, finding := range report.Findings {
 				if _, err := fmt.Fprintf(
 					out,
@@ -101,9 +111,11 @@ func newFilestoreVerifyCommand(out io.Writer, configPath *string) *cobra.Command
 					return err
 				}
 			}
+
 			if report.Status == filestore.VerifyStatusError {
 				return errors.New("filestore verification failed")
 			}
+
 			return nil
 		},
 	}
@@ -114,8 +126,10 @@ func resolvedFilestoreRoot(loaded *config.Loaded) (string, error) {
 	if filepath.IsAbs(root) {
 		return root, nil
 	}
+
 	if loaded.Path == "" {
 		return "", errors.New("relative filestore.root requires a loaded config path")
 	}
+
 	return filepath.Join(filepath.Dir(loaded.Path), root), nil
 }

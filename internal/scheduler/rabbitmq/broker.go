@@ -37,9 +37,9 @@ const (
 
 type Config struct {
 	URL          string
+	QueuePrefix  string
 	RetryLimit   int
 	RetryBackoff time.Duration
-	QueuePrefix  string
 }
 
 type Broker struct {
@@ -62,24 +62,30 @@ func New(ctx context.Context, cfg Config) (*Broker, error) {
 	if strings.TrimSpace(cfg.URL) == "" {
 		return nil, errors.New("rabbitmq url is required")
 	}
+
 	if strings.TrimSpace(cfg.QueuePrefix) == "" {
 		cfg.QueuePrefix = defaultQueuePrefix
 	}
+
 	if cfg.QueuePrefix != defaultQueuePrefix && cfg.QueuePrefix != testQueuePrefix {
 		return nil, errors.New("rabbitmq queue prefix must be gmeow. or gmeow.test.")
 	}
+
 	if cfg.RetryLimit <= 0 {
 		cfg.RetryLimit = 3
 	}
+
 	if cfg.RetryBackoff <= 0 {
 		cfg.RetryBackoff = 30 * time.Second
 	}
+
 	conn, err := amqp.DialConfig(cfg.URL, amqp.Config{
 		Properties: amqp.Table{"connection_name": "gmeow.scheduler"},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("connect rabbitmq: %w", err)
 	}
+
 	broker := &Broker{
 		connection: conn,
 		config:     cfg,
@@ -87,8 +93,10 @@ func New(ctx context.Context, cfg Config) (*Broker, error) {
 	}
 	if err := broker.Declare(ctx); err != nil {
 		conn.Close()
+
 		return nil, err
 	}
+
 	return broker, nil
 }
 
@@ -100,6 +108,7 @@ func ConfigFromResolved(
 	if err != nil {
 		backoff = 30 * time.Second
 	}
+
 	return Config{
 		URL:          rabbit.URL,
 		RetryLimit:   scheduler.RetryLimit,
@@ -115,6 +124,7 @@ func TestConfigFromResolved(
 	cfg := ConfigFromResolved(rabbit, scheduler)
 	cfg.URL = rabbit.TestURL
 	cfg.QueuePrefix = testQueuePrefix
+
 	return cfg
 }
 
@@ -136,6 +146,7 @@ func (broker *Broker) Declare(ctx context.Context) error {
 		return err
 	}
 	defer channel.Close()
+
 	if err := channel.ExchangeDeclare(
 		broker.topology.analysisExchange,
 		"direct",
@@ -147,6 +158,7 @@ func (broker *Broker) Declare(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("declare analysis exchange: %w", err)
 	}
+
 	if err := channel.ExchangeDeclare(
 		broker.topology.projectionExchange,
 		"direct",
@@ -158,6 +170,7 @@ func (broker *Broker) Declare(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("declare projection exchange: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.workQueue,
 		true,
@@ -172,6 +185,7 @@ func (broker *Broker) Declare(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("declare work queue: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.retryQueue,
 		true,
@@ -186,6 +200,7 @@ func (broker *Broker) Declare(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("declare retry queue: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.failedQueue,
 		true,
@@ -196,6 +211,7 @@ func (broker *Broker) Declare(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("declare failed queue: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.deadLetterQueue,
 		true,
@@ -206,6 +222,7 @@ func (broker *Broker) Declare(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("declare dead-letter queue: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.projectionQueue,
 		true,
@@ -216,6 +233,7 @@ func (broker *Broker) Declare(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("declare projection queue: %w", err)
 	}
+
 	bindings := []struct {
 		queue      string
 		routingKey string
@@ -236,16 +254,18 @@ func (broker *Broker) Declare(ctx context.Context) error {
 		},
 	}
 	for _, binding := range bindings {
-		if err := channel.QueueBind(
+		err := channel.QueueBind(
 			binding.queue,
 			binding.routingKey,
 			binding.exchange,
 			false,
 			nil,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("bind queue %s: %w", binding.queue, err)
 		}
 	}
+
 	return nil
 }
 
@@ -254,11 +274,13 @@ func (broker *Broker) Publish(ctx context.Context, job contracts.AnalyzerJob) er
 	if err != nil {
 		return err
 	}
+
 	channel, err := broker.channel(ctx)
 	if err != nil {
 		return err
 	}
 	defer channel.Close()
+
 	return publishConfirmed(
 		ctx,
 		channel,
@@ -287,11 +309,13 @@ func (broker *Broker) PublishProjectionRefresh(
 	if err != nil {
 		return err
 	}
+
 	channel, err := broker.channel(ctx)
 	if err != nil {
 		return err
 	}
 	defer channel.Close()
+
 	return publishConfirmed(
 		ctx,
 		channel,
@@ -313,22 +337,27 @@ func (broker *Broker) Status(ctx context.Context) (contracts.SchedulerStatus, er
 		return contracts.SchedulerStatus{}, err
 	}
 	defer channel.Close()
+
 	work, err := channel.QueueInspect(broker.topology.workQueue)
 	if err != nil {
 		return contracts.SchedulerStatus{}, err
 	}
+
 	retry, err := channel.QueueInspect(broker.topology.retryQueue)
 	if err != nil {
 		return contracts.SchedulerStatus{}, err
 	}
+
 	failed, err := channel.QueueInspect(broker.topology.failedQueue)
 	if err != nil {
 		return contracts.SchedulerStatus{}, err
 	}
+
 	dead, err := channel.QueueInspect(broker.topology.deadLetterQueue)
 	if err != nil {
 		return contracts.SchedulerStatus{}, err
 	}
+
 	return contracts.SchedulerStatus{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Pending:       work.Messages,
@@ -345,34 +374,43 @@ func (broker *Broker) DeadLetters(
 	if limit <= 0 {
 		limit = 20
 	}
+
 	channel, err := broker.channel(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer channel.Close()
+
 	jobs := []contracts.AnalyzerJob{}
 	deliveries := []amqp.Delivery{}
+
 	defer func() {
 		for _, delivery := range deliveries {
 			_ = delivery.Nack(false, true)
 		}
 	}()
+
 	for len(jobs) < limit {
 		delivery, ok, err := channel.Get(broker.topology.deadLetterQueue, false)
 		if err != nil {
 			return nil, err
 		}
+
 		if !ok {
 			break
 		}
+
 		var job contracts.AnalyzerJob
 		if err := json.Unmarshal(delivery.Body, &job); err != nil {
 			_ = delivery.Nack(false, true)
+
 			return nil, err
 		}
+
 		deliveries = append(deliveries, delivery)
 		jobs = append(jobs, job)
 	}
+
 	return jobs, nil
 }
 
@@ -383,31 +421,40 @@ func (broker *Broker) RequeueDeadLetters(
 	if limit <= 0 {
 		limit = 20
 	}
+
 	channel, err := broker.channel(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer channel.Close()
+
 	requeued := 0
 	for requeued < limit {
 		delivery, ok, err := channel.Get(broker.topology.deadLetterQueue, false)
 		if err != nil {
 			return requeued, err
 		}
+
 		if !ok {
 			break
 		}
+
 		var job contracts.AnalyzerJob
 		if err := json.Unmarshal(delivery.Body, &job); err != nil {
 			_ = delivery.Nack(false, true)
+
 			return requeued, err
 		}
+
 		job.Attempt = 0
+
 		body, err := json.Marshal(job)
 		if err != nil {
 			_ = delivery.Nack(false, true)
+
 			return requeued, err
 		}
+
 		if err := publishConfirmed(
 			ctx,
 			channel,
@@ -423,13 +470,17 @@ func (broker *Broker) RequeueDeadLetters(
 			},
 		); err != nil {
 			_ = delivery.Nack(false, true)
+
 			return requeued, err
 		}
+
 		if err := delivery.Ack(false); err != nil {
 			return requeued, err
 		}
+
 		requeued++
 	}
+
 	return requeued, nil
 }
 
@@ -440,35 +491,45 @@ func (broker *Broker) ProcessFailures(
 	if limit <= 0 {
 		limit = 100
 	}
+
 	channel, err := broker.channel(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer channel.Close()
+
 	processed := 0
 	for processed < limit {
 		delivery, ok, err := channel.Get(broker.topology.failedQueue, false)
 		if err != nil {
 			return processed, err
 		}
+
 		if !ok {
 			break
 		}
+
 		var job contracts.AnalyzerJob
 		if err := json.Unmarshal(delivery.Body, &job); err != nil {
 			_ = delivery.Nack(false, true)
+
 			return processed, err
 		}
+
 		job.Attempt++
+
 		routingKey := retryRoutingKey
 		if job.Attempt > broker.config.RetryLimit {
 			routingKey = deadLetterRoutingKey
 		}
+
 		body, err := json.Marshal(job)
 		if err != nil {
 			_ = delivery.Nack(false, true)
+
 			return processed, err
 		}
+
 		if err := publishConfirmed(
 			ctx,
 			channel,
@@ -488,13 +549,17 @@ func (broker *Broker) ProcessFailures(
 			},
 		); err != nil {
 			_ = delivery.Nack(false, true)
+
 			return processed, err
 		}
+
 		if err := delivery.Ack(false); err != nil {
 			return processed, err
 		}
+
 		processed++
 	}
+
 	return processed, nil
 }
 
@@ -507,15 +572,19 @@ func (broker *Broker) RouteFailure(
 		return err
 	}
 	defer channel.Close()
+
 	job.Attempt++
+
 	routingKey := retryRoutingKey
 	if job.Attempt > broker.config.RetryLimit {
 		routingKey = deadLetterRoutingKey
 	}
+
 	body, err := json.Marshal(job)
 	if err != nil {
 		return err
 	}
+
 	return publishConfirmed(
 		ctx,
 		channel,
@@ -539,25 +608,30 @@ func publishConfirmed(
 	routingKey string,
 	publishing amqp.Publishing,
 ) error {
-	if err := channel.Confirm(false); err != nil {
+	err := channel.Confirm(false)
+	if err != nil {
 		return fmt.Errorf("enable publish confirms: %w", err)
 	}
+
 	confirms := channel.NotifyPublish(make(chan amqp.Confirmation, 1))
-	if err := channel.PublishWithContext(
+	err = channel.PublishWithContext(
 		ctx,
 		exchange,
 		routingKey,
 		false,
 		false,
 		publishing,
-	); err != nil {
+	)
+	if err != nil {
 		return err
 	}
+
 	select {
 	case confirmation := <-confirms:
 		if !confirmation.Ack {
 			return errors.New("rabbitmq publish was not confirmed")
 		}
+
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -568,6 +642,7 @@ func (broker *Broker) Close() error {
 	if broker.connection == nil {
 		return nil
 	}
+
 	return broker.connection.Close()
 }
 
@@ -575,13 +650,16 @@ func (broker *Broker) channel(ctx context.Context) (*amqp.Channel, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	if broker.connection == nil {
 		return nil, errors.New("rabbitmq broker is closed")
 	}
+
 	channel, err := broker.connection.Channel()
 	if err != nil {
 		return nil, fmt.Errorf("open rabbitmq channel: %w", err)
 	}
+
 	return channel, nil
 }
 
@@ -589,9 +667,11 @@ func clampPriority(priority int) int {
 	if priority < 0 {
 		return 0
 	}
+
 	if priority > 100 {
 		return 100
 	}
+
 	return priority
 }
 

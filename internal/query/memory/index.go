@@ -19,9 +19,9 @@ import (
 
 type Index struct {
 	source        query.ProjectionSource
-	mutex         sync.RWMutex
 	objects       map[contracts.ObjectDigest]projectedObject
 	sourceCursors map[string]contracts.SourceCursor
+	mutex         sync.RWMutex
 }
 
 type projectedObject struct {
@@ -53,56 +53,71 @@ func (index *Index) ProjectObject(
 	ctx context.Context,
 	object filestore.ProjectionObject,
 ) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	if len(object.Findings) > 0 {
 		return nil
 	}
+
 	index.mutex.Lock()
 	defer index.mutex.Unlock()
+
 	index.objects[object.Manifest.ObjectDigest] = projectedObject{
 		manifest:    object.Manifest,
 		annotations: append([]contracts.Annotation(nil), object.Annotations...),
 	}
+
 	return nil
 }
 
 func (index *Index) Rebuild(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	index.mutex.Lock()
 	index.objects = map[contracts.ObjectDigest]projectedObject{}
 	index.sourceCursors = map[string]contracts.SourceCursor{}
 	index.mutex.Unlock()
+
 	if index.source == nil {
 		return nil
 	}
-	if err := index.source.WalkProjection(
+
+	err = index.source.WalkProjection(
 		ctx,
 		func(object filestore.ProjectionObject) error {
 			return index.ProjectObject(ctx, object)
 		},
-	); err != nil {
+	)
+	if err != nil {
 		return err
 	}
+
 	cursorSource, ok := index.source.(query.SourceCursorProjectionSource)
 	if !ok {
 		return nil
 	}
+
 	return cursorSource.WalkSourceCursors(ctx, func(cursor contracts.SourceCursor) error {
 		return index.ProjectSourceCursor(ctx, cursor)
 	})
 }
 
 func (index *Index) ProjectChanged(ctx context.Context, since time.Time) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	if index.source == nil {
 		return nil
 	}
+
 	if source, ok := index.source.(query.IncrementalProjectionSource); ok {
 		return source.WalkChangedProjection(
 			ctx,
@@ -112,6 +127,7 @@ func (index *Index) ProjectChanged(ctx context.Context, since time.Time) error {
 			},
 		)
 	}
+
 	return index.Rebuild(ctx)
 }
 
@@ -119,12 +135,16 @@ func (index *Index) ProjectSourceCursor(
 	ctx context.Context,
 	cursor contracts.SourceCursor,
 ) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	index.mutex.Lock()
 	defer index.mutex.Unlock()
+
 	index.sourceCursors[sourceCursorKey(cursor)] = cursor
+
 	return nil
 }
 
@@ -132,16 +152,21 @@ func (index *Index) Search(
 	ctx context.Context,
 	request contracts.SearchRequest,
 ) (contracts.SearchResponse, error) {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return contracts.SearchResponse{}, err
 	}
+
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
+
 	results := []contracts.SearchResult{}
+
 	for _, object := range index.sortedObjects() {
 		if !matchesSearch(object, request) {
 			continue
 		}
+
 		results = append(results, contracts.SearchResult{
 			ObjectDigest: object.manifest.ObjectDigest,
 			Score:        1,
@@ -153,6 +178,7 @@ func (index *Index) Search(
 			},
 		})
 	}
+
 	return contracts.SearchResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Results:       pageSearchResults(results, request.Offset, request.Limit),
@@ -164,12 +190,16 @@ func (index *Index) Structure(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 ) (contracts.Structure, error) {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return contracts.Structure{}, err
 	}
+
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
+
 	object := index.objects[digest]
+
 	structure := contracts.Structure{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		ObjectDigest:  digest,
@@ -191,6 +221,7 @@ func (index *Index) Structure(
 			},
 		)
 	}
+
 	return structure, nil
 }
 
@@ -198,12 +229,16 @@ func (index *Index) Relationships(
 	ctx context.Context,
 	request contracts.RelationshipRequest,
 ) (contracts.RelationshipResponse, error) {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return contracts.RelationshipResponse{}, err
 	}
+
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
+
 	relationships := []contracts.Relationship{}
+
 	for _, object := range index.sortedObjects() {
 		for _, relationship := range object.manifest.Relationships {
 			if matchesRelationship(relationship, request.Filter) {
@@ -211,10 +246,12 @@ func (index *Index) Relationships(
 			}
 		}
 	}
+
 	limit := normalizedLimit(request.Limit)
 	if len(relationships) > limit {
 		relationships = relationships[:limit]
 	}
+
 	return contracts.RelationshipResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Relationships: relationships,
@@ -225,28 +262,36 @@ func (index *Index) Graph(
 	ctx context.Context,
 	request contracts.GraphRequest,
 ) (contracts.GraphResponse, error) {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return contracts.GraphResponse{}, err
 	}
+
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
+
 	facts := []contracts.GraphFact{}
+
 	for _, object := range index.sortedObjects() {
 		for _, fact := range object.manifest.Graph {
 			if request.Node != "" && fact.Subject != request.Node &&
 				fact.Object != request.Node {
 				continue
 			}
+
 			if request.Predicate != "" && fact.Predicate != request.Predicate {
 				continue
 			}
+
 			facts = append(facts, fact)
 		}
 	}
+
 	limit := normalizedLimit(request.Limit)
 	if len(facts) > limit {
 		facts = facts[:limit]
 	}
+
 	return contracts.GraphResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Facts:         facts,
@@ -257,38 +302,49 @@ func (index *Index) AnalysisStatus(
 	ctx context.Context,
 	request contracts.AnalysisStatusRequest,
 ) (contracts.AnalysisStatusResponse, error) {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return contracts.AnalysisStatusResponse{}, err
 	}
+
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
+
 	statuses := []contracts.AnalysisStatus{}
+
 	for _, object := range index.sortedObjects() {
 		if len(request.ObjectDigests) > 0 &&
 			!containsDigest(request.ObjectDigests, object.manifest.ObjectDigest) {
 			continue
 		}
+
 		annotationsByName := map[string]contracts.Annotation{}
+
 		for _, annotation := range object.annotations {
 			if annotation.Kind != "analysis" {
 				continue
 			}
+
 			annotationsByName[annotation.AnalyzerName] = annotation
 			if len(request.AnalyzerNames) > 0 &&
 				!containsString(request.AnalyzerNames, annotation.AnalyzerName) {
 				continue
 			}
+
 			if len(request.Analyzers) > 0 &&
 				!containsAnalyzerSpec(request.Analyzers, annotation.AnalyzerName) {
 				continue
 			}
+
 			if containsAnalyzerSpec(request.Analyzers, annotation.AnalyzerName) {
 				continue
 			}
+
 			status := "complete"
 			if value, ok := annotation.Data["status"].(string); ok && value != "" {
 				status = value
 			}
+
 			statuses = append(statuses, contracts.AnalysisStatus{
 				ObjectDigest: annotation.ObjectDigest,
 				AnalyzerName: annotation.AnalyzerName,
@@ -298,6 +354,7 @@ func (index *Index) AnalysisStatus(
 				Data:         annotation.Data,
 			})
 		}
+
 		statuses = append(
 			statuses,
 			requiredAnalyzerStatuses(
@@ -307,10 +364,12 @@ func (index *Index) AnalysisStatus(
 			)...,
 		)
 	}
+
 	limit := normalizedLimit(request.Limit)
 	if len(statuses) > limit {
 		statuses = statuses[:limit]
 	}
+
 	return contracts.AnalysisStatusResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Statuses:      statuses,
@@ -321,23 +380,30 @@ func (index *Index) VectorSearch(
 	ctx context.Context,
 	request contracts.VectorSearchRequest,
 ) (contracts.VectorSearchResponse, error) {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return contracts.VectorSearchResponse{}, err
 	}
+
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
+
 	results := []contracts.VectorSearchResult{}
+
 	for _, object := range index.sortedObjects() {
 		if len(request.Facets) > 0 && !hasAnyFacet(object.manifest.Facets, request.Facets) {
 			continue
 		}
+
 		for _, embedding := range object.manifest.Embeddings {
 			if request.Model != "" && embedding.Model != request.Model {
 				continue
 			}
+
 			if request.Dimensions > 0 && embedding.Dimensions != request.Dimensions {
 				continue
 			}
+
 			results = append(results, contracts.VectorSearchResult{
 				ObjectDigest: object.manifest.ObjectDigest,
 				Model:        embedding.Model,
@@ -345,16 +411,20 @@ func (index *Index) VectorSearch(
 			})
 		}
 	}
+
 	sort.SliceStable(results, func(left, right int) bool {
 		if math.Abs(results[left].Distance-results[right].Distance) > 0 {
 			return results[left].Distance < results[right].Distance
 		}
+
 		return results[left].ObjectDigest < results[right].ObjectDigest
 	})
+
 	limit := normalizedLimit(request.Limit)
 	if len(results) > limit {
 		results = results[:limit]
 	}
+
 	return contracts.VectorSearchResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Results:       results,
@@ -365,33 +435,42 @@ func (index *Index) SourceCursors(
 	ctx context.Context,
 	request contracts.SourceCursorRequest,
 ) (contracts.SourceCursorResponse, error) {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return contracts.SourceCursorResponse{}, err
 	}
+
 	index.mutex.RLock()
 	defer index.mutex.RUnlock()
+
 	cursors := make([]contracts.SourceCursor, 0, len(index.sourceCursors))
 	for _, cursor := range index.sourceCursors {
 		if len(request.SourceKinds) > 0 &&
 			!containsString(request.SourceKinds, cursor.SourceKind) {
 			continue
 		}
+
 		if len(request.SourceNames) > 0 &&
 			!containsString(request.SourceNames, cursor.SourceName) {
 			continue
 		}
+
 		cursors = append(cursors, cursor)
 	}
+
 	sort.SliceStable(cursors, func(left, right int) bool {
 		if cursors[left].SourceKind != cursors[right].SourceKind {
 			return cursors[left].SourceKind < cursors[right].SourceKind
 		}
+
 		return cursors[left].SourceName < cursors[right].SourceName
 	})
+
 	limit := normalizedLimit(request.Limit)
 	if len(cursors) > limit {
 		cursors = cursors[:limit]
 	}
+
 	return contracts.SourceCursorResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Cursors:       cursors,
@@ -403,9 +482,11 @@ func (index *Index) sortedObjects() []projectedObject {
 	for _, object := range index.objects {
 		objects = append(objects, object)
 	}
+
 	sort.SliceStable(objects, func(left, right int) bool {
 		return objects[left].manifest.ObjectDigest < objects[right].manifest.ObjectDigest
 	})
+
 	return objects
 }
 
@@ -413,24 +494,30 @@ func matchesSearch(object projectedObject, request contracts.SearchRequest) bool
 	if len(request.Facets) > 0 && !hasAnyFacet(object.manifest.Facets, request.Facets) {
 		return false
 	}
+
 	if len(request.MediaTypes) > 0 &&
 		!containsString(request.MediaTypes, object.manifest.MediaType) {
 		return false
 	}
+
 	if !matchesProvenance(object.manifest.Provenance, request.Provenance) {
 		return false
 	}
+
 	if !matchesAnyRelationship(object.manifest.Relationships, request.Relationships) {
 		return false
 	}
+
 	if len(request.CompoundRoles) > 0 &&
 		!matchesCompoundRoles(object.manifest.Compound.Parts, request.CompoundRoles) {
 		return false
 	}
+
 	needle := strings.ToLower(strings.TrimSpace(request.Query))
 	if needle == "" {
 		return true
 	}
+
 	return strings.Contains(strings.ToLower(searchableText(object)), needle)
 }
 
@@ -442,6 +529,7 @@ func searchableText(object projectedObject) string {
 		Manifest:    object.manifest,
 		Annotations: object.annotations,
 	})
+
 	return string(encoded)
 }
 
@@ -449,6 +537,7 @@ func projectedTitle(manifest contracts.Manifest) string {
 	if len(manifest.Titles) > 0 {
 		return manifest.Titles[0].Value
 	}
+
 	return manifest.ObjectID
 }
 
@@ -459,7 +548,9 @@ func facetKinds(facets []contracts.Facet) []string {
 			values = append(values, facet.Kind)
 		}
 	}
+
 	sort.Strings(values)
+
 	return values
 }
 
@@ -469,6 +560,7 @@ func hasAnyFacet(facets []contracts.Facet, wanted []string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -480,21 +572,26 @@ func matchesProvenance(
 		len(filter.ExternalIDs) == 0 {
 		return true
 	}
+
 	for _, item := range items {
 		if len(filter.SourceKinds) > 0 &&
 			!containsString(filter.SourceKinds, item.SourceKind) {
 			continue
 		}
+
 		if len(filter.SourceNames) > 0 &&
 			!containsString(filter.SourceNames, item.SourceName) {
 			continue
 		}
+
 		if len(filter.ExternalIDs) > 0 &&
 			!containsString(filter.ExternalIDs, item.ExternalID) {
 			continue
 		}
+
 		return true
 	}
+
 	return false
 }
 
@@ -506,11 +603,13 @@ func matchesAnyRelationship(
 		len(filter.Roles) == 0 && filter.Any == "" {
 		return true
 	}
+
 	for _, relationship := range relationships {
 		if matchesRelationship(relationship, filter) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -521,19 +620,24 @@ func matchesRelationship(
 	if len(filter.Types) > 0 && !containsString(filter.Types, relationship.Type) {
 		return false
 	}
+
 	if filter.From != "" && relationship.From != filter.From {
 		return false
 	}
+
 	if filter.To != "" && relationship.To != filter.To {
 		return false
 	}
+
 	if len(filter.Roles) > 0 && !containsString(filter.Roles, relationship.Role) {
 		return false
 	}
+
 	if filter.Any != "" && relationship.From != filter.Any &&
 		relationship.To != filter.Any {
 		return false
 	}
+
 	return true
 }
 
@@ -543,6 +647,7 @@ func matchesCompoundRoles(parts []contracts.CompoundPart, roles []string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -554,14 +659,18 @@ func pageSearchResults(
 	if offset < 0 {
 		offset = 0
 	}
+
 	if offset >= len(results) {
 		return nil
 	}
+
 	limit = normalizedLimit(limit)
+
 	end := offset + limit
 	if end > len(results) {
 		end = len(results)
 	}
+
 	return results[offset:end]
 }
 
@@ -569,9 +678,11 @@ func normalizedLimit(limit int) int {
 	if limit <= 0 {
 		return 50
 	}
+
 	if limit > 1000 {
 		return 1000
 	}
+
 	return limit
 }
 
@@ -581,6 +692,7 @@ func containsString(values []string, value string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -593,6 +705,7 @@ func containsDigest(
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -602,6 +715,7 @@ func containsAnalyzerSpec(values []contracts.AnalyzerSpec, name string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -611,11 +725,13 @@ func requiredAnalyzerStatuses(
 	request contracts.AnalysisStatusRequest,
 ) []contracts.AnalysisStatus {
 	statuses := []contracts.AnalysisStatus{}
+
 	for _, analyzer := range request.Analyzers {
 		if len(request.AnalyzerNames) > 0 &&
 			!containsString(request.AnalyzerNames, analyzer.Name) {
 			continue
 		}
+
 		annotation, ok := annotationsByName[analyzer.Name]
 		if !ok {
 			statuses = append(statuses, contracts.AnalysisStatus{
@@ -625,8 +741,10 @@ func requiredAnalyzerStatuses(
 				Status:       "missing",
 				Data:         map[string]any{"required_version": analyzer.Version},
 			})
+
 			continue
 		}
+
 		if analyzer.Version != "" && annotation.AnalyzerVer != analyzer.Version {
 			statuses = append(statuses, contracts.AnalysisStatus{
 				ObjectDigest: digest,
@@ -639,12 +757,15 @@ func requiredAnalyzerStatuses(
 					"required_version": analyzer.Version,
 				},
 			})
+
 			continue
 		}
+
 		status := "complete"
 		if value, ok := annotation.Data["status"].(string); ok && value != "" {
 			status = value
 		}
+
 		statuses = append(statuses, contracts.AnalysisStatus{
 			ObjectDigest: annotation.ObjectDigest,
 			AnalyzerName: annotation.AnalyzerName,
@@ -654,6 +775,7 @@ func requiredAnalyzerStatuses(
 			Data:         annotation.Data,
 		})
 	}
+
 	return statuses
 }
 

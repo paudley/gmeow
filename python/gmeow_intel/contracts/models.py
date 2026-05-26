@@ -61,3 +61,14 @@ class Annotation(BaseModel):
     analyzer_name: str = ""
     analyzer_version: str = ""
     data: dict[str, object] = Field(default_factory=dict)
+
+
+class ExternalCommandRequest(BaseModel):
+    """Describe the JSON request sent by the Go external analyzer adapter."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    job: AnalyzerJob
+    manifest: dict[str, object]
+    text: str = ""

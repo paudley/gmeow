@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
@@ -37,30 +38,30 @@ type Options struct {
 }
 
 type Loaded struct {
-	Path             string
 	Config           Config
-	Resolved         Resolved
 	SecretReferences map[string]int
+	Path             string
+	Resolved         Resolved
 }
 
 type Config struct {
+	Secrets    map[string]string `toml:"secrets"`
+	RPC        RPCConfig         `toml:"rpc"`
+	RabbitMQ   RabbitMQConfig    `toml:"rabbitmq"`
+	Postgres   PostgresConfig    `toml:"postgres"`
 	System     SystemConfig      `toml:"system"`
 	Filestore  FilestoreConfig   `toml:"filestore"`
-	RPC        RPCConfig         `toml:"rpc"`
-	Postgres   PostgresConfig    `toml:"postgres"`
-	RabbitMQ   RabbitMQConfig    `toml:"rabbitmq"`
-	Scheduler  SchedulerConfig   `toml:"scheduler"`
+	Analysis   AnalysisConfig    `toml:"analysis"`
 	Interfaces []InterfaceConfig `toml:"interfaces"`
 	Sources    []SourceConfig    `toml:"sources"`
-	Analysis   AnalysisConfig    `toml:"analysis"`
 	Search     SearchConfig      `toml:"search"`
-	Secrets    map[string]string `toml:"secrets"`
+	Scheduler  SchedulerConfig   `toml:"scheduler"`
 }
 
 type SystemConfig struct {
-	ConfigVersion int    `toml:"config_version"`
 	InstanceID    string `toml:"instance_id"`
 	DataDir       string `toml:"data_dir"`
+	ConfigVersion int    `toml:"config_version"`
 }
 
 type FilestoreConfig struct {
@@ -80,27 +81,27 @@ type RPCEndpointConfig struct {
 
 type PostgresConfig struct {
 	Host     string `toml:"host"`
-	Port     int    `toml:"port"`
 	Database string `toml:"database"`
 	User     string `toml:"user"`
 	SSLMode  string `toml:"ssl_mode"`
+	Port     int    `toml:"port"`
 }
 
 type RabbitMQConfig struct {
 	Host      string `toml:"host"`
-	Port      int    `toml:"port"`
 	User      string `toml:"user"`
 	VHost     string `toml:"vhost"`
 	TestUser  string `toml:"test_user"`
 	TestVHost string `toml:"test_vhost"`
+	Port      int    `toml:"port"`
 }
 
 type SchedulerConfig struct {
 	ScanInterval         string            `toml:"scan_interval"`
-	RetryLimit           int               `toml:"retry_limit"`
 	RetryBackoff         string            `toml:"retry_backoff"`
 	QueuePrefix          string            `toml:"queue_prefix"`
 	Priorities           SchedulerPriority `toml:"priorities"`
+	RetryLimit           int               `toml:"retry_limit"`
 	DeadLetterInspectMax int               `toml:"dead_letter_inspect_max"`
 }
 
@@ -140,10 +141,10 @@ type AnalyzerConfig struct {
 	Name       string   `toml:"name"`
 	Version    string   `toml:"version"`
 	WorkerKind string   `toml:"worker_kind"`
-	MediaTypes []string `toml:"media_types"`
 	Command    string   `toml:"command"`
-	Args       []string `toml:"args"`
 	Timeout    string   `toml:"timeout"`
+	MediaTypes []string `toml:"media_types"`
+	Args       []string `toml:"args"`
 }
 
 type SearchConfig struct {
@@ -158,21 +159,21 @@ type SearchBackendConfig struct {
 }
 
 type Resolved struct {
+	RPC       ResolvedRPC
 	Postgres  ResolvedPostgres
 	RabbitMQ  ResolvedRabbitMQ
-	RPC       ResolvedRPC
-	Scheduler ResolvedScheduler
 	Sources   []ResolvedSource
 	Worker    ResolvedWorker
+	Scheduler ResolvedScheduler
 }
 
 type ResolvedPostgres struct {
 	Host     string
-	Port     int
 	Database string
 	User     string
 	Password string
 	SSLMode  string
+	Port     int
 }
 
 type ResolvedRabbitMQ struct {
@@ -193,10 +194,10 @@ type ResolvedRPCEndpoint struct {
 
 type ResolvedScheduler struct {
 	ScanInterval         string
-	RetryLimit           int
 	RetryBackoff         string
 	QueuePrefix          string
 	Priorities           SchedulerPriority
+	RetryLimit           int
 	DeadLetterInspectMax int
 }
 
@@ -211,14 +212,17 @@ type ResolvedWorker struct {
 
 func Load(options Options) (*Loaded, error) {
 	path := selectedPath(options.Path)
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
+
 	unlockKey, unlockKeyPath, err := readUnlockKey()
 	if err != nil {
 		return nil, err
 	}
+
 	var generic map[string]any
 	if _, err := toml.Decode(string(raw), &generic); err != nil {
 		if isOpaqueSOPSConfig(raw) {
@@ -227,26 +231,35 @@ func Load(options Options) (*Loaded, error) {
 				path,
 			)
 		}
+
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+
 	if err := rejectForbiddenPointers(generic); err != nil {
 		return nil, err
 	}
+
 	var parsed Config
+
 	metadata, err := toml.Decode(string(raw), &parsed)
 	if err != nil {
 		return nil, fmt.Errorf("decode config %s: %w", path, err)
 	}
+
 	if undecoded := metadata.Undecoded(); len(undecoded) > 0 {
 		return nil, fmt.Errorf("unknown config key %q", undecoded[0].String())
 	}
+
 	if parsed.Secrets == nil {
 		parsed.Secrets = map[string]string{}
 	}
+
 	if err := validateConfig(parsed); err != nil {
 		return nil, err
 	}
+
 	references := secretReferences(parsed)
+
 	resolvedSecretValues, err := resolveSecretLeaves(
 		parsed.Secrets,
 		references,
@@ -256,14 +269,18 @@ func Load(options Options) (*Loaded, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	parsed.Secrets = resolvedSecretValues
+
 	resolved, err := resolveSecrets(parsed, references)
 	if err != nil {
 		return nil, err
 	}
+
 	if err := verifyDependencies(resolved); err != nil {
 		return nil, err
 	}
+
 	return &Loaded{
 		Path:             path,
 		Config:           parsed,
@@ -277,7 +294,9 @@ func SecretNames(loaded *Loaded) []string {
 	for name := range loaded.Config.Secrets {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	return names
 }
 
@@ -285,9 +304,11 @@ func selectedPath(path string) string {
 	if strings.TrimSpace(path) != "" {
 		return path
 	}
+
 	if envPath := strings.TrimSpace(os.Getenv(configEnvName)); envPath != "" {
 		return envPath
 	}
+
 	return defaultConfigPath
 }
 
@@ -295,6 +316,7 @@ func readUnlockKey() (string, string, error) {
 	if value := strings.TrimSpace(os.Getenv(unlockEnvName)); value != "" {
 		return value, "", nil
 	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", "", fmt.Errorf(
@@ -303,11 +325,14 @@ func readUnlockKey() (string, string, error) {
 			err,
 		)
 	}
+
 	path := filepath.Join(home, ".config", "gmeow", "key.txt")
+
 	value, err := os.ReadFile(path)
 	if err != nil {
 		return "", "", fmt.Errorf("%s or %s is required before startup", unlockEnvName, path)
 	}
+
 	key := strings.TrimSpace(string(value))
 	if key == "" {
 		return "", "", fmt.Errorf(
@@ -317,11 +342,13 @@ func readUnlockKey() (string, string, error) {
 			path,
 		)
 	}
+
 	return key, path, nil
 }
 
 func isOpaqueSOPSConfig(raw []byte) bool {
 	trimmed := bytes.TrimSpace(raw)
+
 	return bytes.HasPrefix(trimmed, []byte(`{"data"`)) ||
 		bytes.HasPrefix(trimmed, []byte("{\n\t\"data\"")) ||
 		bytes.HasPrefix(trimmed, []byte("{\n  \"data\""))
@@ -334,15 +361,15 @@ func resolveSecretLeaves(
 	unlockKeyPath string,
 ) (map[string]string, error) {
 	resolved := make(map[string]string, len(secrets))
-	for name, value := range secrets {
-		resolved[name] = value
-	}
+	maps.Copy(resolved, secrets)
+
 	for name := range references {
 		value := strings.TrimSpace(secrets[name])
 		if value == "" {
 			return nil, fmt.Errorf("referenced secret %q is missing or empty", name)
 		}
 	}
+
 	for name := range references {
 		value := strings.TrimSpace(secrets[name])
 		if !isSOPSLeaf(value) {
@@ -351,17 +378,21 @@ func resolveSecretLeaves(
 				name,
 			)
 		}
+
 		decrypted, err := decryptSOPSLeaf(name, value, unlockKey, unlockKeyPath)
 		if err != nil {
 			return nil, err
 		}
+
 		resolved[name] = decrypted
 	}
+
 	return resolved, nil
 }
 
 func isSOPSLeaf(value string) bool {
 	trimmed := strings.TrimSpace(value)
+
 	return strings.HasPrefix(trimmed, "{") &&
 		strings.Contains(trimmed, `"data"`) &&
 		strings.Contains(trimmed, `"sops"`)
@@ -378,17 +409,21 @@ func decryptSOPSLeaf(name, value, unlockKey, unlockKeyPath string) (string, erro
 		"/dev/stdin",
 	)
 	command.Stdin = strings.NewReader(value)
+
 	env := append(os.Environ(), unlockEnvName+"="+unlockKey)
 	if unlockKeyPath != "" {
 		env = append(env, "SOPS_AGE_KEY_FILE="+unlockKeyPath)
 	} else {
 		env = append(env, "SOPS_AGE_KEY="+unlockKey)
 	}
+
 	command.Env = env
+
 	output, err := command.Output()
 	if err == nil {
 		return string(output), nil
 	}
+
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		return "", fmt.Errorf(
@@ -397,6 +432,7 @@ func decryptSOPSLeaf(name, value, unlockKey, unlockKeyPath string) (string, erro
 			strings.TrimSpace(string(exitErr.Stderr)),
 		)
 	}
+
 	return "", fmt.Errorf("decrypt secret %q: %w", name, err)
 }
 
@@ -409,28 +445,34 @@ func rejectForbiddenPointersAt(value any, path []string) error {
 	case map[string]any:
 		for key, child := range typed {
 			next := append(append([]string{}, path...), key)
+
 			joined := strings.Join(next, ".")
 			switch joined {
 			case "secrets.file", "secrets.sops_file", "config.file":
 				return fmt.Errorf("forbidden secondary config pointer %q", joined)
 			}
-			if err := rejectForbiddenPointersAt(child, next); err != nil {
+
+			err := rejectForbiddenPointersAt(child, next)
+			if err != nil {
 				return err
 			}
 		}
 	case []map[string]any:
 		for _, child := range typed {
-			if err := rejectForbiddenPointersAt(child, path); err != nil {
+			err := rejectForbiddenPointersAt(child, path)
+			if err != nil {
 				return err
 			}
 		}
 	case []any:
 		for _, child := range typed {
-			if err := rejectForbiddenPointersAt(child, path); err != nil {
+			err := rejectForbiddenPointersAt(child, path)
+			if err != nil {
 				return err
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -438,91 +480,121 @@ func validateConfig(parsed Config) error {
 	if parsed.System.ConfigVersion != currentConfigVersion {
 		return fmt.Errorf("unsupported config version %d", parsed.System.ConfigVersion)
 	}
+
 	if strings.TrimSpace(parsed.System.InstanceID) == "" {
 		return errors.New("system.instance_id is required")
 	}
+
 	if strings.TrimSpace(parsed.System.DataDir) == "" {
 		return errors.New("system.data_dir is required")
 	}
+
 	if strings.TrimSpace(parsed.Filestore.Root) == "" {
 		return errors.New("filestore.root is required")
 	}
-	if err := validateRPCEndpoint("rpc.filestore", parsed.RPC.Filestore); err != nil {
+
+	err := validateRPCEndpoint("rpc.filestore", parsed.RPC.Filestore)
+	if err != nil {
 		return err
 	}
-	if err := validateRPCEndpoint("rpc.scheduler", parsed.RPC.Scheduler); err != nil {
+
+	err = validateRPCEndpoint("rpc.scheduler", parsed.RPC.Scheduler)
+	if err != nil {
 		return err
 	}
-	if err := validateRPCEndpoint("rpc.query", parsed.RPC.Query); err != nil {
+
+	err = validateRPCEndpoint("rpc.query", parsed.RPC.Query)
+	if err != nil {
 		return err
 	}
+
 	if strings.TrimSpace(parsed.Postgres.Host) == "" {
 		return errors.New("postgres.host is required")
 	}
+
 	if parsed.Postgres.Port <= 0 {
 		return errors.New("postgres.port must be positive")
 	}
+
 	if strings.TrimSpace(parsed.Postgres.Database) == "" {
 		return errors.New("postgres.database is required")
 	}
+
 	if strings.TrimSpace(parsed.Postgres.User) == "" {
 		return errors.New("postgres.user is required")
 	}
+
 	if strings.TrimSpace(parsed.RabbitMQ.Host) == "" {
 		return errors.New("rabbitmq.host is required")
 	}
+
 	if parsed.RabbitMQ.Host != "127.0.0.1" {
 		return errors.New("rabbitmq.host must be 127.0.0.1")
 	}
+
 	if parsed.RabbitMQ.Port <= 0 {
 		return errors.New("rabbitmq.port must be positive")
 	}
+
 	if strings.TrimSpace(parsed.RabbitMQ.User) == "" {
 		return errors.New("rabbitmq.user is required")
 	}
+
 	if strings.TrimSpace(parsed.RabbitMQ.VHost) == "" {
 		return errors.New("rabbitmq.vhost is required")
 	}
+
 	if parsed.RabbitMQ.VHost != "gmeow" {
 		return errors.New("rabbitmq.vhost must be gmeow")
 	}
+
 	if strings.TrimSpace(parsed.RabbitMQ.TestUser) == "" {
 		return errors.New("rabbitmq.test_user is required")
 	}
+
 	if strings.TrimSpace(parsed.RabbitMQ.TestVHost) == "" {
 		return errors.New("rabbitmq.test_vhost is required")
 	}
+
 	if parsed.RabbitMQ.TestVHost != "gmeow-test" {
 		return errors.New("rabbitmq.test_vhost must be gmeow-test")
 	}
+
 	if strings.TrimSpace(parsed.Scheduler.QueuePrefix) != "" &&
 		parsed.Scheduler.QueuePrefix != "gmeow." &&
 		parsed.Scheduler.QueuePrefix != "gmeow.test." {
 		return errors.New("scheduler.queue_prefix must be gmeow. or gmeow.test.")
 	}
+
 	for _, source := range parsed.Sources {
 		if strings.TrimSpace(source.Name) == "" {
 			return errors.New("source requires name")
 		}
+
 		if strings.TrimSpace(source.Kind) == "" {
 			return fmt.Errorf("source %q requires kind", source.Name)
 		}
 	}
+
 	return nil
 }
 
 func validateRPCEndpoint(name string, endpoint RPCEndpointConfig) error {
 	network := strings.TrimSpace(endpoint.Network)
+
 	address := strings.TrimSpace(endpoint.Address)
 	if network == "" && address == "" {
 		return nil
 	}
+
 	if network == "" {
 		return fmt.Errorf("%s.network is required when address is set", name)
 	}
+
 	if address == "" {
 		return fmt.Errorf("%s.address is required when network is set", name)
 	}
+
 	switch network {
 	case "unix":
 		if !filepath.IsAbs(address) {
@@ -533,6 +605,7 @@ func validateRPCEndpoint(name string, endpoint RPCEndpointConfig) error {
 		if err != nil {
 			return fmt.Errorf("%s.address must be host:port for tcp: %w", name, err)
 		}
+
 		parsed := net.ParseIP(host)
 		if parsed == nil || !parsed.IsLoopback() {
 			return fmt.Errorf("%s.address must bind to a loopback IP", name)
@@ -540,6 +613,7 @@ func validateRPCEndpoint(name string, endpoint RPCEndpointConfig) error {
 	default:
 		return fmt.Errorf("%s.network must be unix or tcp", name)
 	}
+
 	return nil
 }
 
@@ -554,6 +628,7 @@ func secretReferences(parsed Config) map[string]int {
 	add(postgresPasswordName)
 	add(rabbitPasswordName)
 	add(testRabbitPassName)
+
 	return references
 }
 
@@ -563,6 +638,7 @@ func resolveSecrets(parsed Config, references map[string]int) (Resolved, error) 
 			return Resolved{}, fmt.Errorf("referenced secret %q is missing or empty", name)
 		}
 	}
+
 	resolved := Resolved{
 		Postgres: ResolvedPostgres{
 			Host:     parsed.Postgres.Host,
@@ -585,6 +661,7 @@ func resolveSecrets(parsed Config, references map[string]int) (Resolved, error) 
 		parsed.Secrets[rabbitPasswordName],
 		parsed.RabbitMQ.VHost,
 	)
+
 	resolved.RabbitMQ.TestURL = rabbitMQURL(
 		parsed.RabbitMQ.Host,
 		parsed.RabbitMQ.Port,
@@ -598,6 +675,7 @@ func resolveSecrets(parsed Config, references map[string]int) (Resolved, error) 
 			Kind: source.Kind,
 		})
 	}
+
 	return resolved, nil
 }
 
@@ -630,10 +708,12 @@ func resolvedRPCEndpoint(
 	if network == "" {
 		network = defaultNetwork
 	}
+
 	address := strings.TrimSpace(raw.Address)
 	if address == "" {
 		address = defaultAddress
 	}
+
 	return ResolvedRPCEndpoint{Network: network, Address: address}
 }
 
@@ -649,15 +729,22 @@ func rabbitMQURL(host string, port int, user, password, vhost string) string {
 func verifyDependencies(resolved Resolved) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := verifyPostgres(ctx, resolved.Postgres); err != nil {
+
+	err := verifyPostgres(ctx, resolved.Postgres)
+	if err != nil {
 		return err
 	}
-	if err := verifyRabbitMQ("production", resolved.RabbitMQ.URL); err != nil {
+
+	err = verifyRabbitMQ("production", resolved.RabbitMQ.URL)
+	if err != nil {
 		return err
 	}
-	if err := verifyRabbitMQ("test", resolved.RabbitMQ.TestURL); err != nil {
+
+	err = verifyRabbitMQ("test", resolved.RabbitMQ.TestURL)
+	if err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -667,9 +754,11 @@ func verifyPostgres(ctx context.Context, postgres ResolvedPostgres) error {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
 	defer conn.Close(context.Background())
+
 	if err := conn.Ping(ctx); err != nil {
 		return fmt.Errorf("ping postgres: %w", err)
 	}
+
 	return nil
 }
 
@@ -678,6 +767,7 @@ func postgresURL(postgres ResolvedPostgres) string {
 	if postgres.SSLMode != "" {
 		values.Set("sslmode", postgres.SSLMode)
 	}
+
 	return (&url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(postgres.User, postgres.Password),
@@ -694,6 +784,7 @@ func verifyRabbitMQ(label, rawURL string) error {
 	if err != nil {
 		return fmt.Errorf("connect rabbitmq %s: %w", label, err)
 	}
+
 	return conn.Close()
 }
 
@@ -713,24 +804,31 @@ func resolvedScheduler(raw SchedulerConfig) ResolvedScheduler {
 	if resolved.RetryLimit <= 0 {
 		resolved.RetryLimit = 3
 	}
+
 	if resolved.DeadLetterInspectMax <= 0 {
 		resolved.DeadLetterInspectMax = 20
 	}
+
 	if resolved.Priorities.Interactive == 0 {
 		resolved.Priorities.Interactive = 100
 	}
+
 	if resolved.Priorities.Forced == 0 {
 		resolved.Priorities.Forced = 90
 	}
+
 	if resolved.Priorities.FreshIngest == 0 {
 		resolved.Priorities.FreshIngest = 70
 	}
+
 	if resolved.Priorities.Repair == 0 {
 		resolved.Priorities.Repair = 50
 	}
+
 	if resolved.Priorities.Background == 0 {
 		resolved.Priorities.Background = 10
 	}
+
 	return resolved
 }
 
@@ -739,15 +837,19 @@ func validateRabbitMQURL(rawURL, expectedVHost, field string) error {
 	if err != nil {
 		return fmt.Errorf("%s must be a valid amqp URL: %w", field, err)
 	}
+
 	if parsed.Scheme != "amqp" && parsed.Scheme != "amqps" {
 		return fmt.Errorf("%s must use amqp or amqps scheme", field)
 	}
+
 	if parsed.Hostname() != "127.0.0.1" {
 		return fmt.Errorf("%s must use host 127.0.0.1", field)
 	}
+
 	if strings.TrimPrefix(parsed.EscapedPath(), "/") != expectedVHost {
 		return fmt.Errorf("%s must use RabbitMQ vhost /%s", field, expectedVHost)
 	}
+
 	return nil
 }
 
@@ -757,5 +859,6 @@ func firstNonEmpty(values ...string) string {
 			return strings.TrimSpace(value)
 		}
 	}
+
 	return ""
 }

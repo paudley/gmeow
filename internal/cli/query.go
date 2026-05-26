@@ -38,6 +38,7 @@ func newQueryCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newQuerySearchCommand(out, configPath))
 	command.AddCommand(newQueryAgeCommand(out, configPath))
 	command.AddCommand(newQueryServeCommand(out, configPath, "serve"))
+
 	return command
 }
 
@@ -54,11 +55,13 @@ func newQueryServeCommand(
 			if err != nil {
 				return err
 			}
+
 			index, err := openQueryIndex(command.Context(), loaded)
 			if err != nil {
 				return err
 			}
 			defer index.Close()
+
 			endpoint := rpcEndpoint(loaded.Resolved.RPC.Query)
 			if _, err := fmt.Fprintf(
 				out,
@@ -68,6 +71,7 @@ func newQueryServeCommand(
 			); err != nil {
 				return err
 			}
+
 			return rpc.Serve(command.Context(), endpoint, func(server *grpc.Server) {
 				pb.RegisterQueryServiceServer(server, rpc.NewQueryServer(index))
 			})
@@ -84,6 +88,7 @@ func newQueryMigrateCommand(configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			return querypg.Migrate(command.Context(), queryPostgresConfig(loaded))
 		},
 	}
@@ -98,15 +103,18 @@ func newQueryRebuildCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			index, err := openQueryIndex(command.Context(), loaded)
 			if err != nil {
 				return err
 			}
 			defer index.Close()
+
 			report, err := index.RebuildReport(command.Context())
 			if err != nil {
 				return err
 			}
+
 			_, err = fmt.Fprintf(
 				out,
 				"query rebuild: scanned=%d projected=%d failed=%d elapsed=%s\n",
@@ -115,6 +123,7 @@ func newQueryRebuildCommand(out io.Writer, configPath *string) *cobra.Command {
 				report.Failed,
 				report.Elapsed,
 			)
+
 			return err
 		},
 	}
@@ -122,6 +131,7 @@ func newQueryRebuildCommand(out io.Writer, configPath *string) *cobra.Command {
 
 func newQueryProjectChangedCommand(out io.Writer, configPath *string) *cobra.Command {
 	var sinceValue string
+
 	command := &cobra.Command{
 		Use:   "project-changed",
 		Short: "Project changed FILESTORE annotations into QUERY",
@@ -130,19 +140,23 @@ func newQueryProjectChangedCommand(out io.Writer, configPath *string) *cobra.Com
 			if err != nil {
 				return err
 			}
+
 			since, err := parseSince(sinceValue)
 			if err != nil {
 				return err
 			}
+
 			index, err := openQueryIndex(command.Context(), loaded)
 			if err != nil {
 				return err
 			}
 			defer index.Close()
+
 			report, err := index.ProjectChangedReport(command.Context(), since)
 			if err != nil {
 				return err
 			}
+
 			_, err = fmt.Fprintf(
 				out,
 				"query project-changed: scanned=%d projected=%d failed=%d elapsed=%s\n",
@@ -151,11 +165,13 @@ func newQueryProjectChangedCommand(out io.Writer, configPath *string) *cobra.Com
 				report.Failed,
 				report.Elapsed,
 			)
+
 			return err
 		},
 	}
 	command.Flags().
 		StringVar(&sinceValue, "since", "", "only project objects changed after RFC3339 timestamp")
+
 	return command
 }
 
@@ -169,33 +185,42 @@ func newQueryProjectCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			index, err := openQueryIndex(command.Context(), loaded)
 			if err != nil {
 				return err
 			}
 			defer index.Close()
+
 			store, err := openProjectionStore(loaded)
 			if err != nil {
 				return err
 			}
+
 			digest := contracts.ObjectDigest(args[0])
 			projected := false
+
 			if err := store.WalkProjection(
 				command.Context(),
 				func(object filestore.ProjectionObject) error {
 					if object.Digest != digest {
 						return nil
 					}
+
 					projected = true
+
 					return index.ProjectObject(command.Context(), object)
 				},
 			); err != nil {
 				return err
 			}
+
 			if !projected {
 				return fmt.Errorf("object %s was not found in FILESTORE", digest)
 			}
+
 			_, err = fmt.Fprintf(out, "query project: digest=%s\n", digest)
+
 			return err
 		},
 	}
@@ -205,15 +230,18 @@ func parseSince(value string) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
 	}
+
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse --since as RFC3339 timestamp: %w", err)
 	}
+
 	return parsed, nil
 }
 
 func newQuerySearchCommand(out io.Writer, configPath *string) *cobra.Command {
 	var facets []string
+
 	command := &cobra.Command{
 		Use:   "search <text>",
 		Short: "Search projected QUERY objects",
@@ -223,11 +251,13 @@ func newQuerySearchCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			index, err := openQueryIndex(command.Context(), loaded)
 			if err != nil {
 				return err
 			}
 			defer index.Close()
+
 			response, err := index.Search(command.Context(), contracts.SearchRequest{
 				SchemaVersion: contracts.SchemaVersionPhase00,
 				Query:         args[0],
@@ -237,15 +267,19 @@ func newQuerySearchCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			encoded, err := json.MarshalIndent(response, "", "  ")
 			if err != nil {
 				return err
 			}
+
 			_, err = fmt.Fprintln(out, string(encoded))
+
 			return err
 		},
 	}
 	command.Flags().StringSliceVar(&facets, "facet", nil, "facet filter")
+
 	return command
 }
 
@@ -256,6 +290,7 @@ func newQueryAgeCommand(out io.Writer, configPath *string) *cobra.Command {
 	}
 	command.AddCommand(newQueryAgeStatusCommand(out, configPath))
 	command.AddCommand(newQueryAgeCypherCommand(out, configPath))
+
 	return command
 }
 
@@ -269,10 +304,12 @@ func newQueryAgeStatusCommand(out io.Writer, configPath *string) *cobra.Command 
 				return err
 			}
 			defer index.Close()
+
 			status := index.AgeStatus(command.Context())
 			if status.Error != "" {
 				return errors.New(status.Error)
 			}
+
 			_, err = fmt.Fprintf(
 				out,
 				"query age: available=%t graph=%s graphid=%d nodes=%s\n",
@@ -281,14 +318,18 @@ func newQueryAgeStatusCommand(out io.Writer, configPath *string) *cobra.Command 
 				status.GraphID,
 				status.Nodes,
 			)
+
 			return err
 		},
 	}
 }
 
 func newQueryAgeCypherCommand(out io.Writer, configPath *string) *cobra.Command {
-	var columns string
-	var limit int
+	var (
+		columns string
+		limit   int
+	)
+
 	command := &cobra.Command{
 		Use:   "cypher <match-query>",
 		Short: "Run a read-only AGE MATCH query",
@@ -299,21 +340,26 @@ func newQueryAgeCypherCommand(out io.Writer, configPath *string) *cobra.Command 
 				return err
 			}
 			defer index.Close()
+
 			rows, err := index.AgeCypher(command.Context(), args[0], columns, limit)
 			if err != nil {
 				return err
 			}
+
 			encoded, err := json.MarshalIndent(rows, "", "  ")
 			if err != nil {
 				return err
 			}
+
 			_, err = fmt.Fprintln(out, string(encoded))
+
 			return err
 		},
 	}
 	command.Flags().
 		StringVar(&columns, "columns", "value agtype", "AGE result column declaration")
 	command.Flags().IntVar(&limit, "limit", 100, "maximum rows when query omits LIMIT")
+
 	return command
 }
 
@@ -325,6 +371,7 @@ func openQueryIndexFromPath(
 	if err != nil {
 		return nil, err
 	}
+
 	return openQueryIndex(ctx, loaded)
 }
 
@@ -336,10 +383,12 @@ func openQueryIndex(
 	if err != nil {
 		return nil, err
 	}
+
 	config := queryPostgresConfig(loaded)
 	if err := querypg.Migrate(ctx, config); err != nil {
 		return nil, err
 	}
+
 	return querypg.New(ctx, config, store)
 }
 
@@ -348,6 +397,7 @@ func openProjectionStore(loaded *config.Loaded) (*filestore.FilesystemStore, err
 	if err != nil {
 		return nil, err
 	}
+
 	return filestore.NewFilesystemStore(root), nil
 }
 
@@ -363,6 +413,7 @@ func queryPostgresConnString(postgres config.ResolvedPostgres) string {
 	if postgres.SSLMode != "" {
 		values.Set("sslmode", postgres.SSLMode)
 	}
+
 	dsn := url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(postgres.User, postgres.Password),
@@ -370,6 +421,7 @@ func queryPostgresConnString(postgres config.ResolvedPostgres) string {
 		Path:     postgres.Database,
 		RawQuery: values.Encode(),
 	}
+
 	return dsn.String()
 }
 
@@ -378,9 +430,11 @@ func queryMigrationsDir(loaded *config.Loaded) string {
 	if loaded.Path != "" {
 		base = filepath.Dir(loaded.Path)
 	}
+
 	candidate := filepath.Join(base, "migrations", "query")
 	if _, err := os.Stat(candidate); err == nil {
 		return candidate
 	}
+
 	return "migrations/query"
 }

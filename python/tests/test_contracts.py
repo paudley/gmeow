@@ -7,12 +7,19 @@ The tests exercise the minimal Pydantic models shipped for package and release v
 not start worker processes or queues because Phase 00 only defines contracts.
 """
 
-from gmeow_intel.contracts import AnalyzerJob, AnalyzerSpec, Annotation
+from gmeow_intel.analyzers import categories, ner
+from gmeow_intel.contracts import AnalyzerJob, AnalyzerSpec, Annotation, ExternalCommandRequest
 
 
 def _require_equal(actual: object, *, expected: object) -> None:
     if actual != expected:
         message = f"expected {expected!r}, got {actual!r}"
+        raise AssertionError(message)
+
+
+def _require_truthy(value: object) -> None:
+    if not value:
+        message = f"expected truthy value, got {value!r}"
         raise AssertionError(message)
 
 
@@ -29,3 +36,45 @@ def test_annotation_contract_accepts_json_shape() -> None:
     annotation = Annotation(schema_version=1, object_digest="digest", kind="analysis", data={"ok": True})
 
     _require_equal(annotation.data["ok"], expected=True)
+
+
+def test_ner_external_adapter_emits_analysis_annotation() -> None:
+    """Verify the Python NER adapter speaks the Go external command contract."""
+    request = ExternalCommandRequest(
+        schema_version=1,
+        job=AnalyzerJob(
+            schema_version=1,
+            job_id="job-1",
+            analyzer=AnalyzerSpec(name="ner.spacy", version="python-current"),
+            object_digest="digest",
+        ),
+        manifest={"digest": "digest"},
+        text="Alice Smith met Bob in Edmonton.",
+    )
+
+    annotation = ner.analyze(request)
+
+    _require_equal(annotation.kind, expected="analysis")
+    _require_equal(annotation.analyzer_name, expected="ner.spacy")
+    _require_truthy(annotation.data["entities"])
+
+
+def test_category_external_adapter_emits_analysis_annotation() -> None:
+    """Verify the Python category adapter speaks the Go external command contract."""
+    request = ExternalCommandRequest(
+        schema_version=1,
+        job=AnalyzerJob(
+            schema_version=1,
+            job_id="job-1",
+            analyzer=AnalyzerSpec(name="categories.sklearn", version="python-current"),
+            object_digest="digest",
+        ),
+        manifest={"digest": "digest"},
+        text="The invoice and payment receipt are ready.",
+    )
+
+    annotation = categories.analyze(request)
+
+    _require_equal(annotation.kind, expected="analysis")
+    _require_equal(annotation.analyzer_name, expected="categories.sklearn")
+    _require_truthy(annotation.data["categories"])

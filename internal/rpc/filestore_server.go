@@ -18,6 +18,7 @@ import (
 
 type FilestoreServer struct {
 	pb.UnimplementedFilestoreServiceServer
+
 	store filestore.Store
 }
 
@@ -36,6 +37,7 @@ func (server *FilestoreServer) LookupSourceObject(
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.LookupSourceObjectResponse{Digest: string(digest), Found: found}, nil
 }
 
@@ -50,6 +52,7 @@ func (server *FilestoreServer) TryAcquireSourceIngest(
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.TryAcquireSourceIngestResponse{
 		Claim:    ToPBSourceIngestClaim(claim),
 		Acquired: acquired,
@@ -64,6 +67,7 @@ func (server *FilestoreServer) ReleaseSourceIngest(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	return &pb.Empty{}, server.store.ReleaseSourceIngest(ctx, claim)
 }
 
@@ -74,20 +78,25 @@ func (server *FilestoreServer) PutObject(
 	if err != nil {
 		return err
 	}
+
 	start := startFrame.GetStart()
 	if start == nil {
 		return status.Error(codes.InvalidArgument, "first PutObject frame must be start")
 	}
+
 	facets, err := FromPBFacets(start.GetFacets())
 	if err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	provenance, err := FromPBProvenance(start.GetProvenance())
 	if err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	reader, writer := io.Pipe()
 	result := make(chan putResult, 1)
+
 	go func() {
 		digest, putErr := server.store.Put(stream.Context(), filestore.PutRequest{
 			Reader:        reader,
@@ -100,35 +109,46 @@ func (server *FilestoreServer) PutObject(
 		})
 		result <- putResult{digest: digest, err: putErr}
 	}()
+
 	for {
 		frame, recvErr := stream.Recv()
 		if errors.Is(recvErr, io.EOF) {
 			break
 		}
+
 		if recvErr != nil {
 			_ = writer.CloseWithError(recvErr)
+
 			return recvErr
 		}
+
 		if frame.GetFinish() != nil {
 			break
 		}
+
 		data := frame.GetData()
 		if data == nil {
 			_ = writer.CloseWithError(errors.New("PutObject frame must be data or finish"))
+
 			return status.Error(codes.InvalidArgument, "PutObject frame must be data or finish")
 		}
+
 		if _, err := writer.Write(data); err != nil {
 			_ = writer.CloseWithError(err)
+
 			return err
 		}
 	}
+
 	if err := writer.Close(); err != nil {
 		return err
 	}
+
 	put := <-result
 	if put.err != nil {
 		return put.err
 	}
+
 	return stream.SendAndClose(&pb.PutObjectResponse{Digest: string(put.digest)})
 }
 
@@ -140,6 +160,7 @@ func (server *FilestoreServer) AttachProvenance(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	return &pb.Empty{}, server.store.AttachProvenance(
 		ctx,
 		contracts.ObjectDigest(request.GetDigest()),
@@ -155,14 +176,17 @@ func (server *FilestoreServer) PutCompound(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	provenance, err := FromPBProvenance(request.GetProvenance())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	parts, err := FromPBCompoundParts(request.GetParts())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	digest, err := server.store.PutCompound(ctx, filestore.CompoundPutRequest{
 		ObjectID:      request.GetObjectId(),
 		MediaType:     request.GetMediaType(),
@@ -176,6 +200,7 @@ func (server *FilestoreServer) PutCompound(
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.PutCompoundResponse{Digest: string(digest)}, nil
 }
 
@@ -191,19 +216,23 @@ func (server *FilestoreServer) Open(
 		return err
 	}
 	defer reader.Close()
+
 	buffer := make([]byte, 1024*1024)
 	for {
 		n, readErr := reader.Read(buffer)
 		if n > 0 {
-			if err := stream.Send(
+			err := stream.Send(
 				&pb.ObjectChunk{Data: append([]byte{}, buffer[:n]...)},
-			); err != nil {
+			)
+			if err != nil {
 				return err
 			}
 		}
+
 		if errors.Is(readErr, io.EOF) {
 			return nil
 		}
+
 		if readErr != nil {
 			return readErr
 		}
@@ -221,10 +250,12 @@ func (server *FilestoreServer) ReadManifest(
 	if err != nil {
 		return nil, err
 	}
+
 	converted, err := ToPBManifest(manifest)
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.ReadManifestResponse{Manifest: converted}, nil
 }
 
@@ -239,10 +270,12 @@ func (server *FilestoreServer) GetStructure(
 	if err != nil {
 		return nil, err
 	}
+
 	converted, err := ToPBStructure(structure)
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.GetStructureResponse{Structure: converted}, nil
 }
 
@@ -254,6 +287,7 @@ func (server *FilestoreServer) WriteAnnotation(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	return &pb.Empty{}, server.store.WriteAnnotation(ctx, annotation)
 }
 
@@ -265,6 +299,7 @@ func (server *FilestoreServer) WriteOverlays(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	return &pb.Empty{}, server.store.WriteOverlays(
 		ctx,
 		contracts.ObjectDigest(request.GetDigest()),
@@ -280,6 +315,7 @@ func (server *FilestoreServer) WriteSourceCursor(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	return &pb.Empty{}, server.store.WriteSourceCursor(ctx, cursor)
 }
 
@@ -291,6 +327,7 @@ func (server *FilestoreServer) Verify(
 	if err != nil {
 		return nil, err
 	}
+
 	findings := make([]*pb.VerifyFinding, 0, len(report.Findings))
 	for _, finding := range report.Findings {
 		findings = append(findings, &pb.VerifyFinding{
@@ -300,6 +337,7 @@ func (server *FilestoreServer) Verify(
 			Message: finding.Message,
 		})
 	}
+
 	return &pb.VerifyResponse{
 		Status:   string(report.Status),
 		Checked:  int32(report.Checked),
@@ -308,6 +346,6 @@ func (server *FilestoreServer) Verify(
 }
 
 type putResult struct {
-	digest contracts.ObjectDigest
 	err    error
+	digest contracts.ObjectDigest
 }

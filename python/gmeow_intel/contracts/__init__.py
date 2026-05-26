@@ -11,6 +11,6 @@ See Also:
 
 """
 
-from .models import AnalyzerJob, AnalyzerSpec, Annotation
+from .models import AnalyzerJob, AnalyzerSpec, Annotation, ExternalCommandRequest
 
-__all__ = ["AnalyzerJob", "AnalyzerSpec", "Annotation"]
+__all__ = ["AnalyzerJob", "AnalyzerSpec", "Annotation", "ExternalCommandRequest"]

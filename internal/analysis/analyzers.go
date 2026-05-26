@@ -58,7 +58,9 @@ func (TextExtractAnalyzer) Analyze(
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
+
 	text := extractText(content, manifest.MediaType)
+
 	return contracts.Annotation{
 		Data: map[string]any{
 			"text":       text,
@@ -93,10 +95,12 @@ func (RFC822HeaderAnalyzer) Analyze(
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
+
 	message, err := mail.ReadMessage(bytes.NewReader(content))
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
+
 	data := map[string]any{
 		"message_id":  message.Header.Get("Message-Id"),
 		"subject":     message.Header.Get("Subject"),
@@ -111,6 +115,7 @@ func (RFC822HeaderAnalyzer) Analyze(
 	if date, err := message.Header.Date(); err == nil {
 		data["date_rfc3339"] = date.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
+
 	return contracts.Annotation{Data: data}, nil
 }
 
@@ -136,6 +141,7 @@ func (MetadataAnalyzer) Analyze(
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
+
 	return contracts.Annotation{Data: map[string]any{
 		"object_id":          manifest.ObjectID,
 		"identity_strategy":  manifest.IdentityStrategy,
@@ -171,6 +177,7 @@ func (GraphFactAnalyzer) Analyze(
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
+
 	facts := make(
 		[]map[string]any,
 		0,
@@ -180,12 +187,14 @@ func (GraphFactAnalyzer) Analyze(
 		if provenance.SourceKind == "" {
 			continue
 		}
+
 		facts = append(facts, map[string]any{
 			"subject":   string(manifest.ObjectDigest),
 			"predicate": "observed_from",
 			"object":    provenance.SourceKind + ":" + provenance.SourceName,
 		})
 	}
+
 	for _, relationship := range manifest.Relationships {
 		facts = append(facts, map[string]any{
 			"subject":   string(relationship.From),
@@ -194,9 +203,11 @@ func (GraphFactAnalyzer) Analyze(
 			"role":      relationship.Role,
 		})
 	}
+
 	sort.SliceStable(facts, func(left, right int) bool {
 		return facts[left]["predicate"].(string) < facts[right]["predicate"].(string)
 	})
+
 	return contracts.Annotation{Data: map[string]any{"facts": facts}}, nil
 }
 
@@ -223,12 +234,15 @@ func (SummaryAnalyzer) Analyze(
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
+
 	text := extractText(content, manifest.MediaType)
 	summary := firstSentences(text, 2)
+
 	status := "complete"
 	if summary == "" {
 		status = "placeholder"
 	}
+
 	return contracts.Annotation{Data: map[string]any{
 		"status":     status,
 		"summary":    summary,
@@ -256,24 +270,29 @@ func readObject(
 	if err != nil {
 		return nil, contracts.Manifest{}, err
 	}
+
 	reader, err := store.Open(ctx, digest)
 	if err != nil {
 		return nil, contracts.Manifest{}, err
 	}
 	defer reader.Close()
+
 	content, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, contracts.Manifest{}, err
 	}
+
 	return content, manifest, nil
 }
 
 func extractText(content []byte, mediaType string) string {
 	text := string(content)
+
 	base, _, err := mime.ParseMediaType(mediaType)
 	if err == nil {
 		mediaType = base
 	}
+
 	switch mediaType {
 	case "text/html":
 		return normalizeWhitespace(stripTags(text))
@@ -285,16 +304,19 @@ func extractText(content []byte, mediaType string) string {
 				return string(encoded)
 			}
 		}
+
 		return normalizeWhitespace(text)
 	case "message/rfc822":
 		message, err := mail.ReadMessage(bytes.NewReader(content))
 		if err != nil {
 			return normalizeWhitespace(text)
 		}
+
 		body, err := io.ReadAll(message.Body)
 		if err != nil {
 			return ""
 		}
+
 		return normalizeWhitespace(string(body))
 	default:
 		return normalizeWhitespace(text)
@@ -303,10 +325,13 @@ func extractText(content []byte, mediaType string) string {
 
 func normalizedHeaders(header mail.Header) map[string][]string {
 	result := map[string][]string{}
+
 	for key, values := range header {
 		canonical := httpHeaderCanonical(key)
+
 		result[canonical] = append([]string(nil), values...)
 	}
+
 	return result
 }
 
@@ -316,8 +341,10 @@ func httpHeaderCanonical(value string) string {
 		if part == "" {
 			continue
 		}
+
 		parts[index] = strings.ToUpper(part[:1]) + part[1:]
 	}
+
 	return strings.Join(parts, "-")
 }
 
@@ -328,7 +355,9 @@ func facetKinds(facets []contracts.Facet) []string {
 			kinds = append(kinds, facet.FacetKind())
 		}
 	}
+
 	sort.Strings(kinds)
+
 	return kinds
 }
 
@@ -350,7 +379,9 @@ func firstSentences(text string, limit int) string {
 	if text == "" || limit <= 0 {
 		return ""
 	}
+
 	endCount := 0
+
 	for index, char := range text {
 		switch char {
 		case '.', '!', '?':
@@ -360,5 +391,6 @@ func firstSentences(text string, limit int) string {
 			}
 		}
 	}
+
 	return text
 }

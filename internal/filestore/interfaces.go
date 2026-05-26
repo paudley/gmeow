@@ -116,6 +116,6 @@ type VerifyFinding struct {
 
 type VerifyReport struct {
 	Status   VerifyStatus    `json:"status"`
-	Checked  int             `json:"checked"`
 	Findings []VerifyFinding `json:"findings,omitempty"`
+	Checked  int             `json:"checked"`
 }

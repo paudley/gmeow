@@ -17,6 +17,7 @@ import (
 
 type QueryServer struct {
 	pb.UnimplementedQueryServiceServer
+
 	index query.Index
 }
 
@@ -32,10 +33,12 @@ func (server *QueryServer) Project(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	annotations, err := FromPBAnnotations(request.GetAnnotations())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	return &pb.Empty{}, server.index.Project(ctx, manifest, annotations)
 }
 
@@ -47,6 +50,7 @@ func (server *QueryServer) ProjectObject(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	return &pb.Empty{}, server.index.ProjectObject(ctx, object)
 }
 
@@ -58,6 +62,7 @@ func (server *QueryServer) ProjectSourceCursor(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
 	return &pb.Empty{}, server.index.ProjectSourceCursor(ctx, cursor)
 }
 
@@ -84,12 +89,14 @@ func (server *QueryServer) Search(
 	if err != nil {
 		return nil, err
 	}
+
 	results := make([]*pb.SearchResult, 0, len(response.Results))
 	for _, result := range response.Results {
 		attributes, err := encodeMap(result.Attributes)
 		if err != nil {
 			return nil, err
 		}
+
 		results = append(results, &pb.SearchResult{
 			ObjectDigest:   string(result.ObjectDigest),
 			Score:          result.Score,
@@ -99,6 +106,7 @@ func (server *QueryServer) Search(
 			AttributesJson: attributes,
 		})
 	}
+
 	return &pb.SearchResponse{
 		SchemaVersion: int32(response.SchemaVersion),
 		Results:       results,
@@ -117,10 +125,12 @@ func (server *QueryServer) Structure(
 	if err != nil {
 		return nil, err
 	}
+
 	converted, err := ToPBStructure(structure)
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.StructureResponse{Structure: converted}, nil
 }
 
@@ -136,6 +146,7 @@ func (server *QueryServer) Relationships(
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.RelationshipResponse{
 		SchemaVersion: int32(response.SchemaVersion),
 		Relationships: ToPBRelationships(response.Relationships),
@@ -155,10 +166,12 @@ func (server *QueryServer) Graph(
 	if err != nil {
 		return nil, err
 	}
+
 	facts, err := ToPBGraphFacts(response.Facts)
 	if err != nil {
 		return nil, err
 	}
+
 	return &pb.GraphResponse{
 		SchemaVersion: int32(response.SchemaVersion),
 		Facts:         facts,
@@ -173,10 +186,12 @@ func (server *QueryServer) AnalysisStatus(
 	for _, analyzer := range request.GetAnalyzers() {
 		analyzers = append(analyzers, FromPBAnalyzerSpec(analyzer))
 	}
+
 	digests := make([]contracts.ObjectDigest, 0, len(request.GetObjectDigests()))
 	for _, digest := range request.GetObjectDigests() {
 		digests = append(digests, contracts.ObjectDigest(digest))
 	}
+
 	response, err := server.index.AnalysisStatus(ctx, contracts.AnalysisStatusRequest{
 		SchemaVersion: contracts.SchemaVersion(request.GetSchemaVersion()),
 		ObjectDigests: digests,
@@ -187,12 +202,14 @@ func (server *QueryServer) AnalysisStatus(
 	if err != nil {
 		return nil, err
 	}
+
 	statuses := make([]*pb.AnalysisStatus, 0, len(response.Statuses))
 	for _, item := range response.Statuses {
 		data, err := encodeMap(item.Data)
 		if err != nil {
 			return nil, err
 		}
+
 		statuses = append(statuses, &pb.AnalysisStatus{
 			ObjectDigest:    string(item.ObjectDigest),
 			AnalyzerName:    item.AnalyzerName,
@@ -202,6 +219,7 @@ func (server *QueryServer) AnalysisStatus(
 			DataJson:        data,
 		})
 	}
+
 	return &pb.AnalysisStatusResponse{
 		SchemaVersion: int32(response.SchemaVersion),
 		Statuses:      statuses,
@@ -223,6 +241,7 @@ func (server *QueryServer) VectorSearch(
 	if err != nil {
 		return nil, err
 	}
+
 	results := make([]*pb.VectorSearchResult, 0, len(response.Results))
 	for _, result := range response.Results {
 		results = append(results, &pb.VectorSearchResult{
@@ -231,6 +250,7 @@ func (server *QueryServer) VectorSearch(
 			Distance:     result.Distance,
 		})
 	}
+
 	return &pb.VectorSearchResponse{
 		SchemaVersion: int32(response.SchemaVersion),
 		Results:       results,
@@ -250,14 +270,17 @@ func (server *QueryServer) SourceCursors(
 	if err != nil {
 		return nil, err
 	}
+
 	cursors := make([]*pb.SourceCursor, 0, len(response.Cursors))
 	for _, cursor := range response.Cursors {
 		converted, err := ToPBSourceCursor(cursor)
 		if err != nil {
 			return nil, err
 		}
+
 		cursors = append(cursors, converted)
 	}
+
 	return &pb.SourceCursorResponse{
 		SchemaVersion: int32(response.SchemaVersion),
 		Cursors:       cursors,
@@ -279,6 +302,7 @@ func (server *QueryServer) ProjectChanged(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("parse since: %v", err))
 	}
+
 	return &pb.Empty{}, server.index.ProjectChanged(ctx, since)
 }
 
@@ -288,6 +312,7 @@ func fromPBRelationshipFilter(
 	if filter == nil {
 		return contracts.RelationshipFilter{}
 	}
+
 	return contracts.RelationshipFilter{
 		Types: append([]string{}, filter.GetTypes()...),
 		From:  contracts.ObjectDigest(filter.GetFrom()),

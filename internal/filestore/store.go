@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,122 +47,6 @@ func NewFilesystemStore(root string) *FilesystemStore {
 	return &FilesystemStore{root: root}
 }
 
-func (store *FilesystemStore) LookupSourceObject(
-	ctx context.Context,
-	ref contracts.SourceObjectRef,
-) (contracts.ObjectDigest, bool, error) {
-	if err := ctx.Err(); err != nil {
-		return "", false, err
-	}
-	if err := validateSourceObjectRef(ref); err != nil {
-		return "", false, err
-	}
-	var found contracts.ObjectDigest
-	err := store.WalkProjection(ctx, func(object ProjectionObject) error {
-		if len(object.Findings) > 0 {
-			return nil
-		}
-		for _, provenance := range object.Manifest.Provenance {
-			if sourceRefMatches(provenance, ref) {
-				found = object.Manifest.ObjectDigest
-				return errStopWalk
-			}
-		}
-		return nil
-	})
-	if errors.Is(err, errStopWalk) {
-		return found, true, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return "", false, nil
-}
-
-func (store *FilesystemStore) TryAcquireSourceIngest(
-	ctx context.Context,
-	ref contracts.SourceObjectRef,
-) (contracts.SourceIngestClaim, bool, error) {
-	if err := ctx.Err(); err != nil {
-		return contracts.SourceIngestClaim{}, false, err
-	}
-	if err := validateSourceObjectRef(ref); err != nil {
-		return contracts.SourceIngestClaim{}, false, err
-	}
-	acquiredAt := time.Now().UTC()
-	claim := contracts.SourceIngestClaim{
-		SourceObject: ref,
-		ClaimID:      sourceObjectLockID(ref, acquiredAt),
-		AcquiredAt:   acquiredAt,
-	}
-	lockPath := store.sourceObjectLockPath(ref)
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
-		return contracts.SourceIngestClaim{}, false, err
-	}
-	file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
-	if errors.Is(err, os.ErrExist) {
-		return contracts.SourceIngestClaim{}, false, nil
-	}
-	if err != nil {
-		return contracts.SourceIngestClaim{}, false, err
-	}
-	encoded, encodeErr := canonicalJSON(claim)
-	if encodeErr != nil {
-		_ = file.Close()
-		_ = os.Remove(lockPath)
-		return contracts.SourceIngestClaim{}, false, encodeErr
-	}
-	if _, err := file.Write(encoded); err != nil {
-		_ = file.Close()
-		_ = os.Remove(lockPath)
-		return contracts.SourceIngestClaim{}, false, err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(lockPath)
-		return contracts.SourceIngestClaim{}, false, err
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(lockPath)
-		return contracts.SourceIngestClaim{}, false, err
-	}
-	if err := fsyncDir(filepath.Dir(lockPath)); err != nil {
-		_ = os.Remove(lockPath)
-		return contracts.SourceIngestClaim{}, false, err
-	}
-	return claim, true, nil
-}
-
-func (store *FilesystemStore) ReleaseSourceIngest(
-	ctx context.Context,
-	claim contracts.SourceIngestClaim,
-) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := validateSourceObjectRef(claim.SourceObject); err != nil {
-		return err
-	}
-	if strings.TrimSpace(claim.ClaimID) == "" {
-		return errors.New("source ingest claim_id is required")
-	}
-	lockPath := store.sourceObjectLockPath(claim.SourceObject)
-	var existing contracts.SourceIngestClaim
-	if err := readJSON(lockPath, &existing); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if existing.ClaimID != claim.ClaimID {
-		return errors.New("source ingest claim is owned by another writer")
-	}
-	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return fsyncDir(filepath.Dir(lockPath))
-}
-
 func (store *FilesystemStore) Put(
 	ctx context.Context,
 	request PutRequest,
@@ -169,20 +54,26 @@ func (store *FilesystemStore) Put(
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+
 	if err := validateFacets(request.Facets); err != nil {
 		return "", err
 	}
+
 	blob, err := store.streamObjectBlob(ctx, request.Reader)
 	if err != nil {
 		return "", err
 	}
+
 	cleanup := true
+
 	defer func() {
 		if cleanup {
 			_ = os.RemoveAll(blob.stageDir)
 		}
 	}()
+
 	digest := contracts.ObjectDigest(blob.uncompressedBlake3)
+
 	manifest := store.baseManifest(
 		digest,
 		string(digest),
@@ -204,7 +95,9 @@ func (store *FilesystemStore) Put(
 	); err != nil {
 		return "", err
 	}
+
 	cleanup = false
+
 	return digest, nil
 }
 
@@ -216,23 +109,30 @@ func (store *FilesystemStore) AttachProvenance(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if err := validateObjectDigest(digest); err != nil {
 		return err
 	}
+
 	if len(provenance) == 0 {
 		return errors.New("provenance is required")
 	}
+
 	for _, item := range provenance {
-		if err := validateSourceObjectRef(sourceObjectRefFromProvenance(item)); err != nil {
+		err := validateSourceObjectRef(sourceObjectRefFromProvenance(item))
+		if err != nil {
 			return err
 		}
 	}
+
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil {
 		return fmt.Errorf("read provenance target manifest: %w", err)
 	}
+
 	manifest.Provenance = mergeProvenance(manifest.Provenance, provenance)
 	manifest.UpdatedAt = time.Now().UTC()
+
 	return store.writeCompressedJSON(
 		store.objectPath(digest, manifestFilename),
 		manifest,
@@ -246,18 +146,23 @@ func (store *FilesystemStore) PutCompound(
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+
 	objectID := strings.TrimSpace(request.ObjectID)
 	if objectID == "" {
 		return "", errors.New("compound object_id is required")
 	}
+
 	if err := validateFacets(request.Facets); err != nil {
 		return "", err
 	}
+
 	parts := normalizedParts(request.Parts)
 	if err := validateCompoundParts(parts); err != nil {
 		return "", err
 	}
+
 	digest := contracts.ObjectDigest(blake3Hex([]byte("compound:" + objectID)))
+
 	envelope, err := canonicalJSON(compoundEnvelope{
 		SchemaVersion:    int(contracts.SchemaVersionPhase00),
 		ObjectID:         objectID,
@@ -268,6 +173,7 @@ func (store *FilesystemStore) PutCompound(
 	if err != nil {
 		return "", err
 	}
+
 	manifest := store.baseManifest(
 		digest,
 		objectID,
@@ -289,6 +195,7 @@ func (store *FilesystemStore) PutCompound(
 	); err != nil {
 		return "", err
 	}
+
 	return digest, nil
 }
 
@@ -299,22 +206,28 @@ func (store *FilesystemStore) Open(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	if err := validateObjectDigest(digest); err != nil {
 		return nil, err
 	}
+
 	content, err := store.readBlob(digest)
 	if err != nil {
 		return nil, err
 	}
+
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+
 	if manifest.IdentityStrategy != identityStrategyCompoundStableID &&
 		blake3Hex(content) != string(digest) {
 		actual := blake3Hex(content)
+
 		return nil, fmt.Errorf("CAS digest mismatch for %s: got %s", digest, actual)
 	}
+
 	return io.NopCloser(bytes.NewReader(content)), nil
 }
 
@@ -322,19 +235,25 @@ func (store *FilesystemStore) ReadManifest(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 ) (contracts.Manifest, error) {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return contracts.Manifest{}, err
 	}
-	if err := validateObjectDigest(digest); err != nil {
+
+	err = validateObjectDigest(digest)
+	if err != nil {
 		return contracts.Manifest{}, err
 	}
+
 	var manifest contracts.Manifest
-	if err := store.readCompressedJSON(
+	err = store.readCompressedJSON(
 		store.objectPath(digest, manifestFilename),
 		&manifest,
-	); err != nil {
+	)
+	if err != nil {
 		return contracts.Manifest{}, err
 	}
+
 	return manifest, nil
 }
 
@@ -346,6 +265,7 @@ func (store *FilesystemStore) GetStructure(
 	if err != nil {
 		return contracts.Structure{}, err
 	}
+
 	structure := contracts.Structure{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		ObjectDigest:  digest,
@@ -354,13 +274,15 @@ func (store *FilesystemStore) GetStructure(
 		PartsByRole:   map[string][]contracts.StructurePart{},
 	}
 	for _, part := range manifest.Compound.Parts {
-		if err := validateCompoundPart(part); err != nil {
+		err := validateCompoundPart(part)
+		if err != nil {
 			return contracts.Structure{}, fmt.Errorf(
 				"invalid compound part in %s: %w",
 				digest,
 				err,
 			)
 		}
+
 		structurePart := contracts.StructurePart{
 			Digest:   part.Digest,
 			Role:     part.Role,
@@ -371,16 +293,19 @@ func (store *FilesystemStore) GetStructure(
 		if child, childErr := store.ReadManifest(ctx, part.Digest); childErr == nil {
 			structurePart.Facets = facetKinds(child.Facets)
 		}
+
 		structure.PartsByRole[part.Role] = append(
 			structure.PartsByRole[part.Role],
 			structurePart,
 		)
 	}
+
 	for role := range structure.PartsByRole {
 		sort.SliceStable(structure.PartsByRole[role], func(left, right int) bool {
 			return structure.PartsByRole[role][left].Order < structure.PartsByRole[role][right].Order
 		})
 	}
+
 	return structure, nil
 }
 
@@ -391,38 +316,47 @@ func (store *FilesystemStore) WriteAnnotation(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if strings.TrimSpace(string(annotation.ObjectDigest)) == "" {
 		return errors.New("annotation object digest is required")
 	}
+
 	if err := validateObjectDigest(annotation.ObjectDigest); err != nil {
 		return err
 	}
+
 	if _, err := store.ReadManifest(ctx, annotation.ObjectDigest); err != nil {
 		return fmt.Errorf("read annotation target manifest: %w", err)
 	}
+
 	name, err := annotationFilename(annotation)
 	if err != nil {
 		return err
 	}
+
 	annotation.SchemaVersion = contracts.SchemaVersionPhase00
 	if annotation.GeneratedAt.IsZero() {
 		annotation.GeneratedAt = time.Now().UTC()
 	}
+
 	annotationPath := store.objectPath(annotation.ObjectDigest, name)
 	if existing, err := store.readAnnotation(annotationPath); err == nil {
 		annotation = mergeAnnotation(existing, annotation)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read existing annotation: %w", err)
 	}
+
 	if err := store.writeCompressedJSON(
 		annotationPath,
 		annotation,
 	); err != nil {
 		return err
 	}
+
 	if annotation.Kind == "analysis" {
 		return store.refreshParentsForSubobject(ctx, annotation.ObjectDigest)
 	}
+
 	return nil
 }
 
@@ -434,17 +368,22 @@ func (store *FilesystemStore) WriteOverlays(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if err := validateObjectDigest(digest); err != nil {
 		return err
 	}
+
 	if overlays == nil {
 		overlays = map[string]any{}
 	}
+
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil {
 		return fmt.Errorf("read overlay target manifest: %w", err)
 	}
+
 	manifest.Overlays = mergeMaps(manifest.Overlays, overlays)
+
 	manifest.UpdatedAt = time.Now().UTC()
 	if err := store.writeCompressedJSON(
 		store.objectPath(digest, manifestFilename),
@@ -452,6 +391,7 @@ func (store *FilesystemStore) WriteOverlays(
 	); err != nil {
 		return err
 	}
+
 	return store.writeCompressedJSON(
 		store.objectPath(digest, "overlays.json.zst"),
 		contracts.Annotation{
@@ -468,22 +408,28 @@ func (store *FilesystemStore) WriteSourceCursor(
 	ctx context.Context,
 	cursor contracts.SourceCursor,
 ) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	if strings.TrimSpace(cursor.SourceKind) == "" {
 		return errors.New("source cursor kind is required")
 	}
+
 	if strings.TrimSpace(cursor.SourceName) == "" {
 		return errors.New("source cursor name is required")
 	}
+
 	cursor.SchemaVersion = contracts.SchemaVersionPhase00
 	if cursor.UpdatedAt.IsZero() {
 		cursor.UpdatedAt = time.Now().UTC()
 	}
+
 	if cursor.Cursor == nil {
 		cursor.Cursor = map[string]any{}
 	}
+
 	return store.writeCompressedJSON(store.sourceCursorPath(cursor), cursor)
 }
 
@@ -495,11 +441,14 @@ func (store *FilesystemStore) refreshParentsForSubobject(
 	if err != nil {
 		return err
 	}
+
 	summaries := []map[string]any{}
+
 	for _, annotation := range childAnnotations {
 		if annotation.Kind != "analysis" {
 			continue
 		}
+
 		summaries = append(summaries, map[string]any{
 			"analyzer_name":    annotation.AnalyzerName,
 			"analyzer_version": annotation.AnalyzerVer,
@@ -510,27 +459,33 @@ func (store *FilesystemStore) refreshParentsForSubobject(
 			),
 		})
 	}
+
 	if len(summaries) == 0 {
 		return nil
 	}
+
 	return store.WalkProjection(ctx, func(object ProjectionObject) error {
 		if len(object.Findings) > 0 || !manifestContainsPart(object.Manifest, childDigest) {
 			return nil
 		}
+
 		manifest := object.Manifest
 		if manifest.Analysis == nil {
 			manifest.Analysis = map[string]any{}
 		}
+
 		partAnalysis, ok := manifest.Analysis["part_analysis"].(map[string]any)
 		if !ok {
 			partAnalysis = map[string]any{}
 		}
+
 		partAnalysis[string(childDigest)] = map[string]any{
 			"refreshed_at": time.Now().UTC(),
 			"annotations":  summaries,
 		}
 		manifest.Analysis["part_analysis"] = partAnalysis
 		manifest.UpdatedAt = time.Now().UTC()
+
 		return store.writeCompressedJSON(
 			store.objectPath(manifest.ObjectDigest, manifestFilename),
 			manifest,
@@ -546,6 +501,7 @@ func (store *FilesystemStore) readObjectAnnotations(
 		Path:   store.objectDir(digest),
 	}
 	store.readProjectionObject(&object)
+
 	if len(object.Findings) > 0 {
 		return nil, fmt.Errorf(
 			"read annotations for %s: %s",
@@ -553,6 +509,7 @@ func (store *FilesystemStore) readObjectAnnotations(
 			object.Findings[0].Message,
 		)
 	}
+
 	return object.Annotations, nil
 }
 
@@ -565,6 +522,7 @@ func manifestContainsPart(
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -575,7 +533,9 @@ func (store *FilesystemStore) WalkProjection(
 	if fn == nil {
 		return errors.New("projection callback is required")
 	}
+
 	base := filepath.Join(store.root, "objects", "blake3")
+
 	err := filepath.WalkDir(
 		base,
 		func(path string, entry os.DirEntry, walkErr error) error {
@@ -583,15 +543,21 @@ func (store *FilesystemStore) WalkProjection(
 				if errors.Is(walkErr, os.ErrNotExist) && path == base {
 					return nil
 				}
+
 				return walkErr
 			}
-			if err := ctx.Err(); err != nil {
+
+			err := ctx.Err()
+			if err != nil {
 				return err
 			}
+
 			if !entry.IsDir() || !looksLikeDigest(entry.Name()) {
 				return nil
 			}
+
 			digest := contracts.ObjectDigest(entry.Name())
+
 			object := ProjectionObject{
 				Digest: digest,
 				Path:   path,
@@ -601,20 +567,24 @@ func (store *FilesystemStore) WalkProjection(
 					Digest:  digest,
 					Path:    path,
 					Code:    "object_path_mismatch",
-					Message: fmt.Sprintf("expected %s", expectedPath),
+					Message: "expected " + expectedPath,
 				})
 			} else {
 				store.readProjectionObject(&object)
 			}
-			if err := fn(object); err != nil {
+
+			err = fn(object)
+			if err != nil {
 				return err
 			}
+
 			return filepath.SkipDir
 		},
 	)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+
 	return err
 }
 
@@ -626,10 +596,12 @@ func (store *FilesystemStore) WalkChangedProjection(
 	if fn == nil {
 		return errors.New("projection callback is required")
 	}
+
 	return store.WalkProjection(ctx, func(object ProjectionObject) error {
 		if len(object.Findings) > 0 || projectionObjectChangedAfter(object, since) {
 			return fn(object)
 		}
+
 		return nil
 	})
 }
@@ -641,7 +613,9 @@ func (store *FilesystemStore) WalkSourceCursors(
 	if fn == nil {
 		return errors.New("source cursor projection callback is required")
 	}
+
 	base := filepath.Join(store.root, "source-cursors")
+
 	err := filepath.WalkDir(
 		base,
 		func(path string, entry os.DirEntry, walkErr error) error {
@@ -649,24 +623,32 @@ func (store *FilesystemStore) WalkSourceCursors(
 				if errors.Is(walkErr, os.ErrNotExist) && path == base {
 					return nil
 				}
+
 				return walkErr
 			}
-			if err := ctx.Err(); err != nil {
+
+			err := ctx.Err()
+			if err != nil {
 				return err
 			}
+
 			if entry.IsDir() || entry.Name() != sourceCursorFilename {
 				return nil
 			}
+
 			var cursor contracts.SourceCursor
-			if err := store.readCompressedJSON(path, &cursor); err != nil {
+			err = store.readCompressedJSON(path, &cursor)
+			if err != nil {
 				return err
 			}
+
 			return fn(cursor)
 		},
 	)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+
 	return err
 }
 
@@ -679,11 +661,14 @@ func (store *FilesystemStore) readProjectionObject(object *ProjectionObject) {
 			Code:    "manifest_read_failed",
 			Message: err.Error(),
 		})
+
 		return
 	}
+
 	if object.Manifest.ObjectDigest == "" {
 		object.Manifest.ObjectDigest = object.Digest
 	}
+
 	entries, err := os.ReadDir(object.Path)
 	if err != nil {
 		object.Findings = append(object.Findings, ProjectionFinding{
@@ -692,88 +677,55 @@ func (store *FilesystemStore) readProjectionObject(object *ProjectionObject) {
 			Code:    "annotation_list_failed",
 			Message: err.Error(),
 		})
+
 		return
 	}
+
 	for _, entry := range entries {
 		if entry.IsDir() || !isProjectionAnnotationFilename(entry.Name()) {
 			continue
 		}
+
 		path := filepath.Join(object.Path, entry.Name())
+
 		var annotation contracts.Annotation
-		if err := store.readCompressedJSON(path, &annotation); err != nil {
+		err := store.readCompressedJSON(path, &annotation)
+		if err != nil {
 			object.Findings = append(object.Findings, ProjectionFinding{
 				Digest:  object.Digest,
 				Path:    path,
 				Code:    "annotation_read_failed",
 				Message: err.Error(),
 			})
+
 			continue
 		}
+
 		if annotation.ObjectDigest == "" {
 			annotation.ObjectDigest = object.Digest
 		}
+
 		if annotation.Kind == "" {
 			annotation.Kind = strings.TrimSuffix(entry.Name(), ".json.zst")
 		}
+
 		object.Annotations = append(object.Annotations, annotation)
 	}
+
 	sort.SliceStable(object.Annotations, func(left, right int) bool {
 		leftAnnotation := object.Annotations[left]
+
 		rightAnnotation := object.Annotations[right]
 		if leftAnnotation.Kind != rightAnnotation.Kind {
 			return leftAnnotation.Kind < rightAnnotation.Kind
 		}
+
 		if leftAnnotation.AnalyzerName != rightAnnotation.AnalyzerName {
 			return leftAnnotation.AnalyzerName < rightAnnotation.AnalyzerName
 		}
+
 		return leftAnnotation.AnalyzerVer < rightAnnotation.AnalyzerVer
 	})
-}
-
-func (store *FilesystemStore) Verify(ctx context.Context) (VerifyReport, error) {
-	report := VerifyReport{Status: VerifyStatusOK}
-	base := filepath.Join(store.root, "objects", "blake3")
-	err := filepath.WalkDir(
-		base,
-		func(path string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				if errors.Is(walkErr, os.ErrNotExist) && path == base {
-					return nil
-				}
-				report.addFinding("", path, "walk_error", walkErr.Error())
-				return nil
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if !entry.IsDir() || !looksLikeDigest(entry.Name()) {
-				return nil
-			}
-			digest := contracts.ObjectDigest(entry.Name())
-			report.Checked++
-			if expectedPath := store.objectDir(digest); path != expectedPath {
-				report.addFinding(
-					digest,
-					path,
-					"object_path_mismatch",
-					fmt.Sprintf("expected %s", expectedPath),
-				)
-				return filepath.SkipDir
-			}
-			store.verifyObject(&report, digest, path)
-			return filepath.SkipDir
-		},
-	)
-	if errors.Is(err, os.ErrNotExist) {
-		return report, nil
-	}
-	if err != nil {
-		return report, err
-	}
-	if len(report.Findings) > 0 {
-		report.Status = VerifyStatusError
-	}
-	return report, nil
 }
 
 func (store *FilesystemStore) writeObject(
@@ -783,40 +735,50 @@ func (store *FilesystemStore) writeObject(
 	sourceHint string,
 	incoming contracts.Manifest,
 ) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	objectDir := store.objectDir(digest)
 	blobPath := filepath.Join(objectDir, blobFilename)
 	manifestPath := filepath.Join(objectDir, manifestFilename)
+
 	manifest := incoming
 	if existing, err := store.ReadManifest(ctx, digest); err == nil {
 		manifest = mergeManifest(existing, incoming)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read existing manifest: %w", err)
 	}
+
 	blobExists := true
 	if _, err := os.Stat(blobPath); errors.Is(err, os.ErrNotExist) {
 		blobExists = false
 	} else if err != nil {
 		return fmt.Errorf("stat blob: %w", err)
 	}
+
 	if !blobExists && manifest.IdentityStrategy == identityStrategyCompoundStableID {
 		var err error
+
 		content, err = compoundEnvelopeBytes(manifest)
 		if err != nil {
 			return err
 		}
+
 		manifest.Size = int64(len(content))
 	}
+
 	if !blobExists {
 		if exists, err := pathExists(objectDir); err != nil {
 			return fmt.Errorf("stat object directory: %w", err)
 		} else if exists {
 			return fmt.Errorf("object %s is incomplete: missing immutable blob", digest)
 		}
+
 		return store.commitNewObjectDirectory(ctx, digest, content, sourceHint, manifest)
 	}
+
 	return store.writeCompressedJSON(manifestPath, manifest)
 }
 
@@ -827,32 +789,39 @@ func (store *FilesystemStore) commitStreamedObject(
 	sourceHint string,
 	incoming contracts.Manifest,
 ) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	objectDir := store.objectDir(digest)
 	blobPath := filepath.Join(objectDir, blobFilename)
 	manifestPath := filepath.Join(objectDir, manifestFilename)
+
 	manifest := incoming
 	if existing, err := store.ReadManifest(ctx, digest); err == nil {
 		manifest = mergeManifest(existing, incoming)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read existing manifest: %w", err)
 	}
+
 	blobExists := true
 	if _, err := os.Stat(blobPath); errors.Is(err, os.ErrNotExist) {
 		blobExists = false
 	} else if err != nil {
 		return fmt.Errorf("stat blob: %w", err)
 	}
+
 	if blobExists {
 		return store.writeCompressedJSON(manifestPath, manifest)
 	}
+
 	if exists, err := pathExists(objectDir); err != nil {
 		return fmt.Errorf("stat object directory: %w", err)
 	} else if exists {
 		return fmt.Errorf("object %s is incomplete: missing immutable blob", digest)
 	}
+
 	return store.commitStreamedObjectDirectory(ctx, digest, blob, sourceHint, manifest)
 }
 
@@ -866,25 +835,32 @@ func (store *FilesystemStore) commitNewObjectDirectory(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	compressed, err := compressZstd(content)
 	if err != nil {
 		return err
 	}
+
 	objectDir := store.objectDir(digest)
+
 	parentDir := filepath.Dir(objectDir)
 	if err := os.MkdirAll(parentDir, 0o750); err != nil {
 		return fmt.Errorf("create object parent directory: %w", err)
 	}
+
 	stageDir, err := os.MkdirTemp(parentDir, "."+string(digest)+".")
 	if err != nil {
 		return fmt.Errorf("create staged object directory: %w", err)
 	}
+
 	cleanup := true
+
 	defer func() {
 		if cleanup {
 			_ = os.RemoveAll(stageDir)
 		}
 	}()
+
 	if err := atomicWriteFile(
 		filepath.Join(stageDir, blobFilename),
 		compressed,
@@ -892,25 +868,31 @@ func (store *FilesystemStore) commitNewObjectDirectory(
 	); err != nil {
 		return fmt.Errorf("stage blob: %w", err)
 	}
+
 	if err := atomicWriteJSON(
 		filepath.Join(stageDir, recoveryFilename),
 		recoverySidecarFor(digest, content, compressed, sourceHint, manifest),
 	); err != nil {
 		return fmt.Errorf("stage recovery sidecar: %w", err)
 	}
+
 	if err := store.writeCompressedJSON(
 		filepath.Join(stageDir, manifestFilename),
 		manifest,
 	); err != nil {
 		return fmt.Errorf("stage manifest: %w", err)
 	}
+
 	if err := fsyncDir(stageDir); err != nil {
 		return fmt.Errorf("fsync staged object directory: %w", err)
 	}
+
 	if err := os.Rename(stageDir, objectDir); err != nil {
 		return fmt.Errorf("commit object directory: %w", err)
 	}
+
 	cleanup = false
+
 	return fsyncDir(parentDir)
 }
 
@@ -921,36 +903,51 @@ func (store *FilesystemStore) commitStreamedObjectDirectory(
 	sourceHint string,
 	manifest contracts.Manifest,
 ) error {
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err != nil {
 		return err
 	}
+
 	objectDir := store.objectDir(digest)
+
 	parentDir := filepath.Dir(objectDir)
-	if err := os.MkdirAll(parentDir, 0o750); err != nil {
+	err = os.MkdirAll(parentDir, 0o750)
+	if err != nil {
 		return fmt.Errorf("create object parent directory: %w", err)
 	}
-	if err := atomicWriteJSON(
+
+	err = atomicWriteJSON(
 		filepath.Join(blob.stageDir, recoveryFilename),
 		recoverySidecarForStream(digest, blob, sourceHint, manifest),
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("stage recovery sidecar: %w", err)
 	}
-	if err := store.writeCompressedJSON(
+
+	err = store.writeCompressedJSON(
 		filepath.Join(blob.stageDir, manifestFilename),
 		manifest,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("stage manifest: %w", err)
 	}
-	if err := fsyncDir(blob.stageDir); err != nil {
+
+	err = fsyncDir(blob.stageDir)
+	if err != nil {
 		return fmt.Errorf("fsync staged object directory: %w", err)
 	}
-	if err := os.Rename(blob.stageDir, objectDir); err != nil {
+
+	err = os.Rename(blob.stageDir, objectDir)
+	if err != nil {
 		if existing, readErr := store.ReadManifest(ctx, digest); readErr == nil {
 			merged := mergeManifest(existing, manifest)
+
 			return store.writeCompressedJSON(filepath.Join(objectDir, manifestFilename), merged)
 		}
+
 		return fmt.Errorf("commit object directory: %w", err)
 	}
+
 	return fsyncDir(parentDir)
 }
 
@@ -971,55 +968,75 @@ func (store *FilesystemStore) streamObjectBlob(
 	if err := ctx.Err(); err != nil {
 		return streamedBlob{}, err
 	}
+
 	incomingDir := filepath.Join(store.root, ".incoming")
 	if err := os.MkdirAll(incomingDir, 0o750); err != nil {
 		return streamedBlob{}, fmt.Errorf("create incoming object directory: %w", err)
 	}
+
 	stageDir, err := os.MkdirTemp(incomingDir, "object.")
 	if err != nil {
 		return streamedBlob{}, fmt.Errorf("create incoming object stage: %w", err)
 	}
+
 	cleanup := true
+
 	defer func() {
 		if cleanup {
 			_ = os.RemoveAll(stageDir)
 		}
 	}()
+
 	blobPath := filepath.Join(stageDir, blobFilename)
+
 	file, err := os.OpenFile(blobPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
 	if err != nil {
 		return streamedBlob{}, fmt.Errorf("open incoming blob: %w", err)
 	}
+
 	compressedHash := newHashingWriter(file)
+
 	encoder, err := zstd.NewWriter(compressedHash)
 	if err != nil {
 		_ = file.Close()
+
 		return streamedBlob{}, fmt.Errorf("create zstd stream: %w", err)
 	}
+
 	uncompressedHash := newHashingWriter(encoder)
 	if _, err := io.Copy(uncompressedHash, reader); err != nil {
 		encoder.Close()
 		_ = file.Close()
+
 		return streamedBlob{}, fmt.Errorf("stream object bytes: %w", err)
 	}
+
 	if err := encoder.Close(); err != nil {
 		_ = file.Close()
+
 		return streamedBlob{}, fmt.Errorf("finish zstd stream: %w", err)
 	}
+
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
+
 		return streamedBlob{}, fmt.Errorf("sync incoming blob: %w", err)
 	}
+
 	if err := file.Close(); err != nil {
 		return streamedBlob{}, fmt.Errorf("close incoming blob: %w", err)
 	}
+
 	if err := fsyncDir(stageDir); err != nil {
 		return streamedBlob{}, fmt.Errorf("fsync incoming object directory: %w", err)
 	}
+
 	if err := fsyncDir(incomingDir); err != nil {
 		return streamedBlob{}, fmt.Errorf("fsync incoming parent directory: %w", err)
 	}
+
 	cleanup = false
+
 	return streamedBlob{
 		stageDir:           stageDir,
 		uncompressedSize:   uncompressedHash.size,
@@ -1054,6 +1071,7 @@ func (writer *hashingWriter) Write(content []byte) (int, error) {
 		_, _ = writer.blake3.Write(chunk)
 		_, _ = writer.sha256.Write(chunk)
 	}
+
 	return n, err
 }
 
@@ -1078,6 +1096,7 @@ func (store *FilesystemStore) baseManifest(
 	compound contracts.Compound,
 ) contracts.Manifest {
 	now := time.Now().UTC()
+
 	return contracts.Manifest{
 		SchemaVersion:    contracts.SchemaVersionPhase00,
 		ObjectDigest:     digest,
@@ -1098,153 +1117,6 @@ func (store *FilesystemStore) baseManifest(
 	}
 }
 
-func (store *FilesystemStore) verifyObject(
-	report *VerifyReport,
-	digest contracts.ObjectDigest,
-	path string,
-) {
-	blobPath := filepath.Join(path, blobFilename)
-	recoveryPath := filepath.Join(path, recoveryFilename)
-	manifestPath := filepath.Join(path, manifestFilename)
-	compressedBlob, compressedErr := os.ReadFile(blobPath)
-	if compressedErr != nil {
-		report.addFinding(digest, blobPath, "blob_read_failed", compressedErr.Error())
-	}
-	blob, err := decompressZstd(blobPath, compressedBlob)
-	if err != nil {
-		report.addFinding(digest, blobPath, "blob_read_failed", err.Error())
-	}
-	if _, err := os.Stat(recoveryPath); err != nil {
-		report.addFinding(digest, recoveryPath, "recovery_missing", err.Error())
-	} else {
-		store.verifyRecovery(report, digest, recoveryPath, blob, compressedBlob)
-	}
-	var manifest contracts.Manifest
-	if err := store.readCompressedJSON(manifestPath, &manifest); err != nil {
-		report.addFinding(digest, manifestPath, "manifest_read_failed", err.Error())
-		return
-	}
-	if manifest.ObjectDigest != digest {
-		report.addFinding(
-			digest,
-			manifestPath,
-			"manifest_digest_mismatch",
-			fmt.Sprintf("manifest digest %s", manifest.ObjectDigest),
-		)
-	}
-	if blob != nil {
-		switch manifest.IdentityStrategy {
-		case identityStrategyCompoundStableID:
-			expected := contracts.ObjectDigest(
-				blake3Hex([]byte("compound:" + manifest.ObjectID)),
-			)
-			if expected != digest {
-				report.addFinding(
-					digest,
-					blobPath,
-					"compound_digest_mismatch",
-					fmt.Sprintf("expected %s", expected),
-				)
-			}
-		default:
-			if actual := blake3Hex(blob); actual != string(digest) {
-				report.addFinding(
-					digest,
-					blobPath,
-					"blob_digest_mismatch",
-					fmt.Sprintf("expected %s got %s", digest, actual),
-				)
-			}
-		}
-	}
-	if len(manifest.Facets) == 0 {
-		report.addFinding(
-			digest,
-			manifestPath,
-			"manifest_missing_facets",
-			"manifest must have at least one facet",
-		)
-	}
-	for _, part := range manifest.Compound.Parts {
-		if err := validateCompoundPart(part); err != nil {
-			report.addFinding(digest, manifestPath, "compound_invalid_part", err.Error())
-			continue
-		}
-		if _, err := os.Stat(
-			filepath.Join(store.objectDir(part.Digest), blobFilename),
-		); err != nil {
-			report.addFinding(
-				digest,
-				manifestPath,
-				"compound_dangling_part",
-				fmt.Sprintf("part %s: %v", part.Digest, err),
-			)
-		}
-	}
-}
-
-func (store *FilesystemStore) verifyRecovery(
-	report *VerifyReport,
-	digest contracts.ObjectDigest,
-	path string,
-	content []byte,
-	compressed []byte,
-) {
-	var recovery recoverySidecar
-	if err := readJSON(path, &recovery); err != nil {
-		report.addFinding(digest, path, "recovery_read_failed", err.Error())
-		return
-	}
-	if recovery.Digest != string(digest) {
-		report.addFinding(
-			digest,
-			path,
-			"recovery_digest_mismatch",
-			fmt.Sprintf("recovery digest %s", recovery.Digest),
-		)
-	}
-	if content != nil && recovery.UncompressedBlake3 != blake3Hex(content) {
-		report.addFinding(
-			digest,
-			path,
-			"recovery_uncompressed_hash_mismatch",
-			"uncompressed BLAKE3 does not match blob",
-		)
-	}
-	if content != nil && recovery.UncompressedSHA256 != sha256Hex(content) {
-		report.addFinding(
-			digest,
-			path,
-			"recovery_uncompressed_hash_mismatch",
-			"uncompressed SHA-256 does not match blob",
-		)
-	}
-	if compressed != nil && recovery.CompressedSize != int64(len(compressed)) {
-		report.addFinding(
-			digest,
-			path,
-			"recovery_compressed_size_mismatch",
-			fmt.Sprintf("expected %d got %d", recovery.CompressedSize, len(compressed)),
-		)
-	}
-	if compressed != nil && recovery.CompressedBlake3 != blake3Hex(compressed) {
-		report.addFinding(
-			digest,
-			path,
-			"recovery_compressed_hash_mismatch",
-			"compressed BLAKE3 does not match blob",
-		)
-	}
-	if compressed != nil && recovery.CompressedSHA256 != sha256Hex(compressed) {
-		report.addFinding(
-			digest,
-			path,
-			"recovery_compressed_hash_mismatch",
-			"compressed SHA-256 does not match blob",
-		)
-	}
-}
-
 func (store *FilesystemStore) readBlob(digest contracts.ObjectDigest) ([]byte, error) {
 	return readZstdFile(store.objectPath(digest, blobFilename))
 }
@@ -1254,10 +1126,12 @@ func (store *FilesystemStore) writeCompressedJSON(path string, value any) error 
 	if err != nil {
 		return err
 	}
+
 	compressed, err := compressZstd(encoded)
 	if err != nil {
 		return err
 	}
+
 	return atomicWriteFile(path, compressed, 0o640)
 }
 
@@ -1266,9 +1140,11 @@ func (store *FilesystemStore) readCompressedJSON(path string, value any) error {
 	if err != nil {
 		return err
 	}
+
 	if err := json.Unmarshal(encoded, value); err != nil {
 		return fmt.Errorf("decode %s: %w", path, err)
 	}
+
 	return nil
 }
 
@@ -1276,9 +1152,11 @@ func (store *FilesystemStore) readAnnotation(
 	path string,
 ) (contracts.Annotation, error) {
 	var annotation contracts.Annotation
-	if err := store.readCompressedJSON(path, &annotation); err != nil {
+	err := store.readCompressedJSON(path, &annotation)
+	if err != nil {
 		return contracts.Annotation{}, err
 	}
+
 	return annotation, nil
 }
 
@@ -1291,6 +1169,7 @@ func (store *FilesystemStore) objectPath(
 
 func (store *FilesystemStore) objectDir(digest contracts.ObjectDigest) string {
 	value := string(digest)
+
 	return filepath.Join(store.root, "objects", "blake3", value[:2], value[2:4], value)
 }
 
@@ -1298,6 +1177,7 @@ func (store *FilesystemStore) sourceObjectLockPath(
 	ref contracts.SourceObjectRef,
 ) string {
 	key := sourceObjectRefKey(ref)
+
 	return filepath.Join(store.root, "source-locks", key[:2], key[2:4], key+".json")
 }
 
@@ -1332,22 +1212,22 @@ func compoundEnvelopeBytes(manifest contracts.Manifest) ([]byte, error) {
 }
 
 type recoverySidecar struct {
-	SchemaVersion       string                 `json:"schema_version"`
-	Digest              string                 `json:"digest"`
-	ObjectID            string                 `json:"object_id"`
-	IdentityStrategy    string                 `json:"identity_strategy"`
-	SourceHint          string                 `json:"source_hint,omitempty"`
-	MediaType           string                 `json:"media_type,omitempty"`
-	UncompressedSize    int64                  `json:"uncompressed_size"`
-	CompressedSize      int64                  `json:"compressed_size"`
-	UncompressedBlake3  string                 `json:"uncompressed_blake3"`
-	UncompressedSHA256  string                 `json:"uncompressed_sha256"`
-	CompressedBlake3    string                 `json:"compressed_blake3"`
-	CompressedSHA256    string                 `json:"compressed_sha256"`
-	Compression         string                 `json:"compression"`
-	CreatedAt           time.Time              `json:"created_at"`
-	FilestoreVersion    string                 `json:"filestore_version"`
-	ManifestSourceHints map[string]interface{} `json:"manifest_source_hints,omitempty"`
+	SchemaVersion       string         `json:"schema_version"`
+	Digest              string         `json:"digest"`
+	ObjectID            string         `json:"object_id"`
+	IdentityStrategy    string         `json:"identity_strategy"`
+	SourceHint          string         `json:"source_hint,omitempty"`
+	MediaType           string         `json:"media_type,omitempty"`
+	UncompressedSize    int64          `json:"uncompressed_size"`
+	CompressedSize      int64          `json:"compressed_size"`
+	UncompressedBlake3  string         `json:"uncompressed_blake3"`
+	UncompressedSHA256  string         `json:"uncompressed_sha256"`
+	CompressedBlake3    string         `json:"compressed_blake3"`
+	CompressedSHA256    string         `json:"compressed_sha256"`
+	Compression         string         `json:"compression"`
+	CreatedAt           time.Time      `json:"created_at"`
+	FilestoreVersion    string         `json:"filestore_version"`
+	ManifestSourceHints map[string]any `json:"manifest_source_hints,omitempty"`
 }
 
 func recoverySidecarFor(
@@ -1405,20 +1285,24 @@ func validateFacets(facets []contracts.Facet) error {
 	if len(facets) == 0 {
 		return errors.New("at least one facet is required")
 	}
+
 	for _, facet := range facets {
 		if strings.TrimSpace(facet.FacetKind()) == "" {
 			return errors.New("facet kind is required")
 		}
 	}
+
 	return nil
 }
 
 func validateCompoundParts(parts []contracts.CompoundPart) error {
 	for _, part := range parts {
-		if err := validateCompoundPart(part); err != nil {
+		err := validateCompoundPart(part)
+		if err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -1429,32 +1313,40 @@ func validateCompoundPart(part contracts.CompoundPart) error {
 			part.Digest,
 		)
 	}
+
 	if strings.TrimSpace(part.Role) == "" {
 		return fmt.Errorf("compound part %s role is required", part.Digest)
 	}
+
 	return nil
 }
 
 func normalizeFacets(facets []contracts.Facet) []contracts.Facet {
 	seen := map[string]bool{}
+
 	normalized := make([]contracts.Facet, 0, len(facets))
 	for _, facet := range facets {
 		kind := strings.TrimSpace(facet.FacetKind())
 		if kind == "" || seen[kind] {
 			continue
 		}
+
 		seen[kind] = true
 		facet.Kind = kind
+
 		facet.Name = ""
 		if facet.Metadata == nil {
 			facet.Metadata = facet.Attributes
 		}
+
 		facet.Attributes = nil
 		normalized = append(normalized, facet)
 	}
+
 	sort.SliceStable(normalized, func(left, right int) bool {
 		return normalized[left].Kind < normalized[right].Kind
 	})
+
 	return normalized
 }
 
@@ -1464,14 +1356,18 @@ func normalizeProvenance(provenance []contracts.Provenance) []contracts.Provenan
 		if result[left].SourceKind != result[right].SourceKind {
 			return result[left].SourceKind < result[right].SourceKind
 		}
+
 		if result[left].SourceName != result[right].SourceName {
 			return result[left].SourceName < result[right].SourceName
 		}
+
 		if result[left].ExternalID != result[right].ExternalID {
 			return result[left].ExternalID < result[right].ExternalID
 		}
+
 		return result[left].ExternalVersion < result[right].ExternalVersion
 	})
+
 	return result
 }
 
@@ -1483,11 +1379,14 @@ func normalizedRelationships(
 		if result[left].Type != result[right].Type {
 			return result[left].Type < result[right].Type
 		}
+
 		if result[left].From != result[right].From {
 			return result[left].From < result[right].From
 		}
+
 		return result[left].To < result[right].To
 	})
+
 	return result
 }
 
@@ -1497,11 +1396,14 @@ func normalizedParts(parts []contracts.CompoundPart) []contracts.CompoundPart {
 		if result[left].Order != result[right].Order {
 			return result[left].Order < result[right].Order
 		}
+
 		if result[left].Role != result[right].Role {
 			return result[left].Role < result[right].Role
 		}
+
 		return result[left].Digest < result[right].Digest
 	})
+
 	return result
 }
 
@@ -1515,13 +1417,16 @@ func mergeManifest(existing, incoming contracts.Manifest) contracts.Manifest {
 	merged.Provenance = mergeProvenance(merged.Provenance, incoming.Provenance)
 	merged.Relationships = mergeRelationships(merged.Relationships, incoming.Relationships)
 	merged.Compound.Parts = mergeParts(merged.Compound.Parts, incoming.Compound.Parts)
+
 	merged.Compound.IsCompound = merged.Compound.IsCompound || incoming.Compound.IsCompound
 	if merged.Analysis == nil {
 		merged.Analysis = map[string]any{}
 	}
+
 	if merged.Overlays == nil {
 		merged.Overlays = map[string]any{}
 	}
+
 	return merged
 }
 
@@ -1534,27 +1439,29 @@ func mergeAnnotation(
 	merged.ObjectDigest = incoming.ObjectDigest
 	merged.Kind = incoming.Kind
 	merged.AnalyzerName = firstNonEmpty(incoming.AnalyzerName, existing.AnalyzerName)
+
 	merged.AnalyzerVer = firstNonEmpty(incoming.AnalyzerVer, existing.AnalyzerVer)
 	if !incoming.GeneratedAt.IsZero() {
 		merged.GeneratedAt = incoming.GeneratedAt
 	}
+
 	merged.Data = mergeMaps(existing.Data, incoming.Data)
+
 	return merged
 }
 
 func mergeMaps(existing, incoming map[string]any) map[string]any {
 	merged := map[string]any{}
-	for key, value := range existing {
-		merged[key] = value
-	}
-	for key, value := range incoming {
-		merged[key] = value
-	}
+	maps.Copy(merged, existing)
+
+	maps.Copy(merged, incoming)
+
 	return merged
 }
 
 func mergeProvenance(existing, incoming []contracts.Provenance) []contracts.Provenance {
 	seen := map[string]bool{}
+
 	result := make([]contracts.Provenance, 0, len(existing)+len(incoming))
 	for _, item := range append(existing, incoming...) {
 		key := strings.Join([]string{
@@ -1566,9 +1473,12 @@ func mergeProvenance(existing, incoming []contracts.Provenance) []contracts.Prov
 		if seen[key] {
 			continue
 		}
+
 		seen[key] = true
+
 		result = append(result, item)
 	}
+
 	return normalizeProvenance(result)
 }
 
@@ -1576,6 +1486,7 @@ func mergeRelationships(
 	existing, incoming []contracts.Relationship,
 ) []contracts.Relationship {
 	seen := map[string]bool{}
+
 	result := make([]contracts.Relationship, 0, len(existing)+len(incoming))
 	for _, item := range append(existing, incoming...) {
 		key := fmt.Sprintf(
@@ -1589,35 +1500,45 @@ func mergeRelationships(
 		if seen[key] {
 			continue
 		}
+
 		seen[key] = true
+
 		result = append(result, item)
 	}
+
 	return normalizedRelationships(result)
 }
 
 func mergeParts(existing, incoming []contracts.CompoundPart) []contracts.CompoundPart {
 	seen := map[string]bool{}
+
 	result := make([]contracts.CompoundPart, 0, len(existing)+len(incoming))
 	for _, item := range append(existing, incoming...) {
 		key := fmt.Sprintf("%s\x00%s\x00%d", item.Digest, item.Role, item.Order)
 		if seen[key] {
 			continue
 		}
+
 		seen[key] = true
+
 		result = append(result, item)
 	}
+
 	return normalizedParts(result)
 }
 
 func annotationFilename(annotation contracts.Annotation) (string, error) {
 	kind := annotation.Kind
+
 	trimmed := strings.TrimSpace(kind)
 	if trimmed == "" {
 		return "", errors.New("annotation kind is required")
 	}
+
 	if isReservedAnnotationKind(trimmed) {
 		return "", fmt.Errorf("annotation kind %q is reserved", kind)
 	}
+
 	for _, char := range trimmed {
 		if (char >= 'a' && char <= 'z') ||
 			(char >= 'A' && char <= 'Z') ||
@@ -1626,12 +1547,16 @@ func annotationFilename(annotation contracts.Annotation) (string, error) {
 			char == '-' {
 			continue
 		}
+
 		return "", fmt.Errorf("invalid annotation kind %q", kind)
 	}
+
 	if trimmed == "analysis" && strings.TrimSpace(annotation.AnalyzerName) != "" {
 		sum := sha256.Sum256([]byte(annotation.AnalyzerName))
+
 		return "analysis-" + hex.EncodeToString(sum[:]) + ".json.zst", nil
 	}
+
 	return trimmed + ".json.zst", nil
 }
 
@@ -1658,6 +1583,7 @@ func compressZstd(content []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return encoder.EncodeAll(content, nil), nil
 }
 
@@ -1666,6 +1592,7 @@ func readZstdFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return decompressZstd(path, content)
 }
 
@@ -1673,15 +1600,18 @@ func decompressZstd(path string, content []byte) ([]byte, error) {
 	if content == nil {
 		return nil, fmt.Errorf("read %s: empty compressed content", path)
 	}
+
 	decoder, err := zstd.NewReader(nil)
 	if err != nil {
 		return nil, err
 	}
 	defer decoder.Close()
+
 	decoded, err := decoder.DecodeAll(content, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decompress %s: %w", path, err)
 	}
+
 	return decoded, nil
 }
 
@@ -1690,6 +1620,7 @@ func atomicWriteJSON(path string, value any) error {
 	if err != nil {
 		return err
 	}
+
 	return atomicWriteFile(path, encoded, 0o640)
 }
 
@@ -1697,36 +1628,49 @@ func atomicWriteFile(path string, content []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
+
 	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".")
 	if err != nil {
 		return err
 	}
+
 	tmpPath := file.Name()
 	cleanup := true
+
 	defer func() {
 		if cleanup {
 			_ = os.Remove(tmpPath)
 		}
 	}()
+
 	if _, err := file.Write(content); err != nil {
 		_ = file.Close()
+
 		return err
 	}
+
 	if err := file.Chmod(perm); err != nil {
 		_ = file.Close()
+
 		return err
 	}
+
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
+
 		return err
 	}
+
 	if err := file.Close(); err != nil {
 		return err
 	}
+
 	if err := os.Rename(tmpPath, path); err != nil {
 		return err
 	}
+
 	cleanup = false
+
 	return fsyncDir(filepath.Dir(path))
 }
 
@@ -1736,6 +1680,7 @@ func fsyncDir(path string) error {
 		return err
 	}
 	defer dir.Close()
+
 	return dir.Sync()
 }
 
@@ -1744,19 +1689,25 @@ func pathExists(path string) (bool, error) {
 	if err == nil {
 		return true, nil
 	}
+
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
+
 	return false, err
 }
 
 func canonicalJSON(value any) ([]byte, error) {
 	var buffer bytes.Buffer
+
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
+
+	err := encoder.Encode(value)
+	if err != nil {
 		return nil, err
 	}
+
 	return bytes.TrimSpace(buffer.Bytes()), nil
 }
 
@@ -1765,19 +1716,23 @@ func readJSON(path string, value any) error {
 	if err != nil {
 		return err
 	}
+
 	if err := json.Unmarshal(encoded, value); err != nil {
 		return fmt.Errorf("decode %s: %w", path, err)
 	}
+
 	return nil
 }
 
 func blake3Hex(content []byte) string {
 	sum := blake3.Sum256(content)
+
 	return hex.EncodeToString(sum[:])
 }
 
 func sha256Hex(content []byte) string {
 	sum := sha256.Sum256(content)
+
 	return hex.EncodeToString(sum[:])
 }
 
@@ -1785,7 +1740,9 @@ func looksLikeDigest(value string) bool {
 	if len(value) != 64 {
 		return false
 	}
+
 	_, err := hex.DecodeString(value)
+
 	return err == nil
 }
 
@@ -1793,59 +1750,8 @@ func validateObjectDigest(digest contracts.ObjectDigest) error {
 	if !looksLikeDigest(string(digest)) {
 		return fmt.Errorf("invalid object digest %q", digest)
 	}
+
 	return nil
-}
-
-func validateSourceObjectRef(ref contracts.SourceObjectRef) error {
-	if strings.TrimSpace(ref.SourceKind) == "" {
-		return errors.New("source object kind is required")
-	}
-	if strings.TrimSpace(ref.SourceName) == "" {
-		return errors.New("source object name is required")
-	}
-	if strings.TrimSpace(ref.ExternalID) == "" {
-		return errors.New("source object external_id is required")
-	}
-	return nil
-}
-
-func sourceObjectRefFromProvenance(
-	provenance contracts.Provenance,
-) contracts.SourceObjectRef {
-	return contracts.SourceObjectRef{
-		SourceKind:      provenance.SourceKind,
-		SourceName:      provenance.SourceName,
-		ExternalID:      provenance.ExternalID,
-		ExternalVersion: provenance.ExternalVersion,
-	}
-}
-
-func sourceRefMatches(
-	provenance contracts.Provenance,
-	ref contracts.SourceObjectRef,
-) bool {
-	return provenance.SourceKind == ref.SourceKind &&
-		provenance.SourceName == ref.SourceName &&
-		provenance.ExternalID == ref.ExternalID &&
-		provenance.ExternalVersion == ref.ExternalVersion
-}
-
-func sourceObjectRefKey(ref contracts.SourceObjectRef) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		ref.SourceKind,
-		ref.SourceName,
-		ref.ExternalID,
-		ref.ExternalVersion,
-	}, "\x00")))
-	return hex.EncodeToString(sum[:])
-}
-
-func sourceObjectLockID(ref contracts.SourceObjectRef, acquiredAt time.Time) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		sourceObjectRefKey(ref),
-		acquiredAt.Format(time.RFC3339Nano),
-	}, "\x00")))
-	return hex.EncodeToString(sum[:])
 }
 
 func facetKinds(facets []contracts.Facet) []string {
@@ -1856,26 +1762,32 @@ func facetKinds(facets []contracts.Facet) []string {
 			kinds = append(kinds, kind)
 		}
 	}
+
 	return uniqueStrings(kinds)
 }
 
 func uniqueStrings(values []string) []string {
 	seen := map[string]bool{}
+
 	result := make([]string, 0, len(values))
 	for _, value := range values {
 		trimmed := strings.TrimSpace(value)
 		if trimmed == "" || seen[trimmed] {
 			continue
 		}
+
 		seen[trimmed] = true
 		result = append(result, trimmed)
 	}
+
 	sort.Strings(result)
+
 	return result
 }
 
 func safePathComponent(value string) string {
 	replacer := strings.NewReplacer("/", "_", "\\", "_", "\x00", "_")
+
 	return replacer.Replace(strings.TrimSpace(value))
 }
 
@@ -1883,10 +1795,10 @@ func cloneMap(value map[string]any) map[string]any {
 	if value == nil {
 		return nil
 	}
+
 	clone := make(map[string]any, len(value))
-	for key, item := range value {
-		clone[key] = item
-	}
+	maps.Copy(clone, value)
+
 	return clone
 }
 
@@ -1894,14 +1806,17 @@ func projectionObjectChangedAfter(object ProjectionObject, since time.Time) bool
 	if since.IsZero() {
 		return true
 	}
+
 	if object.Manifest.UpdatedAt.After(since) || object.Manifest.CreatedAt.After(since) {
 		return true
 	}
+
 	for _, annotation := range object.Annotations {
 		if annotation.GeneratedAt.After(since) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -1911,6 +1826,7 @@ func firstNonEmpty(values ...string) string {
 			return strings.TrimSpace(value)
 		}
 	}
+
 	return ""
 }
 
@@ -1918,17 +1834,6 @@ func stringFromAny(value any) string {
 	if typed, ok := value.(string); ok {
 		return typed
 	}
-	return ""
-}
 
-func (report *VerifyReport) addFinding(
-	digest contracts.ObjectDigest,
-	path, code, message string,
-) {
-	report.Findings = append(report.Findings, VerifyFinding{
-		Digest:  digest,
-		Path:    path,
-		Code:    code,
-		Message: message,
-	})
+	return ""
 }

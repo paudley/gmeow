@@ -16,6 +16,7 @@ func WithTraceID(ctx context.Context, traceID string) context.Context {
 
 func TraceID(ctx context.Context) string {
 	value, _ := ctx.Value(traceIDKey{}).(string)
+
 	return value
 }
 
@@ -24,5 +25,6 @@ func Logger(ctx context.Context) *slog.Logger {
 	if traceID == "" {
 		return slog.Default()
 	}
+
 	return slog.Default().With("trace_id", traceID)
 }

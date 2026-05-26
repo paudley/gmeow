@@ -32,28 +32,33 @@ type ExternalCommandConfig struct {
 }
 
 type ExternalCommandRequest struct {
-	SchemaVersion contracts.SchemaVersion `json:"schema_version"`
-	Job           contracts.AnalyzerJob   `json:"job"`
 	Manifest      contracts.Manifest      `json:"manifest"`
+	Job           contracts.AnalyzerJob   `json:"job"`
 	Text          string                  `json:"text,omitempty"`
+	SchemaVersion contracts.SchemaVersion `json:"schema_version"`
 }
 
 func NewExternalCommandAnalyzer(
 	config ExternalCommandConfig,
 ) (*ExternalCommandAnalyzer, error) {
-	if err := ValidateSpec(config.Spec); err != nil {
+	err := ValidateSpec(config.Spec)
+	if err != nil {
 		return nil, err
 	}
+
 	if strings.TrimSpace(config.Command) == "" {
 		return nil, errors.New("external analyzer command is required")
 	}
+
 	if config.Timeout <= 0 {
 		config.Timeout = 2 * time.Minute
 	}
+
 	spec := config.Spec
 	if strings.TrimSpace(spec.WorkerKind) == "" {
 		spec.WorkerKind = "external"
 	}
+
 	return &ExternalCommandAnalyzer{
 		spec:    spec,
 		command: config.Command,
@@ -75,6 +80,7 @@ func (analyzer *ExternalCommandAnalyzer) Analyze(
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
+
 	request := ExternalCommandRequest{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Job:           job,
@@ -83,16 +89,22 @@ func (analyzer *ExternalCommandAnalyzer) Analyze(
 	if text, ok := readTextInput(ctx, store, job.ObjectDigest, manifest.MediaType); ok {
 		request.Text = text
 	}
+
 	input, err := json.Marshal(request)
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
+
 	runCtx, cancel := context.WithTimeout(ctx, analyzer.timeout)
 	defer cancel()
+
 	command := exec.CommandContext(runCtx, analyzer.command, analyzer.args...)
 	command.Stdin = bytes.NewReader(input)
+
 	var stderr bytes.Buffer
+
 	command.Stderr = &stderr
+
 	output, err := command.Output()
 	if err != nil {
 		return contracts.Annotation{}, fmt.Errorf(
@@ -102,6 +114,7 @@ func (analyzer *ExternalCommandAnalyzer) Analyze(
 			strings.TrimSpace(stderr.String()),
 		)
 	}
+
 	var annotation contracts.Annotation
 	if err := json.Unmarshal(output, &annotation); err != nil {
 		return contracts.Annotation{}, fmt.Errorf(
@@ -110,6 +123,7 @@ func (analyzer *ExternalCommandAnalyzer) Analyze(
 			err,
 		)
 	}
+
 	if annotation.Kind != "" && annotation.Kind != "analysis" {
 		return contracts.Annotation{}, fmt.Errorf(
 			"external analyzer %s emitted unsupported annotation kind %q",
@@ -117,6 +131,7 @@ func (analyzer *ExternalCommandAnalyzer) Analyze(
 			annotation.Kind,
 		)
 	}
+
 	return annotation, nil
 }
 
@@ -129,15 +144,18 @@ func readTextInput(
 	if !strings.HasPrefix(mediaType, "text/") && mediaType != "application/json" {
 		return "", false
 	}
+
 	reader, err := store.Open(ctx, digest)
 	if err != nil {
 		return "", false
 	}
 	defer reader.Close()
+
 	content, err := io.ReadAll(io.LimitReader(reader, 10*1024*1024))
 	if err != nil {
 		return "", false
 	}
+
 	return extractText(content, mediaType), true
 }
 
