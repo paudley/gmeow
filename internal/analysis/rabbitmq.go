@@ -50,7 +50,8 @@ func NewRabbitMQSource(
 		config.QueuePrefix = defaultQueuePrefix
 	}
 
-	if config.QueuePrefix != defaultQueuePrefix && config.QueuePrefix != testQueuePrefix {
+	if config.QueuePrefix != defaultQueuePrefix &&
+		!strings.HasPrefix(config.QueuePrefix, testQueuePrefix) {
 		return nil, errors.New("analysis rabbitmq queue prefix must be gmeow. or gmeow.test.")
 	}
 

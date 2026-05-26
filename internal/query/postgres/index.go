@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -27,8 +28,9 @@ import (
 const defaultLimit = 50
 
 type Config struct {
-	ConnString    string
-	MigrationsDir string
+	ConnString     string
+	MigrationsDir  string
+	MigrationTable string
 }
 
 type Index struct {
@@ -50,6 +52,8 @@ type AgeStatus struct {
 	GraphID   int64
 	Available bool
 }
+
+var migrationMu sync.Mutex
 
 type ageSearchPathExecutor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
@@ -105,6 +109,14 @@ func Migrate(ctx context.Context, config Config) error {
 
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("set goose dialect: %w", err)
+	}
+
+	migrationMu.Lock()
+	defer migrationMu.Unlock()
+	if strings.TrimSpace(config.MigrationTable) != "" {
+		previousTable := goose.TableName()
+		goose.SetTableName(config.MigrationTable)
+		defer goose.SetTableName(previousTable)
 	}
 
 	if err := goose.UpContext(ctx, db, config.MigrationsDir); err != nil {

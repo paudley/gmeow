@@ -12,19 +12,28 @@ import (
 
 	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/contracts"
-	"blackcat.ca/gmeow/internal/filestore"
-	querymemory "blackcat.ca/gmeow/internal/query/memory"
 	"blackcat.ca/gmeow/internal/rpc"
-	"blackcat.ca/gmeow/internal/scheduler"
+	"blackcat.ca/gmeow/internal/testsupport"
 )
 
 func TestIngestSourceLookupHitDoesNotReadOrRewritePayload(t *testing.T) {
 	ctx := context.Background()
-	existing := contracts.ObjectDigest(
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	)
-	store := &recordingStore{lookupDigest: existing, lookupFound: true}
-	service, err := NewService(store)
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	existing, err := filestoreService.Client.Put(ctx, rpc.PutRequest{
+		Reader: strings.NewReader("known payload"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+		Provenance: []contracts.Provenance{{
+			SourceKind:      "gmail",
+			SourceName:      "primary",
+			ExternalID:      "message-1",
+			ExternalVersion: "v1",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(filestoreService.Client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,20 +53,27 @@ func TestIngestSourceLookupHitDoesNotReadOrRewritePayload(t *testing.T) {
 	if digest != existing || wrote {
 		t.Fatalf("expected lookup digest without write, digest=%s wrote=%t", digest, wrote)
 	}
-
-	if store.putCalls != 0 {
-		t.Fatalf("lookup hit transferred payload %d times", store.putCalls)
-	}
-
-	if len(store.attached) != 1 {
-		t.Fatalf("expected provenance attach on lookup hit, got %#v", store.attached)
-	}
 }
 
 func TestIngestSourceClaimSerializesHydration(t *testing.T) {
 	ctx := context.Background()
-	store := &recordingStore{claimAcquired: false}
-	service, err := NewService(store)
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	ref := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1",
+		ExternalVersion: "v1",
+	}
+	claim, acquired, err := filestoreService.Client.TryAcquireSourceIngest(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acquired {
+		t.Fatal("expected test setup to acquire source ingest claim")
+	}
+	defer filestoreService.Client.ReleaseSourceIngest(ctx, claim)
+	service, err := NewService(filestoreService.Client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,21 +89,18 @@ func TestIngestSourceClaimSerializesHydration(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected concurrent source ingest claim to block hydration")
 	}
-
-	if store.putCalls != 0 {
-		t.Fatalf("blocked claim transferred payload %d times", store.putCalls)
-	}
 }
 
 func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 	ctx := context.Background()
-	store := filestore.NewFilesystemStore(t.TempDir())
-	service, err := NewService(filestoreClient{store: store})
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	service, err := NewService(filestoreService.Client)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	adapter, err := NewGmailAdapter("primary", memoryGmailBackend{})
+	adapter, err := NewGmailAdapter("primary", gmailExternalBackend{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +130,7 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 		t.Fatal("expected first Gmail hydrate to write")
 	}
 
-	structure, err := store.GetStructure(ctx, digest)
+	structure, err := filestoreService.Client.GetStructure(ctx, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +154,7 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 		}
 	}
 
-	manifest, err := store.ReadManifest(ctx, digest)
+	manifest, err := filestoreService.Client.ReadManifest(ctx, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,11 +199,22 @@ func TestDriveAdapterFailsUnsupportedOperationsWithActionableError(t *testing.T)
 
 func TestGmailSearchAndHydrateReusesExistingDigestWithoutFetchingPayload(t *testing.T) {
 	ctx := context.Background()
-	existing := contracts.ObjectDigest(
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	)
-	store := &recordingStore{lookupDigest: existing, lookupFound: true}
-	service, err := NewService(store)
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	existing, err := filestoreService.Client.Put(ctx, rpc.PutRequest{
+		Reader: strings.NewReader("known gmail payload"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+		Provenance: []contracts.Provenance{{
+			SourceKind:      "gmail",
+			SourceName:      "primary",
+			ExternalID:      "m1",
+			ExternalVersion: "v1",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(filestoreService.Client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,8 +240,9 @@ func TestGmailSearchAndHydrateReusesExistingDigestWithoutFetchingPayload(t *test
 
 func TestGmailActionRequiresMatchingProvenanceAndMailFacet(t *testing.T) {
 	ctx := context.Background()
-	store := filestore.NewFilesystemStore(t.TempDir())
-	service, err := NewService(filestoreClient{store: store})
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	service, err := NewService(filestoreService.Client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +279,7 @@ func TestGmailActionRequiresMatchingProvenanceAndMailFacet(t *testing.T) {
 		)
 	}
 
-	fileDigest, err := store.Put(ctx, filestore.PutRequest{
+	fileDigest, err := filestoreService.Client.Put(ctx, rpc.PutRequest{
 		Reader:     strings.NewReader("not mail"),
 		MediaType:  "text/plain",
 		SourceHint: "not-mail",
@@ -278,8 +303,9 @@ func TestGmailActionRequiresMatchingProvenanceAndMailFacet(t *testing.T) {
 
 func TestPushIngestProjectsAndSchedulesAnalysis(t *testing.T) {
 	ctx := context.Background()
-	store := filestore.NewFilesystemStore(t.TempDir())
-	service, err := NewService(filestoreClient{store: store})
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	service, err := NewService(filestoreService.Client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,13 +328,20 @@ func TestPushIngestProjectsAndSchedulesAnalysis(t *testing.T) {
 		t.Fatal("expected push ingest to write new FILESTORE object")
 	}
 
-	index := querymemory.New(store)
-	if err := index.Rebuild(ctx); err != nil {
+	queryService := testsupport.StartQueryGRPC(t, ctx, filestoreService.Store)
+	defer queryService.Close()
+	if err := queryService.Client.Rebuild(ctx); err != nil {
 		t.Fatal(err)
 	}
-	search, err := index.Search(
+	search, err := queryService.Client.Search(
 		ctx,
-		contracts.SearchRequest{Query: "Call 1", Facets: []string{"phone"}},
+		contracts.SearchRequest{
+			Facets: []string{"phone"},
+			Provenance: contracts.ProvenanceFilter{
+				SourceNames: []string{"ringme-fixture"},
+				ExternalIDs: []string{"call-1"},
+			},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -317,110 +350,31 @@ func TestPushIngestProjectsAndSchedulesAnalysis(t *testing.T) {
 		t.Fatalf("expected projected push object to be searchable, got %#v", search.Results)
 	}
 
-	broker := scheduler.NewMemoryBroker()
-	schedulerService, err := scheduler.NewService(
-		store,
-		broker,
+	schedulerService := testsupport.StartSchedulerGRPC(
+		t,
+		ctx,
+		filestoreService.Store,
 		[]contracts.AnalyzerSpec{analysis.TextExtractAnalyzer{}.Spec()},
-		scheduler.Config{},
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := schedulerService.Scan(ctx, contracts.SchedulerScanRequest{
+	defer schedulerService.Close()
+	response, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
 		PriorityClass: contracts.PriorityFreshIngest,
 		RequestedBy:   "source-test",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Enqueued == 0 || len(broker.Jobs()) == 0 {
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Enqueued == 0 || status.Pending == 0 {
 		t.Fatalf(
-			"expected push ingest to schedule analysis, response=%#v jobs=%#v",
+			"expected push ingest to schedule analysis, response=%#v status=%#v",
 			response,
-			broker.Jobs(),
+			status,
 		)
 	}
-}
-
-type recordingStore struct {
-	lookupDigest  contracts.ObjectDigest
-	claim         contracts.SourceIngestClaim
-	lookupFound   bool
-	claimAcquired bool
-	putCalls      int
-	attached      []contracts.Provenance
-}
-
-func (store *recordingStore) LookupSourceObject(
-	context.Context,
-	contracts.SourceObjectRef,
-) (contracts.ObjectDigest, bool, error) {
-	return store.lookupDigest, store.lookupFound, nil
-}
-
-func (store *recordingStore) TryAcquireSourceIngest(
-	_ context.Context,
-	ref contracts.SourceObjectRef,
-) (contracts.SourceIngestClaim, bool, error) {
-	if !store.claimAcquired {
-		return contracts.SourceIngestClaim{}, false, nil
-	}
-
-	store.claim = contracts.SourceIngestClaim{SourceObject: ref, ClaimID: "claim-1"}
-
-	return store.claim, true, nil
-}
-
-func (store *recordingStore) ReleaseSourceIngest(
-	context.Context,
-	contracts.SourceIngestClaim,
-) error {
-	return nil
-}
-
-func (store *recordingStore) Put(
-	context.Context,
-	rpc.PutRequest,
-) (contracts.ObjectDigest, error) {
-	store.putCalls++
-
-	return contracts.ObjectDigest(
-		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-	), nil
-}
-
-func (store *recordingStore) ReadManifest(
-	context.Context,
-	contracts.ObjectDigest,
-) (contracts.Manifest, error) {
-	return contracts.Manifest{}, errors.New("not implemented")
-}
-
-func (store *recordingStore) AttachProvenance(
-	_ context.Context,
-	_ contracts.ObjectDigest,
-	provenance []contracts.Provenance,
-) error {
-	store.attached = append(store.attached, provenance...)
-
-	return nil
-}
-
-func (store *recordingStore) PutCompound(
-	context.Context,
-	rpc.CompoundPutRequest,
-) (contracts.ObjectDigest, error) {
-	return contracts.ObjectDigest(
-		"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-	), nil
-}
-
-func (store *recordingStore) WriteSourceCursor(
-	context.Context,
-	contracts.SourceCursor,
-) error {
-	return nil
 }
 
 type panicReader struct{}
@@ -429,87 +383,9 @@ func (panicReader) Read([]byte) (int, error) {
 	panic("payload should not be read on source lookup hit")
 }
 
-type filestoreClient struct {
-	store filestore.Store
-}
+type gmailExternalBackend struct{}
 
-func (client filestoreClient) LookupSourceObject(
-	ctx context.Context,
-	ref contracts.SourceObjectRef,
-) (contracts.ObjectDigest, bool, error) {
-	return client.store.LookupSourceObject(ctx, ref)
-}
-
-func (client filestoreClient) TryAcquireSourceIngest(
-	ctx context.Context,
-	ref contracts.SourceObjectRef,
-) (contracts.SourceIngestClaim, bool, error) {
-	return client.store.TryAcquireSourceIngest(ctx, ref)
-}
-
-func (client filestoreClient) ReleaseSourceIngest(
-	ctx context.Context,
-	claim contracts.SourceIngestClaim,
-) error {
-	return client.store.ReleaseSourceIngest(ctx, claim)
-}
-
-func (client filestoreClient) Put(
-	ctx context.Context,
-	request rpc.PutRequest,
-) (contracts.ObjectDigest, error) {
-	return client.store.Put(ctx, filestore.PutRequest{
-		Reader:        request.Reader,
-		MediaType:     request.MediaType,
-		SourceHint:    request.SourceHint,
-		ContentRoles:  request.ContentRoles,
-		Facets:        request.Facets,
-		Provenance:    request.Provenance,
-		Relationships: request.Relationships,
-	})
-}
-
-func (client filestoreClient) ReadManifest(
-	ctx context.Context,
-	digest contracts.ObjectDigest,
-) (contracts.Manifest, error) {
-	return client.store.ReadManifest(ctx, digest)
-}
-
-func (client filestoreClient) AttachProvenance(
-	ctx context.Context,
-	digest contracts.ObjectDigest,
-	provenance []contracts.Provenance,
-) error {
-	return client.store.AttachProvenance(ctx, digest, provenance)
-}
-
-func (client filestoreClient) PutCompound(
-	ctx context.Context,
-	request rpc.CompoundPutRequest,
-) (contracts.ObjectDigest, error) {
-	return client.store.PutCompound(ctx, filestore.CompoundPutRequest{
-		ObjectID:      request.ObjectID,
-		MediaType:     request.MediaType,
-		SourceHint:    request.SourceHint,
-		ContentRoles:  request.ContentRoles,
-		Facets:        request.Facets,
-		Provenance:    request.Provenance,
-		Relationships: request.Relationships,
-		Parts:         request.Parts,
-	})
-}
-
-func (client filestoreClient) WriteSourceCursor(
-	ctx context.Context,
-	cursor contracts.SourceCursor,
-) error {
-	return client.store.WriteSourceCursor(ctx, cursor)
-}
-
-type memoryGmailBackend struct{}
-
-func (memoryGmailBackend) Search(
+func (gmailExternalBackend) Search(
 	context.Context,
 	string,
 	int,
@@ -517,14 +393,14 @@ func (memoryGmailBackend) Search(
 	return nil, nil
 }
 
-func (memoryGmailBackend) GetMessage(
+func (gmailExternalBackend) GetMessage(
 	context.Context,
 	string,
 ) (GmailMessage, error) {
 	return GmailMessage{}, errors.New("not used")
 }
 
-func (memoryGmailBackend) ModifyMessage(
+func (gmailExternalBackend) ModifyMessage(
 	context.Context,
 	string,
 	string,

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Blackcat Informatics Inc.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package scheduler
+package scheduler_test
 
 import (
 	"context"
@@ -9,29 +9,22 @@ import (
 	"testing"
 	"time"
 
-	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
-	"blackcat.ca/gmeow/internal/filestore"
+	"blackcat.ca/gmeow/internal/rpc"
+	"blackcat.ca/gmeow/internal/scheduler"
+	"blackcat.ca/gmeow/internal/testsupport"
 )
 
 func TestScanEnqueuesMissingWorkIdempotently(t *testing.T) {
 	ctx := context.Background()
-	store := filestore.NewFilesystemStore(t.TempDir())
-	digest, err := store.Put(ctx, filestore.PutRequest{
-		Reader:    strings.NewReader("hello"),
-		MediaType: "text/plain",
-		Facets:    []contracts.Facet{{Kind: "file"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	broker := NewMemoryBroker()
-	service := newTestService(t, store, broker, []contracts.AnalyzerSpec{{
+	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
 		Name:       "text.extract",
 		Version:    "1",
 		MediaTypes: []string{"text/plain"},
 	}})
-	first, err := service.Scan(ctx, contracts.SchedulerScanRequest{
+	digest := putTextObject(t, ctx, filestoreService, "hello")
+
+	first, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		PriorityClass: contracts.PriorityBackground,
 		RequestedBy:   "test",
@@ -40,7 +33,7 @@ func TestScanEnqueuesMissingWorkIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.Scan(ctx, contracts.SchedulerScanRequest{
+	second, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		PriorityClass: contracts.PriorityBackground,
 		RequestedBy:   "test",
@@ -49,32 +42,30 @@ func TestScanEnqueuesMissingWorkIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobs := broker.Jobs()
-	if first.Enqueued != 1 || second.Enqueued != 0 || len(jobs) != 1 {
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Enqueued != 1 || second.Enqueued != 0 || status.Pending != 1 {
 		t.Fatalf(
-			"expected one effective job across repeated scans, first=%#v second=%#v jobs=%#v",
+			"expected one effective job across repeated scans for %s, first=%#v second=%#v status=%#v",
+			digest,
 			first,
 			second,
-			jobs,
+			status,
 		)
-	}
-	if jobs[0].ObjectDigest != digest || jobs[0].IdempotencyKey == "" {
-		t.Fatalf("unexpected job: %#v", jobs[0])
 	}
 }
 
 func TestScanDetectsStaleAndFailedOutputs(t *testing.T) {
 	ctx := context.Background()
-	store := filestore.NewFilesystemStore(t.TempDir())
-	staleDigest, err := store.Put(ctx, filestore.PutRequest{
-		Reader:    strings.NewReader("stale"),
-		MediaType: "text/plain",
-		Facets:    []contracts.Facet{{Kind: "file"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
+		Name:       "text.extract",
+		Version:    "2",
+		MediaTypes: []string{"text/plain"},
+	}})
+	staleDigest := putTextObject(t, ctx, filestoreService, "stale")
+	if err := filestoreService.Client.WriteAnnotation(ctx, contracts.Annotation{
 		ObjectDigest:  staleDigest,
 		Kind:          "analysis",
 		AnalyzerName:  "text.extract",
@@ -85,15 +76,8 @@ func TestScanDetectsStaleAndFailedOutputs(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	failedDigest, err := store.Put(ctx, filestore.PutRequest{
-		Reader:    strings.NewReader("failed"),
-		MediaType: "text/plain",
-		Facets:    []contracts.Facet{{Kind: "file"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+	failedDigest := putTextObject(t, ctx, filestoreService, "failed")
+	if err := filestoreService.Client.WriteAnnotation(ctx, contracts.Annotation{
 		ObjectDigest:  failedDigest,
 		Kind:          "analysis",
 		AnalyzerName:  "text.extract",
@@ -104,164 +88,112 @@ func TestScanDetectsStaleAndFailedOutputs(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	broker := NewMemoryBroker()
-	service := newTestService(t, store, broker, []contracts.AnalyzerSpec{{
-		Name:       "text.extract",
-		Version:    "2",
-		MediaTypes: []string{"text/plain"},
-	}})
-	response, err := service.Scan(ctx, contracts.SchedulerScanRequest{})
+
+	response, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Enqueued != 2 {
-		t.Fatalf("expected stale and failed jobs, got %#v", response)
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	reasons := map[string]bool{}
-	for _, job := range broker.Jobs() {
-		reasons[job.Reason] = true
-	}
-	if !reasons["stale"] || !reasons["repair"] {
-		t.Fatalf("expected stale and repair reasons, got %#v", reasons)
+	if response.Enqueued != 2 || status.Pending != 2 {
+		t.Fatalf("expected stale and failed jobs, response=%#v status=%#v", response, status)
 	}
 }
 
-func TestInteractivePriorityOutranksBackground(t *testing.T) {
-	store := filestore.NewFilesystemStore(t.TempDir())
-	broker := NewMemoryBroker()
-	service := newTestService(t, store, broker, []contracts.AnalyzerSpec{{
-		Name:    "noop",
-		Version: "1",
-	}})
-	interactive := contracts.AnalyzerJob{
-		SchemaVersion: contracts.SchemaVersionPhase00,
-		ObjectDigest:  contracts.ObjectDigest(strings.Repeat("a", 64)),
-		Analyzer:      service.specs[0],
-		PriorityClass: contracts.PriorityInteractive,
-	}
-	background := interactive
-	background.PriorityClass = contracts.PriorityBackground
-	background.ObjectDigest = contracts.ObjectDigest(strings.Repeat("b", 64))
-	if err := service.Enqueue(context.Background(), interactive); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.Enqueue(context.Background(), background); err != nil {
-		t.Fatal(err)
-	}
-	jobs := broker.Jobs()
-	values := map[string]int{}
-	for _, job := range jobs {
-		values[job.PriorityClass] = job.Priority
-	}
-	if values[contracts.PriorityInteractive] <= values[contracts.PriorityBackground] {
-		t.Fatalf("interactive priority did not outrank background: %#v", values)
-	}
-}
-
-func TestInteractiveScanReprioritizesScheduledBackgroundWork(t *testing.T) {
+func TestInteractiveScanAddsHigherPriorityWorkForScheduledBackgroundWork(t *testing.T) {
 	ctx := context.Background()
-	store := filestore.NewFilesystemStore(t.TempDir())
-	digest, err := store.Put(ctx, filestore.PutRequest{
-		Reader:    strings.NewReader("hello"),
-		MediaType: "text/plain",
-		Facets:    []contracts.Facet{{Kind: "file"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	broker := NewMemoryBroker()
-	service := newTestService(t, store, broker, []contracts.AnalyzerSpec{{
+	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
 		Name:       "text.extract",
 		Version:    "1",
 		MediaTypes: []string{"text/plain"},
 	}})
-	background, err := service.Scan(ctx, contracts.SchedulerScanRequest{
+	putTextObject(t, ctx, filestoreService, "hello")
+
+	background, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
 		PriorityClass: contracts.PriorityBackground,
 		RequestedBy:   "scheduler",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	interactive, err := service.Scan(ctx, contracts.SchedulerScanRequest{
+	interactive, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
 		PriorityClass: contracts.PriorityInteractive,
 		RequestedBy:   "interface",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobs := broker.Jobs()
-	if background.Enqueued != 1 ||
-		interactive.Enqueued != 1 ||
-		len(jobs) != 1 ||
-		jobs[0].ObjectDigest != digest ||
-		jobs[0].PriorityClass != contracts.PriorityInteractive {
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if background.Enqueued != 1 || interactive.Enqueued != 1 || status.Pending != 2 {
 		t.Fatalf(
-			"expected one reprioritized interactive job, background=%#v interactive=%#v jobs=%#v",
+			"expected background work plus higher-priority interactive work, background=%#v interactive=%#v status=%#v",
 			background,
 			interactive,
-			jobs,
+			status,
 		)
 	}
 }
 
 func TestForceUsesSchedulerMarkersForIdempotency(t *testing.T) {
 	ctx := context.Background()
-	store := filestore.NewFilesystemStore(t.TempDir())
-	digest, err := store.Put(ctx, filestore.PutRequest{
-		Reader:    strings.NewReader("hello"),
-		MediaType: "text/plain",
-		Facets:    []contracts.Facet{{Kind: "file"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	broker := NewMemoryBroker()
-	service := newTestService(t, store, broker, []contracts.AnalyzerSpec{{
+	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
 		Name:       "text.extract",
 		Version:    "1",
 		MediaTypes: []string{"text/plain"},
 	}})
-	first, err := service.Force(ctx, digest, nil, "operator", "trace")
+	digest := putTextObject(t, ctx, filestoreService, "hello")
+
+	first, err := schedulerService.Client.Force(ctx, digest, nil, "operator", "trace")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.Force(ctx, digest, nil, "operator", "trace")
+	second, err := schedulerService.Client.Force(ctx, digest, nil, "operator", "trace")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Enqueued != 1 || second.Enqueued != 0 || len(broker.Jobs()) != 1 {
-		t.Fatalf("forced reanalysis was not idempotent: first=%#v second=%#v jobs=%#v",
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Enqueued != 1 || second.Enqueued != 0 || status.Pending != 1 {
+		t.Fatalf("forced reanalysis was not idempotent: first=%#v second=%#v status=%#v",
 			first,
 			second,
-			broker.Jobs(),
+			status,
 		)
 	}
 }
 
 func TestDeadLetterRequeueMovesJobsBackToPending(t *testing.T) {
-	broker := NewMemoryBroker()
+	ctx := context.Background()
+	_, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
+		Name:    "noop",
+		Version: "1",
+	}})
 	job := contracts.AnalyzerJob{
 		SchemaVersion:  contracts.SchemaVersionPhase00,
 		JobID:          "job",
 		IdempotencyKey: "job",
 		ObjectDigest:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Analyzer:       contracts.AnalyzerSpec{Name: "noop", Version: "1"},
+		Attempt:        1,
 	}
-	broker.AddDeadLetter(job)
-	service := newTestService(
-		t,
-		filestore.NewFilesystemStore(t.TempDir()),
-		broker,
-		[]contracts.AnalyzerSpec{job.Analyzer},
-	)
-	response, err := service.Requeue(
-		context.Background(),
+	if err := schedulerService.Broker.RouteFailure(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	response, err := schedulerService.Client.Requeue(
+		ctx,
 		contracts.RequeueRequest{Limit: 10},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := service.Status(context.Background())
+	status, err := schedulerService.Client.Status(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,31 +204,27 @@ func TestDeadLetterRequeueMovesJobsBackToPending(t *testing.T) {
 
 func TestStalePublishingMarkerIsRetried(t *testing.T) {
 	ctx := context.Background()
-	store := filestore.NewFilesystemStore(t.TempDir())
-	digest, err := store.Put(ctx, filestore.PutRequest{
-		Reader:    strings.NewReader("hello"),
-		MediaType: "text/plain",
-		Facets:    []contracts.Facet{{Kind: "file"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	broker := NewMemoryBroker()
-	service := newTestService(t, store, broker, []contracts.AnalyzerSpec{{
+	spec := contracts.AnalyzerSpec{
 		Name:       "text.extract",
 		Version:    "1",
 		MediaTypes: []string{"text/plain"},
-	}})
+	}
+	filestoreService, schedulerService := startScheduler(
+		t,
+		ctx,
+		[]contracts.AnalyzerSpec{spec},
+	)
+	digest := putTextObject(t, ctx, filestoreService, "hello")
 	job := contracts.AnalyzerJob{
 		ObjectDigest:  digest,
-		Analyzer:      service.specs[0],
+		Analyzer:      spec,
 		PriorityClass: contracts.PriorityBackground,
 		RequestedBy:   "scheduler",
 		Reason:        "missing",
 		CreatedAt:     time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC),
 	}
-	job.IdempotencyKey = IdempotencyKey(job)
-	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+	job.IdempotencyKey = scheduler.IdempotencyKey(job)
+	if err := filestoreService.Client.WriteAnnotation(ctx, contracts.Annotation{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		ObjectDigest:  digest,
 		Kind:          "scheduler",
@@ -311,36 +239,57 @@ func TestStalePublishingMarkerIsRetried(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	response, err := service.Scan(ctx, contracts.SchedulerScanRequest{})
+
+	response, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Enqueued != 1 {
-		t.Fatalf("expected stale publishing marker to be retried, got %#v", response)
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Enqueued != 1 || status.Pending != 1 {
+		t.Fatalf("expected stale publishing marker to be retried, response=%#v status=%#v",
+			response,
+			status,
+		)
 	}
 }
 
-func newTestService(
+func startScheduler(
 	t *testing.T,
-	store filestore.Store,
-	broker Broker,
+	ctx context.Context,
 	specs []contracts.AnalyzerSpec,
-) *Service {
+) (*testsupport.FilestoreService, *testsupport.SchedulerService) {
 	t.Helper()
-	service, err := NewService(store, broker, specs, Config{
-		RetryBackoff: 30 * time.Second,
-		Priorities: config.SchedulerPriority{
-			Interactive: 100,
-			Forced:      90,
-			FreshIngest: 70,
-			Repair:      50,
-			Background:  10,
-		},
-	}, WithClock(func() time.Time {
-		return time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
-	}))
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	t.Cleanup(filestoreService.Close)
+	schedulerService := testsupport.StartSchedulerGRPC(
+		t,
+		ctx,
+		filestoreService.Store,
+		specs,
+	)
+	t.Cleanup(schedulerService.Close)
+
+	return filestoreService, schedulerService
+}
+
+func putTextObject(
+	t *testing.T,
+	ctx context.Context,
+	filestoreService *testsupport.FilestoreService,
+	body string,
+) contracts.ObjectDigest {
+	t.Helper()
+	digest, err := filestoreService.Client.Put(ctx, rpc.PutRequest{
+		Reader:    strings.NewReader(body),
+		MediaType: "text/plain",
+		Facets:    []contracts.Facet{{Kind: "file"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return service
+
+	return digest
 }

@@ -60,8 +60,7 @@ schema and query code is retired:
 
 ## Exit Gate
 
-- QUERY APIs are exercised through the real query interface, using the package-local in-memory
-  implementation only when PostgreSQL behavior is not under test and PostgreSQL-backed tests for
-  projection/search behavior.
+- QUERY APIs are exercised through the real PostgreSQL-backed query implementation. Tests outside
+  QUERY's own package-local private behavior cross the QUERY boundary through its gRPC service.
 - No FILESTORE package imports PostgreSQL code.
 - Old Python PostgreSQL cache and Alembic schema are removed after rebuild parity is proved.

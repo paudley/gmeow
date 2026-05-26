@@ -14,8 +14,8 @@ import (
 
 	"blackcat.ca/gmeow/internal/appsvc"
 	"blackcat.ca/gmeow/internal/contracts"
-	"blackcat.ca/gmeow/internal/filestore"
-	"blackcat.ca/gmeow/internal/query/memory"
+	"blackcat.ca/gmeow/internal/rpc"
+	"blackcat.ca/gmeow/internal/testsupport"
 )
 
 func TestRESTMailSearchUsesAppServices(t *testing.T) {
@@ -70,9 +70,11 @@ func TestRESTMetricsExposesPrometheusText(t *testing.T) {
 func testServices(t *testing.T, text string) *appsvc.Services {
 	t.Helper()
 	ctx := context.Background()
-	store := filestore.NewFilesystemStore(t.TempDir())
-	index := memory.New(store)
-	digest, err := store.Put(ctx, filestore.PutRequest{
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	t.Cleanup(filestoreService.Close)
+	queryService := testsupport.StartQueryGRPC(t, ctx, filestoreService.Store)
+	t.Cleanup(queryService.Close)
+	digest, err := filestoreService.Client.Put(ctx, rpc.PutRequest{
 		Reader:    strings.NewReader(text),
 		MediaType: "text/plain",
 		Facets:    []contracts.Facet{{Kind: appsvc.MailMessageFacet}},
@@ -80,16 +82,20 @@ func testServices(t *testing.T, text string) *appsvc.Services {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := store.ReadManifest(ctx, digest)
+	t.Cleanup(func() { testsupport.CleanupQueryObjects(t, digest) })
+	manifest, err := filestoreService.Client.ReadManifest(ctx, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	manifest.Titles = []contracts.Title{{Value: text}}
-	if err := index.Project(ctx, manifest, nil); err != nil {
+	if err := queryService.Client.Project(ctx, manifest, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	services, err := appsvc.New(appsvc.Options{Query: index, Objects: store})
+	services, err := appsvc.New(appsvc.Options{
+		Query:   queryService.Client,
+		Objects: filestoreService.Client,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

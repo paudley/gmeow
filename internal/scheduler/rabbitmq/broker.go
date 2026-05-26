@@ -67,7 +67,8 @@ func New(ctx context.Context, cfg Config) (*Broker, error) {
 		cfg.QueuePrefix = defaultQueuePrefix
 	}
 
-	if cfg.QueuePrefix != defaultQueuePrefix && cfg.QueuePrefix != testQueuePrefix {
+	if cfg.QueuePrefix != defaultQueuePrefix &&
+		!strings.HasPrefix(cfg.QueuePrefix, testQueuePrefix) {
 		return nil, errors.New("rabbitmq queue prefix must be gmeow. or gmeow.test.")
 	}
 

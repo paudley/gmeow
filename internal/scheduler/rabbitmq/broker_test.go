@@ -5,6 +5,7 @@ package rabbitmq
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,6 +29,60 @@ func TestQueueNamesUseGmeowDotPrefix(t *testing.T) {
 		if !strings.HasPrefix(name, "gmeow.test.") {
 			t.Fatalf("queue %q does not use gmeow.test. prefix", name)
 		}
+	}
+}
+
+func TestRabbitMQDeliversHigherPriorityWorkFirst(t *testing.T) {
+	cfg := testRabbitMQConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	broker, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broker.Close()
+	purgeQueues(t, broker)
+	background := contracts.AnalyzerJob{
+		SchemaVersion:  contracts.SchemaVersionPhase00,
+		JobID:          "background-priority-test",
+		IdempotencyKey: "background-priority-test",
+		ObjectDigest:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Analyzer:       contracts.AnalyzerSpec{Name: "noop", Version: "1"},
+		PriorityClass:  contracts.PriorityBackground,
+		Priority:       10,
+	}
+	interactive := background
+	interactive.JobID = "interactive-priority-test"
+	interactive.IdempotencyKey = "interactive-priority-test"
+	interactive.ObjectDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	interactive.PriorityClass = contracts.PriorityInteractive
+	interactive.Priority = 100
+	if err := broker.Publish(ctx, background); err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Publish(ctx, interactive); err != nil {
+		t.Fatal(err)
+	}
+
+	channel, err := broker.connection.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer channel.Close()
+	delivery, ok, err := channel.Get(broker.topology.workQueue, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected work delivery")
+	}
+	defer delivery.Nack(false, true)
+	var delivered contracts.AnalyzerJob
+	if err := json.Unmarshal(delivery.Body, &delivered); err != nil {
+		t.Fatal(err)
+	}
+	if delivered.IdempotencyKey != interactive.IdempotencyKey {
+		t.Fatalf("expected interactive work first, got %#v", delivered)
 	}
 }
 

@@ -1249,8 +1249,8 @@ Deliverables:
 - incremental projection from changed annotation files;
 - text search, vector placeholder paths, graph edge projection, facet filters, compound expansion,
   metadata/structure queries, and analyzer status queries;
-- package-local in-memory QUERY implementation for tests that do not need PostgreSQL, plus
-  PostgreSQL-backed tests for QUERY behavior and app-service orchestration.
+- PostgreSQL-backed tests for QUERY behavior and app-service orchestration, with cross-component
+  callers using the QUERY gRPC boundary.
 
 Exit criteria:
 
@@ -1603,15 +1603,16 @@ Testing should define the architecture contract, not just implementation details
 - **Integration tests:** FILESTORE object-directory walk + QUERY rebuild; SCHEDULER + RabbitMQ +
   test worker; source ingest through projection; forced analysis from MCP/REST through to annotation
   update; `mail_search` fan-out through real app-service, QUERY, SOURCE, and Gmail-adapter code
-  paths, with mocks only below external APIs such as Google Gmail.
+  paths, with replacement behavior only below external APIs such as Google Gmail.
 - **Failure tests:** duplicate ingest, worker crash before ack, worker crash after FILESTORE write,
   stale analyzer output, parent refresh after subobject analysis, dead-letter requeue, corrupt CAS
   object, missing emergency sidecar, missing manifest, PostgreSQL wipe.
 - **Performance tests:** ingest throughput, projection lag, queue latency by priority, search p95/p99,
   semantic search latency, rebuild time by object count.
 
-Mocks are allowed only at external-system boundaries such as live Google Gmail/Drive APIs,
-unavailable model endpoints, and network services that cannot be exercised safely in a given test.
+Mocks, fakes, simulations, stubs, and emulators are allowed only at external-system boundaries such
+as live Google Gmail/Drive APIs, unavailable model endpoints, and network services that cannot be
+exercised safely in a given test.
 They are not sufficient proof for core workflows. Any feature that changes an operator command,
 config bootstrap, FILESTORE write path, QUERY rebuild, scheduler enqueue, or worker acknowledgement
 path needs at least one representative functional test using the real in-repo code path.

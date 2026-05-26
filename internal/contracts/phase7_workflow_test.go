@@ -6,20 +6,26 @@ package contracts_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/contracts"
-	"blackcat.ca/gmeow/internal/filestore"
 	"blackcat.ca/gmeow/internal/observability"
-	"blackcat.ca/gmeow/internal/query/memory"
+	"blackcat.ca/gmeow/internal/rpc"
+	"blackcat.ca/gmeow/internal/testsupport"
 )
 
 func TestPhaseSevenLoadWorkflowIngestAnalysisProjectionAndSearch(t *testing.T) {
 	ctx := context.Background()
-	store := filestore.NewFilesystemStore(t.TempDir())
-	index := memory.New(store)
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	queryService := testsupport.StartQueryGRPC(t, ctx, filestoreService.Store)
+	defer queryService.Close()
 	analyzer := fixedAnalyzer{spec: contracts.AnalyzerSpec{
 		Name:    "summary.load",
 		Version: "1",
@@ -28,7 +34,9 @@ func TestPhaseSevenLoadWorkflowIngestAnalysisProjectionAndSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := analysis.NewRuntime(blockingJobSource{}, store, registry)
+	jobSource := analysisJobSource(t, ctx)
+	defer jobSource.Close()
+	runtime, err := analysis.NewRuntime(jobSource, filestoreService.Client, registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +44,7 @@ func TestPhaseSevenLoadWorkflowIngestAnalysisProjectionAndSearch(t *testing.T) {
 	const objectCount = 64
 	digests := make([]contracts.ObjectDigest, 0, objectCount)
 	for offset := range objectCount {
-		digest, err := store.Put(ctx, filestore.PutRequest{
+		digest, err := filestoreService.Client.Put(ctx, rpc.PutRequest{
 			Reader: strings.NewReader(
 				fmt.Sprintf("phase seven load object %02d searchable payload", offset),
 			),
@@ -57,10 +65,10 @@ func TestPhaseSevenLoadWorkflowIngestAnalysisProjectionAndSearch(t *testing.T) {
 		}
 	}
 
-	if err := index.Rebuild(ctx); err != nil {
+	if err := queryService.Client.Rebuild(ctx); err != nil {
 		t.Fatal(err)
 	}
-	response, err := index.Search(ctx, contracts.SearchRequest{
+	response, err := queryService.Client.Search(ctx, contracts.SearchRequest{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Query:         "searchable",
 		Limit:         objectCount,
@@ -72,11 +80,11 @@ func TestPhaseSevenLoadWorkflowIngestAnalysisProjectionAndSearch(t *testing.T) {
 		t.Fatalf("expected load ingest to produce searchable objects, got %#v", response)
 	}
 
-	report, err := store.Verify(ctx)
+	report, err := filestoreService.Store.Verify(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Status != filestore.VerifyStatusOK {
+	if string(report.Status) != "ok" {
 		t.Fatalf("load workflow produced invalid FILESTORE: %#v", report)
 	}
 
@@ -85,6 +93,83 @@ func TestPhaseSevenLoadWorkflowIngestAnalysisProjectionAndSearch(t *testing.T) {
 		t.Fatalf("expected analysis latency metrics, got %#v", metrics)
 	}
 	_ = digests
+}
+
+func TestPhaseSevenFilestoreRestoreDrillRebuildsSearchableProjection(t *testing.T) {
+	ctx := context.Background()
+	sourceService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer sourceService.Close()
+	originalDigest, err := sourceService.Client.Put(ctx, rpc.PutRequest{
+		Reader:    strings.NewReader("phase seven restore drill searchable payload"),
+		MediaType: "text/plain",
+		Facets: []contracts.Facet{{
+			Kind:    "file",
+			Version: "1",
+			Metadata: map[string]any{
+				"display_name": "restore-drill.txt",
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "filesystem",
+			SourceName: "restore-drill",
+			ExternalID: "restore-drill.txt",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceService.Client.WriteAnnotation(ctx, contracts.Annotation{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigest:  originalDigest,
+		Kind:          "analysis",
+		AnalyzerName:  "summary.restore",
+		AnalyzerVer:   "1",
+		Data:          map[string]any{"status": "complete", "summary": "restored"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	restoredRoot := filepath.Join(t.TempDir(), "restored-filestore")
+	copyTree(t, sourceService.Root, restoredRoot)
+	restoredService := testsupport.StartFilestoreGRPCAt(t, ctx, restoredRoot)
+	defer restoredService.Close()
+	report, err := restoredService.Store.Verify(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(report.Status) != "ok" || report.Checked != 1 {
+		t.Fatalf("restored FILESTORE did not verify cleanly: %#v", report)
+	}
+
+	queryService := testsupport.StartQueryGRPC(t, ctx, restoredService.Store)
+	defer queryService.Close()
+	if err := queryService.Client.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	response, err := queryService.Client.Search(ctx, contracts.SearchRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Query:         "restored",
+		Limit:         10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 1 || response.Results[0].ObjectDigest != originalDigest {
+		t.Fatalf("restore drill did not rebuild searchable QUERY projection: %#v", response)
+	}
+
+	reader, err := restoredService.Client.Open(ctx, originalDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "phase seven restore drill searchable payload" {
+		t.Fatalf("restored content mismatch: %q", content)
+	}
 }
 
 type fixedAnalyzer struct {
@@ -105,10 +190,67 @@ func (fixedAnalyzer) Analyze(
 	}}, nil
 }
 
-type blockingJobSource struct{}
+func copyTree(t *testing.T, sourceRoot, targetRoot string) {
+	t.Helper()
+	err := filepath.WalkDir(
+		sourceRoot,
+		func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			relative, err := filepath.Rel(sourceRoot, path)
+			if err != nil {
+				return err
+			}
+			target := filepath.Join(targetRoot, relative)
+			if entry.IsDir() {
+				return os.MkdirAll(target, 0o755)
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			return copyFile(path, target, info.Mode())
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
-func (blockingJobSource) Receive(ctx context.Context) (analysis.JobReceipt, error) {
-	<-ctx.Done()
+func copyFile(sourcePath, targetPath string, mode os.FileMode) error {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
 
-	return nil, ctx.Err()
+	target, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(target, source); err != nil {
+		_ = target.Close()
+
+		return err
+	}
+
+	return target.Close()
+}
+
+func analysisJobSource(t *testing.T, ctx context.Context) *analysis.RabbitMQSource {
+	t.Helper()
+	loaded := testsupport.LoadConfig(t)
+	source, err := analysis.NewRabbitMQSource(ctx, analysis.RabbitMQSourceConfig{
+		URL: loaded.Resolved.RabbitMQ.TestURL,
+		QueuePrefix: fmt.Sprintf(
+			"gmeow.test.analysis.%d.",
+			time.Now().UnixNano(),
+		),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return source
 }

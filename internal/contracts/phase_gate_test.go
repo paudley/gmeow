@@ -391,6 +391,173 @@ func TestPythonIntelDocsDescribeExternalAnalyzerAdapters(t *testing.T) {
 	}
 }
 
+func TestPhaseSevenOperationalDocsAndMetricsStayAligned(t *testing.T) {
+	root := repoRoot(t)
+	backupDoc, err := os.ReadFile(
+		filepath.Join(root, "docs", "FILESTORE_BACKUP_RESTORE.md"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupText := string(backupDoc)
+	for _, required := range []string{
+		"temporary target",
+		"filestore verify",
+		"query migrate",
+		"query rebuild --confirm-instance <instance_id>",
+		"scheduler scan",
+		"search <synthetic-term>",
+		"Do not use `recovery.json` sidecars for normal rebuilds",
+	} {
+		if !strings.Contains(backupText, required) {
+			t.Fatalf("FILESTORE backup/restore docs are missing phase-7 step %q", required)
+		}
+	}
+
+	metricSources := []string{
+		"internal/analysis/worker.go",
+		"internal/appsvc/services.go",
+		"internal/filestore/verify.go",
+		"internal/interface/rest/server.go",
+		"internal/query/postgres/index.go",
+	}
+	metricText := strings.Builder{}
+	for _, relative := range metricSources {
+		content, err := os.ReadFile(filepath.Join(root, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		metricText.Write(content)
+	}
+	for _, metric := range []string{
+		"gmeow_queue_depth_pending",
+		"gmeow_queue_depth_retry",
+		"gmeow_analysis_latency",
+		"gmeow_projection_lag",
+		"gmeow_corrupt_objects",
+		"gmeow_failed_analyzers",
+		"gmeow_source_errors",
+		"gmeow_interface_latency",
+	} {
+		if !strings.Contains(metricText.String(), metric) {
+			t.Fatalf("phase-7 metric %q is not instrumented", metric)
+		}
+	}
+}
+
+func TestTestingArchitectureForbidsInternalDoublesAndConcreteSeamBypasses(
+	t *testing.T,
+) {
+	root := repoRoot(t)
+	internalRoot := filepath.Join(root, "internal")
+	self := filepath.Join(internalRoot, "contracts", "phase_gate_test.go")
+	forbiddenTestSnippets := []string{
+		"NewMemoryBroker",
+		"MemoryBroker",
+		"memoryIndex",
+		"internal/query/memory",
+		"internal/query/querytest",
+		"internal/scheduler/schedulertest",
+		"mock",
+		"Mock",
+		"fake",
+		"Fake",
+		"stub",
+		"Stub",
+	}
+	err := filepath.WalkDir(
+		internalRoot,
+		func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || filepath.Ext(path) != ".go" ||
+				!strings.HasSuffix(path, "_test.go") || path == self {
+				return nil
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			text := string(content)
+			for _, forbidden := range forbiddenTestSnippets {
+				if strings.Contains(text, forbidden) {
+					t.Fatalf(
+						"%s contains forbidden in-repo test double marker %q; only fully external APIs/services may be replaced",
+						path,
+						forbidden,
+					)
+				}
+			}
+			if strings.Contains(text, "InMemory") &&
+				!strings.Contains(text, "mcp.NewInMemoryTransports") {
+				t.Fatalf("%s contains forbidden in-memory test transport/backend", path)
+			}
+
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, relative := range []string{
+		filepath.Join("internal", "query", "memory"),
+		filepath.Join("internal", "query", "querytest"),
+		filepath.Join("internal", "scheduler", "schedulertest"),
+	} {
+		path := filepath.Join(root, relative)
+		if _, err := os.Stat(path); err == nil {
+			t.Fatalf("forbidden internal testing/backend path is present: %s", relative)
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat forbidden testing/backend path %s: %v", relative, err)
+		}
+	}
+
+	for _, relativeRoot := range []string{
+		filepath.Join("internal", "appsvc"),
+		filepath.Join("internal", "contracts"),
+		filepath.Join("internal", "interface"),
+		filepath.Join("internal", "source"),
+	} {
+		err := filepath.WalkDir(filepath.Join(root, relativeRoot), func(
+			path string,
+			entry os.DirEntry,
+			err error,
+		) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || filepath.Ext(path) != ".go" {
+				return nil
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			text := string(content)
+			for _, forbidden := range []string{
+				"\"blackcat.ca/gmeow/internal/filestore\"",
+				"\"blackcat.ca/gmeow/internal/query/postgres\"",
+				"\"blackcat.ca/gmeow/internal/scheduler/rabbitmq\"",
+			} {
+				if strings.Contains(text, forbidden) {
+					t.Fatalf(
+						"%s imports concrete component implementation %s; major component seams must use gRPC",
+						path,
+						forbidden,
+					)
+				}
+			}
+
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))

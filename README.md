@@ -169,6 +169,7 @@ databases or schemas.
 Before publishing, run the checklist in `docs/PUBLIC_RELEASE_CHECKLIST.md`.
 
 FILESTORE backup and restore procedures live in `docs/FILESTORE_BACKUP_RESTORE.md`.
+Testing architecture and mock-minimization rules live in `docs/TESTING.md`.
 
 ## License
 
