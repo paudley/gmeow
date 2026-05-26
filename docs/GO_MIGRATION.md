@@ -656,7 +656,8 @@ RabbitMQ topology:
 
 - one exchange for analysis work;
 - queues by priority or a priority queue with max priority configured;
-- every RabbitMQ queue name is prefixed with `gmeow:`;
+- production RabbitMQ queue names are prefixed with `gmeow.`;
+- integration-test RabbitMQ queue names are prefixed with `gmeow.test.`;
 - production broker URLs target the RabbitMQ `gmeow` vhost;
 - integration tests target the RabbitMQ `gmeow-test` vhost;
 - retry queues with TTL/dead-letter routing;
@@ -923,18 +924,19 @@ Config rules:
 - ANALYSIS receives every needed setting through RabbitMQ job payloads, analyzer specs, environment
   variables for process-level concerns, or resolved worker startup payloads;
 - SOPS is a first-class startup dependency, not an optional integration;
-- startup requires a config unlock key from `GMEOW_SOPS_UNLOCK_KEY`, falling back to
+- startup requires a SOPS age identity from `GMEOW_SOPS_UNLOCK_KEY`, falling back to
   `~/.config/gmeow/key.txt`; if neither exists, every binary fails before starting components;
 - avoid the current secondary-config indirection: `gmeow.toml` must not contain a
   `secrets.file`/`config.file` pointer to another config file;
 - config file selection belongs to process startup through CLI flags, environment variables, or
   fixed defaults, not to the config data model itself;
-- encrypt only minimal leaf secrets, not whole operational structures: for example, PostgreSQL
-  host/port/database/user remain visible while only the password is encrypted;
-- secret references should be explicit typed fields such as `password_secret`, `token_secret`, or
-  `private_key_secret`, never opaque replacement blobs for entire DSNs or adapter configs;
-- the shared Go parser unlocks/decrypts the selected config source, resolves declared secret fields
-  into the typed config model, and dispatches resolved values to components;
+- encrypt only minimal leaf secrets as SOPS JSON envelopes inside `[secrets]`, not whole
+  operational structures: for example, PostgreSQL host/port/database/user remain visible while
+  only the password is encrypted;
+- password leaves have fixed names under `[secrets]`; connection URLs, hosts, users, ports, and
+  vhosts stay visible operational config and must not be encrypted as opaque DSNs;
+- the shared Go parser decrypts referenced SOPS leaf envelopes, resolves declared secret fields into
+  the typed config model, and dispatches resolved values to components;
 - repeated components use arrays, such as `[[sources]]`, `[[search.backends]]`, and
   `[[analysis.analyzers]]`;
 - source configs declare facets and capabilities explicitly;
@@ -954,32 +956,23 @@ log_level = "info"
 root = "data/filestore"
 compression = "zstd"
 zstd_level = 6
-deep_verify_on_startup = false
-recovery_sidecar = true
 
-[query]
-backend = "postgres"
-
-[query.postgres]
+[postgres]
 host = "127.0.0.1"
 port = 5432
 database = "gmeow"
 user = "gmeow"
-password_secret = "postgres.password"
 sslmode = "disable"
 migrations = "migrations/query"
 max_conns = 10
 
-[broker]
-backend = "rabbitmq"
+[rabbitmq]
 host = "127.0.0.1"
 port = 5672
 vhost = "gmeow"
 user = "gmeow"
-password_secret = "rabbitmq.password"
 
 [scheduler]
-enabled = true
 scan_interval = "30s"
 stale_after = "15m"
 
@@ -991,49 +984,39 @@ repair = 50
 background = 10
 
 [analysis]
-enabled = true
 worker_concurrency = 4
 
 [analysis.embeddings]
-enabled = true
 endpoint = "http://127.0.0.1:8090/v1/embeddings"
 model = "nomic-embed-text-v1.5"
 batch_size = 32
 
 [[analysis.analyzers]]
 name = "text.extract"
-enabled = true
 runtime = "go"
 
 [[analysis.analyzers]]
 name = "ner.spacy"
-enabled = true
 runtime = "python"
 
 [[analysis.analyzers]]
 name = "categories.sklearn"
-enabled = true
 runtime = "python"
 
 [interface.mcp]
-enabled = true
 listen = "127.0.0.1:8765"
 
 [interface.rest]
-enabled = true
 listen = "127.0.0.1:8766"
 
 [interface.imap]
-enabled = false
 listen = "127.0.0.1:1143"
 username = "gmeow"
-password_secret = "imap.password"
 facet = "mail_message"
 
 [[sources]]
 name = "primary-gmail"
 kind = "gmail"
-enabled = true
 facets = ["mail_message"]
 capabilities = ["ingest", "hydrate", "live_search", "live_retrieve", "action", "cursor", "backfill"]
 
@@ -1045,7 +1028,6 @@ service_account_json_secret = "gmail.primary.service_account_json"
 [[sources]]
 name = "local-spool"
 kind = "spool"
-enabled = true
 path = "data/spool"
 facets = ["file", "phone", "webpage"]
 capabilities = ["ingest"]
@@ -1053,36 +1035,34 @@ capabilities = ["ingest"]
 [[search.backends]]
 name = "query"
 kind = "query"
-enabled = true
 facets = ["*"]
 
 [[search.backends]]
 name = "gmail-live"
 kind = "source"
 source = "primary-gmail"
-enabled = true
 facets = ["mail_message"]
 ```
 
 Startup config resolution should be deterministic:
 
 1. select the config source from CLI flag, `GMEOW_CONFIG`, or the default path;
-2. require the SOPS unlock key from `GMEOW_SOPS_UNLOCK_KEY` or `~/.config/gmeow/key.txt`;
-3. unlock/decrypt the selected config source when it is SOPS-protected;
-4. read `gmeow.toml` and reject unknown schema versions;
-5. resolve environment/file secret references inside the shared parser;
+2. require the SOPS age identity from `GMEOW_SOPS_UNLOCK_KEY` or `~/.config/gmeow/key.txt`;
+3. read TOML-shaped `gmeow.toml` and reject unknown schema versions or opaque whole-file SOPS blobs;
+4. decrypt referenced `[secrets]` leaf envelopes through SOPS;
+5. resolve named secret references inside the shared parser;
 6. validate the complete typed config before any component starts;
 7. dispatch resolved config to Go components and resolved worker settings/job specs to ANALYSIS.
 
-Startup validation is mandatory and cannot be disabled. `deep_verify_on_startup` is only an
-operator-controlled full FILESTORE integrity sweep; disabling it does not skip config validation,
-required dependency validation, schema checks, SOPS unlock, or cheap FILESTORE layout checks.
+Startup validation is mandatory and cannot be disabled. Deep FILESTORE verification belongs to an
+explicit CLI command, not startup config. Recovery sidecars are mandatory FILESTORE output, not a
+config toggle.
 
 Secret management should be part of `gmeow-admin` so operators do not hand-edit encrypted values:
 
 - `gmeow-admin config secret set <name>` reads a value from stdin or an interactive prompt and
   writes the encrypted leaf value back through the shared SOPS config writer;
-- `gmeow-admin config secret unset <name>` removes an encrypted leaf after validating no enabled
+- `gmeow-admin config secret unset <name>` removes an encrypted leaf after validating no configured
   component still references it;
 - `gmeow-admin config secret list` prints secret names, reference counts, and last update metadata,
   but never decrypted values;
@@ -1235,6 +1215,7 @@ Deliverables:
 - idempotency key generation;
 - RabbitMQ exchange/queue setup;
 - production RabbitMQ vhost `gmeow` and test vhost `gmeow-test`;
+- production queue prefix `gmeow.` and test queue prefix `gmeow.test.`;
 - priority classes;
 - retry and dead-letter routing;
 - forced reanalysis and interactive reprioritization;
@@ -1523,9 +1504,9 @@ Ownership boundaries:
 | PyPI release runs | Only `gmeow-intel` Python ANALYSIS package is built and published, not the Go core or old Python app |
 | Python ANALYSIS worker starts | Worker receives resolved settings/job specs from Go/RabbitMQ and never parses `gmeow.toml` |
 | Invalid config is provided | Shared Go parser rejects it before component startup and reports schema/field errors |
-| SOPS unlock key is missing | Startup fails before any component starts and reports the required env/file sources |
+| SOPS age identity is missing | Startup fails before any component starts and reports the required env/file sources |
 | Config includes a secondary config-file pointer | Shared Go parser rejects it; config source selection is only CLI/env/default startup policy |
-| SOPS-protected config is provided | Shared Go parser decrypts the selected config source once and dispatches resolved values; components and Python workers do not read SOPS directly |
+| SOPS-protected secret leaves are provided | Shared Go parser decrypts referenced leaf envelopes and dispatches resolved values; components and Python workers do not read SOPS directly |
 | PostgreSQL config is inspected | Host, port, database, user, and SSL mode are visible; only the password is encrypted as a named leaf secret |
 | Encrypted config secret is updated | `gmeow-admin config secret set` atomically updates one encrypted leaf without rewriting whole operational config blocks |
 | QUERY SQL is reviewed | SQL is parameterized through `pgx`/query-builder APIs; string-formatted SQL is rejected by review or static checks |

@@ -5,9 +5,7 @@ package config
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -28,34 +26,39 @@ func TestLoadFailsWithoutUnlockKey(t *testing.T) {
 }
 
 func TestLoadUsesUnlockKeyFileFallback(t *testing.T) {
-	configPath := writeConfig(t, minimalConfig())
+	configPath := repoConfigPath(t)
 	home := t.TempDir()
 	keyPath := filepath.Join(home, ".config", "gmeow", "key.txt")
 	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(keyPath, []byte("file-key\n"), 0o600); err != nil {
+	key, err := os.ReadFile(
+		filepath.Join(os.Getenv("HOME"), ".config", "gmeow", "key.txt"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(unlockEnvName, "")
 	t.Setenv(configEnvName, "")
 	t.Setenv("HOME", home)
 
-	loaded, err := Load(Options{Path: configPath, allowPlaintextSecretsForTests: true})
+	loaded, err := Load(Options{Path: configPath})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Config.System.InstanceID != "test" {
+	if loaded.Config.System.InstanceID == "" {
 		t.Fatalf("unexpected instance: %s", loaded.Config.System.InstanceID)
 	}
 }
 
 func TestLoadUsesConfigEnvironmentFallback(t *testing.T) {
-	configPath := writeConfig(t, minimalConfig())
-	t.Setenv(unlockEnvName, "test-key")
+	configPath := repoConfigPath(t)
 	t.Setenv(configEnvName, configPath)
 
-	loaded, err := Load(Options{allowPlaintextSecretsForTests: true})
+	loaded, err := Load(Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,21 +112,21 @@ func TestLoadRejectsUnknownConfigVersion(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsSchedulerWithoutRabbitMQ(t *testing.T) {
+func TestLoadRejectsRabbitMQEnabledSwitch(t *testing.T) {
 	configPath := writeConfig(
 		t,
 		strings.Replace(
 			minimalConfig(),
-			"[rabbitmq]\nenabled = true",
-			"[rabbitmq]\nenabled = false",
+			"[rabbitmq]\n",
+			"[rabbitmq]\nenabled = false\n",
 			1,
-		)+"\n[scheduler]\nenabled = true\nqueue_prefix = \"gmeow:\"\n",
+		),
 	)
 	t.Setenv(unlockEnvName, "test-key")
 
-	_, err := Load(Options{Path: configPath, allowPlaintextSecretsForTests: true})
+	_, err := Load(Options{Path: configPath})
 	if err == nil {
-		t.Fatal("expected scheduler to require RabbitMQ")
+		t.Fatal("expected RabbitMQ enabled switch to fail")
 	}
 	if !strings.Contains(err.Error(), "rabbitmq.enabled") {
 		t.Fatalf("unexpected error: %v", err)
@@ -133,15 +136,36 @@ func TestLoadRejectsSchedulerWithoutRabbitMQ(t *testing.T) {
 func TestLoadRejectsSchedulerQueuePrefixOutsideGmeowNamespace(t *testing.T) {
 	configPath := writeConfig(
 		t,
-		minimalConfig()+"\n[scheduler]\nenabled = true\nqueue_prefix = \"other:\"\n",
+		minimalConfig()+"\n[scheduler]\nqueue_prefix = \"other:\"\n",
 	)
 	t.Setenv(unlockEnvName, "test-key")
 
-	_, err := Load(Options{Path: configPath, allowPlaintextSecretsForTests: true})
+	_, err := Load(Options{Path: configPath})
 	if err == nil {
 		t.Fatal("expected scheduler queue prefix validation error")
 	}
-	if !strings.Contains(err.Error(), "gmeow:") {
+	if !strings.Contains(err.Error(), "gmeow.") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsWrongRabbitMQVHost(t *testing.T) {
+	configPath := writeConfig(
+		t,
+		strings.Replace(
+			minimalConfig(),
+			"vhost = \"gmeow\"",
+			"vhost = \"/\"",
+			1,
+		),
+	)
+	t.Setenv(unlockEnvName, "test-key")
+
+	_, err := Load(Options{Path: configPath})
+	if err == nil {
+		t.Fatal("expected RabbitMQ vhost validation error")
+	}
+	if !strings.Contains(err.Error(), "gmeow") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -151,14 +175,14 @@ func TestLoadRejectsUnknownWholeSecretReferences(t *testing.T) {
 		t,
 		strings.Replace(
 			minimalConfig(),
-			"password_secret = \"postgres_password\"",
-			"dsn_secret = \"postgres_dsn\"",
+			"host = \"127.0.0.1\"",
+			"host = \"127.0.0.1\"\ndsn_secret = \"postgres_dsn\"",
 			1,
 		),
 	)
 	t.Setenv(unlockEnvName, "test-key")
 
-	_, err := Load(Options{Path: configPath, allowPlaintextSecretsForTests: true})
+	_, err := Load(Options{Path: configPath})
 	if err == nil {
 		t.Fatal("expected unknown key error")
 	}
@@ -175,60 +199,30 @@ func TestLoadRejectsPlaintextReferencedSecrets(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected plaintext secret rejection")
 	}
-	if !strings.Contains(err.Error(), "SOPS-protected config") {
-		t.Fatalf("expected SOPS protection error, got %v", err)
+	if !strings.Contains(err.Error(), "SOPS-encrypted leaf") {
+		t.Fatalf("expected SOPS leaf protection error, got %v", err)
 	}
 }
 
-func TestLoadSOPSConfigRequiresSOPSCLI(t *testing.T) {
-	if _, err := exec.LookPath("sops"); err != nil {
-		t.Skip("sops CLI is not installed")
-	}
-	configPath := writeConfig(t, `
-[sops]
-version = "fixture"
-`)
+func TestLoadRejectsOpaqueWholeFileSOPSConfig(t *testing.T) {
+	configPath := writeConfig(t, `{"data":"ENC[AES256_GCM,data:fixture]","sops":{}}`)
 	t.Setenv(unlockEnvName, "test-key")
 
 	_, err := Load(Options{Path: configPath})
 	if err == nil {
-		t.Fatal("expected decrypt failure for invalid SOPS fixture")
+		t.Fatal("expected whole-file SOPS config rejection")
 	}
-	if !strings.Contains(err.Error(), "decrypt config") {
-		t.Fatalf("expected decrypt error, got %v", err)
+	if !strings.Contains(err.Error(), "whole-file SOPS encryption is not supported") {
+		t.Fatalf("expected whole-file SOPS error, got %v", err)
 	}
 }
 
-func TestLoadAcceptsSOPSEncryptedLeafSecrets(t *testing.T) {
-	requireCommand(t, "sops")
-	requireCommand(t, "age-keygen")
-	keyPath := filepath.Join(t.TempDir(), "key.txt")
-	output, err := exec.Command("age-keygen", "-o", keyPath).CombinedOutput()
-	if err != nil {
-		t.Fatalf("generate age key: %v: %s", err, output)
-	}
-	recipient := publicAgeRecipient(t, string(output))
-	plainPath := writeConfig(t, minimalConfig())
-	encrypted, err := exec.Command("sops", "encrypt", "--input-type", "binary", "--output-type", "binary", "--age", recipient, plainPath).
-		Output()
-	if err != nil {
-		t.Fatalf("encrypt config: %v", err)
-	}
-	encryptedPath := filepath.Join(t.TempDir(), "gmeow.sops.toml")
-	if err := os.WriteFile(encryptedPath, encrypted, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	key, err := os.ReadFile(keyPath)
+func TestLoadAcceptsSOPSEncryptedPasswordLeaves(t *testing.T) {
+	loaded, err := Load(Options{Path: repoConfigPath(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(unlockEnvName, string(key))
-
-	loaded, err := Load(Options{Path: encryptedPath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Resolved.Postgres.Password != "postgres-password" {
+	if loaded.Resolved.Postgres.Password == "" {
 		t.Fatalf("postgres password was not resolved from SOPS config")
 	}
 	if loaded.Config.Postgres.Host != "127.0.0.1" ||
@@ -239,7 +233,8 @@ func TestLoadAcceptsSOPSEncryptedLeafSecrets(t *testing.T) {
 		)
 	}
 	if loaded.SecretReferences["postgres_password"] != 1 ||
-		loaded.SecretReferences["rabbitmq_url"] != 1 {
+		loaded.SecretReferences["rabbitmq_password"] != 1 ||
+		loaded.SecretReferences["rabbitmq_test_password"] != 1 {
 		t.Fatalf(
 			"expected only named leaf secret references, got %#v",
 			loaded.SecretReferences,
@@ -248,18 +243,18 @@ func TestLoadAcceptsSOPSEncryptedLeafSecrets(t *testing.T) {
 }
 
 func TestLoadResolvesReferencedSecrets(t *testing.T) {
-	configPath := writeConfig(t, minimalConfig())
-	t.Setenv(unlockEnvName, "test-key")
-
-	loaded, err := Load(Options{Path: configPath, allowPlaintextSecretsForTests: true})
+	loaded, err := Load(Options{Path: repoConfigPath(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Resolved.Postgres.Password != "postgres-password" {
+	if loaded.Resolved.Postgres.Password == "" {
 		t.Fatalf("postgres password was not resolved")
 	}
-	if loaded.Resolved.RabbitMQ.URL != "amqp://guest:guest@127.0.0.1:5672/gmeow" {
-		t.Fatalf("rabbitmq URL was not resolved")
+	if !strings.Contains(loaded.Resolved.RabbitMQ.URL, "@127.0.0.1:5672/gmeow") {
+		t.Fatalf("rabbitmq URL was not resolved correctly")
+	}
+	if !strings.Contains(loaded.Resolved.RabbitMQ.TestURL, "@127.0.0.1:5672/gmeow-test") {
+		t.Fatalf("rabbitmq test URL was not resolved correctly")
 	}
 	if loaded.SecretReferences["postgres_password"] != 1 {
 		t.Fatalf(
@@ -282,7 +277,7 @@ func TestLoadRejectsMissingReferencedSecret(t *testing.T) {
 	)
 	t.Setenv(unlockEnvName, "test-key")
 
-	_, err := Load(Options{Path: configPath, allowPlaintextSecretsForTests: true})
+	_, err := Load(Options{Path: configPath})
 	if err == nil {
 		t.Fatal("expected missing secret error")
 	}
@@ -291,27 +286,20 @@ func TestLoadRejectsMissingReferencedSecret(t *testing.T) {
 	}
 }
 
-func requireCommand(t *testing.T, name string) {
-	t.Helper()
-	if _, err := exec.LookPath(name); err != nil {
-		t.Skipf("%s CLI is not installed", name)
-	}
-}
-
-func publicAgeRecipient(t *testing.T, output string) string {
-	t.Helper()
-	match := regexp.MustCompile(`age1[0-9a-z]+`).FindString(output)
-	if match == "" {
-		t.Fatalf("age-keygen output did not include public recipient: %s", output)
-	}
-	return match
-}
-
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "gmeow.toml")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	return path
+}
+
+func repoConfigPath(t *testing.T) string {
+	t.Helper()
+	path := filepath.Clean(filepath.Join("..", "..", "gmeow.toml"))
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("repo config is required for live config tests: %v", err)
 	}
 	return path
 }
@@ -327,33 +315,34 @@ data_dir = "data"
 root = "data/filestore"
 
 [postgres]
-enabled = true
 host = "127.0.0.1"
 port = 5432
 database = "gmeow"
 user = "gmeow"
-password_secret = "postgres_password"
 ssl_mode = "disable"
 
 [rabbitmq]
-enabled = true
-url_secret = "rabbitmq_url"
+host = "127.0.0.1"
+port = 5672
+user = "user"
+vhost = "gmeow"
+test_user = "test-user"
+test_vhost = "gmeow-test"
 
 [secrets]
 postgres_password = "postgres-password"
-rabbitmq_url = "amqp://guest:guest@127.0.0.1:5672/gmeow"
+rabbitmq_password = "password"
+rabbitmq_test_password = "test-rabbit-password"
 
 [[interfaces]]
 name = "rest"
 kind = "rest"
-enabled = true
 host = "127.0.0.1"
 port = 8765
 
 [[analysis.analyzers]]
 name = "noop"
 version = "phase00"
-enabled = true
 worker_kind = "python"
 `
 }

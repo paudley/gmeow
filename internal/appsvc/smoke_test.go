@@ -284,7 +284,6 @@ func (fakeAnalyzer) Spec() contracts.AnalyzerSpec {
 	return contracts.AnalyzerSpec{
 		Name:       "fake",
 		Version:    "phase00",
-		Enabled:    true,
 		WorkerKind: "go",
 	}
 }

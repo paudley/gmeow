@@ -19,9 +19,9 @@ import (
 )
 
 type Config struct {
-	ScanInterval      time.Duration
-	Priorities        config.SchedulerPriority
-	ProjectionRefresh bool
+	ScanInterval time.Duration
+	RetryBackoff time.Duration
+	Priorities   config.SchedulerPriority
 }
 
 type Service struct {
@@ -62,6 +62,9 @@ func NewService(
 	if service.config.ScanInterval <= 0 {
 		service.config.ScanInterval = 30 * time.Second
 	}
+	if service.config.RetryBackoff <= 0 {
+		service.config.RetryBackoff = 30 * time.Second
+	}
 	for _, option := range options {
 		option(service)
 	}
@@ -85,13 +88,9 @@ func WithClock(now func() time.Time) Option {
 func SpecsFromConfig(analyzers []config.AnalyzerConfig) []contracts.AnalyzerSpec {
 	specs := make([]contracts.AnalyzerSpec, 0, len(analyzers))
 	for _, analyzer := range analyzers {
-		if !analyzer.Enabled {
-			continue
-		}
 		specs = append(specs, contracts.AnalyzerSpec{
 			Name:          analyzer.Name,
 			Version:       analyzer.Version,
-			Enabled:       analyzer.Enabled,
 			WorkerKind:    analyzer.WorkerKind,
 			MediaTypes:    append([]string(nil), analyzer.MediaTypes...),
 			Deterministic: true,
@@ -104,9 +103,6 @@ func NormalizeSpecs(specs []contracts.AnalyzerSpec) ([]contracts.AnalyzerSpec, e
 	normalized := make([]contracts.AnalyzerSpec, 0, len(specs))
 	seen := map[string]bool{}
 	for _, spec := range specs {
-		if !spec.Enabled {
-			continue
-		}
 		spec.Name = strings.TrimSpace(spec.Name)
 		spec.Version = strings.TrimSpace(spec.Version)
 		if spec.Name == "" {
@@ -138,6 +134,9 @@ func (service *Service) Scan(
 	if err := service.broker.Declare(ctx); err != nil {
 		return response, err
 	}
+	if _, err := service.broker.ProcessFailures(ctx, 100); err != nil {
+		return response, err
+	}
 	err := service.store.WalkProjection(
 		ctx,
 		func(object filestore.ProjectionObject) error {
@@ -151,21 +150,25 @@ func (service *Service) Scan(
 				response.Skipped++
 				return nil
 			}
+			schedulerAnnotation := schedulerAnnotationFor(object)
 			for _, job := range jobs {
-				if err := service.Enqueue(ctx, job); err != nil {
+				enqueued, err := service.enqueueForObject(ctx, job, schedulerAnnotation)
+				if err != nil {
 					response.Failed++
 					return err
 				}
-				response.Enqueued++
+				if enqueued {
+					response.Enqueued++
+				} else {
+					response.Skipped++
+				}
 			}
-			if service.config.ProjectionRefresh {
-				if err := service.broker.PublishProjectionRefresh(
-					ctx,
-					object.Manifest.ObjectDigest,
-				); err != nil {
-					response.Failed++
-					return err
-				}
+			if err := service.broker.PublishProjectionRefresh(
+				ctx,
+				object.Manifest.ObjectDigest,
+			); err != nil {
+				response.Failed++
+				return err
 			}
 			return nil
 		},
@@ -174,6 +177,11 @@ func (service *Service) Scan(
 }
 
 func (service *Service) Enqueue(ctx context.Context, job contracts.AnalyzerJob) error {
+	job = service.normalizeJob(job)
+	return service.broker.Publish(ctx, job)
+}
+
+func (service *Service) normalizeJob(job contracts.AnalyzerJob) contracts.AnalyzerJob {
 	if job.SchemaVersion == 0 {
 		job.SchemaVersion = contracts.SchemaVersionPhase00
 	}
@@ -192,7 +200,37 @@ func (service *Service) Enqueue(ctx context.Context, job contracts.AnalyzerJob) 
 	if job.Priority == 0 {
 		job.Priority = service.priorityValue(job.PriorityClass)
 	}
-	return service.broker.Publish(ctx, job)
+	return job
+}
+
+func (service *Service) enqueueForObject(
+	ctx context.Context,
+	job contracts.AnalyzerJob,
+	schedulerAnnotation *contracts.Annotation,
+) (bool, error) {
+	job = service.normalizeJob(job)
+	if schedulerMarkerActive(
+		*schedulerAnnotation,
+		job.IdempotencyKey,
+		service.now(),
+		service.config.RetryBackoff,
+	) {
+		return false, nil
+	}
+	updated := withSchedulerMarker(*schedulerAnnotation, job, "publishing", service.now())
+	if err := service.store.WriteAnnotation(ctx, updated); err != nil {
+		return false, err
+	}
+	*schedulerAnnotation = updated
+	if err := service.broker.Publish(ctx, job); err != nil {
+		return false, err
+	}
+	updated = withSchedulerMarker(*schedulerAnnotation, job, "enqueued", service.now())
+	if err := service.store.WriteAnnotation(ctx, updated); err != nil {
+		return false, err
+	}
+	*schedulerAnnotation = updated
+	return true, nil
 }
 
 func (service *Service) Force(
@@ -294,6 +332,100 @@ func (service *Service) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+func schedulerAnnotationFor(object filestore.ProjectionObject) *contracts.Annotation {
+	for _, annotation := range object.Annotations {
+		if annotation.Kind == "scheduler" {
+			return &contracts.Annotation{
+				SchemaVersion: annotation.SchemaVersion,
+				ObjectDigest:  object.Manifest.ObjectDigest,
+				Kind:          "scheduler",
+				GeneratedAt:   annotation.GeneratedAt,
+				Data:          copyMap(annotation.Data),
+			}
+		}
+	}
+	return &contracts.Annotation{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigest:  object.Manifest.ObjectDigest,
+		Kind:          "scheduler",
+		Data:          map[string]any{},
+	}
+}
+
+func schedulerMarkerActive(
+	annotation contracts.Annotation,
+	key string,
+	now time.Time,
+	lease time.Duration,
+) bool {
+	marker, ok := schedulerMarkers(annotation)[key]
+	if !ok {
+		return false
+	}
+	status, _ := marker["status"].(string)
+	switch status {
+	case "enqueued":
+		return true
+	case "publishing":
+		updatedAt, _ := marker["updated_at"].(string)
+		parsed, err := time.Parse(time.RFC3339Nano, updatedAt)
+		if err != nil {
+			return false
+		}
+		return now.Sub(parsed) <= lease
+	default:
+		return false
+	}
+}
+
+func withSchedulerMarker(
+	annotation contracts.Annotation,
+	job contracts.AnalyzerJob,
+	status string,
+	now time.Time,
+) contracts.Annotation {
+	annotation.SchemaVersion = contracts.SchemaVersionPhase00
+	annotation.ObjectDigest = job.ObjectDigest
+	annotation.Kind = "scheduler"
+	annotation.GeneratedAt = now
+	data := copyMap(annotation.Data)
+	markers := schedulerMarkers(annotation)
+	markers[job.IdempotencyKey] = map[string]any{
+		"status":           status,
+		"job_id":           job.JobID,
+		"analyzer_name":    job.Analyzer.Name,
+		"analyzer_version": job.Analyzer.Version,
+		"reason":           job.Reason,
+		"attempt":          job.Attempt,
+		"updated_at":       now.Format(time.RFC3339Nano),
+	}
+	data["scheduled_jobs"] = markers
+	annotation.Data = data
+	return annotation
+}
+
+func schedulerMarkers(annotation contracts.Annotation) map[string]map[string]any {
+	result := map[string]map[string]any{}
+	raw, ok := annotation.Data["scheduled_jobs"].(map[string]any)
+	if !ok {
+		return result
+	}
+	for key, value := range raw {
+		if marker, ok := value.(map[string]any); ok {
+			result[key] = copyMap(marker)
+		}
+	}
+	return result
+}
+
+func copyMap(input map[string]any) map[string]any {
+	output := map[string]any{}
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 func (service *Service) jobsForObject(

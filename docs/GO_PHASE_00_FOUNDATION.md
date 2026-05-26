@@ -27,9 +27,9 @@ stable interfaces without depending on the Python application.
   source events, analyzer specs, analyzer jobs, annotations, search requests, and search results.
 - Implement the shared config parser:
   - one parser for every binary;
-  - SOPS unlock required from `GMEOW_SOPS_UNLOCK_KEY` or `~/.config/gmeow/key.txt`;
+  - SOPS age identity required from `GMEOW_SOPS_UNLOCK_KEY` or `~/.config/gmeow/key.txt`;
   - no `secrets.file` or secondary config pointer inside `gmeow.toml`;
-  - encrypted leaf secrets only;
+  - encrypted SOPS JSON leaf secrets only;
   - startup validation cannot be disabled.
 - Add `gmeow-admin config validate`.
 - Add `gmeow-admin config secret set`, `unset`, and `list` command stubs with validated behavior

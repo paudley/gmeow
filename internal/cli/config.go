@@ -8,6 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -16,7 +19,14 @@ import (
 	"blackcat.ca/gmeow/internal/config"
 )
 
-var secretNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+var (
+	secretNamePattern   = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	writableSecretNames = map[string]bool{
+		"postgres_password":      true,
+		"rabbitmq_password":      true,
+		"rabbitmq_test_password": true,
+	}
+)
 
 func newConfigCommand(out io.Writer, in io.Reader, configPath *string) *cobra.Command {
 	command := &cobra.Command{
@@ -90,14 +100,15 @@ func newSecretListCommand(out io.Writer, configPath *string) *cobra.Command {
 func newSecretSetCommand(in io.Reader, configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "set <name>",
-		Short: "Validate a secret update request",
+		Short: "Update an encrypted password leaf",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if _, err := config.Load(config.Options{Path: *configPath}); err != nil {
+			name := args[0]
+			if err := validateSecretName(name); err != nil {
 				return err
 			}
-			if err := validateSecretName(args[0]); err != nil {
-				return err
+			if !writableSecretNames[name] {
+				return fmt.Errorf("secret %q is not a writable password leaf", name)
 			}
 			value, err := readSecretValue(in)
 			if err != nil {
@@ -106,7 +117,11 @@ func newSecretSetCommand(in io.Reader, configPath *string) *cobra.Command {
 			if strings.TrimSpace(value) == "" {
 				return errors.New("secret value must not be empty")
 			}
-			return errors.New("encrypted secret writes are not implemented in Phase 00")
+			encrypted, err := encryptSecretLeaf(value)
+			if err != nil {
+				return err
+			}
+			return updateSecretLeaf(selectedConfigPath(*configPath), name, encrypted)
 		},
 	}
 }
@@ -126,11 +141,104 @@ func newSecretUnsetCommand(configPath *string) *cobra.Command {
 				return err
 			}
 			if loaded.SecretReferences[name] > 0 {
-				return fmt.Errorf("secret %q is still referenced by enabled config", name)
+				return fmt.Errorf("secret %q is still referenced by config", name)
 			}
 			return errors.New("encrypted secret writes are not implemented in Phase 00")
 		},
 	}
+}
+
+func selectedConfigPath(path string) string {
+	if strings.TrimSpace(path) != "" {
+		return path
+	}
+	if envPath := strings.TrimSpace(os.Getenv("GMEOW_CONFIG")); envPath != "" {
+		return envPath
+	}
+	return "gmeow.toml"
+}
+
+func encryptSecretLeaf(value string) (string, error) {
+	keyPath, err := sopsAgeKeyPath()
+	if err != nil {
+		return "", err
+	}
+	recipientBytes, err := exec.Command("age-keygen", "-y", keyPath).Output()
+	if err != nil {
+		return "", fmt.Errorf("derive SOPS age recipient: %w", err)
+	}
+	recipient := strings.TrimSpace(string(recipientBytes))
+	if recipient == "" {
+		return "", errors.New("derive SOPS age recipient: empty recipient")
+	}
+	command := exec.Command(
+		"sops",
+		"encrypt",
+		"--input-type",
+		"binary",
+		"--output-type",
+		"json",
+		"--age",
+		recipient,
+		"/dev/stdin",
+	)
+	command.Stdin = strings.NewReader(value)
+	output, err := command.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return "", fmt.Errorf(
+				"encrypt secret leaf: %s",
+				strings.TrimSpace(string(exitErr.Stderr)),
+			)
+		}
+		return "", fmt.Errorf("encrypt secret leaf: %w", err)
+	}
+	return string(output), nil
+}
+
+func sopsAgeKeyPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory for SOPS age key: %w", err)
+	}
+	path := filepath.Join(home, ".config", "gmeow", "key.txt")
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("%s is required before secret writes", path)
+	}
+	return path, nil
+}
+
+func updateSecretLeaf(path, name, encrypted string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	text := string(raw)
+	block := name + " = " + tomlLiteral(encrypted)
+	pattern := regexp.MustCompile(
+		`(?ms)^` + regexp.QuoteMeta(name) + `\s*=\s*'''` + "\n.*?\n'''",
+	)
+	if pattern.MatchString(text) {
+		text = pattern.ReplaceAllString(text, block)
+	} else {
+		secretsHeader := regexp.MustCompile(`(?m)^\[secrets\]\s*$`)
+		location := secretsHeader.FindStringIndex(text)
+		if location == nil {
+			text = strings.TrimRight(text, "\n") + "\n\n[secrets]\n" + block + "\n"
+		} else {
+			insertAt := location[1]
+			text = text[:insertAt] + "\n" + block + text[insertAt:]
+		}
+	}
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	return nil
+}
+
+func tomlLiteral(value string) string {
+	return "'''\n" + strings.TrimRight(value, "\n") + "\n'''"
 }
 
 func validateSecretName(name string) error {

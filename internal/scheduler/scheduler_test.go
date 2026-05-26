@@ -30,7 +30,6 @@ func TestScanEnqueuesMissingWorkIdempotently(t *testing.T) {
 		Name:       "text.extract",
 		Version:    "1",
 		MediaTypes: []string{"text/plain"},
-		Enabled:    true,
 	}})
 	first, err := service.Scan(ctx, contracts.SchedulerScanRequest{
 		SchemaVersion: contracts.SchemaVersionPhase00,
@@ -51,7 +50,7 @@ func TestScanEnqueuesMissingWorkIdempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobs := broker.Jobs()
-	if first.Enqueued != 1 || second.Enqueued != 1 || len(jobs) != 1 {
+	if first.Enqueued != 1 || second.Enqueued != 0 || len(jobs) != 1 {
 		t.Fatalf(
 			"expected one effective job across repeated scans, first=%#v second=%#v jobs=%#v",
 			first,
@@ -110,7 +109,6 @@ func TestScanDetectsStaleAndFailedOutputs(t *testing.T) {
 		Name:       "text.extract",
 		Version:    "2",
 		MediaTypes: []string{"text/plain"},
-		Enabled:    true,
 	}})
 	response, err := service.Scan(ctx, contracts.SchedulerScanRequest{})
 	if err != nil {
@@ -134,7 +132,6 @@ func TestInteractivePriorityOutranksBackground(t *testing.T) {
 	service := newTestService(t, store, broker, []contracts.AnalyzerSpec{{
 		Name:    "noop",
 		Version: "1",
-		Enabled: true,
 	}})
 	interactive := contracts.AnalyzerJob{
 		SchemaVersion: contracts.SchemaVersionPhase00,
@@ -168,7 +165,7 @@ func TestDeadLetterRequeueMovesJobsBackToPending(t *testing.T) {
 		JobID:          "job",
 		IdempotencyKey: "job",
 		ObjectDigest:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Analyzer:       contracts.AnalyzerSpec{Name: "noop", Version: "1", Enabled: true},
+		Analyzer:       contracts.AnalyzerSpec{Name: "noop", Version: "1"},
 	}
 	broker.AddDeadLetter(job)
 	service := newTestService(
@@ -193,6 +190,56 @@ func TestDeadLetterRequeueMovesJobsBackToPending(t *testing.T) {
 	}
 }
 
+func TestStalePublishingMarkerIsRetried(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("hello"),
+		MediaType: "text/plain",
+		Facets:    []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := NewMemoryBroker()
+	service := newTestService(t, store, broker, []contracts.AnalyzerSpec{{
+		Name:       "text.extract",
+		Version:    "1",
+		MediaTypes: []string{"text/plain"},
+	}})
+	job := contracts.AnalyzerJob{
+		ObjectDigest:  digest,
+		Analyzer:      service.specs[0],
+		PriorityClass: contracts.PriorityBackground,
+		RequestedBy:   "scheduler",
+		Reason:        "missing",
+		CreatedAt:     time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC),
+	}
+	job.IdempotencyKey = IdempotencyKey(job)
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigest:  digest,
+		Kind:          "scheduler",
+		GeneratedAt:   time.Date(2026, 5, 25, 11, 0, 0, 0, time.UTC),
+		Data: map[string]any{"scheduled_jobs": map[string]any{
+			job.IdempotencyKey: map[string]any{
+				"status": "publishing",
+				"updated_at": time.Date(2026, 5, 25, 11, 0, 0, 0, time.UTC).
+					Format(time.RFC3339Nano),
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.Scan(ctx, contracts.SchedulerScanRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Enqueued != 1 {
+		t.Fatalf("expected stale publishing marker to be retried, got %#v", response)
+	}
+}
+
 func newTestService(
 	t *testing.T,
 	store filestore.Store,
@@ -201,6 +248,7 @@ func newTestService(
 ) *Service {
 	t.Helper()
 	service, err := NewService(store, broker, specs, Config{
+		RetryBackoff: 30 * time.Second,
 		Priorities: config.SchedulerPriority{
 			Interactive: 100,
 			Forced:      90,
@@ -208,7 +256,6 @@ func newTestService(
 			Repair:      50,
 			Background:  10,
 		},
-		ProjectionRefresh: true,
 	}, WithClock(func() time.Time {
 		return time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
 	}))

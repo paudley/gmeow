@@ -5,15 +5,20 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/jackc/pgx/v5"
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 const (
@@ -21,11 +26,13 @@ const (
 	defaultConfigPath    = "gmeow.toml"
 	unlockEnvName        = "GMEOW_SOPS_UNLOCK_KEY"
 	configEnvName        = "GMEOW_CONFIG"
+	postgresPasswordName = "postgres_password"
+	rabbitPasswordName   = "rabbitmq_password"
+	testRabbitPassName   = "rabbitmq_test_password"
 )
 
 type Options struct {
-	Path                          string
-	allowPlaintextSecretsForTests bool
+	Path string
 }
 
 type Loaded struct {
@@ -59,29 +66,28 @@ type FilestoreConfig struct {
 }
 
 type PostgresConfig struct {
-	Enabled        bool   `toml:"enabled"`
-	Host           string `toml:"host"`
-	Port           int    `toml:"port"`
-	Database       string `toml:"database"`
-	User           string `toml:"user"`
-	PasswordSecret string `toml:"password_secret"`
-	SSLMode        string `toml:"ssl_mode"`
+	Host     string `toml:"host"`
+	Port     int    `toml:"port"`
+	Database string `toml:"database"`
+	User     string `toml:"user"`
+	SSLMode  string `toml:"ssl_mode"`
 }
 
 type RabbitMQConfig struct {
-	Enabled   bool   `toml:"enabled"`
-	URLSecret string `toml:"url_secret"`
+	Host      string `toml:"host"`
+	Port      int    `toml:"port"`
+	User      string `toml:"user"`
+	VHost     string `toml:"vhost"`
+	TestUser  string `toml:"test_user"`
+	TestVHost string `toml:"test_vhost"`
 }
 
 type SchedulerConfig struct {
-	Enabled              bool              `toml:"enabled"`
 	ScanInterval         string            `toml:"scan_interval"`
 	RetryLimit           int               `toml:"retry_limit"`
 	RetryBackoff         string            `toml:"retry_backoff"`
 	QueuePrefix          string            `toml:"queue_prefix"`
 	Priorities           SchedulerPriority `toml:"priorities"`
-	ProjectionRefresh    bool              `toml:"projection_refresh"`
-	BackgroundLoop       bool              `toml:"background_loop"`
 	DeadLetterInspectMax int               `toml:"dead_letter_inspect_max"`
 }
 
@@ -94,21 +100,17 @@ type SchedulerPriority struct {
 }
 
 type InterfaceConfig struct {
-	Name    string `toml:"name"`
-	Kind    string `toml:"kind"`
-	Enabled bool   `toml:"enabled"`
-	Host    string `toml:"host"`
-	Port    int    `toml:"port"`
+	Name string `toml:"name"`
+	Kind string `toml:"kind"`
+	Host string `toml:"host"`
+	Port int    `toml:"port"`
 }
 
 type SourceConfig struct {
-	Name             string   `toml:"name"`
-	Kind             string   `toml:"kind"`
-	Enabled          bool     `toml:"enabled"`
-	Facets           []string `toml:"facets"`
-	Capabilities     []string `toml:"capabilities"`
-	TokenSecret      string   `toml:"token_secret"`
-	PrivateKeySecret string   `toml:"private_key_secret"`
+	Name         string   `toml:"name"`
+	Kind         string   `toml:"kind"`
+	Facets       []string `toml:"facets"`
+	Capabilities []string `toml:"capabilities"`
 }
 
 type AnalysisConfig struct {
@@ -118,7 +120,6 @@ type AnalysisConfig struct {
 type AnalyzerConfig struct {
 	Name       string   `toml:"name"`
 	Version    string   `toml:"version"`
-	Enabled    bool     `toml:"enabled"`
 	WorkerKind string   `toml:"worker_kind"`
 	MediaTypes []string `toml:"media_types"`
 }
@@ -128,11 +129,10 @@ type SearchConfig struct {
 }
 
 type SearchBackendConfig struct {
-	Name    string   `toml:"name"`
-	Kind    string   `toml:"kind"`
-	Enabled bool     `toml:"enabled"`
-	Source  string   `toml:"source"`
-	Facets  []string `toml:"facets"`
+	Name   string   `toml:"name"`
+	Kind   string   `toml:"kind"`
+	Source string   `toml:"source"`
+	Facets []string `toml:"facets"`
 }
 
 type Resolved struct {
@@ -144,7 +144,6 @@ type Resolved struct {
 }
 
 type ResolvedPostgres struct {
-	Enabled  bool
 	Host     string
 	Port     int
 	Database string
@@ -154,27 +153,22 @@ type ResolvedPostgres struct {
 }
 
 type ResolvedRabbitMQ struct {
-	Enabled bool
 	URL     string
+	TestURL string
 }
 
 type ResolvedScheduler struct {
-	Enabled              bool
 	ScanInterval         string
 	RetryLimit           int
 	RetryBackoff         string
 	QueuePrefix          string
 	Priorities           SchedulerPriority
-	ProjectionRefresh    bool
-	BackgroundLoop       bool
 	DeadLetterInspectMax int
 }
 
 type ResolvedSource struct {
-	Name       string
-	Kind       string
-	Token      string
-	PrivateKey string
+	Name string
+	Kind string
 }
 
 type ResolvedWorker struct {
@@ -183,31 +177,29 @@ type ResolvedWorker struct {
 
 func Load(options Options) (*Loaded, error) {
 	path := selectedPath(options.Path)
-	unlockKey, err := readUnlockKey()
-	if err != nil {
-		return nil, err
-	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
-	configBytes := raw
-	sopsProtected := isSOPSConfig(path, raw)
-	if sopsProtected {
-		configBytes, err = decryptSOPS(path, unlockKey)
-		if err != nil {
-			return nil, err
-		}
+	unlockKey, unlockKeyPath, err := readUnlockKey()
+	if err != nil {
+		return nil, err
 	}
 	var generic map[string]any
-	if _, err := toml.Decode(string(configBytes), &generic); err != nil {
+	if _, err := toml.Decode(string(raw), &generic); err != nil {
+		if isOpaqueSOPSConfig(raw) {
+			return nil, fmt.Errorf(
+				"parse config %s: whole-file SOPS encryption is not supported for gmeow.toml; encrypt only [secrets] leaf values",
+				path,
+			)
+		}
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if err := rejectForbiddenPointers(generic); err != nil {
 		return nil, err
 	}
 	var parsed Config
-	metadata, err := toml.Decode(string(configBytes), &parsed)
+	metadata, err := toml.Decode(string(raw), &parsed)
 	if err != nil {
 		return nil, fmt.Errorf("decode config %s: %w", path, err)
 	}
@@ -221,13 +213,21 @@ func Load(options Options) (*Loaded, error) {
 		return nil, err
 	}
 	references := secretReferences(parsed)
-	if len(references) > 0 && !sopsProtected && !options.allowPlaintextSecretsForTests {
-		return nil, errors.New(
-			"referenced secrets require a SOPS-protected config; plaintext secret leaves are not accepted",
-		)
+	resolvedSecretValues, err := resolveSecretLeaves(
+		parsed.Secrets,
+		references,
+		unlockKey,
+		unlockKeyPath,
+	)
+	if err != nil {
+		return nil, err
 	}
+	parsed.Secrets = resolvedSecretValues
 	resolved, err := resolveSecrets(parsed, references)
 	if err != nil {
+		return nil, err
+	}
+	if err := verifyDependencies(resolved); err != nil {
 		return nil, err
 	}
 	return &Loaded{
@@ -257,13 +257,13 @@ func selectedPath(path string) string {
 	return defaultConfigPath
 }
 
-func readUnlockKey() (string, error) {
+func readUnlockKey() (string, string, error) {
 	if value := strings.TrimSpace(os.Getenv(unlockEnvName)); value != "" {
-		return value, nil
+		return value, "", nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf(
+		return "", "", fmt.Errorf(
 			"%s is required and home directory cannot be resolved: %w",
 			unlockEnvName,
 			err,
@@ -272,56 +272,98 @@ func readUnlockKey() (string, error) {
 	path := filepath.Join(home, ".config", "gmeow", "key.txt")
 	value, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("%s or %s is required before startup", unlockEnvName, path)
+		return "", "", fmt.Errorf("%s or %s is required before startup", unlockEnvName, path)
 	}
 	key := strings.TrimSpace(string(value))
 	if key == "" {
-		return "", fmt.Errorf(
+		return "", "", fmt.Errorf(
 			"%s is empty; %s or %s is required before startup",
 			path,
 			unlockEnvName,
 			path,
 		)
 	}
-	return key, nil
+	return key, path, nil
 }
 
-func isSOPSConfig(path string, raw []byte) bool {
+func isOpaqueSOPSConfig(raw []byte) bool {
 	trimmed := bytes.TrimSpace(raw)
-	return strings.Contains(filepath.Base(path), ".sops.") ||
-		bytes.Contains(trimmed, []byte("\n[sops]")) ||
-		bytes.HasPrefix(trimmed, []byte("[sops]")) ||
-		bytes.Contains(trimmed, []byte(`"sops"`))
+	return bytes.HasPrefix(trimmed, []byte(`{"data"`)) ||
+		bytes.HasPrefix(trimmed, []byte("{\n\t\"data\"")) ||
+		bytes.HasPrefix(trimmed, []byte("{\n  \"data\""))
 }
 
-func decryptSOPS(path, unlockKey string) ([]byte, error) {
+func resolveSecretLeaves(
+	secrets map[string]string,
+	references map[string]int,
+	unlockKey string,
+	unlockKeyPath string,
+) (map[string]string, error) {
+	resolved := make(map[string]string, len(secrets))
+	for name, value := range secrets {
+		resolved[name] = value
+	}
+	for name := range references {
+		value := strings.TrimSpace(secrets[name])
+		if value == "" {
+			return nil, fmt.Errorf("referenced secret %q is missing or empty", name)
+		}
+	}
+	for name := range references {
+		value := strings.TrimSpace(secrets[name])
+		if !isSOPSLeaf(value) {
+			return nil, fmt.Errorf(
+				"referenced secret %q must be a SOPS-encrypted leaf value",
+				name,
+			)
+		}
+		decrypted, err := decryptSOPSLeaf(name, value, unlockKey, unlockKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		resolved[name] = decrypted
+	}
+	return resolved, nil
+}
+
+func isSOPSLeaf(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return strings.HasPrefix(trimmed, "{") &&
+		strings.Contains(trimmed, `"data"`) &&
+		strings.Contains(trimmed, `"sops"`)
+}
+
+func decryptSOPSLeaf(name, value, unlockKey, unlockKeyPath string) (string, error) {
 	command := exec.Command(
 		"sops",
 		"decrypt",
 		"--input-type",
-		"binary",
+		"json",
 		"--output-type",
 		"binary",
-		path,
+		"/dev/stdin",
 	)
-	command.Env = append(
-		os.Environ(),
-		unlockEnvName+"="+unlockKey,
-		"SOPS_AGE_KEY="+unlockKey,
-	)
+	command.Stdin = strings.NewReader(value)
+	env := append(os.Environ(), unlockEnvName+"="+unlockKey)
+	if unlockKeyPath != "" {
+		env = append(env, "SOPS_AGE_KEY_FILE="+unlockKeyPath)
+	} else {
+		env = append(env, "SOPS_AGE_KEY="+unlockKey)
+	}
+	command.Env = env
 	output, err := command.Output()
 	if err == nil {
-		return output, nil
+		return string(output), nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return nil, fmt.Errorf(
-			"decrypt config %s: %s",
-			path,
+		return "", fmt.Errorf(
+			"decrypt secret %q: %s",
+			name,
 			strings.TrimSpace(string(exitErr.Stderr)),
 		)
 	}
-	return nil, fmt.Errorf("decrypt config %s: %w", path, err)
+	return "", fmt.Errorf("decrypt secret %q: %w", name, err)
 }
 
 func rejectForbiddenPointers(value any) error {
@@ -371,38 +413,55 @@ func validateConfig(parsed Config) error {
 	if strings.TrimSpace(parsed.Filestore.Root) == "" {
 		return errors.New("filestore.root is required")
 	}
-	if parsed.Postgres.Enabled {
-		if strings.TrimSpace(parsed.Postgres.Host) == "" {
-			return errors.New("postgres.host is required when postgres is enabled")
-		}
-		if parsed.Postgres.Port <= 0 {
-			return errors.New("postgres.port must be positive when postgres is enabled")
-		}
-		if strings.TrimSpace(parsed.Postgres.Database) == "" {
-			return errors.New("postgres.database is required when postgres is enabled")
-		}
-		if strings.TrimSpace(parsed.Postgres.User) == "" {
-			return errors.New("postgres.user is required when postgres is enabled")
-		}
-		if strings.TrimSpace(parsed.Postgres.PasswordSecret) == "" {
-			return errors.New("postgres.password_secret is required when postgres is enabled")
-		}
+	if strings.TrimSpace(parsed.Postgres.Host) == "" {
+		return errors.New("postgres.host is required")
 	}
-	if parsed.RabbitMQ.Enabled && strings.TrimSpace(parsed.RabbitMQ.URLSecret) == "" {
-		return errors.New("rabbitmq.url_secret is required when rabbitmq is enabled")
+	if parsed.Postgres.Port <= 0 {
+		return errors.New("postgres.port must be positive")
 	}
-	if parsed.Scheduler.Enabled && !parsed.RabbitMQ.Enabled {
-		return errors.New("rabbitmq.enabled is required when scheduler is enabled")
+	if strings.TrimSpace(parsed.Postgres.Database) == "" {
+		return errors.New("postgres.database is required")
 	}
-	if parsed.Scheduler.Enabled && strings.TrimSpace(parsed.Scheduler.QueuePrefix) != "" &&
-		!strings.HasPrefix(parsed.Scheduler.QueuePrefix, "gmeow:") {
-		return errors.New("scheduler.queue_prefix must start with gmeow:")
+	if strings.TrimSpace(parsed.Postgres.User) == "" {
+		return errors.New("postgres.user is required")
+	}
+	if strings.TrimSpace(parsed.RabbitMQ.Host) == "" {
+		return errors.New("rabbitmq.host is required")
+	}
+	if parsed.RabbitMQ.Host != "127.0.0.1" {
+		return errors.New("rabbitmq.host must be 127.0.0.1")
+	}
+	if parsed.RabbitMQ.Port <= 0 {
+		return errors.New("rabbitmq.port must be positive")
+	}
+	if strings.TrimSpace(parsed.RabbitMQ.User) == "" {
+		return errors.New("rabbitmq.user is required")
+	}
+	if strings.TrimSpace(parsed.RabbitMQ.VHost) == "" {
+		return errors.New("rabbitmq.vhost is required")
+	}
+	if parsed.RabbitMQ.VHost != "gmeow" {
+		return errors.New("rabbitmq.vhost must be gmeow")
+	}
+	if strings.TrimSpace(parsed.RabbitMQ.TestUser) == "" {
+		return errors.New("rabbitmq.test_user is required")
+	}
+	if strings.TrimSpace(parsed.RabbitMQ.TestVHost) == "" {
+		return errors.New("rabbitmq.test_vhost is required")
+	}
+	if parsed.RabbitMQ.TestVHost != "gmeow-test" {
+		return errors.New("rabbitmq.test_vhost must be gmeow-test")
+	}
+	if strings.TrimSpace(parsed.Scheduler.QueuePrefix) != "" &&
+		parsed.Scheduler.QueuePrefix != "gmeow." &&
+		parsed.Scheduler.QueuePrefix != "gmeow.test." {
+		return errors.New("scheduler.queue_prefix must be gmeow. or gmeow.test.")
 	}
 	for _, source := range parsed.Sources {
-		if source.Enabled && strings.TrimSpace(source.Name) == "" {
-			return errors.New("enabled source requires name")
+		if strings.TrimSpace(source.Name) == "" {
+			return errors.New("source requires name")
 		}
-		if source.Enabled && strings.TrimSpace(source.Kind) == "" {
+		if strings.TrimSpace(source.Kind) == "" {
 			return fmt.Errorf("source %q requires kind", source.Name)
 		}
 	}
@@ -417,18 +476,9 @@ func secretReferences(parsed Config) map[string]int {
 			references[name]++
 		}
 	}
-	if parsed.Postgres.Enabled {
-		add(parsed.Postgres.PasswordSecret)
-	}
-	if parsed.RabbitMQ.Enabled {
-		add(parsed.RabbitMQ.URLSecret)
-	}
-	for _, source := range parsed.Sources {
-		if source.Enabled {
-			add(source.TokenSecret)
-			add(source.PrivateKeySecret)
-		}
-	}
+	add(postgresPasswordName)
+	add(rabbitPasswordName)
+	add(testRabbitPassName)
 	return references
 }
 
@@ -440,61 +490,112 @@ func resolveSecrets(parsed Config, references map[string]int) (Resolved, error) 
 	}
 	resolved := Resolved{
 		Postgres: ResolvedPostgres{
-			Enabled:  parsed.Postgres.Enabled,
 			Host:     parsed.Postgres.Host,
 			Port:     parsed.Postgres.Port,
 			Database: parsed.Postgres.Database,
 			User:     parsed.Postgres.User,
 			SSLMode:  parsed.Postgres.SSLMode,
 		},
-		RabbitMQ: ResolvedRabbitMQ{
-			Enabled: parsed.RabbitMQ.Enabled,
-		},
 		Scheduler: resolvedScheduler(parsed.Scheduler),
 		Worker: ResolvedWorker{
-			Analyzers: enabledAnalyzers(parsed.Analysis.Analyzers),
+			Analyzers: configuredAnalyzers(parsed.Analysis.Analyzers),
 		},
 	}
-	if parsed.Postgres.Enabled {
-		resolved.Postgres.Password = parsed.Secrets[parsed.Postgres.PasswordSecret]
-	}
-	if parsed.RabbitMQ.Enabled {
-		resolved.RabbitMQ.URL = parsed.Secrets[parsed.RabbitMQ.URLSecret]
-	}
+	resolved.Postgres.Password = parsed.Secrets[postgresPasswordName]
+	resolved.RabbitMQ.URL = rabbitMQURL(
+		parsed.RabbitMQ.Host,
+		parsed.RabbitMQ.Port,
+		parsed.RabbitMQ.User,
+		parsed.Secrets[rabbitPasswordName],
+		parsed.RabbitMQ.VHost,
+	)
+	resolved.RabbitMQ.TestURL = rabbitMQURL(
+		parsed.RabbitMQ.Host,
+		parsed.RabbitMQ.Port,
+		parsed.RabbitMQ.TestUser,
+		parsed.Secrets[testRabbitPassName],
+		parsed.RabbitMQ.TestVHost,
+	)
 	for _, source := range parsed.Sources {
-		if !source.Enabled {
-			continue
-		}
 		resolved.Sources = append(resolved.Sources, ResolvedSource{
-			Name:       source.Name,
-			Kind:       source.Kind,
-			Token:      parsed.Secrets[source.TokenSecret],
-			PrivateKey: parsed.Secrets[source.PrivateKeySecret],
+			Name: source.Name,
+			Kind: source.Kind,
 		})
 	}
 	return resolved, nil
 }
 
-func enabledAnalyzers(analyzers []AnalyzerConfig) []AnalyzerConfig {
-	enabled := make([]AnalyzerConfig, 0, len(analyzers))
-	for _, analyzer := range analyzers {
-		if analyzer.Enabled {
-			enabled = append(enabled, analyzer)
-		}
+func rabbitMQURL(host string, port int, user, password, vhost string) string {
+	return (&url.URL{
+		Scheme: "amqp",
+		User:   url.UserPassword(user, password),
+		Host:   fmt.Sprintf("%s:%d", host, port),
+		Path:   vhost,
+	}).String()
+}
+
+func verifyDependencies(resolved Resolved) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := verifyPostgres(ctx, resolved.Postgres); err != nil {
+		return err
 	}
-	return enabled
+	if err := verifyRabbitMQ("production", resolved.RabbitMQ.URL); err != nil {
+		return err
+	}
+	if err := verifyRabbitMQ("test", resolved.RabbitMQ.TestURL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyPostgres(ctx context.Context, postgres ResolvedPostgres) error {
+	conn, err := pgx.Connect(ctx, postgresURL(postgres))
+	if err != nil {
+		return fmt.Errorf("connect postgres: %w", err)
+	}
+	defer conn.Close(context.Background())
+	if err := conn.Ping(ctx); err != nil {
+		return fmt.Errorf("ping postgres: %w", err)
+	}
+	return nil
+}
+
+func postgresURL(postgres ResolvedPostgres) string {
+	values := url.Values{}
+	if postgres.SSLMode != "" {
+		values.Set("sslmode", postgres.SSLMode)
+	}
+	return (&url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(postgres.User, postgres.Password),
+		Host:     fmt.Sprintf("%s:%d", postgres.Host, postgres.Port),
+		Path:     postgres.Database,
+		RawQuery: values.Encode(),
+	}).String()
+}
+
+func verifyRabbitMQ(label, rawURL string) error {
+	conn, err := amqp.DialConfig(rawURL, amqp.Config{
+		Properties: amqp.Table{"connection_name": "gmeow.config-validate"},
+	})
+	if err != nil {
+		return fmt.Errorf("connect rabbitmq %s: %w", label, err)
+	}
+	return conn.Close()
+}
+
+func configuredAnalyzers(analyzers []AnalyzerConfig) []AnalyzerConfig {
+	return append([]AnalyzerConfig(nil), analyzers...)
 }
 
 func resolvedScheduler(raw SchedulerConfig) ResolvedScheduler {
 	resolved := ResolvedScheduler{
-		Enabled:              raw.Enabled,
 		ScanInterval:         firstNonEmpty(raw.ScanInterval, "30s"),
 		RetryLimit:           raw.RetryLimit,
 		RetryBackoff:         firstNonEmpty(raw.RetryBackoff, "30s"),
-		QueuePrefix:          firstNonEmpty(raw.QueuePrefix, "gmeow:"),
+		QueuePrefix:          firstNonEmpty(raw.QueuePrefix, "gmeow."),
 		Priorities:           raw.Priorities,
-		ProjectionRefresh:    raw.ProjectionRefresh,
-		BackgroundLoop:       raw.BackgroundLoop,
 		DeadLetterInspectMax: raw.DeadLetterInspectMax,
 	}
 	if resolved.RetryLimit <= 0 {
@@ -519,6 +620,23 @@ func resolvedScheduler(raw SchedulerConfig) ResolvedScheduler {
 		resolved.Priorities.Background = 10
 	}
 	return resolved
+}
+
+func validateRabbitMQURL(rawURL, expectedVHost, field string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid amqp URL: %w", field, err)
+	}
+	if parsed.Scheme != "amqp" && parsed.Scheme != "amqps" {
+		return fmt.Errorf("%s must use amqp or amqps scheme", field)
+	}
+	if parsed.Hostname() != "127.0.0.1" {
+		return fmt.Errorf("%s must use host 127.0.0.1", field)
+	}
+	if strings.TrimPrefix(parsed.EscapedPath(), "/") != expectedVHost {
+		return fmt.Errorf("%s must use RabbitMQ vhost /%s", field, expectedVHost)
+	}
+	return nil
 }
 
 func firstNonEmpty(values ...string) string {

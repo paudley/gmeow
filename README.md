@@ -40,10 +40,11 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 uv sync --extra test
 mkdir -p ~/.config/gmeow
 cp gmeow.toml-example gmeow.toml
-printf 'replace-with-local-unlock-key\n' > ~/.config/gmeow/key.txt
+age-keygen -o ~/.config/gmeow/key.txt
+chmod 600 ~/.config/gmeow/key.txt
 ```
 
-Edit `gmeow.toml`. Phase 00 uses the Go config parser for all binaries. Startup requires an unlock key from `GMEOW_SOPS_UNLOCK_KEY` or `~/.config/gmeow/key.txt`; config validation cannot be disabled.
+Edit `gmeow.toml`. Phase 00 uses the Go config parser for all binaries. Startup requires a SOPS age identity from `GMEOW_SOPS_UNLOCK_KEY` or `~/.config/gmeow/key.txt`; config validation cannot be disabled. Keep operational TOML fields readable and store referenced `[secrets]` values as SOPS JSON leaf envelopes.
 
 ```toml
 [system]
@@ -55,18 +56,36 @@ data_dir = "data"
 root = "data/filestore"
 
 [postgres]
-enabled = false
 host = "127.0.0.1"
 port = 5432
 database = "gmeow"
 user = "gmeow"
-password_secret = ""
-ssl_mode = "disable"
+ssl_mode = "require"
+
+[rabbitmq]
+host = "127.0.0.1"
+port = 5672
+user = "gmeow"
+vhost = "gmeow"
+test_user = "gmeow-test"
+test_vhost = "gmeow-test"
+
+[scheduler]
+queue_prefix = "gmeow."
 
 [secrets]
+postgres_password = '''
+{"data":"ENC[AES256_GCM,data:...leaf ciphertext...,type:str]","sops":{"age":[{"recipient":"age1...","enc":"-----BEGIN AGE ENCRYPTED FILE-----\n...\n-----END AGE ENCRYPTED FILE-----\n"}],"version":"3.13.1"}}
+'''
+rabbitmq_password = '''
+{"data":"ENC[AES256_GCM,data:...leaf ciphertext...,type:str]","sops":{"age":[{"recipient":"age1...","enc":"-----BEGIN AGE ENCRYPTED FILE-----\n...\n-----END AGE ENCRYPTED FILE-----\n"}],"version":"3.13.1"}}
+'''
+rabbitmq_test_password = '''
+{"data":"ENC[AES256_GCM,data:...leaf ciphertext...,type:str]","sops":{"age":[{"recipient":"age1...","enc":"-----BEGIN AGE ENCRYPTED FILE-----\n...\n-----END AGE ENCRYPTED FILE-----\n"}],"version":"3.13.1"}}
+'''
 ```
 
-Do not put `secrets.file`, `secrets.sops_file`, or `config.file` inside `gmeow.toml`. Config source selection belongs to `--config`, `GMEOW_CONFIG`, or the default `gmeow.toml`. Any enabled component that references a secret requires the selected config file to be SOPS-protected; plaintext secret leaves are rejected.
+Do not put `secrets.file`, `secrets.sops_file`, or `config.file` inside `gmeow.toml`. Config source selection belongs to `--config`, `GMEOW_CONFIG`, or the default `gmeow.toml`. Mandatory password leaves must be SOPS-encrypted; plaintext password leaves are rejected.
 
 Gmail provisioning and source runtime behavior move in later Go migration phases. Phase 00 only
 validates foundation contracts and startup configuration.
@@ -83,8 +102,8 @@ Phase 01/02 development commands include `gmeow-admin filestore verify`,
 `gmeow-admin query rebuild`, and `gmeow-admin query project-changed --since <RFC3339>` for
 FILESTORE verification and QUERY projection work.
 Phase 03 adds `gmeow-admin scheduler scan`, `status`, `dead-letter`, `requeue`, and `force`;
-RabbitMQ queues are durable and use the `gmeow:` prefix. Production connections should use the
-RabbitMQ `gmeow` vhost; RabbitMQ integration tests use the `gmeow-test` vhost.
+RabbitMQ is mandatory. Production queues use the `gmeow.` prefix on the `gmeow` vhost; integration
+tests use the `gmeow.test.` prefix on the `gmeow-test` vhost.
 
 ## Distribution
 
@@ -116,7 +135,9 @@ The canonical local quality gate is one command:
 make check
 ```
 
-PostgreSQL-backed integration tests are skipped unless `GMEOW_TEST_POSTGRES_DSN` points at a disposable test database. Tests must not use a production database.
+PostgreSQL-backed integration tests use the mandatory local `gmeow.toml` configuration and the
+running local PostgreSQL service. Tests must clean only test-owned rows and must not create or drop
+databases or schemas.
 
 Before publishing, run the checklist in `docs/PUBLIC_RELEASE_CHECKLIST.md`.
 

@@ -160,7 +160,6 @@ type AnalyzerSpec struct {
 	IdempotencyFormula string   `json:"idempotency_key_formula,omitempty"`
 	Deterministic      bool     `json:"deterministic,omitempty"`
 	WorkerKind         string   `json:"worker_kind,omitempty"`
-	Enabled            bool     `json:"enabled"`
 }
 
 type AnalyzerJob struct {
@@ -201,6 +200,7 @@ type SchedulerStatus struct {
 	SchemaVersion SchemaVersion `json:"schema_version"`
 	Pending       int           `json:"pending"`
 	Retry         int           `json:"retry"`
+	Failed        int           `json:"failed"`
 	DeadLetter    int           `json:"dead_letter"`
 }
 

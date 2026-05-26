@@ -18,7 +18,6 @@ import (
 func TestAdminFilestoreVerifyReportsCleanStore(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "filestore")
 	configPath := writePlainCLIConfig(t, root)
-	t.Setenv("GMEOW_SOPS_UNLOCK_KEY", "test-key")
 	var out bytes.Buffer
 	command := NewAdminCommand(&out, strings.NewReader(""))
 	command.SetArgs([]string{"--config", configPath, "filestore", "verify"})
@@ -42,7 +41,6 @@ func TestAdminFilestoreVerifyResolvesRelativeRootFromConfigPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := writePlainCLIConfigAt(t, configDir, "data/filestore")
-	t.Setenv("GMEOW_SOPS_UNLOCK_KEY", "test-key")
 	originalWD, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -74,6 +72,9 @@ func writePlainCLIConfig(t *testing.T, filestoreRoot string) string {
 
 func writePlainCLIConfigAt(t *testing.T, dir, filestoreRoot string) string {
 	t.Helper()
+	postgresPassword := localSecretLeaf(t, "postgres_password")
+	rabbitPassword := localSecretLeaf(t, "rabbitmq_password")
+	testRabbitPassword := localSecretLeaf(t, "rabbitmq_test_password")
 	path := filepath.Join(dir, "gmeow.toml")
 	body := `
 [system]
@@ -85,19 +86,25 @@ data_dir = "data"
 root = "` + filestoreRoot + `"
 
 [postgres]
-enabled = false
 host = "127.0.0.1"
 port = 5432
 database = "gmeow"
 user = "gmeow"
-password_secret = ""
-ssl_mode = "disable"
+ssl_mode = "require"
 
 [rabbitmq]
-enabled = false
-url_secret = ""
+host = "127.0.0.1"
+port = 5672
+user = "gmeow"
+vhost = "gmeow"
+test_user = "gmeow-test"
+test_vhost = "gmeow-test"
 
 [secrets]
+postgres_password = ` + tomlLiteralForCLIConfig(postgresPassword) + `
+rabbitmq_password = ` + tomlLiteralForCLIConfig(rabbitPassword) + `
+rabbitmq_test_password = ` + tomlLiteralForCLIConfig(testRabbitPassword) + `
+
 `
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)

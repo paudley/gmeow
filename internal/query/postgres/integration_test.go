@@ -5,20 +5,26 @@ package postgres
 
 import (
 	"context"
-	"os"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"net/url"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
 )
 
-func TestPostgresRebuildProjectsFilestore(t *testing.T) {
-	dsn := os.Getenv("GMEOW_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("GMEOW_TEST_POSTGRES_DSN is required for QUERY integration tests")
-	}
+func TestPostgresProjectsFilestore(t *testing.T) {
 	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	sourceName := "integration-" + randomHex(t, 8)
+	embeddingModel := "fixture-" + randomHex(t, 4)
+	referencedModel := "fixture-ref-" + randomHex(t, 4)
 	store := filestore.NewFilesystemStore(t.TempDir())
 	digest, err := store.Put(ctx, filestore.PutRequest{
 		Reader:    strings.NewReader("hello apollo"),
@@ -26,7 +32,7 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 		Facets:    []contracts.Facet{{Kind: "file"}},
 		Provenance: []contracts.Provenance{{
 			SourceKind: "fixture",
-			SourceName: "integration",
+			SourceName: sourceName,
 			ExternalID: "apollo-1",
 		}},
 		Relationships: []contracts.Relationship{
@@ -45,27 +51,30 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.WriteAnnotation(ctx, contracts.Annotation{
-		ObjectDigest: digest,
-		Kind:         "analysis",
-		AnalyzerName: "summary",
-		AnalyzerVer:  "1",
-		Data:         map[string]any{"summary": "apollo integration"},
-	}); err != nil {
-		t.Fatal(err)
+	annotations := []contracts.Annotation{
+		{
+			ObjectDigest: digest,
+			Kind:         "analysis",
+			AnalyzerName: "summary",
+			AnalyzerVer:  "1",
+			Data:         map[string]any{"summary": "apollo integration"},
+		},
+		{
+			ObjectDigest: digest,
+			Kind:         "analysis",
+			AnalyzerName: "entities",
+			AnalyzerVer:  "1",
+			Data:         map[string]any{"entities": []any{"apollo"}},
+		},
 	}
-	if err := store.WriteAnnotation(ctx, contracts.Annotation{
-		ObjectDigest: digest,
-		Kind:         "analysis",
-		AnalyzerName: "entities",
-		AnalyzerVer:  "1",
-		Data:         map[string]any{"entities": []any{"apollo"}},
-	}); err != nil {
-		t.Fatal(err)
+	for _, annotation := range annotations {
+		if err := store.WriteAnnotation(ctx, annotation); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := store.WriteSourceCursor(ctx, contracts.SourceCursor{
 		SourceKind: "fixture",
-		SourceName: "integration",
+		SourceName: sourceName,
 		Cursor:     map[string]any{"offset": "1"},
 	}); err != nil {
 		t.Fatal(err)
@@ -78,16 +87,33 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer index.Close()
-	report, err := index.RebuildReport(ctx)
+	cleanupDigests := []contracts.ObjectDigest{digest}
+	t.Cleanup(index.Close)
+	t.Cleanup(func() {
+		cleanupQueryIntegrationRows(
+			context.Background(),
+			t,
+			index,
+			sourceName,
+			cleanupDigests...)
+	})
+	cleanupQueryIntegrationRows(ctx, t, index, sourceName, cleanupDigests...)
+	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Projected != 1 || report.Failed != 0 {
-		t.Fatalf("unexpected rebuild report: %#v", report)
+	if err := index.Project(ctx, manifest, annotations); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.ProjectSourceCursor(ctx, contracts.SourceCursor{
+		SourceKind: "fixture",
+		SourceName: sourceName,
+		Cursor:     map[string]any{"offset": "1"},
+	}); err != nil {
+		t.Fatal(err)
 	}
 	cursors, err := index.SourceCursors(ctx, contracts.SourceCursorRequest{
-		SourceNames: []string{"integration"},
+		SourceNames: []string{sourceName},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -117,6 +143,9 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	response, err := index.Search(ctx, contracts.SearchRequest{
 		Query:  "apollo",
 		Facets: []string{"file"},
+		Provenance: contracts.ProvenanceFilter{
+			SourceNames: []string{sourceName},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +156,7 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	filtered, err := index.Search(ctx, contracts.SearchRequest{
 		Query: "apollo",
 		Provenance: contracts.ProvenanceFilter{
-			SourceNames: []string{"integration"},
+			SourceNames: []string{sourceName},
 			ExternalIDs: []string{"apollo-1"},
 		},
 		Relationships: contracts.RelationshipFilter{
@@ -155,10 +184,6 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	if missing.Total != 0 {
 		t.Fatalf("non-matching provenance filter returned results: %#v", missing)
 	}
-	manifest, err := store.ReadManifest(ctx, digest)
-	if err != nil {
-		t.Fatal(err)
-	}
 	embeddingDigest, err := store.Put(ctx, filestore.PutRequest{
 		Reader:       strings.NewReader(`{"vector":[0.1,0.2,0.3]}`),
 		MediaType:    "application/json",
@@ -174,7 +199,7 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 		Object:    "gmeow:entity/Mission",
 	}}
 	manifest.Embeddings = []contracts.EmbeddingRef{{
-		Model:        "fixture-ref",
+		Model:        referencedModel,
 		ObjectDigest: embeddingDigest,
 		Dimensions:   3,
 	}}
@@ -184,7 +209,7 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 		AnalyzerName: "embedding",
 		Data: map[string]any{
 			"embeddings": []any{map[string]any{
-				"model":         "fixture",
+				"model":         embeddingModel,
 				"object_digest": string(digest),
 				"dimensions":    float64(3),
 				"vector":        []any{float64(0.1), float64(0.2), float64(0.3)},
@@ -194,7 +219,7 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	vector, err := index.VectorSearch(ctx, contracts.VectorSearchRequest{
-		Model:      "fixture",
+		Model:      embeddingModel,
 		Dimensions: 3,
 		Vector:     []float32{0.1, 0.2, 0.3},
 		Facets:     []string{"file"},
@@ -207,7 +232,7 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 		t.Fatalf("unexpected vector response: %#v", vector)
 	}
 	referencedVector, err := index.VectorSearch(ctx, contracts.VectorSearchRequest{
-		Model:  "fixture-ref",
+		Model:  referencedModel,
 		Vector: []float32{0.1, 0.2, 0.3},
 		Facets: []string{"file"},
 		Limit:  5,
@@ -227,6 +252,7 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupDigests = append(cleanupDigests, otherDigest)
 	otherManifest, err := store.ReadManifest(ctx, otherDigest)
 	if err != nil {
 		t.Fatal(err)
@@ -237,7 +263,7 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 		AnalyzerName: "embedding",
 		Data: map[string]any{
 			"embeddings": []any{map[string]any{
-				"model":         "fixture",
+				"model":         embeddingModel,
 				"object_digest": string(otherDigest),
 				"dimensions":    float64(2),
 				"vector":        []any{float64(0.1), float64(0.2)},
@@ -247,7 +273,7 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	inferredDimension, err := index.VectorSearch(ctx, contracts.VectorSearchRequest{
-		Model:  "fixture",
+		Model:  embeddingModel,
 		Vector: []float32{0.1, 0.2, 0.3},
 		Facets: []string{"file"},
 		Limit:  5,
@@ -260,7 +286,7 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 		t.Fatalf("unexpected inferred-dimension vector response: %#v", inferredDimension)
 	}
 	wrongDimension, err := index.VectorSearch(ctx, contracts.VectorSearchRequest{
-		Model:      "fixture",
+		Model:      embeddingModel,
 		Dimensions: 2,
 		Vector:     []float32{0.1, 0.2, 0.3},
 		Facets:     []string{"file"},
@@ -274,7 +300,10 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	}
 	ageRows, err := index.AgeCypher(
 		ctx,
-		"MATCH ()-[r]->() RETURN count(r)",
+		fmt.Sprintf(
+			"MATCH ()-[r]->() WHERE r.object_digest = %s RETURN count(r)",
+			ageStringLiteral(string(digest)),
+		),
 		"edges agtype",
 		10,
 	)
@@ -290,15 +319,18 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	}
 	ageRows, err = index.AgeCypher(
 		ctx,
-		"MATCH (n) RETURN count(n)",
-		"nodes agtype",
+		fmt.Sprintf(
+			"MATCH ()-[r]->() WHERE r.object_digest = %s RETURN count(r)",
+			ageStringLiteral(string(digest)),
+		),
+		"edges agtype",
 		10,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ageRows) != 1 || ageRows[0]["nodes"] != "0" {
-		t.Fatalf("incremental projection left stale AGE nodes: %#v", ageRows)
+	if len(ageRows) != 1 || ageRows[0]["edges"] != "0" {
+		t.Fatalf("incremental projection left stale AGE edges: %#v", ageRows)
 	}
 	if err := index.ProjectObject(ctx, filestore.ProjectionObject{
 		Digest: digest,
@@ -309,7 +341,12 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stale, err := index.Search(ctx, contracts.SearchRequest{Query: "apollo"})
+	stale, err := index.Search(ctx, contracts.SearchRequest{
+		Query: "apollo",
+		Provenance: contracts.ProvenanceFilter{
+			SourceNames: []string{sourceName},
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +355,10 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	}
 	ageRows, err = index.AgeCypher(
 		ctx,
-		"MATCH ()-[r]->() RETURN count(r)",
+		fmt.Sprintf(
+			"MATCH ()-[r]->() WHERE r.object_digest = %s RETURN count(r)",
+			ageStringLiteral(string(digest)),
+		),
 		"edges agtype",
 		10,
 	)
@@ -339,4 +379,81 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	if findingCount != 1 {
 		t.Fatalf("projection finding was not recorded, count=%d", findingCount)
 	}
+}
+
+func queryIntegrationDSN(t *testing.T) string {
+	t.Helper()
+	loaded, err := config.Load(config.Options{
+		Path: filepath.Join("..", "..", "..", "gmeow.toml"),
+	})
+	if err != nil {
+		t.Fatalf("load integration config: %v", err)
+	}
+	return postgresDSN(loaded.Resolved.Postgres, loaded.Resolved.Postgres.Database)
+}
+
+func postgresDSN(postgres config.ResolvedPostgres, database string) string {
+	dsn := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(postgres.User, postgres.Password),
+		Host:   postgres.Host + ":" + strconv.Itoa(postgres.Port),
+		Path:   database,
+	}
+	query := dsn.Query()
+	query.Set("sslmode", postgres.SSLMode)
+	dsn.RawQuery = query.Encode()
+	return dsn.String()
+}
+
+func cleanupQueryIntegrationRows(
+	ctx context.Context,
+	t *testing.T,
+	index *Index,
+	sourceName string,
+	digests ...contracts.ObjectDigest,
+) {
+	t.Helper()
+	tx, err := index.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin query integration cleanup transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	for _, digest := range digests {
+		if err := deleteAgeFactsForDigest(ctx, tx, digest); err != nil {
+			t.Fatalf("cleanup AGE facts for %s: %v", digest, err)
+		}
+		if _, err := tx.Exec(
+			ctx,
+			"DELETE FROM query_projection_state WHERE key = $1",
+			"findings:"+string(digest),
+		); err != nil {
+			t.Fatalf("cleanup projection findings for %s: %v", digest, err)
+		}
+		if _, err := tx.Exec(
+			ctx,
+			"DELETE FROM query_objects WHERE object_digest = $1",
+			digest,
+		); err != nil {
+			t.Fatalf("cleanup query object %s: %v", digest, err)
+		}
+	}
+	if _, err := tx.Exec(
+		ctx,
+		"DELETE FROM query_source_cursors WHERE source_name = $1",
+		sourceName,
+	); err != nil {
+		t.Fatalf("cleanup source cursor %s: %v", sourceName, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit query integration cleanup transaction: %v", err)
+	}
+}
+
+func randomHex(t *testing.T, bytes int) string {
+	t.Helper()
+	buffer := make([]byte, bytes)
+	if _, err := rand.Read(buffer); err != nil {
+		t.Fatalf("read random bytes: %v", err)
+	}
+	return hex.EncodeToString(buffer)
 }

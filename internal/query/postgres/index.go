@@ -1244,7 +1244,7 @@ func deleteAgeFactsForDigest(
 	}
 	if _, err := tx.Exec(
 		ctx,
-		ageSQL(`MATCH (n) WHERE NOT (n)--() DELETE n`, "value agtype"),
+		ageSQL(`MATCH (n) WHERE NOT EXISTS((n)--()) DELETE n`, "value agtype"),
 	); err != nil {
 		return fmt.Errorf("delete stale AGE nodes for %s: %w", digest, err)
 	}

@@ -13,12 +13,14 @@ import (
 type MemoryBroker struct {
 	mutex             sync.Mutex
 	jobs              map[string]contracts.AnalyzerJob
+	failed            []contracts.AnalyzerJob
 	deadLetters       []contracts.AnalyzerJob
 	projectionRefresh []contracts.ObjectDigest
+	retryLimit        int
 }
 
 func NewMemoryBroker() *MemoryBroker {
-	return &MemoryBroker{jobs: map[string]contracts.AnalyzerJob{}}
+	return &MemoryBroker{jobs: map[string]contracts.AnalyzerJob{}, retryLimit: 3}
 }
 
 func (broker *MemoryBroker) Declare(context.Context) error {
@@ -70,12 +72,37 @@ func (broker *MemoryBroker) RouteFailure(
 	return nil
 }
 
+func (broker *MemoryBroker) ProcessFailures(
+	ctx context.Context,
+	limit int,
+) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	broker.mutex.Lock()
+	defer broker.mutex.Unlock()
+	if limit <= 0 || limit > len(broker.failed) {
+		limit = len(broker.failed)
+	}
+	for _, job := range broker.failed[:limit] {
+		job.Attempt++
+		if job.Attempt > broker.retryLimit {
+			broker.deadLetters = append(broker.deadLetters, job)
+			continue
+		}
+		broker.jobs[job.IdempotencyKey] = job
+	}
+	broker.failed = append([]contracts.AnalyzerJob(nil), broker.failed[limit:]...)
+	return limit, nil
+}
+
 func (broker *MemoryBroker) Status(context.Context) (contracts.SchedulerStatus, error) {
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
 	return contracts.SchedulerStatus{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Pending:       len(broker.jobs),
+		Failed:        len(broker.failed),
 		DeadLetter:    len(broker.deadLetters),
 	}, nil
 }
@@ -131,6 +158,12 @@ func (broker *MemoryBroker) AddDeadLetter(job contracts.AnalyzerJob) {
 	broker.mutex.Lock()
 	defer broker.mutex.Unlock()
 	broker.deadLetters = append(broker.deadLetters, job)
+}
+
+func (broker *MemoryBroker) AddFailed(job contracts.AnalyzerJob) {
+	broker.mutex.Lock()
+	defer broker.mutex.Unlock()
+	broker.failed = append(broker.failed, job)
 }
 
 func (broker *MemoryBroker) ProjectionRefreshes() []contracts.ObjectDigest {

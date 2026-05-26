@@ -6,16 +6,17 @@ package cli
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
+
+	"blackcat.ca/gmeow/internal/config"
 )
 
 func TestAdminConfigValidate(t *testing.T) {
-	path, key := writeEncryptedCLIConfig(t)
-	t.Setenv("GMEOW_SOPS_UNLOCK_KEY", key)
+	path := writeEncryptedCLIConfig(t)
 	var out bytes.Buffer
 	command := NewAdminCommand(&out, strings.NewReader(""))
 	command.SetArgs([]string{"--config", path, "config", "validate"})
@@ -29,8 +30,7 @@ func TestAdminConfigValidate(t *testing.T) {
 }
 
 func TestAdminSecretListHidesValues(t *testing.T) {
-	path, key := writeEncryptedCLIConfig(t)
-	t.Setenv("GMEOW_SOPS_UNLOCK_KEY", key)
+	path := writeEncryptedCLIConfig(t)
 	var out bytes.Buffer
 	command := NewAdminCommand(&out, strings.NewReader(""))
 	command.SetArgs([]string{"--config", path, "config", "secret", "list"})
@@ -47,26 +47,30 @@ func TestAdminSecretListHidesValues(t *testing.T) {
 	}
 }
 
-func TestAdminSecretSetIsValidatedStub(t *testing.T) {
-	path, key := writeEncryptedCLIConfig(t)
-	t.Setenv("GMEOW_SOPS_UNLOCK_KEY", key)
-	command := NewAdminCommand(&bytes.Buffer{}, strings.NewReader("new-value\n"))
+func TestAdminSecretSetUpdatesEncryptedLeaf(t *testing.T) {
+	path := writeEncryptedCLIConfig(t)
+	command := NewAdminCommand(&bytes.Buffer{}, strings.NewReader("gmeow\n"))
 	command.SetArgs(
 		[]string{"--config", path, "config", "secret", "set", "postgres_password"},
 	)
 
-	err := command.Execute()
-	if err == nil {
-		t.Fatal("expected Phase 00 stub error")
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "Phase 00") {
-		t.Fatalf("unexpected error: %v", err)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "gmeow\n") {
+		t.Fatal("secret value was written in plaintext")
+	}
+	if _, err := config.Load(config.Options{Path: path}); err != nil {
+		t.Fatalf("updated config should validate: %v", err)
 	}
 }
 
 func TestAdminSecretUnsetRefusesReferencedSecret(t *testing.T) {
-	path, key := writeEncryptedCLIConfig(t)
-	t.Setenv("GMEOW_SOPS_UNLOCK_KEY", key)
+	path := writeEncryptedCLIConfig(t)
 	command := NewAdminCommand(&bytes.Buffer{}, strings.NewReader(""))
 	command.SetArgs(
 		[]string{"--config", path, "config", "secret", "unset", "postgres_password"},
@@ -81,20 +85,12 @@ func TestAdminSecretUnsetRefusesReferencedSecret(t *testing.T) {
 	}
 }
 
-func writeEncryptedCLIConfig(t *testing.T) (string, string) {
+func writeEncryptedCLIConfig(t *testing.T) string {
 	t.Helper()
-	requireCommand(t, "sops")
-	requireCommand(t, "age-keygen")
-	keyPath := filepath.Join(t.TempDir(), "key.txt")
-	output, err := exec.Command("age-keygen", "-o", keyPath).CombinedOutput()
-	if err != nil {
-		t.Fatalf("generate age key: %v: %s", err, output)
-	}
-	recipient := regexp.MustCompile(`age1[0-9a-z]+`).FindString(string(output))
-	if recipient == "" {
-		t.Fatalf("age-keygen output did not include public recipient: %s", output)
-	}
 	plainPath := filepath.Join(t.TempDir(), "gmeow.toml")
+	postgresPassword := localSecretLeaf(t, "postgres_password")
+	rabbitPassword := localSecretLeaf(t, "rabbitmq_password")
+	testRabbitPassword := localSecretLeaf(t, "rabbitmq_test_password")
 	body := `
 [system]
 config_version = 1
@@ -105,39 +101,47 @@ data_dir = "data"
 root = "data/filestore"
 
 [postgres]
-enabled = true
 host = "127.0.0.1"
 port = 5432
 database = "gmeow"
 user = "gmeow"
-password_secret = "postgres_password"
-ssl_mode = "disable"
+ssl_mode = "require"
+
+[rabbitmq]
+host = "127.0.0.1"
+port = 5672
+user = "gmeow"
+vhost = "gmeow"
+test_user = "gmeow-test"
+test_vhost = "gmeow-test"
 
 [secrets]
-postgres_password = "postgres-password"
+postgres_password = ` + tomlLiteralForCLIConfig(postgresPassword) + `
+rabbitmq_password = ` + tomlLiteralForCLIConfig(rabbitPassword) + `
+rabbitmq_test_password = ` + tomlLiteralForCLIConfig(testRabbitPassword) + `
 `
 	if err := os.WriteFile(plainPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	encrypted, err := exec.Command("sops", "encrypt", "--input-type", "binary", "--output-type", "binary", "--age", recipient, plainPath).
-		Output()
-	if err != nil {
-		t.Fatalf("encrypt config: %v", err)
-	}
-	encryptedPath := filepath.Join(t.TempDir(), "gmeow.sops.toml")
-	if err := os.WriteFile(encryptedPath, encrypted, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	key, err := os.ReadFile(keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return encryptedPath, string(key)
+	return plainPath
 }
 
-func requireCommand(t *testing.T, name string) {
+func tomlLiteralForCLIConfig(value string) string {
+	return "'''\n" + value + "\n'''"
+}
+
+func localSecretLeaf(t *testing.T, name string) string {
 	t.Helper()
-	if _, err := exec.LookPath(name); err != nil {
-		t.Skipf("%s CLI is not installed", name)
+	var parsed struct {
+		Secrets map[string]string `toml:"secrets"`
 	}
+	path := filepath.Clean(filepath.Join("..", "..", "gmeow.toml"))
+	if _, err := toml.DecodeFile(path, &parsed); err != nil {
+		t.Fatalf("decode local config for encrypted secret leaf: %v", err)
+	}
+	value := strings.TrimSpace(parsed.Secrets[name])
+	if value == "" {
+		t.Fatalf("local config missing encrypted secret leaf %q", name)
+	}
+	return value
 }

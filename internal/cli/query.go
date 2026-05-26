@@ -321,9 +321,6 @@ func queryPostgresConfig(loaded *config.Loaded) querypg.Config {
 }
 
 func queryPostgresConnString(postgres config.ResolvedPostgres) string {
-	if !postgres.Enabled {
-		return ""
-	}
 	values := url.Values{}
 	if postgres.SSLMode != "" {
 		values.Set("sslmode", postgres.SSLMode)

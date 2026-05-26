@@ -5,38 +5,37 @@ package rabbitmq
 
 import (
 	"context"
-	"net/url"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
+	sched "blackcat.ca/gmeow/internal/scheduler"
 )
 
-func TestQueueNamesUseGmeowPrefix(t *testing.T) {
+func TestQueueNamesUseGmeowDotPrefix(t *testing.T) {
+	topology := newTopology(testQueuePrefix)
 	for _, name := range []string{
-		workQueueName,
-		retryQueueName,
-		deadLetterQueueName,
-		projectionQueueName,
+		topology.workQueue,
+		topology.retryQueue,
+		topology.failedQueue,
+		topology.deadLetterQueue,
+		topology.projectionQueue,
 	} {
-		if !strings.HasPrefix(name, "gmeow:") {
-			t.Fatalf("queue %q does not use gmeow: prefix", name)
+		if !strings.HasPrefix(name, "gmeow.test.") {
+			t.Fatalf("queue %q does not use gmeow.test. prefix", name)
 		}
 	}
 }
 
 func TestRabbitMQTopologyAndDeadLetterRequeue(t *testing.T) {
-	url := testRabbitMQURL(t)
+	cfg := testRabbitMQConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	broker, err := New(ctx, Config{
-		URL:          url,
-		RetryLimit:   1,
-		RetryBackoff: 50 * time.Millisecond,
-		QueuePrefix:  "gmeow:",
-	})
+	broker, err := New(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +46,7 @@ func TestRabbitMQTopologyAndDeadLetterRequeue(t *testing.T) {
 		JobID:          "rabbitmq-test",
 		IdempotencyKey: "rabbitmq-test",
 		ObjectDigest:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Analyzer:       contracts.AnalyzerSpec{Name: "noop", Version: "1", Enabled: true},
+		Analyzer:       contracts.AnalyzerSpec{Name: "noop", Version: "1"},
 		Priority:       10,
 	}
 	if err := broker.RouteFailure(ctx, job); err != nil {
@@ -74,14 +73,10 @@ func TestRabbitMQTopologyAndDeadLetterRequeue(t *testing.T) {
 }
 
 func TestRabbitMQUnackedDeliveryRedeliversAfterChannelClose(t *testing.T) {
-	url := testRabbitMQURL(t)
+	cfg := testRabbitMQConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	broker, err := New(ctx, Config{
-		URL:         url,
-		RetryLimit:  1,
-		QueuePrefix: "gmeow:",
-	})
+	broker, err := New(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +87,7 @@ func TestRabbitMQUnackedDeliveryRedeliversAfterChannelClose(t *testing.T) {
 		JobID:          "redelivery-test",
 		IdempotencyKey: "redelivery-test",
 		ObjectDigest:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Analyzer:       contracts.AnalyzerSpec{Name: "noop", Version: "1", Enabled: true},
+		Analyzer:       contracts.AnalyzerSpec{Name: "noop", Version: "1"},
 		Priority:       10,
 	}
 	if err := broker.Publish(ctx, job); err != nil {
@@ -102,7 +97,7 @@ func TestRabbitMQUnackedDeliveryRedeliversAfterChannelClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := channel.Get(workQueueName, false); err != nil || !ok {
+	if _, ok, err := channel.Get(broker.topology.workQueue, false); err != nil || !ok {
 		t.Fatalf("expected first delivery, ok=%t err=%v", ok, err)
 	}
 	if err := channel.Close(); err != nil {
@@ -113,7 +108,7 @@ func TestRabbitMQUnackedDeliveryRedeliversAfterChannelClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer channel.Close()
-	delivery, ok, err := channel.Get(workQueueName, false)
+	delivery, ok, err := channel.Get(broker.topology.workQueue, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,27 +120,133 @@ func TestRabbitMQUnackedDeliveryRedeliversAfterChannelClose(t *testing.T) {
 	}
 }
 
-func testRabbitMQURL(t *testing.T) string {
-	t.Helper()
-	raw := os.Getenv("GMEOW_TEST_RABBITMQ_URL")
-	if raw == "" {
-		t.Skip("GMEOW_TEST_RABBITMQ_URL is required for RabbitMQ integration tests")
-	}
-	parsed, err := url.Parse(raw)
+func TestRabbitMQNackRetriesThenDeadLetters(t *testing.T) {
+	cfg := testRabbitMQConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	broker, err := New(ctx, cfg)
 	if err != nil {
-		t.Fatalf("parse GMEOW_TEST_RABBITMQ_URL: %v", err)
+		t.Fatal(err)
 	}
-	if parsed.Path == "" || parsed.Path == "/" {
-		parsed.Path = "/gmeow-test"
-		return parsed.String()
+	defer broker.Close()
+	purgeQueues(t, broker)
+	job := contracts.AnalyzerJob{
+		SchemaVersion:  contracts.SchemaVersionPhase00,
+		JobID:          "nack-test",
+		IdempotencyKey: "nack-test",
+		ObjectDigest:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Analyzer:       contracts.AnalyzerSpec{Name: "noop", Version: "1"},
+		Priority:       10,
 	}
-	if parsed.Path != "/gmeow-test" {
+	if err := broker.Publish(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	nackOne(t, broker)
+	if processed, err := broker.ProcessFailures(ctx, 10); err != nil || processed != 1 {
+		t.Fatalf("expected one failed job processed, processed=%d err=%v", processed, err)
+	}
+	time.Sleep(cfg.RetryBackoff + 50*time.Millisecond)
+	nackOne(t, broker)
+	if processed, err := broker.ProcessFailures(ctx, 10); err != nil || processed != 1 {
 		t.Fatalf(
-			"GMEOW_TEST_RABBITMQ_URL must use RabbitMQ vhost /gmeow-test, got %q",
-			parsed.Path,
+			"expected exhausted failed job processed, processed=%d err=%v",
+			processed,
+			err,
 		)
 	}
-	return parsed.String()
+	dead, err := broker.DeadLetters(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dead) != 1 || dead[0].Attempt != 2 {
+		t.Fatalf("expected exhausted job in dead letter, got %#v", dead)
+	}
+}
+
+func TestRabbitMQScanIsIdempotent(t *testing.T) {
+	cfg := testRabbitMQConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	broker, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broker.Close()
+	purgeQueues(t, broker)
+	store := filestore.NewFilesystemStore(t.TempDir())
+	if _, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("hello"),
+		MediaType: "text/plain",
+		Facets:    []contracts.Facet{{Kind: "file"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service, err := sched.NewService(
+		store,
+		broker,
+		[]contracts.AnalyzerSpec{{
+			Name:       "text.extract",
+			Version:    "1",
+			MediaTypes: []string{"text/plain"},
+		}},
+		sched.Config{RetryBackoff: cfg.RetryBackoff},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.Scan(ctx, contracts.SchedulerScanRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Scan(ctx, contracts.SchedulerScanRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := broker.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Enqueued != 1 || second.Enqueued != 0 || status.Pending != 1 {
+		t.Fatalf(
+			"expected one effective RabbitMQ job, first=%#v second=%#v status=%#v",
+			first,
+			second,
+			status,
+		)
+	}
+}
+
+func testRabbitMQConfig(t *testing.T) Config {
+	t.Helper()
+	loaded, err := config.Load(config.Options{
+		Path: filepath.Join("..", "..", "..", "gmeow.toml"),
+	})
+	if err != nil {
+		t.Fatalf("load gmeow.toml for RabbitMQ integration tests: %v", err)
+	}
+	cfg := TestConfigFromResolved(loaded.Resolved.RabbitMQ, loaded.Resolved.Scheduler)
+	cfg.RetryLimit = 1
+	cfg.RetryBackoff = 50 * time.Millisecond
+	return cfg
+}
+
+func nackOne(t *testing.T, broker *Broker) {
+	t.Helper()
+	channel, err := broker.connection.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer channel.Close()
+	delivery, ok, err := channel.Get(broker.topology.workQueue, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected work delivery")
+	}
+	if err := delivery.Nack(false, false); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func purgeQueues(t *testing.T, broker *Broker) {
@@ -155,7 +256,13 @@ func purgeQueues(t *testing.T, broker *Broker) {
 		t.Fatal(err)
 	}
 	defer channel.Close()
-	for _, name := range []string{workQueueName, retryQueueName, deadLetterQueueName, projectionQueueName} {
+	for _, name := range []string{
+		broker.topology.workQueue,
+		broker.topology.retryQueue,
+		broker.topology.failedQueue,
+		broker.topology.deadLetterQueue,
+		broker.topology.projectionQueue,
+	} {
 		if _, err := channel.QueuePurge(name, false); err != nil {
 			t.Fatalf("purge %s: %v", name, err)
 		}

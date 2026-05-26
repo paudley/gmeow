@@ -85,9 +85,10 @@ func newSchedulerStatusCommand(out io.Writer, configPath *string) *cobra.Command
 			}
 			_, err = fmt.Fprintf(
 				out,
-				"scheduler status: pending=%d retry=%d dead_letter=%d\n",
+				"scheduler status: pending=%d retry=%d failed=%d dead_letter=%d\n",
 				status.Pending,
 				status.Retry,
+				status.Failed,
 				status.DeadLetter,
 			)
 			return err
@@ -259,8 +260,16 @@ func schedulerConfigFromResolved(
 		return scheduler.Config{}, fmt.Errorf("parse scheduler.scan_interval: %w", err)
 	}
 	return scheduler.Config{
-		ScanInterval:      scanInterval,
-		Priorities:        resolved.Priorities,
-		ProjectionRefresh: resolved.ProjectionRefresh,
+		ScanInterval: scanInterval,
+		RetryBackoff: retryBackoffDuration(resolved.RetryBackoff),
+		Priorities:   resolved.Priorities,
 	}, nil
+}
+
+func retryBackoffDuration(raw string) time.Duration {
+	duration, err := time.ParseDuration(raw)
+	if err != nil || duration <= 0 {
+		return 30 * time.Second
+	}
+	return duration
 }

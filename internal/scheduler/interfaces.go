@@ -39,6 +39,7 @@ type Broker interface {
 	Declare(ctx context.Context) error
 	Publish(ctx context.Context, job contracts.AnalyzerJob) error
 	PublishProjectionRefresh(ctx context.Context, digest contracts.ObjectDigest) error
+	ProcessFailures(ctx context.Context, limit int) (int, error)
 	RouteFailure(ctx context.Context, job contracts.AnalyzerJob) error
 	Status(ctx context.Context) (contracts.SchedulerStatus, error)
 	DeadLetters(ctx context.Context, limit int) ([]contracts.AnalyzerJob, error)

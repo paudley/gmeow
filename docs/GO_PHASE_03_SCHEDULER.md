@@ -12,7 +12,8 @@ events.
 - Derive missing/stale work from FILESTORE annotations.
 - Generate deterministic idempotency keys.
 - Configure RabbitMQ exchanges, queues, priority classes, retries, and dead letters.
-  All RabbitMQ queues must be prefixed with `gmeow:`.
+  Production RabbitMQ queues must be prefixed with `gmeow.`; integration-test queues must be
+  prefixed with `gmeow.test.`.
   Production connections use the RabbitMQ `gmeow` vhost; integration tests use `gmeow-test`.
 - Implement scheduler scan command and background loop.
 - Implement forced reanalysis and interactive reprioritization.
@@ -41,6 +42,6 @@ orchestration code:
 ## Exit Gate
 
 - SCHEDULER owns priority, retry, dead-letter, and idempotency behavior.
-- RabbitMQ queues are durable and named under the `gmeow:` prefix.
+- RabbitMQ queues are durable and named under the `gmeow.` or `gmeow.test.` prefix.
 - ANALYSIS workers receive jobs only through the scheduler/broker contract.
 - Old Python maintenance/job orchestration is removed once Go SCHEDULER is authoritative.
