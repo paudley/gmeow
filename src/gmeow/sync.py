@@ -36,7 +36,6 @@ from .sync_backfill import (
 DEFAULT_DICT_ANY = cast(dict[str, Any], None)
 DEFAULT_GRAPH: IntelligenceGraph = NoGraph()
 DEFAULT_LIST_STR = cast(list[str], None)
-DEFAULT_OBJECT = cast(object, None)
 DEFAULT_PRIORITY_RULE = cast(PriorityRule, None)
 DEFAULT_STR = cast(str, None)
 
@@ -141,7 +140,6 @@ class SyncService:
         self.semantic = semantic
         self.gmail = gmail
         self.graph = graph
-        self.maintenance_scheduler = DEFAULT_OBJECT
 
     def gmail_available(self) -> bool:
         """Return whether Gmail-backed operations can run."""
@@ -470,7 +468,6 @@ class SyncService:
             if message:
                 hydrated_ids.append(message["id"])
                 deferred_attachments += _gmail_attachment_ref_count(message.get("raw", {}))
-        self._enqueue_missing_message_analysis(hydrated_ids, {"source": "live_search", "query": query})
         analysis = self.analysis_status_for_messages(hydrated_ids)
         self.cache.set_state(
             "last_gmail_search",
@@ -572,7 +569,6 @@ class SyncService:
             )
             phases["cache_ms"] = _elapsed_ms(cache_started)
         message_ids = [str(message["id"]) for message in messages if message.get("id")]
-        self._enqueue_missing_message_analysis(message_ids, {"source": "search", "query": query})
         analysis = self.analysis_status_for_messages(message_ids)
         attachment_hydration = self.cache.deferred_attachment_hydration_status(message_ids)
         phases["total_ms"] = _elapsed_ms(started)
@@ -623,9 +619,6 @@ class SyncService:
         status["attachment_hydration"] = self.cache.deferred_attachment_hydration_status(message_ids)
         status["messages"] = [message for message_id in message_ids if (message := self.cache.get_message(message_id))]
         return status
-
-    def _enqueue_missing_message_analysis(self, message_ids: list[str], payload: dict[str, Any]) -> None:
-        _ = (message_ids, payload)
 
     def hydrate_deferred_attachment(self, job: dict[str, Any]) -> str:
         """Download a deferred Gmail attachment, write the sidecar, and return its digest."""

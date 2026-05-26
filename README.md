@@ -4,35 +4,31 @@
 
 # Gmeow
 
-Local Gmail intelligence for agents.
+FILESTORE-first local knowledge services for agents.
 
-Gmeow turns a Gmail mailbox into a local intelligence layer for agents and automation. It exposes a loopback REST API and an MCP Streamable HTTP endpoint over an authenticated Gmail mailbox, while maintaining a local PostgreSQL-backed cache, semantic index, attachment object store, and knowledge graph.
+Gmeow is in a Go rewrite. Phases 0-3 provide the greenfield foundation: shared contracts, SOPS-backed config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, and RabbitMQ-backed SCHEDULER work derivation.
 
 Gmeow is designed for trusted single-user local systems. By default it binds to `127.0.0.1` and does not add application-level authentication. Do not expose it directly to an untrusted network.
 
-## What Gmeow Does
+## Current Go Runtime
 
-- Gives agents a local MCP and REST interface to search, read, and act on Gmail without scraping a browser.
-- Builds a durable local archive with raw RFC822 messages, attachment payloads, labels, threads, sync state, and search indexes.
-- Adds semantic search, category discovery, and knowledge-graph views over mailbox content.
-- Extracts attachment metadata and text so documents, images, archives, PDFs, and calendar files become searchable context.
-- Serves the cached archive through read-only IMAP for tools that already speak mail protocols.
+- Validates one shared `gmeow.toml` config path for all Go binaries.
+- Stores authoritative content and annotations in FILESTORE object directories.
+- Projects FILESTORE manifests into PostgreSQL QUERY tables, pgvector rows, and Apache AGE graph state.
+- Derives analysis work through SCHEDULER and publishes durable RabbitMQ jobs with retry and dead-letter handling.
+- Runs typed gRPC service endpoints for FILESTORE, QUERY, and SCHEDULER over Unix sockets by default.
+- Provides admin commands for config, FILESTORE verification, QUERY projection, and SCHEDULER operations.
+
+MCP, REST, IMAP, Gmail SOURCE adapters, and ANALYSIS workers return in later Go migration phases.
 
 ## Features
 
-- Gmail mailbox access through Google Workspace service-account delegation or local user OAuth.
-- REST and MCP tools for search, reads, labels, archive/read/star state, contacts, categories, graph exploration, and archive operations.
-- PostgreSQL catalog for labels, threads, headers, MIME structure, categories, graph triples, jobs, sync state, and pgvector embedding chunks.
-- Live Gmail search hydration: unbounded searches can query Gmail, cache returned messages, and enqueue analysis work.
-- Full local object storage for payload bytes using a BLAKE3 content-addressed store with zstd compression for compressible content.
-- Attachment sidecars with Gmail source metadata, `exiftool` metadata, extracted text, OCR, archive listings, document conversion, and optional vision captions.
-- Semantic search using `semchunk` chunking and an OpenAI-compatible embedding endpoint.
-- Knowledge graph extraction with RDF/RDFS, FOAF, SIOC, schema.org, SKOS, PROV-O, and DOAP alignment.
-- Rustworkx graph projection, paths, ranking, centrality, components, project views, and related-node discovery.
-- Category rules plus learned category suggestions from TF-IDF clustering.
+- BLAKE3 content identity with zstd-compressed FILESTORE blobs and immutable recovery sidecars.
+- Atomic manifest, analysis, overlay, and source-cursor annotations.
+- Rebuildable PostgreSQL projection for facets, provenance, relationships, compound parts, analysis status, graph facts, keywords, embeddings, overlays, and source cursors.
+- Read-only Apache AGE graph inspection over projected graph facts.
 - Go SCHEDULER work derivation with RabbitMQ priority, retry, and dead-letter queues.
-- Token-Oriented Object Notation by default for MCP responses, with JSON available on request.
-- Read-only IMAP service backed by cached RFC822 archive objects.
+- Transitional Python code remains only as reference/support for later SOURCE, ANALYSIS, and INTERFACE phases.
 
 ## Install
 
@@ -54,6 +50,18 @@ data_dir = "data"
 
 [filestore]
 root = "data/filestore"
+
+[rpc.filestore]
+network = "unix"
+address = "/run/gmeow/filestore.sock"
+
+[rpc.scheduler]
+network = "unix"
+address = "/run/gmeow/scheduler.sock"
+
+[rpc.query]
+network = "unix"
+address = "/run/gmeow/query.sock"
 
 [postgres]
 host = "127.0.0.1"
@@ -95,15 +103,20 @@ validates foundation contracts and startup configuration.
 ```bash
 go run ./cmd/gmeow-admin --config gmeow.toml config validate
 go run ./cmd/gmeow --config gmeow.toml status
+go run ./cmd/gmeow --config gmeow.toml filestore-serve
+go run ./cmd/gmeow --config gmeow.toml query-serve
+go run ./cmd/gmeow --config gmeow.toml scheduler-serve
 ```
 
-Phase 00 binaries validate config and report startup status without initializing unimplemented components.
 Phase 01/02 development commands include `gmeow-admin filestore verify`,
 `gmeow-admin query rebuild`, and `gmeow-admin query project-changed --since <RFC3339>` for
 FILESTORE verification and QUERY projection work.
 Phase 03 adds `gmeow-admin scheduler scan`, `status`, `dead-letter`, `requeue`, and `force`;
 RabbitMQ is mandatory. Production queues use the `gmeow.` prefix on the `gmeow` vhost; integration
 tests use the `gmeow.test.` prefix on the `gmeow-test` vhost.
+
+The gRPC service protocol is typed protobuf. JSON is limited to dynamic metadata leaf fields, not
+whole request or response envelopes. See `proto/gmeow/v1/` and `docs/systemd.md`.
 
 ## Distribution
 
