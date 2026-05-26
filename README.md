@@ -30,7 +30,7 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Knowledge graph extraction with RDF/RDFS, FOAF, SIOC, schema.org, SKOS, PROV-O, and DOAP alignment.
 - Rustworkx graph projection, paths, ranking, centrality, components, project views, and related-node discovery.
 - Category rules plus learned category suggestions from TF-IDF clustering.
-- Timed maintenance jobs for history sync, priority sync, intelligence workers, derived views, PostgreSQL analyze, and optional sidecar refresh.
+- Go SCHEDULER work derivation with RabbitMQ priority, retry, and dead-letter queues.
 - Token-Oriented Object Notation by default for MCP responses, with JSON available on request.
 - Read-only IMAP service backed by cached RFC822 archive objects.
 
@@ -82,6 +82,9 @@ Phase 00 binaries validate config and report startup status without initializing
 Phase 01/02 development commands include `gmeow-admin filestore verify`,
 `gmeow-admin query rebuild`, and `gmeow-admin query project-changed --since <RFC3339>` for
 FILESTORE verification and QUERY projection work.
+Phase 03 adds `gmeow-admin scheduler scan`, `status`, `dead-letter`, `requeue`, and `force`;
+RabbitMQ queues are durable and use the `gmeow:` prefix. Production connections should use the
+RabbitMQ `gmeow` vhost; RabbitMQ integration tests use the `gmeow-test` vhost.
 
 ## Distribution
 

@@ -26,6 +26,7 @@ func NewServiceCommand(name, summary string, out io.Writer) *cobra.Command {
 	root.PersistentFlags().StringVar(&configPath, "config", "", "path to gmeow.toml")
 	root.AddCommand(newVersionCommand(out))
 	root.AddCommand(newStatusCommand(name, out, &configPath))
+	root.AddCommand(newSchedulerRunCommand(out, &configPath, "scheduler-run"))
 	return root
 }
 
@@ -41,6 +42,7 @@ func NewAdminCommand(out io.Writer, in io.Reader) *cobra.Command {
 	root.AddCommand(newConfigCommand(out, in, &configPath))
 	root.AddCommand(newFilestoreCommand(out, &configPath))
 	root.AddCommand(newQueryCommand(out, &configPath))
+	root.AddCommand(newSchedulerCommand(out, &configPath))
 	return root
 }
 

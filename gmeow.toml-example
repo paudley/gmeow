@@ -19,7 +19,26 @@ ssl_mode = "disable"
 enabled = false
 url_secret = ""
 
+[scheduler]
+enabled = false
+scan_interval = "30s"
+retry_limit = 3
+retry_backoff = "30s"
+queue_prefix = "gmeow:"
+projection_refresh = true
+background_loop = false
+dead_letter_inspect_max = 20
+
+[scheduler.priorities]
+interactive = 100
+forced = 90
+fresh_ingest = 70
+repair = 50
+background = 10
+
 [secrets]
+# Production RabbitMQ URLs should use the gmeow vhost:
+# rabbitmq_url = "amqp://gmeow:secret@127.0.0.1:5672/gmeow"
 
 [[interfaces]]
 name = "rest"

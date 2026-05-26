@@ -39,3 +39,4 @@ htmlcov/
 .coding-ethos/events/
 .coding-ethos/tool-config-hashes.json
 .coding-ethos/gemini
+gmeow.toml

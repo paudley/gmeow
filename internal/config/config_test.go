@@ -109,6 +109,43 @@ func TestLoadRejectsUnknownConfigVersion(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsSchedulerWithoutRabbitMQ(t *testing.T) {
+	configPath := writeConfig(
+		t,
+		strings.Replace(
+			minimalConfig(),
+			"[rabbitmq]\nenabled = true",
+			"[rabbitmq]\nenabled = false",
+			1,
+		)+"\n[scheduler]\nenabled = true\nqueue_prefix = \"gmeow:\"\n",
+	)
+	t.Setenv(unlockEnvName, "test-key")
+
+	_, err := Load(Options{Path: configPath, allowPlaintextSecretsForTests: true})
+	if err == nil {
+		t.Fatal("expected scheduler to require RabbitMQ")
+	}
+	if !strings.Contains(err.Error(), "rabbitmq.enabled") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsSchedulerQueuePrefixOutsideGmeowNamespace(t *testing.T) {
+	configPath := writeConfig(
+		t,
+		minimalConfig()+"\n[scheduler]\nenabled = true\nqueue_prefix = \"other:\"\n",
+	)
+	t.Setenv(unlockEnvName, "test-key")
+
+	_, err := Load(Options{Path: configPath, allowPlaintextSecretsForTests: true})
+	if err == nil {
+		t.Fatal("expected scheduler queue prefix validation error")
+	}
+	if !strings.Contains(err.Error(), "gmeow:") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLoadRejectsUnknownWholeSecretReferences(t *testing.T) {
 	configPath := writeConfig(
 		t,
@@ -221,7 +258,7 @@ func TestLoadResolvesReferencedSecrets(t *testing.T) {
 	if loaded.Resolved.Postgres.Password != "postgres-password" {
 		t.Fatalf("postgres password was not resolved")
 	}
-	if loaded.Resolved.RabbitMQ.URL != "amqp://guest:guest@127.0.0.1:5672/" {
+	if loaded.Resolved.RabbitMQ.URL != "amqp://guest:guest@127.0.0.1:5672/gmeow" {
 		t.Fatalf("rabbitmq URL was not resolved")
 	}
 	if loaded.SecretReferences["postgres_password"] != 1 {
@@ -304,7 +341,7 @@ url_secret = "rabbitmq_url"
 
 [secrets]
 postgres_password = "postgres-password"
-rabbitmq_url = "amqp://guest:guest@127.0.0.1:5672/"
+rabbitmq_url = "amqp://guest:guest@127.0.0.1:5672/gmeow"
 
 [[interfaces]]
 name = "rest"

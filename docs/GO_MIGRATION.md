@@ -178,6 +178,8 @@ derive work:
 SCHEDULER publishes jobs to RabbitMQ, which is available in the core-data stack. RabbitMQ is the
 primary broker because durable acknowledgements, worker pools, priority queues, retry routing, and
 dead-letter queues fit the workload well.
+Production connections use the RabbitMQ `gmeow` vhost. Integration tests use the separate
+`gmeow-test` vhost.
 
 ### INTERFACE Has No Primacy
 
@@ -654,6 +656,9 @@ RabbitMQ topology:
 
 - one exchange for analysis work;
 - queues by priority or a priority queue with max priority configured;
+- every RabbitMQ queue name is prefixed with `gmeow:`;
+- production broker URLs target the RabbitMQ `gmeow` vhost;
+- integration tests target the RabbitMQ `gmeow-test` vhost;
 - retry queues with TTL/dead-letter routing;
 - dead-letter queue for inspection;
 - separate lightweight queue for QUERY projection refresh events if needed.
@@ -969,7 +974,7 @@ max_conns = 10
 backend = "rabbitmq"
 host = "127.0.0.1"
 port = 5672
-vhost = "/"
+vhost = "gmeow"
 user = "gmeow"
 password_secret = "rabbitmq.password"
 
@@ -1229,6 +1234,7 @@ Deliverables:
 - stale/missing work detector;
 - idempotency key generation;
 - RabbitMQ exchange/queue setup;
+- production RabbitMQ vhost `gmeow` and test vhost `gmeow-test`;
 - priority classes;
 - retry and dead-letter routing;
 - forced reanalysis and interactive reprioritization;

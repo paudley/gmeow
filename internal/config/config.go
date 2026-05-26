@@ -40,6 +40,7 @@ type Config struct {
 	Filestore  FilestoreConfig   `toml:"filestore"`
 	Postgres   PostgresConfig    `toml:"postgres"`
 	RabbitMQ   RabbitMQConfig    `toml:"rabbitmq"`
+	Scheduler  SchedulerConfig   `toml:"scheduler"`
 	Interfaces []InterfaceConfig `toml:"interfaces"`
 	Sources    []SourceConfig    `toml:"sources"`
 	Analysis   AnalysisConfig    `toml:"analysis"`
@@ -70,6 +71,26 @@ type PostgresConfig struct {
 type RabbitMQConfig struct {
 	Enabled   bool   `toml:"enabled"`
 	URLSecret string `toml:"url_secret"`
+}
+
+type SchedulerConfig struct {
+	Enabled              bool              `toml:"enabled"`
+	ScanInterval         string            `toml:"scan_interval"`
+	RetryLimit           int               `toml:"retry_limit"`
+	RetryBackoff         string            `toml:"retry_backoff"`
+	QueuePrefix          string            `toml:"queue_prefix"`
+	Priorities           SchedulerPriority `toml:"priorities"`
+	ProjectionRefresh    bool              `toml:"projection_refresh"`
+	BackgroundLoop       bool              `toml:"background_loop"`
+	DeadLetterInspectMax int               `toml:"dead_letter_inspect_max"`
+}
+
+type SchedulerPriority struct {
+	Interactive int `toml:"interactive"`
+	Forced      int `toml:"forced"`
+	FreshIngest int `toml:"fresh_ingest"`
+	Repair      int `toml:"repair"`
+	Background  int `toml:"background"`
 }
 
 type InterfaceConfig struct {
@@ -115,10 +136,11 @@ type SearchBackendConfig struct {
 }
 
 type Resolved struct {
-	Postgres ResolvedPostgres
-	RabbitMQ ResolvedRabbitMQ
-	Sources  []ResolvedSource
-	Worker   ResolvedWorker
+	Postgres  ResolvedPostgres
+	RabbitMQ  ResolvedRabbitMQ
+	Scheduler ResolvedScheduler
+	Sources   []ResolvedSource
+	Worker    ResolvedWorker
 }
 
 type ResolvedPostgres struct {
@@ -134,6 +156,18 @@ type ResolvedPostgres struct {
 type ResolvedRabbitMQ struct {
 	Enabled bool
 	URL     string
+}
+
+type ResolvedScheduler struct {
+	Enabled              bool
+	ScanInterval         string
+	RetryLimit           int
+	RetryBackoff         string
+	QueuePrefix          string
+	Priorities           SchedulerPriority
+	ProjectionRefresh    bool
+	BackgroundLoop       bool
+	DeadLetterInspectMax int
 }
 
 type ResolvedSource struct {
@@ -357,6 +391,13 @@ func validateConfig(parsed Config) error {
 	if parsed.RabbitMQ.Enabled && strings.TrimSpace(parsed.RabbitMQ.URLSecret) == "" {
 		return errors.New("rabbitmq.url_secret is required when rabbitmq is enabled")
 	}
+	if parsed.Scheduler.Enabled && !parsed.RabbitMQ.Enabled {
+		return errors.New("rabbitmq.enabled is required when scheduler is enabled")
+	}
+	if parsed.Scheduler.Enabled && strings.TrimSpace(parsed.Scheduler.QueuePrefix) != "" &&
+		!strings.HasPrefix(parsed.Scheduler.QueuePrefix, "gmeow:") {
+		return errors.New("scheduler.queue_prefix must start with gmeow:")
+	}
 	for _, source := range parsed.Sources {
 		if source.Enabled && strings.TrimSpace(source.Name) == "" {
 			return errors.New("enabled source requires name")
@@ -409,6 +450,7 @@ func resolveSecrets(parsed Config, references map[string]int) (Resolved, error) 
 		RabbitMQ: ResolvedRabbitMQ{
 			Enabled: parsed.RabbitMQ.Enabled,
 		},
+		Scheduler: resolvedScheduler(parsed.Scheduler),
 		Worker: ResolvedWorker{
 			Analyzers: enabledAnalyzers(parsed.Analysis.Analyzers),
 		},
@@ -441,4 +483,49 @@ func enabledAnalyzers(analyzers []AnalyzerConfig) []AnalyzerConfig {
 		}
 	}
 	return enabled
+}
+
+func resolvedScheduler(raw SchedulerConfig) ResolvedScheduler {
+	resolved := ResolvedScheduler{
+		Enabled:              raw.Enabled,
+		ScanInterval:         firstNonEmpty(raw.ScanInterval, "30s"),
+		RetryLimit:           raw.RetryLimit,
+		RetryBackoff:         firstNonEmpty(raw.RetryBackoff, "30s"),
+		QueuePrefix:          firstNonEmpty(raw.QueuePrefix, "gmeow:"),
+		Priorities:           raw.Priorities,
+		ProjectionRefresh:    raw.ProjectionRefresh,
+		BackgroundLoop:       raw.BackgroundLoop,
+		DeadLetterInspectMax: raw.DeadLetterInspectMax,
+	}
+	if resolved.RetryLimit <= 0 {
+		resolved.RetryLimit = 3
+	}
+	if resolved.DeadLetterInspectMax <= 0 {
+		resolved.DeadLetterInspectMax = 20
+	}
+	if resolved.Priorities.Interactive == 0 {
+		resolved.Priorities.Interactive = 100
+	}
+	if resolved.Priorities.Forced == 0 {
+		resolved.Priorities.Forced = 90
+	}
+	if resolved.Priorities.FreshIngest == 0 {
+		resolved.Priorities.FreshIngest = 70
+	}
+	if resolved.Priorities.Repair == 0 {
+		resolved.Priorities.Repair = 50
+	}
+	if resolved.Priorities.Background == 0 {
+		resolved.Priorities.Background = 10
+	}
+	return resolved
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

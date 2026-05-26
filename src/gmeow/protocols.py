@@ -11,7 +11,7 @@ each subsystem needs, while the individual subsystem protocols (e.g. :class:`Syn
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, NotRequired, Protocol, TypedDict, Unpack, cast
 
 from .parser import ParsedMessage
 
@@ -35,12 +35,26 @@ class StoredAttachmentObject:
     compression: str
 
 
+class SearchRunCompletionKwargs(TypedDict):
+    """Keyword payload for completing a search run."""
+
+    status: str
+    source: str
+    live: dict[str, Any]
+    message_ids: list[str]
+    analysis: dict[str, Any]
+    attachment_hydration: dict[str, Any]
+    phase_timings: dict[str, Any]
+    error: NotRequired[str]
+
+
 class SyncCache(Protocol):
     """Cache surface required by ``SyncService``."""
 
     def start_sync_run(self, run_kind: str, start_cursor: str = DEFAULT_STR, request: dict[str, Any] = DEFAULT_DICT_ANY) -> int:
         """Record the start of a sync run."""
-        ...
+        _ = (run_kind, start_cursor, request)
+        raise NotImplementedError
 
     def finish_sync_run(
         self,
@@ -51,6 +65,7 @@ class SyncCache(Protocol):
         error: str = DEFAULT_STR,
     ) -> None:
         """Record the final state of a sync run."""
+        _ = (run_id, status, end_cursor, result, error)
         ...
 
     def upsert_label(self, label: dict[str, Any]) -> None:
@@ -79,10 +94,12 @@ class SyncCache(Protocol):
 
     def upsert_message(self, message: ParsedMessage, raw_json: dict[str, Any], markdown: str, *, hydrated: bool) -> None:
         """Store or update a parsed message."""
+        _ = (message, raw_json, markdown, hydrated)
         ...
 
     def enqueue_intelligence_job(self, kind: str, target_id: str, payload: dict[str, Any] = DEFAULT_DICT_ANY) -> None:
         """Queue intelligence processing for a target."""
+        _ = (kind, target_id, payload)
         ...
 
     def intelligence_target_status(self, targets: list[tuple[str, str]]) -> dict[str, Any]:
@@ -91,7 +108,8 @@ class SyncCache(Protocol):
 
     def message_backfill_complete(self, message_id: str, *, require_raw: bool = True) -> dict[str, Any]:
         """Return backfill completeness for a message."""
-        ...
+        _ = (message_id, require_raw)
+        raise NotImplementedError
 
     def text_search(
         self,
@@ -116,7 +134,8 @@ class SyncCache(Protocol):
         visibility: str = "user",
     ) -> list[dict[str, Any]]:
         """Search cached graph content."""
-        ...
+        _ = (term, limit, include_noise, kind, namespace, visibility)
+        raise NotImplementedError
 
     def category_allowed(self, categories: list[str], include_categories: list[str], exclude_categories: list[str]) -> bool:
         """Return whether categories satisfy visibility filters."""
@@ -148,11 +167,13 @@ class SyncCache(Protocol):
         metadata: dict[str, Any] = DEFAULT_DICT_ANY,
     ) -> int:
         """Record an operational event."""
-        ...
+        _ = (event_type, severity, component, subject_id, detail, metadata)
+        raise NotImplementedError
 
     def apply_retention_policy(self, message_id: str, source: str = "operator", *, dry_run: bool = True) -> dict[str, Any]:
         """Apply retention policy to a message."""
-        ...
+        _ = (message_id, source, dry_run)
+        raise NotImplementedError
 
     def add_attachment(self, record: dict[str, Any]) -> None:
         """Store attachment metadata."""
@@ -162,20 +183,9 @@ class SyncCache(Protocol):
         """Record search run start."""
         ...
 
-    def finish_search_run(
-        self,
-        search_id: str,
-        *,
-        status: str,
-        source: str,
-        live: dict[str, Any],
-        message_ids: list[str],
-        analysis: dict[str, Any],
-        attachment_hydration: dict[str, Any],
-        phase_timings: dict[str, Any],
-        error: str = DEFAULT_STR,
-    ) -> None:
+    def finish_search_run(self, search_id: str, **completion: Unpack[SearchRunCompletionKwargs]) -> None:
         """Record search run completion."""
+        _ = (search_id, completion)
         ...
 
     def search_run(self, search_id: str) -> dict[str, Any]:
@@ -204,10 +214,12 @@ class IntelligenceCache(Protocol):
 
     def fail_intelligence_job(self, job_id: int, error: str) -> None:
         """Record an intelligence job failure."""
+        _ = (job_id, error)
         ...
 
     def complete_intelligence_job(self, job_id: int) -> None:
         """Mark an intelligence job complete."""
+        _ = job_id
         ...
 
     def intelligence_job_status(self) -> dict[str, int]:
@@ -299,4 +311,5 @@ class SyncAttachments(Protocol):
         media_type: str = "application/octet-stream",
     ) -> StoredAttachmentObject:
         """Store attachment content."""
-        ...
+        _ = (content, metadata, extract_metadata, media_type)
+        raise NotImplementedError

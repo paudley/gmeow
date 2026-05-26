@@ -20,6 +20,14 @@ class AnalyzerSpec(BaseModel):
     version: str
     enabled: bool = True
     worker_kind: str = "python"
+    media_types: list[str] = Field(default_factory=list)
+    content_roles: list[str] = Field(default_factory=list)
+    required_inputs: list[str] = Field(default_factory=list)
+    output_sections: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    priority: int = 0
+    idempotency_key_formula: str = ""
+    deterministic: bool = False
 
 
 class AnalyzerJob(BaseModel):
@@ -29,8 +37,15 @@ class AnalyzerJob(BaseModel):
 
     schema_version: int
     job_id: str
+    idempotency_key: str = ""
     analyzer: AnalyzerSpec
     object_digest: str
+    priority_class: str = ""
+    requested_by: str = ""
+    reason: str = ""
+    attempt: int = 0
+    trace_id: str = ""
+    deadline: str = ""
     forced: bool = False
     priority: int = 0
 

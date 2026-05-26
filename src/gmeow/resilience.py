@@ -47,7 +47,8 @@ class _ResilienceCache(Protocol):
 
     def reclaim_stale_intelligence_jobs(self, stale_after_seconds: int = 900) -> dict[str, int]:
         """Reclaim jobs left running by a dead worker."""
-        ...
+        _ = stale_after_seconds
+        raise NotImplementedError
 
     def age_status(self) -> dict[str, Any]:
         """Return AGE graph status."""
@@ -67,7 +68,8 @@ class _ResilienceCache(Protocol):
         metadata: dict[str, Any] = DEFAULT_DICT_ANY,
     ) -> int:
         """Record an operational event."""
-        ...
+        _ = (event_type, severity, component, subject_id, detail, metadata)
+        raise NotImplementedError
 
     def sync_status(self) -> dict[str, Any]:
         """Return sync status."""
@@ -142,17 +144,6 @@ def _age_check(cache: _ResilienceCache) -> dict[str, Any]:
     try:
         state = cache.age_status()
         return _check("ok" if state.get("available") else "degraded", state.get("error") or "AGE graph available.")
-    except CHECK_EXCEPTIONS as exc:
-        return _check("degraded", repr(exc))
-
-
-def _writable_dir_check(path: Path, probe_name: str, ok_detail: str) -> dict[str, Any]:
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        probe = path / probe_name
-        probe.write_text("ok")
-        probe.unlink(missing_ok=True)
-        return _check("ok", ok_detail)
     except CHECK_EXCEPTIONS as exc:
         return _check("degraded", repr(exc))
 

@@ -9,6 +9,14 @@ type SchemaVersion int
 
 const SchemaVersionPhase00 SchemaVersion = 1
 
+const (
+	PriorityInteractive = "interactive"
+	PriorityForced      = "forced"
+	PriorityFreshIngest = "fresh_ingest"
+	PriorityRepair      = "repair"
+	PriorityBackground  = "background"
+)
+
 type ObjectDigest string
 
 type Manifest struct {
@@ -170,6 +178,50 @@ type AnalyzerJob struct {
 	Forced         bool          `json:"forced"`
 	Priority       int           `json:"priority"`
 	CreatedAt      time.Time     `json:"created_at"`
+}
+
+type SchedulerScanRequest struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	PriorityClass string        `json:"priority_class,omitempty"`
+	RequestedBy   string        `json:"requested_by,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
+	Forced        bool          `json:"forced,omitempty"`
+	TraceID       string        `json:"trace_id,omitempty"`
+}
+
+type SchedulerScanResponse struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Scanned       int           `json:"scanned"`
+	Enqueued      int           `json:"enqueued"`
+	Skipped       int           `json:"skipped"`
+	Failed        int           `json:"failed"`
+}
+
+type SchedulerStatus struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Pending       int           `json:"pending"`
+	Retry         int           `json:"retry"`
+	DeadLetter    int           `json:"dead_letter"`
+}
+
+type DeadLetterRequest struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Limit         int           `json:"limit,omitempty"`
+}
+
+type DeadLetterResponse struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Jobs          []AnalyzerJob `json:"jobs"`
+}
+
+type RequeueRequest struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Limit         int           `json:"limit,omitempty"`
+}
+
+type RequeueResponse struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Requeued      int           `json:"requeued"`
 }
 
 type Annotation struct {
