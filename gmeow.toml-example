@@ -72,9 +72,34 @@ host = "127.0.0.1"
 port = 8765
 
 [[analysis.analyzers]]
-name = "noop"
-version = "phase00"
+name = "text.extract"
+version = "phase04"
 worker_kind = "go"
+
+[[analysis.analyzers]]
+name = "rfc822.headers"
+version = "phase04"
+worker_kind = "go"
+
+[[analysis.analyzers]]
+name = "metadata.extract"
+version = "phase04"
+worker_kind = "go"
+
+[[analysis.analyzers]]
+name = "graph.facts"
+version = "phase04"
+worker_kind = "go"
+
+# Quality-critical Python/model analyzers must be explicit external adapters.
+# They are managed by the Go worker, which owns RabbitMQ, gRPC FILESTORE access, and ack/nack.
+# [[analysis.analyzers]]
+# name = "ner.spacy"
+# version = "python-current"
+# worker_kind = "python"
+# command = "gmeow-intel"
+# args = ["analyze", "ner.spacy"]
+# timeout = "2m"
 
 [[search.backends]]
 name = "query"

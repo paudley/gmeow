@@ -72,6 +72,33 @@ func TestFilestoreDoesNotImportQueryOrPostgres(t *testing.T) {
 	}
 }
 
+func TestAnalysisRuntimeDoesNotImportConcreteFilestore(t *testing.T) {
+	root := filepath.Join(repoRoot(t), "internal", "analysis")
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".go" ||
+			strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(content), "internal/filestore") {
+			t.Fatalf(
+				"%s imports concrete FILESTORE; ANALYSIS must use FilestoreService gRPC",
+				path,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPhaseZeroToThreePythonRetiredPathsStayRetired(t *testing.T) {
 	root := repoRoot(t)
 	retired := []string{

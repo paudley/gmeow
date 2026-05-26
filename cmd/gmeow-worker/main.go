@@ -10,5 +10,5 @@ import (
 )
 
 func main() {
-	cli.Execute(cli.NewServiceCommand("gmeow-worker", "Gmeow analysis worker", os.Stdout))
+	cli.Execute(cli.NewWorkerCommand(os.Stdout))
 }

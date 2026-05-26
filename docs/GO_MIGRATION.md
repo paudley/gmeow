@@ -1287,15 +1287,20 @@ Goal: implement extensible analyzers that write results to FILESTORE.
 Deliverables:
 
 - Go worker runtime;
-- Python worker runtime for spaCy/sklearn analyzers;
-- `gmeow-intel` packaging and entrypoint for Python analyzers;
+- Go-owned analyzer registry, RabbitMQ consume/ack, failure routing, spec-version checks, and
+  durable FILESTORE annotation writes before ack through `FilestoreService` gRPC;
+- external adapter support for Python/model/tool analyzers that cannot yet be replaced in Go without
+  quality regression, configured explicitly with command, arguments, timeout, analyzer name, and
+  analyzer version;
+- `gmeow-intel` packaging and entrypoint only for quality-preserving external analyzer adapters;
 - text extraction analyzer;
 - RFC822/header analyzer;
 - metadata extraction analyzer;
 - embedding analyzer using configured endpoint;
 - graph fact analyzer;
-- NER analyzer;
-- categorization analyzer;
+- NER analyzer, either equal-or-better Go-native or Python/model-backed through the external adapter;
+- categorization analyzer, either equal-or-better Go-native or Python/model-backed through the
+  external adapter;
 - summary/centroid analyzer placeholder or first pass.
 
 Exit criteria:
@@ -1303,7 +1308,12 @@ Exit criteria:
 - every analyzer is idempotent by digest/spec version;
 - workers ack only after durable FILESTORE writes;
 - QUERY can lag and later catch up from FILESTORE annotations;
-- Python and Go workers share job and annotation contracts.
+- Go owns scheduling, queue consumption, gRPC FILESTORE writes, and ack/nack decisions;
+- ANALYSIS workers do not open FILESTORE directories directly outside tests;
+- Python/model adapters share job and annotation contracts and fail closed when unregistered;
+- Python/model analyzers without an explicit external adapter command fail at worker startup;
+- Go-native replacements for Python-backed analyzers pass equal-or-better fixture gates before the
+  Python implementation is retired.
 
 ### Phase 5 - SOURCE Adapters
 

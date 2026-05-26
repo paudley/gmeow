@@ -135,6 +135,9 @@ type AnalyzerConfig struct {
 	Version    string   `toml:"version"`
 	WorkerKind string   `toml:"worker_kind"`
 	MediaTypes []string `toml:"media_types"`
+	Command    string   `toml:"command"`
+	Args       []string `toml:"args"`
+	Timeout    string   `toml:"timeout"`
 }
 
 type SearchConfig struct {

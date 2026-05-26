@@ -85,6 +85,41 @@ func TestAdminSecretUnsetRefusesReferencedSecret(t *testing.T) {
 	}
 }
 
+func TestWorkerRegistrySupportsConfiguredExternalAnalyzer(t *testing.T) {
+	registry, err := workerRegistryFromConfig([]config.AnalyzerConfig{{
+		Name:       "ner.spacy",
+		Version:    "python-current",
+		WorkerKind: "python",
+		Command:    "gmeow-intel",
+		Args:       []string{"analyze", "ner.spacy"},
+		Timeout:    "30s",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := registry.Analyzer(analyzerSpecFromConfig(config.AnalyzerConfig{
+		Name:       "ner.spacy",
+		Version:    "python-current",
+		WorkerKind: "python",
+	})); !ok {
+		t.Fatal("expected configured external analyzer to be registered")
+	}
+}
+
+func TestWorkerRegistryRejectsPythonAnalyzerWithoutExplicitAdapter(t *testing.T) {
+	_, err := workerRegistryFromConfig([]config.AnalyzerConfig{{
+		Name:       "ner.spacy",
+		Version:    "python-current",
+		WorkerKind: "python",
+	}})
+	if err == nil {
+		t.Fatal("expected Python analyzer without command to fail closed")
+	}
+	if !strings.Contains(err.Error(), "external analyzer command is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestAdminSecretUnsetRemovesUnreferencedSecretAtomically(t *testing.T) {
 	path := writeEncryptedCLIConfig(t)
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)

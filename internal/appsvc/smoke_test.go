@@ -37,7 +37,7 @@ func TestPhase00FakeStackSmoke(t *testing.T) {
 		ObjectDigest:  digest,
 		CreatedAt:     time.Now(),
 	}
-	annotation, err := analyzer.Analyze(ctx, job)
+	annotation, err := analyzer.Analyze(ctx, store, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +319,7 @@ func (fakeAnalyzer) Spec() contracts.AnalyzerSpec {
 
 func (fakeAnalyzer) Analyze(
 	_ context.Context,
+	_ analysis.ObjectStore,
 	job contracts.AnalyzerJob,
 ) (contracts.Annotation, error) {
 	return contracts.Annotation{
