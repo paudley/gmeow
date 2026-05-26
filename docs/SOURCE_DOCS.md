@@ -3,11 +3,6 @@
 This index lists the colocated `MODULE.md` files that document the contracts and integration
 requirements of the Gmeow source and test packages.
 
-## Source
-
-- [src/gmeow/MODULE.md](../src/gmeow/MODULE.md) — Gmeow package contract, layout, external tool
-  prerequisites, and integration test setup.
-
 ## Python Analysis Package
 
 - [python/gmeow_intel/MODULE.md](../python/gmeow_intel/MODULE.md) — Python ANALYSIS external
@@ -27,7 +22,3 @@ requirements of the Gmeow source and test packages.
 ## Scripts
 
 - [scripts/MODULE.md](../scripts/MODULE.md) — Repository maintenance script contract.
-
-## Tests
-
-- [tests/MODULE.md](../tests/MODULE.md) — pytest package contract and integration test contract.
