@@ -129,15 +129,12 @@ python:
   source_paths:
     - src/gmeow
     - scripts
-    - migrations
-    - main.py
   test_paths:
     - tests
   stub_paths:
     - typings
-    - src
   extra_paths:
-    - src
+    - src/gmeow
   venv_path: .
   venv: .venv
   module_docs:

@@ -23,7 +23,7 @@ After Go SCHEDULER owns work derivation and RabbitMQ dispatch, remove old Python
 orchestration code:
 
 - `src/gmeow/maintenance.py`
-- `src/gmeow/pg_cache_jobs.py`
+- the retired Python PostgreSQL job queue path
 - scheduler-like paths in `src/gmeow/sync_backfill.py` that only exist to enqueue old work
 - CLI commands that enqueue old Python intelligence or maintenance jobs
 

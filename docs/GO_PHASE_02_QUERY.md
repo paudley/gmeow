@@ -33,10 +33,10 @@ not authority.
   - read-only Apache AGE status and Cypher exploration over projected graph data.
 - Ensure all SQL uses parameterized `pgx` calls or generated/query-builder code.
 
-## Retire Python Equivalent
+## Retired Python Equivalent
 
-After Go QUERY can rebuild from FILESTORE and serve the planned search APIs, remove old Python
-database schema and query code:
+Go QUERY can rebuild from FILESTORE and serve the planned search APIs. The old Python database
+schema and query code is retired:
 
 - `src/gmeow/db.py`
 - `src/gmeow/pg_cache.py`
@@ -44,9 +44,9 @@ database schema and query code:
 - `src/gmeow/pg_cache_helpers.py`
 - `src/gmeow/pg_cache_imap.py`
 - `src/gmeow/pg_cache_jobs.py`
-- `src/gmeow/semantic_pg.py` once vector projection is migrated
-- `migrations/` Alembic runtime and old Python migration versions after greenfield goose migrations
-  are the only supported path
+- `src/gmeow/semantic_pg.py`
+- `migrations/` Alembic runtime and old Python migration versions; greenfield goose migrations are
+  the only supported path
 
 ## Functional Proof
 

@@ -11,7 +11,6 @@ authors = [
 keywords = ["gmail", "mcp", "email", "agents", "archive", "semantic-search", "knowledge-graph"]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Framework :: FastAPI",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
@@ -21,24 +20,17 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
 ]
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
     "pydantic>=2.10",
     "google-api-python-client>=2.150",
     "google-auth>=2.36",
     "google-auth-httplib2>=0.2",
     "rustworkx>=0.15",
-    "mcp>=1.8",
     "semchunk>=4.0.0",
     "spacy>=3.8.14",
     "scikit-learn>=1.8.0",
-    "psycopg[binary]>=3.2",
-    "psycopg-pool>=3.2",
-    "pgvector>=0.3",
     "blake3>=1.0",
     "zstandard>=0.23",
     "tantivy>=0.22",
-    "alembic>=1.18.4",
     "tenacity>=9.1",
     "en-core-web-sm",
 ]
@@ -64,7 +56,6 @@ packages = ["src/gmeow"]
 
 [tool.hatch.build.targets.sdist]
 only-include = [
-    "alembic.ini",
     "CODE_OF_CONDUCT.md",
     "gmeow.toml-example",
     "CONTRIBUTING.md",

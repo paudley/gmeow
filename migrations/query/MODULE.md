@@ -1,4 +1,4 @@
 # Query Migrations
 
-This directory is reserved for future Go QUERY migrations. Phase 00 creates the source layout only;
-the first goose migrations are added in the QUERY phase.
+This directory contains goose migrations for the Go QUERY projection. Apply them with
+`gmeow-admin query migrate` against a disposable or operator-approved PostgreSQL database.

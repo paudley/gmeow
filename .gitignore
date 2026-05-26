@@ -22,7 +22,6 @@ exports/
 htmlcov/
 
 # coding-ethos generated runtime output
-.code-ethos/cache/
 .coding-ethos/cache/
 .coding-ethos/code-intel.db
 .coding-ethos/hook-runs/
@@ -37,3 +36,5 @@ htmlcov/
 .coding-ethos/code-intel.duckdb
 .coding-ethos/code-intel.duckdb.wal
 .coding-ethos/events/
+.coding-ethos/tool-config-hashes.json
+.coding-ethos/gemini

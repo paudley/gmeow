@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Gmeow local Gmail intelligence server.
+"""Gmeow local Gmail intelligence package.
 
-This package wires a durable PostgreSQL cache, content-addressed attachment store, semantic and
-lexical search, knowledge-graph projection, and the Gmail mutation surface exposed over HTTP,
-MCP, IMAP, and CLI. See ``MODULE.md`` for the package layout and external tool prerequisites.
+The Go runtime owns operator startup and PostgreSQL projection paths. This Python package now keeps
+only the transitional helpers that have not yet moved to Go. See ``MODULE.md`` for the package
+layout and external tool prerequisites.
 
 See Also:
     MODULE.md: Package contract, layout, and integration test prerequisites.

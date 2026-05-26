@@ -2,9 +2,7 @@
     "typeCheckingMode": "strict",
     "include": [
         "src/gmeow",
-        "scripts",
-        "migrations",
-        "main.py"
+        "scripts"
     ],
     "exclude": [
         "**/tests/**",
@@ -13,7 +11,7 @@
         "**/.venv/**"
     ],
     "extraPaths": [
-        "src"
+        "src/gmeow"
     ],
     "venvPath": ".",
     "venv": ".venv",

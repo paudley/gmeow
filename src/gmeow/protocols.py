@@ -3,8 +3,8 @@
 """Shared Protocol declarations for Gmeow cache, semantic, and graph dependencies.
 
 This module hosts the structural typing surface used by both ``SyncService`` and
-``IntelligenceWorker`` so they can take the same concrete ``PgCache`` and semantic backend without
-casts. The combined :class:`GmeowCache` and :class:`GmeowSemantic` protocols collect the methods
+``IntelligenceWorker`` so they can take the same cache and semantic backends without casts. The
+combined :class:`GmeowCache` and :class:`GmeowSemantic` protocols collect the methods
 each subsystem needs, while the individual subsystem protocols (e.g. :class:`SyncCache`,
 :class:`IntelligenceCache`) stay available for narrower call sites.
 """

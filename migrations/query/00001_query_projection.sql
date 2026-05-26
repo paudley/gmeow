@@ -1,4 +1,5 @@
 -- +goose Up
+-- +goose StatementBegin
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
@@ -9,6 +10,7 @@ BEGIN
   END IF;
 END
 $$;
+-- +goose StatementEnd
 
 CREATE TABLE IF NOT EXISTS query_objects (
   object_digest TEXT PRIMARY KEY,
@@ -132,6 +134,7 @@ CREATE INDEX IF NOT EXISTS query_object_analysis_analyzer_idx ON query_object_an
 CREATE INDEX IF NOT EXISTS query_object_graph_edges_subject_idx ON query_object_graph_edges(subject);
 CREATE INDEX IF NOT EXISTS query_object_graph_edges_object_idx ON query_object_graph_edges(object_value);
 
+-- +goose StatementBegin
 DO $$
 BEGIN
   PERFORM set_config('search_path', 'ag_catalog, public', false);
@@ -140,6 +143,7 @@ BEGIN
   END IF;
 END
 $$;
+-- +goose StatementEnd
 
 -- +goose Down
 DROP TABLE IF EXISTS query_projection_state;

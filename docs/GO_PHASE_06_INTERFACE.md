@@ -26,16 +26,18 @@ interfaces. INTERFACE does not own storage, query, analysis, or source behavior.
 
 ## Retire Python Equivalent
 
-Remove Python interface and presentation code as Go interfaces reach parity:
+Python interface/server code removed with the old Python PostgreSQL runtime:
 
 - `src/gmeow/app.py`
 - `src/gmeow/mcp_server.py`
 - `src/gmeow/imap_server.py`
-- `src/gmeow/cli.py`
+- API/MCP/IMAP tests that target the old Python server behavior
+
+Remove remaining Python presentation helpers as Go interfaces reach parity:
+
 - `src/gmeow/http_json.py`
 - `src/gmeow/toon.py` after Go response formatting is implemented
 - `src/gmeow/markdown.py` if only used by old responses
-- API/MCP/IMAP tests that target the old Python server behavior
 
 ## Functional Proof
 
