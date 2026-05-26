@@ -54,6 +54,15 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest: digest,
+		Kind:         "analysis",
+		AnalyzerName: "entities",
+		AnalyzerVer:  "1",
+		Data:         map[string]any{"entities": []any{"apollo"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.WriteSourceCursor(ctx, contracts.SourceCursor{
 		SourceKind: "fixture",
 		SourceName: "integration",
@@ -93,14 +102,16 @@ func TestPostgresRebuildProjectsFilestore(t *testing.T) {
 		Analyzers: []contracts.AnalyzerSpec{
 			{Name: "summary", Version: "2"},
 			{Name: "entities", Version: "1"},
+			{Name: "keywords", Version: "1"},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(analysis.Statuses) != 2 ||
+	if len(analysis.Statuses) != 3 ||
 		analysis.Statuses[0].Status != "stale" ||
-		analysis.Statuses[1].Status != "missing" {
+		analysis.Statuses[1].Status != "complete" ||
+		analysis.Statuses[2].Status != "missing" {
 		t.Fatalf("unexpected analysis status response: %#v", analysis)
 	}
 	response, err := index.Search(ctx, contracts.SearchRequest{

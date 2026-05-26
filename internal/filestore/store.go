@@ -243,7 +243,7 @@ func (store *FilesystemStore) WriteAnnotation(
 	if _, err := store.ReadManifest(ctx, annotation.ObjectDigest); err != nil {
 		return fmt.Errorf("read annotation target manifest: %w", err)
 	}
-	name, err := annotationFilename(annotation.Kind)
+	name, err := annotationFilename(annotation)
 	if err != nil {
 		return err
 	}
@@ -420,7 +420,15 @@ func (store *FilesystemStore) readProjectionObject(object *ProjectionObject) {
 		object.Annotations = append(object.Annotations, annotation)
 	}
 	sort.SliceStable(object.Annotations, func(left, right int) bool {
-		return object.Annotations[left].Kind < object.Annotations[right].Kind
+		leftAnnotation := object.Annotations[left]
+		rightAnnotation := object.Annotations[right]
+		if leftAnnotation.Kind != rightAnnotation.Kind {
+			return leftAnnotation.Kind < rightAnnotation.Kind
+		}
+		if leftAnnotation.AnalyzerName != rightAnnotation.AnalyzerName {
+			return leftAnnotation.AnalyzerName < rightAnnotation.AnalyzerName
+		}
+		return leftAnnotation.AnalyzerVer < rightAnnotation.AnalyzerVer
 	})
 }
 
@@ -1029,7 +1037,8 @@ func mergeParts(existing, incoming []contracts.CompoundPart) []contracts.Compoun
 	return normalizedParts(result)
 }
 
-func annotationFilename(kind string) (string, error) {
+func annotationFilename(annotation contracts.Annotation) (string, error) {
+	kind := annotation.Kind
 	trimmed := strings.TrimSpace(kind)
 	if trimmed == "" {
 		return "", errors.New("annotation kind is required")
@@ -1046,6 +1055,10 @@ func annotationFilename(kind string) (string, error) {
 			continue
 		}
 		return "", fmt.Errorf("invalid annotation kind %q", kind)
+	}
+	if trimmed == "analysis" && strings.TrimSpace(annotation.AnalyzerName) != "" {
+		sum := sha256.Sum256([]byte(annotation.AnalyzerName))
+		return "analysis-" + hex.EncodeToString(sum[:]) + ".json.zst", nil
 	}
 	return trimmed + ".json.zst", nil
 }

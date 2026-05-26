@@ -192,7 +192,7 @@ func TestWriteAnnotationWritesIndependentCompressedJSON(t *testing.T) {
 	}
 }
 
-func TestWriteAnnotationMergesExistingData(t *testing.T) {
+func TestWriteAnalysisAnnotationPreservesPerAnalyzerOutputs(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	digest, err := store.Put(ctx, PutRequest{
@@ -220,20 +220,52 @@ func TestWriteAnnotationMergesExistingData(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest: digest,
+		AnalyzerName: "summary",
+		AnalyzerVer:  "2",
+		Kind:         "analysis",
+		Data:         map[string]any{"summary": "new", "keywords": []any{"apollo"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	objects := []ProjectionObject{}
+	if err := store.WalkProjection(ctx, func(object ProjectionObject) error {
+		objects = append(objects, object)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 {
+		t.Fatalf("expected one projected object, got %d", len(objects))
+	}
+	annotations := objects[0].Annotations
+	if len(annotations) != 2 {
+		t.Fatalf("expected two analysis annotations, got %#v", annotations)
+	}
+	if annotations[0].AnalyzerName != "entities" ||
+		annotations[0].AnalyzerVer != "2" ||
+		len(annotations[0].Data["entities"].([]any)) != 1 ||
+		annotations[0].Data["score"] != float64(2) {
+		t.Fatalf("entities annotation was not preserved: %#v", annotations[0])
+	}
+	if annotations[1].AnalyzerName != "summary" ||
+		annotations[1].AnalyzerVer != "2" ||
+		annotations[1].Data["summary"] != "new" ||
+		annotations[1].Data["score"] != float64(1) ||
+		len(annotations[1].Data["keywords"].([]any)) != 1 {
+		t.Fatalf("summary annotation was not merged independently: %#v", annotations[1])
+	}
 	var annotation contracts.Annotation
 	if err := store.readCompressedJSON(
 		store.objectPath(digest, "analysis.json.zst"),
 		&annotation,
 	); err != nil {
-		t.Fatal(err)
-	}
-	if annotation.Data["summary"] != "ok" ||
-		annotation.Data["score"] != float64(2) ||
-		len(annotation.Data["entities"].([]any)) != 1 {
-		t.Fatalf("annotation data was not merged: %#v", annotation.Data)
-	}
-	if annotation.AnalyzerName != "entities" || annotation.AnalyzerVer != "2" {
-		t.Fatalf("annotation metadata was not refreshed: %#v", annotation)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	} else {
+		t.Fatalf("named analysis annotations should not share legacy path: %#v", annotation)
 	}
 }
 
