@@ -20,8 +20,7 @@ Alembic runtime have been retired.
 - **Intelligence and graph** — [`intelligence.py`](./intelligence.py),
   [`graph.py`](./graph.py), [`kg.py`](./kg.py),
   [`categories.py`](./categories.py), [`semantic.py`](./semantic.py), [`text_index.py`](./text_index.py).
-- **Operations** — [`maintenance.py`](./maintenance.py),
-  [`resilience.py`](./resilience.py), [`provision.py`](./provision.py),
+- **Operations** — [`resilience.py`](./resilience.py), [`provision.py`](./provision.py),
   [`metadata.py`](./metadata.py), [`headers.py`](./headers.py),
   [`http_json.py`](./http_json.py), [`markdown.py`](./markdown.py),
   [`parser.py`](./parser.py), [`toon.py`](./toon.py), [`_typing.py`](./_typing.py).
