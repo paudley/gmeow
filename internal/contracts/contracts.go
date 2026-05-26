@@ -81,6 +81,19 @@ type Provenance struct {
 	Attributes       map[string]any `json:"attributes,omitempty"`
 }
 
+type SourceObjectRef struct {
+	SourceKind      string `json:"source_kind"`
+	SourceName      string `json:"source_name"`
+	ExternalID      string `json:"external_id"`
+	ExternalVersion string `json:"external_version,omitempty"`
+}
+
+type SourceIngestClaim struct {
+	SourceObject SourceObjectRef `json:"source_object"`
+	ClaimID      string          `json:"claim_id"`
+	AcquiredAt   time.Time       `json:"acquired_at"`
+}
+
 type Relationship struct {
 	Type   string       `json:"type"`
 	From   ObjectDigest `json:"from"`

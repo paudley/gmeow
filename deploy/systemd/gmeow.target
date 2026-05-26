@@ -1,0 +1,7 @@
+[Unit]
+Description=Gmeow local data services
+Wants=gmeow-filestore.service gmeow-query.service gmeow-scheduler.service
+After=network-online.target postgresql.service rabbitmq-server.service
+
+[Install]
+WantedBy=multi-user.target

@@ -158,6 +158,86 @@ func TestInteractivePriorityOutranksBackground(t *testing.T) {
 	}
 }
 
+func TestInteractiveScanReprioritizesScheduledBackgroundWork(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("hello"),
+		MediaType: "text/plain",
+		Facets:    []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := NewMemoryBroker()
+	service := newTestService(t, store, broker, []contracts.AnalyzerSpec{{
+		Name:       "text.extract",
+		Version:    "1",
+		MediaTypes: []string{"text/plain"},
+	}})
+	background, err := service.Scan(ctx, contracts.SchedulerScanRequest{
+		PriorityClass: contracts.PriorityBackground,
+		RequestedBy:   "scheduler",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	interactive, err := service.Scan(ctx, contracts.SchedulerScanRequest{
+		PriorityClass: contracts.PriorityInteractive,
+		RequestedBy:   "interface",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := broker.Jobs()
+	if background.Enqueued != 1 ||
+		interactive.Enqueued != 1 ||
+		len(jobs) != 1 ||
+		jobs[0].ObjectDigest != digest ||
+		jobs[0].PriorityClass != contracts.PriorityInteractive {
+		t.Fatalf(
+			"expected one reprioritized interactive job, background=%#v interactive=%#v jobs=%#v",
+			background,
+			interactive,
+			jobs,
+		)
+	}
+}
+
+func TestForceUsesSchedulerMarkersForIdempotency(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("hello"),
+		MediaType: "text/plain",
+		Facets:    []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := NewMemoryBroker()
+	service := newTestService(t, store, broker, []contracts.AnalyzerSpec{{
+		Name:       "text.extract",
+		Version:    "1",
+		MediaTypes: []string{"text/plain"},
+	}})
+	first, err := service.Force(ctx, digest, nil, "operator", "trace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Force(ctx, digest, nil, "operator", "trace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Enqueued != 1 || second.Enqueued != 0 || len(broker.Jobs()) != 1 {
+		t.Fatalf("forced reanalysis was not idempotent: first=%#v second=%#v jobs=%#v",
+			first,
+			second,
+			broker.Jobs(),
+		)
+	}
+}
+
 func TestDeadLetterRequeueMovesJobsBackToPending(t *testing.T) {
 	broker := NewMemoryBroker()
 	job := contracts.AnalyzerJob{

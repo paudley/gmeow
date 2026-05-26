@@ -85,6 +85,40 @@ func TestAdminSecretUnsetRefusesReferencedSecret(t *testing.T) {
 	}
 }
 
+func TestAdminSecretUnsetRemovesUnreferencedSecretAtomically(t *testing.T) {
+	path := writeEncryptedCLIConfig(t)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("unused_password = '''\nunused\n'''\n"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	command := NewAdminCommand(&bytes.Buffer{}, strings.NewReader(""))
+	command.SetArgs(
+		[]string{"--config", path, "config", "secret", "unset", "unused_password"},
+	)
+
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "unused_password") {
+		t.Fatalf("unreferenced secret was not removed:\n%s", string(body))
+	}
+	if _, err := config.Load(config.Options{Path: path}); err != nil {
+		t.Fatalf("updated config should validate: %v", err)
+	}
+}
+
 func writeEncryptedCLIConfig(t *testing.T) string {
 	t.Helper()
 	plainPath := filepath.Join(t.TempDir(), "gmeow.toml")

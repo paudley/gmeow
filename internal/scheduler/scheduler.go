@@ -211,7 +211,7 @@ func (service *Service) enqueueForObject(
 	job = service.normalizeJob(job)
 	if schedulerMarkerActive(
 		*schedulerAnnotation,
-		job.IdempotencyKey,
+		job,
 		service.now(),
 		service.config.RetryBackoff,
 	) {
@@ -248,6 +248,17 @@ func (service *Service) Force(
 		Digest:   digest,
 		Manifest: manifest,
 	}
+	if err := service.store.WalkProjection(
+		ctx,
+		func(candidate filestore.ProjectionObject) error {
+			if candidate.Manifest.ObjectDigest == digest {
+				object = candidate
+			}
+			return nil
+		},
+	); err != nil {
+		return contracts.SchedulerScanResponse{}, err
+	}
 	filter := map[string]bool{}
 	for _, name := range analyzerNames {
 		filter[name] = true
@@ -264,17 +275,27 @@ func (service *Service) Force(
 		Forced:        true,
 		TraceID:       traceID,
 	}
+	schedulerAnnotation := schedulerAnnotationFor(object)
 	for _, job := range service.jobsForObject(object, request) {
 		if len(filter) > 0 && !filter[job.Analyzer.Name] {
 			continue
 		}
-		if err := service.Enqueue(ctx, job); err != nil {
+		enqueued, err := service.enqueueForObject(
+			ctx,
+			job,
+			schedulerAnnotation,
+		)
+		if err != nil {
 			response.Failed++
 			return response, err
 		}
-		response.Enqueued++
+		if enqueued {
+			response.Enqueued++
+		} else {
+			response.Skipped++
+		}
 	}
-	if response.Enqueued == 0 {
+	if response.Enqueued == 0 && response.Skipped == 0 {
 		response.Skipped = 1
 	}
 	return response, nil
@@ -356,12 +377,15 @@ func schedulerAnnotationFor(object filestore.ProjectionObject) *contracts.Annota
 
 func schedulerMarkerActive(
 	annotation contracts.Annotation,
-	key string,
+	job contracts.AnalyzerJob,
 	now time.Time,
 	lease time.Duration,
 ) bool {
-	marker, ok := schedulerMarkers(annotation)[key]
+	marker, ok := schedulerMarkers(annotation)[job.IdempotencyKey]
 	if !ok {
+		return false
+	}
+	if job.Priority > markerPriority(marker, job.Priority) {
 		return false
 	}
 	status, _ := marker["status"].(string)
@@ -399,11 +423,28 @@ func withSchedulerMarker(
 		"analyzer_version": job.Analyzer.Version,
 		"reason":           job.Reason,
 		"attempt":          job.Attempt,
+		"priority_class":   job.PriorityClass,
+		"priority":         job.Priority,
 		"updated_at":       now.Format(time.RFC3339Nano),
 	}
 	data["scheduled_jobs"] = markers
 	annotation.Data = data
 	return annotation
+}
+
+func markerPriority(marker map[string]any, fallback int) int {
+	switch value := marker["priority"].(type) {
+	case int:
+		return value
+	case int32:
+		return int(value)
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	default:
+		return fallback
+	}
 }
 
 func schedulerMarkers(annotation contracts.Annotation) map[string]map[string]any {
@@ -512,8 +553,6 @@ func IdempotencyKey(job contracts.AnalyzerJob) string {
 		string(job.ObjectDigest),
 		job.Analyzer.Name,
 		job.Analyzer.Version,
-		job.Reason,
-		boolString(job.Forced),
 	}, "\x00")
 	sum := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(sum[:])
@@ -570,13 +609,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func boolString(value bool) string {
-	if value {
-		return "true"
-	}
-	return "false"
 }
 
 var _ Scheduler = (*Service)(nil)

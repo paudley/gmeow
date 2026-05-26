@@ -170,6 +170,41 @@ func TestLoadRejectsWrongRabbitMQVHost(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsRPCUnixSocketEndpoints(t *testing.T) {
+	configPath := writeConfig(t, minimalConfig())
+	t.Setenv(unlockEnvName, "test-key")
+
+	loaded, err := Load(Options{Path: configPath})
+	if err == nil {
+		t.Fatal("expected plaintext secret rejection before dependency checks")
+	}
+	if !strings.Contains(err.Error(), "SOPS-encrypted leaf") {
+		t.Fatalf("unexpected precondition error: %v", err)
+	}
+
+	resolved := resolvedRPC(RPCConfig{})
+	if resolved.Filestore.Network != "unix" ||
+		resolved.Filestore.Address != "/run/gmeow/filestore.sock" ||
+		resolved.Scheduler.Address != "/run/gmeow/scheduler.sock" ||
+		resolved.Query.Address != "/run/gmeow/query.sock" {
+		t.Fatalf("unexpected default RPC endpoints: %#v", resolved)
+	}
+	_ = loaded
+}
+
+func TestValidateRPCRejectsNonLoopbackTCP(t *testing.T) {
+	err := validateRPCEndpoint("rpc.filestore", RPCEndpointConfig{
+		Network: "tcp",
+		Address: "0.0.0.0:9010",
+	})
+	if err == nil {
+		t.Fatal("expected non-loopback TCP bind to fail")
+	}
+	if !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLoadRejectsUnknownWholeSecretReferences(t *testing.T) {
 	configPath := writeConfig(
 		t,

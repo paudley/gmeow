@@ -75,6 +75,27 @@ type fakeStore struct {
 	manifests map[contracts.ObjectDigest]contracts.Manifest
 }
 
+func (store *fakeStore) LookupSourceObject(
+	context.Context,
+	contracts.SourceObjectRef,
+) (contracts.ObjectDigest, bool, error) {
+	return "", false, nil
+}
+
+func (store *fakeStore) TryAcquireSourceIngest(
+	context.Context,
+	contracts.SourceObjectRef,
+) (contracts.SourceIngestClaim, bool, error) {
+	return contracts.SourceIngestClaim{}, true, nil
+}
+
+func (store *fakeStore) ReleaseSourceIngest(
+	context.Context,
+	contracts.SourceIngestClaim,
+) error {
+	return nil
+}
+
 func (store *fakeStore) Put(
 	ctx context.Context,
 	request filestore.PutRequest,
@@ -93,6 +114,14 @@ func (store *fakeStore) Put(
 	}
 	_ = ctx
 	return digest, nil
+}
+
+func (store *fakeStore) AttachProvenance(
+	context.Context,
+	contracts.ObjectDigest,
+	[]contracts.Provenance,
+) error {
+	return nil
 }
 
 func (store *fakeStore) PutCompound(

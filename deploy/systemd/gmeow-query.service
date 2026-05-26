@@ -1,0 +1,18 @@
+[Unit]
+Description=Gmeow QUERY gRPC service
+PartOf=gmeow.target
+After=network-online.target postgresql.service gmeow-filestore.service
+
+[Service]
+Type=simple
+User=gmeow
+Group=gmeow
+RuntimeDirectory=gmeow
+RuntimeDirectoryMode=0755
+Environment=GMEOW_CONFIG=/etc/gmeow/gmeow.toml
+ExecStart=/usr/local/bin/gmeow query-serve
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=gmeow.target

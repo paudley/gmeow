@@ -83,11 +83,13 @@ func newSecretListCommand(out io.Writer, configPath *string) *cobra.Command {
 				return err
 			}
 			for _, name := range config.SecretNames(loaded) {
+				updated := secretUpdateMetadata(loaded.Config.Secrets[name])
 				if _, err := fmt.Fprintf(
 					out,
-					"%s references=%d\n",
+					"%s references=%d updated=%s\n",
 					name,
 					loaded.SecretReferences[name],
+					updated,
 				); err != nil {
 					return err
 				}
@@ -143,9 +145,16 @@ func newSecretUnsetCommand(configPath *string) *cobra.Command {
 			if loaded.SecretReferences[name] > 0 {
 				return fmt.Errorf("secret %q is still referenced by config", name)
 			}
-			return errors.New("encrypted secret writes are not implemented in Phase 00")
+			return removeSecretLeaf(selectedConfigPath(*configPath), name)
 		},
 	}
+}
+
+func secretUpdateMetadata(encryptedLeaf string) string {
+	if strings.TrimSpace(encryptedLeaf) == "" {
+		return "unknown"
+	}
+	return "unknown"
 }
 
 func selectedConfigPath(path string) string {
@@ -231,10 +240,75 @@ func updateSecretLeaf(path, name, encrypted string) error {
 			text = text[:insertAt] + "\n" + block + text[insertAt:]
 		}
 	}
-	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+	if err := atomicWriteConfig(path, []byte(text)); err != nil {
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
 	return nil
+}
+
+func removeSecretLeaf(path, name string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	pattern := regexp.MustCompile(
+		`(?ms)^` + regexp.QuoteMeta(name) + `\s*=\s*'''` + "\n.*?\n'''\n?",
+	)
+	text := pattern.ReplaceAllString(string(raw), "")
+	if text == string(raw) {
+		return fmt.Errorf("secret %q is not present in config", name)
+	}
+	if err := atomicWriteConfig(path, []byte(text)); err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	return nil
+}
+
+func atomicWriteConfig(path string, content []byte) error {
+	info, statErr := os.Stat(path)
+	perm := os.FileMode(0o600)
+	if statErr == nil {
+		perm = info.Mode().Perm()
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	dir := filepath.Dir(path)
+	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".")
+	if err != nil {
+		return err
+	}
+	tmpPath := file.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := file.Write(content); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Chmod(perm); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+	return dirHandle.Sync()
 }
 
 func tomlLiteral(value string) string {

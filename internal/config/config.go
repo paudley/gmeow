@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -45,6 +46,7 @@ type Loaded struct {
 type Config struct {
 	System     SystemConfig      `toml:"system"`
 	Filestore  FilestoreConfig   `toml:"filestore"`
+	RPC        RPCConfig         `toml:"rpc"`
 	Postgres   PostgresConfig    `toml:"postgres"`
 	RabbitMQ   RabbitMQConfig    `toml:"rabbitmq"`
 	Scheduler  SchedulerConfig   `toml:"scheduler"`
@@ -63,6 +65,17 @@ type SystemConfig struct {
 
 type FilestoreConfig struct {
 	Root string `toml:"root"`
+}
+
+type RPCConfig struct {
+	Filestore RPCEndpointConfig `toml:"filestore"`
+	Scheduler RPCEndpointConfig `toml:"scheduler"`
+	Query     RPCEndpointConfig `toml:"query"`
+}
+
+type RPCEndpointConfig struct {
+	Network string `toml:"network"`
+	Address string `toml:"address"`
 }
 
 type PostgresConfig struct {
@@ -138,6 +151,7 @@ type SearchBackendConfig struct {
 type Resolved struct {
 	Postgres  ResolvedPostgres
 	RabbitMQ  ResolvedRabbitMQ
+	RPC       ResolvedRPC
 	Scheduler ResolvedScheduler
 	Sources   []ResolvedSource
 	Worker    ResolvedWorker
@@ -155,6 +169,17 @@ type ResolvedPostgres struct {
 type ResolvedRabbitMQ struct {
 	URL     string
 	TestURL string
+}
+
+type ResolvedRPC struct {
+	Filestore ResolvedRPCEndpoint
+	Scheduler ResolvedRPCEndpoint
+	Query     ResolvedRPCEndpoint
+}
+
+type ResolvedRPCEndpoint struct {
+	Network string
+	Address string
 }
 
 type ResolvedScheduler struct {
@@ -413,6 +438,15 @@ func validateConfig(parsed Config) error {
 	if strings.TrimSpace(parsed.Filestore.Root) == "" {
 		return errors.New("filestore.root is required")
 	}
+	if err := validateRPCEndpoint("rpc.filestore", parsed.RPC.Filestore); err != nil {
+		return err
+	}
+	if err := validateRPCEndpoint("rpc.scheduler", parsed.RPC.Scheduler); err != nil {
+		return err
+	}
+	if err := validateRPCEndpoint("rpc.query", parsed.RPC.Query); err != nil {
+		return err
+	}
 	if strings.TrimSpace(parsed.Postgres.Host) == "" {
 		return errors.New("postgres.host is required")
 	}
@@ -468,6 +502,38 @@ func validateConfig(parsed Config) error {
 	return nil
 }
 
+func validateRPCEndpoint(name string, endpoint RPCEndpointConfig) error {
+	network := strings.TrimSpace(endpoint.Network)
+	address := strings.TrimSpace(endpoint.Address)
+	if network == "" && address == "" {
+		return nil
+	}
+	if network == "" {
+		return fmt.Errorf("%s.network is required when address is set", name)
+	}
+	if address == "" {
+		return fmt.Errorf("%s.address is required when network is set", name)
+	}
+	switch network {
+	case "unix":
+		if !filepath.IsAbs(address) {
+			return fmt.Errorf("%s.address must be absolute for unix sockets", name)
+		}
+	case "tcp":
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return fmt.Errorf("%s.address must be host:port for tcp: %w", name, err)
+		}
+		parsed := net.ParseIP(host)
+		if parsed == nil || !parsed.IsLoopback() {
+			return fmt.Errorf("%s.address must bind to a loopback IP", name)
+		}
+	default:
+		return fmt.Errorf("%s.network must be unix or tcp", name)
+	}
+	return nil
+}
+
 func secretReferences(parsed Config) map[string]int {
 	references := map[string]int{}
 	add := func(name string) {
@@ -496,6 +562,7 @@ func resolveSecrets(parsed Config, references map[string]int) (Resolved, error) 
 			User:     parsed.Postgres.User,
 			SSLMode:  parsed.Postgres.SSLMode,
 		},
+		RPC:       resolvedRPC(parsed.RPC),
 		Scheduler: resolvedScheduler(parsed.Scheduler),
 		Worker: ResolvedWorker{
 			Analyzers: configuredAnalyzers(parsed.Analysis.Analyzers),
@@ -523,6 +590,42 @@ func resolveSecrets(parsed Config, references map[string]int) (Resolved, error) 
 		})
 	}
 	return resolved, nil
+}
+
+func resolvedRPC(raw RPCConfig) ResolvedRPC {
+	return ResolvedRPC{
+		Filestore: resolvedRPCEndpoint(
+			raw.Filestore,
+			"unix",
+			"/run/gmeow/filestore.sock",
+		),
+		Scheduler: resolvedRPCEndpoint(
+			raw.Scheduler,
+			"unix",
+			"/run/gmeow/scheduler.sock",
+		),
+		Query: resolvedRPCEndpoint(
+			raw.Query,
+			"unix",
+			"/run/gmeow/query.sock",
+		),
+	}
+}
+
+func resolvedRPCEndpoint(
+	raw RPCEndpointConfig,
+	defaultNetwork string,
+	defaultAddress string,
+) ResolvedRPCEndpoint {
+	network := strings.TrimSpace(raw.Network)
+	if network == "" {
+		network = defaultNetwork
+	}
+	address := strings.TrimSpace(raw.Address)
+	if address == "" {
+		address = defaultAddress
+	}
+	return ResolvedRPCEndpoint{Network: network, Address: address}
 }
 
 func rabbitMQURL(host string, port int, user, password, vhost string) string {

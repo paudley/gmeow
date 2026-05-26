@@ -84,6 +84,116 @@ func TestPutSameBytesDedupesToOneObjectDirectory(t *testing.T) {
 	}
 }
 
+func TestLookupSourceObjectFindsExactSourceVersion(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+		Provenance: []contracts.Provenance{{
+			SourceKind:      "gmail",
+			SourceName:      "primary",
+			ExternalID:      "message-1",
+			ExternalVersion: "history-1",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, ok, err := store.LookupSourceObject(ctx, contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1",
+		ExternalVersion: "history-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || found != digest {
+		t.Fatalf("expected source lookup hit for %s, got ok=%t digest=%s", digest, ok, found)
+	}
+	if _, ok, err := store.LookupSourceObject(ctx, contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1",
+		ExternalVersion: "history-2",
+	}); err != nil || ok {
+		t.Fatalf("expected exact source version miss, ok=%t err=%v", ok, err)
+	}
+}
+
+func TestAttachProvenanceEnablesZeroPayloadLookup(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachProvenance(ctx, digest, []contracts.Provenance{{
+		SourceKind:      "camera",
+		SourceName:      "front-door",
+		ExternalID:      "segment-42",
+		ExternalVersion: "encoder-run-7",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	found, ok, err := store.LookupSourceObject(ctx, contracts.SourceObjectRef{
+		SourceKind:      "camera",
+		SourceName:      "front-door",
+		ExternalID:      "segment-42",
+		ExternalVersion: "encoder-run-7",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || found != digest {
+		t.Fatalf("expected attached provenance lookup hit, ok=%t digest=%s", ok, found)
+	}
+	if count := countObjectDirs(t, store.root); count != 1 {
+		t.Fatalf("metadata-only provenance attach wrote payload object: %d", count)
+	}
+}
+
+func TestSourceIngestClaimSerializesConcurrentWriters(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	ref := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1",
+		ExternalVersion: "history-1",
+	}
+	claim, acquired, err := store.TryAcquireSourceIngest(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acquired {
+		t.Fatal("expected first claim to acquire")
+	}
+	if _, acquired, err := store.TryAcquireSourceIngest(ctx, ref); err != nil || acquired {
+		t.Fatalf("expected second claim to be blocked, acquired=%t err=%v", acquired, err)
+	}
+	if err := store.ReleaseSourceIngest(ctx, contracts.SourceIngestClaim{
+		SourceObject: ref,
+		ClaimID:      "wrong",
+	}); err == nil {
+		t.Fatal("expected wrong claim release to fail")
+	}
+	if err := store.ReleaseSourceIngest(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+	if _, acquired, err := store.TryAcquireSourceIngest(
+		ctx,
+		ref,
+	); err != nil ||
+		!acquired {
+		t.Fatalf("expected claim after release to acquire, acquired=%t err=%v", acquired, err)
+	}
+}
+
 func TestPutRejectsObjectWithoutFacet(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 
@@ -135,6 +245,61 @@ func TestPutDoesNotRepairMissingRecoverySidecarOnExistingObject(t *testing.T) {
 		t.Fatalf("expected missing recovery sidecar to remain visible: %#v", report)
 	}
 	assertFinding(t, report, "recovery_missing")
+}
+
+func TestPutRefusesToRepairIncompleteObjectDirectory(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	request := PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	}
+	digest, err := store.Put(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(store.objectPath(digest, blobFilename)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+
+	if err == nil {
+		t.Fatal("expected incomplete object directory error")
+	}
+	if !strings.Contains(err.Error(), "missing immutable blob") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	report, err := store.Verify(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFinding(t, report, "blob_read_failed")
+}
+
+func TestPutCommitsNoStagedObjectDirectories(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(store.objectDir(digest))
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "."+string(digest)+".") {
+			t.Fatalf("staged object directory was left behind: %s", entry.Name())
+		}
+	}
 }
 
 func TestPublicMethodsRejectMalformedDigests(t *testing.T) {

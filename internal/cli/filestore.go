@@ -10,9 +10,12 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
 
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/filestore"
+	"blackcat.ca/gmeow/internal/rpc"
+	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
 )
 
 func newFilestoreCommand(out io.Writer, configPath *string) *cobra.Command {
@@ -21,7 +24,42 @@ func newFilestoreCommand(out io.Writer, configPath *string) *cobra.Command {
 		Short: "Inspect and verify FILESTORE data",
 	}
 	command.AddCommand(newFilestoreVerifyCommand(out, configPath))
+	command.AddCommand(newFilestoreServeCommand(out, configPath, "serve"))
 	return command
+}
+
+func newFilestoreServeCommand(
+	out io.Writer,
+	configPath *string,
+	use string,
+) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: "Run the FILESTORE gRPC service",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			root, err := resolvedFilestoreRoot(loaded)
+			if err != nil {
+				return err
+			}
+			store := filestore.NewFilesystemStore(root)
+			endpoint := rpcEndpoint(loaded.Resolved.RPC.Filestore)
+			if _, err := fmt.Fprintf(
+				out,
+				"filestore serve: %s %s\n",
+				endpoint.Network,
+				endpoint.Address,
+			); err != nil {
+				return err
+			}
+			return rpc.Serve(command.Context(), endpoint, func(server *grpc.Server) {
+				pb.RegisterFilestoreServiceServer(server, rpc.NewFilestoreServer(store))
+			})
+		},
+	}
 }
 
 func newFilestoreVerifyCommand(out io.Writer, configPath *string) *cobra.Command {

@@ -12,7 +12,24 @@ import (
 )
 
 type Store interface {
+	LookupSourceObject(
+		ctx context.Context,
+		ref contracts.SourceObjectRef,
+	) (contracts.ObjectDigest, bool, error)
+	TryAcquireSourceIngest(
+		ctx context.Context,
+		ref contracts.SourceObjectRef,
+	) (contracts.SourceIngestClaim, bool, error)
+	ReleaseSourceIngest(
+		ctx context.Context,
+		claim contracts.SourceIngestClaim,
+	) error
 	Put(ctx context.Context, request PutRequest) (contracts.ObjectDigest, error)
+	AttachProvenance(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+		provenance []contracts.Provenance,
+	) error
 	PutCompound(
 		ctx context.Context,
 		request CompoundPutRequest,

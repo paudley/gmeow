@@ -11,10 +11,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
 
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
+	"blackcat.ca/gmeow/internal/rpc"
+	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
 	"blackcat.ca/gmeow/internal/scheduler"
 	schedmq "blackcat.ca/gmeow/internal/scheduler/rabbitmq"
 )
@@ -30,6 +33,7 @@ func newSchedulerCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newSchedulerRequeueCommand(out, configPath))
 	command.AddCommand(newSchedulerForceCommand(out, configPath))
 	command.AddCommand(newSchedulerRunCommand(out, configPath, "run"))
+	command.AddCommand(newSchedulerServeCommand(out, configPath, "serve"))
 	return command
 }
 
@@ -214,6 +218,40 @@ func newSchedulerRunCommand(
 	}
 }
 
+func newSchedulerServeCommand(
+	out io.Writer,
+	configPath *string,
+	use string,
+) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: "Run the SCHEDULER gRPC service",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			service, closeFn, err := openSchedulerLoaded(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+			endpoint := rpcEndpoint(loaded.Resolved.RPC.Scheduler)
+			if _, err := fmt.Fprintf(
+				out,
+				"scheduler serve: %s %s\n",
+				endpoint.Network,
+				endpoint.Address,
+			); err != nil {
+				return err
+			}
+			return rpc.Serve(command.Context(), endpoint, func(server *grpc.Server) {
+				pb.RegisterSchedulerServiceServer(server, rpc.NewSchedulerServer(service))
+			})
+		},
+	}
+}
+
 func openScheduler(
 	ctx context.Context,
 	configPath *string,
@@ -222,6 +260,13 @@ func openScheduler(
 	if err != nil {
 		return nil, nil, err
 	}
+	return openSchedulerLoaded(ctx, loaded)
+}
+
+func openSchedulerLoaded(
+	ctx context.Context,
+	loaded *config.Loaded,
+) (*scheduler.Service, func(), error) {
 	root, err := resolvedFilestoreRoot(loaded)
 	if err != nil {
 		return nil, nil, err

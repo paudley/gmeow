@@ -6,6 +6,18 @@ data_dir = "data"
 [filestore]
 root = "data/filestore"
 
+[rpc.filestore]
+network = "unix"
+address = "/run/gmeow/filestore.sock"
+
+[rpc.scheduler]
+network = "unix"
+address = "/run/gmeow/scheduler.sock"
+
+[rpc.query]
+network = "unix"
+address = "/run/gmeow/query.sock"
+
 [postgres]
 host = "127.0.0.1"
 port = 5432

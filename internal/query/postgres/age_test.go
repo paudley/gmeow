@@ -100,3 +100,36 @@ func TestProjectionSQLDoesNotConcatenateTableNames(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchSQLKeepsUserInputInPlaceholders(t *testing.T) {
+	content, err := os.ReadFile("index.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(content)
+	required := []string{
+		"args = append(args, queryText)",
+		"websearch_to_tsquery('simple', $%d)",
+		"f.kind = ANY($%d)",
+		"p.source_name = ANY($%d)",
+		"r.relationship_type = ANY($%d)",
+		"a.analyzer_name = ANY($%d)",
+	}
+	for _, snippet := range required {
+		if !strings.Contains(sql, snippet) {
+			t.Fatalf("search SQL must keep user filters parameterized; missing %q", snippet)
+		}
+	}
+	for _, forbidden := range []string{
+		"websearch_to_tsquery('simple', request.Query)",
+		"websearch_to_tsquery('simple', queryText)",
+		"request.Query +",
+		"+ request.Query",
+		"queryText +",
+		"+ queryText",
+	} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("search SQL must not concatenate user text; found %q", forbidden)
+		}
+	}
+}

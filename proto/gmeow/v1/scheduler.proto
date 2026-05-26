@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package gmeow.v1;
+
+option go_package = "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1;gmeowv1";
+
+import "gmeow/v1/common.proto";
+
+service SchedulerService {
+  rpc Scan(SchedulerScanRequest) returns (SchedulerScanResponse);
+  rpc Enqueue(AnalyzerJob) returns (Empty);
+  rpc Force(ForceRequest) returns (SchedulerScanResponse);
+  rpc Requeue(RequeueRequest) returns (RequeueResponse);
+  rpc DeadLetters(DeadLetterRequest) returns (DeadLetterResponse);
+  rpc Status(Empty) returns (SchedulerStatus);
+  rpc NotifyObjectsChanged(NotifyObjectsChangedRequest) returns (SchedulerScanResponse);
+}
+
+message SchedulerScanRequest {
+  int32 schema_version = 1;
+  string priority_class = 2;
+  string requested_by = 3;
+  string reason = 4;
+  bool forced = 5;
+  string trace_id = 6;
+}
+
+message SchedulerScanResponse {
+  int32 schema_version = 1;
+  int32 scanned = 2;
+  int32 enqueued = 3;
+  int32 skipped = 4;
+  int32 failed = 5;
+}
+
+message ForceRequest {
+  string digest = 1;
+  repeated string analyzer_names = 2;
+  string requested_by = 3;
+  string trace_id = 4;
+}
+
+message RequeueRequest {
+  int32 schema_version = 1;
+  int32 limit = 2;
+}
+
+message RequeueResponse {
+  int32 schema_version = 1;
+  int32 requeued = 2;
+}
+
+message DeadLetterRequest {
+  int32 schema_version = 1;
+  int32 limit = 2;
+}
+
+message DeadLetterResponse {
+  int32 schema_version = 1;
+  repeated AnalyzerJob jobs = 2;
+}
+
+message SchedulerStatus {
+  int32 schema_version = 1;
+  int32 pending = 2;
+  int32 retry = 3;
+  int32 failed = 4;
+  int32 dead_letter = 5;
+}
+
+message NotifyObjectsChangedRequest {
+  repeated string digests = 1;
+  string priority_class = 2;
+  string requested_by = 3;
+  string reason = 4;
+  string trace_id = 5;
+}

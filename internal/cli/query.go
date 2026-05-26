@@ -16,11 +16,14 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
 
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
 	querypg "blackcat.ca/gmeow/internal/query/postgres"
+	"blackcat.ca/gmeow/internal/rpc"
+	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
 )
 
 func newQueryCommand(out io.Writer, configPath *string) *cobra.Command {
@@ -34,7 +37,42 @@ func newQueryCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newQueryProjectCommand(out, configPath))
 	command.AddCommand(newQuerySearchCommand(out, configPath))
 	command.AddCommand(newQueryAgeCommand(out, configPath))
+	command.AddCommand(newQueryServeCommand(out, configPath, "serve"))
 	return command
+}
+
+func newQueryServeCommand(
+	out io.Writer,
+	configPath *string,
+	use string,
+) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: "Run the QUERY gRPC service",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			index, err := openQueryIndex(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer index.Close()
+			endpoint := rpcEndpoint(loaded.Resolved.RPC.Query)
+			if _, err := fmt.Fprintf(
+				out,
+				"query serve: %s %s\n",
+				endpoint.Network,
+				endpoint.Address,
+			); err != nil {
+				return err
+			}
+			return rpc.Serve(command.Context(), endpoint, func(server *grpc.Server) {
+				pb.RegisterQueryServiceServer(server, rpc.NewQueryServer(index))
+			})
+		},
+	}
 }
 
 func newQueryMigrateCommand(configPath *string) *cobra.Command {
