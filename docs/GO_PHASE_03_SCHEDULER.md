@@ -15,6 +15,9 @@ events.
   Production RabbitMQ queues must be prefixed with `gmeow.`; integration-test queues must be
   prefixed with `gmeow.test.`.
   Production connections use the RabbitMQ `gmeow` vhost; integration tests use `gmeow-test`.
+- Expose SCHEDULER through typed gRPC `SchedulerService` over the configured Unix socket
+  (`/run/gmeow/scheduler.sock` by default). RPC requests use protobuf messages, not whole-request
+  JSON envelopes.
 - Implement scheduler scan command and background loop.
 - Implement forced reanalysis and interactive reprioritization.
 - Emit projection refresh requests after FILESTORE changes where needed.
@@ -43,5 +46,6 @@ orchestration code:
 
 - SCHEDULER owns priority, retry, dead-letter, and idempotency behavior.
 - RabbitMQ queues are durable and named under the `gmeow.` or `gmeow.test.` prefix.
+- `gmeow scheduler-serve` runs the gRPC server and registers `SchedulerService`.
 - ANALYSIS workers receive jobs only through the scheduler/broker contract.
 - Old Python maintenance/job orchestration is removed once Go SCHEDULER is authoritative.

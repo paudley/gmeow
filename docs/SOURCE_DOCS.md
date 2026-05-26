@@ -20,8 +20,9 @@ requirements of the Gmeow source and test packages.
 
 ## Migrations
 
-- [migrations/MODULE.md](../migrations/MODULE.md) — Alembic migration environment contract.
-- [migrations/versions/MODULE.md](../migrations/versions/MODULE.md) — Migration revisions conventions.
+- [migrations/MODULE.md](../migrations/MODULE.md) — Go-owned goose migration contract for
+  rebuildable QUERY projections.
+- [migrations/query/MODULE.md](../migrations/query/MODULE.md) — QUERY migration conventions.
 
 ## Scripts
 

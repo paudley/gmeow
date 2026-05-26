@@ -96,6 +96,15 @@ ID to FILESTORE; FILESTORE computes the digest, reuses the existing object when 
 merges facets, provenance, relationships, overlays, and analysis state through manifest rules. This
 prevents source-specific duplicate logic from leaking into the rest of the system.
 
+High-duplicate sources must use FILESTORE source identity lookups before streaming payload bytes.
+The source identity tuple is `source_kind`, `source_name`, `external_id`, and optional
+`external_version`. If FILESTORE already maps that exact source version to a digest, SOURCE reuses
+the digest and does not transfer or write payload bytes. On a miss, SOURCE must acquire a
+FILESTORE-owned source ingest claim for that exact tuple before opening the network payload stream.
+This prevents two workers from hydrating the same Gmail message, Drive export, or realtime segment
+at the same time. SOURCE still never computes content identity; source identity is only a
+zero-transfer fast path and concurrency guard.
+
 ### Facets And Compound Objects Are First Class
 
 Every object must have at least one **facet**, and may have several. Facets describe the domain
@@ -131,10 +140,13 @@ Rules:
 
 Compound objects are mandatory real FILESTORE objects, not virtual views. A Gmail message is not a
 single flattened blob and not just a QUERY projection: it is a compound FILESTORE object with a
-`mail_message` facet and likely a `container` facet. It contains Gmail metadata, a stripped message
-body object, raw RFC822/API payload objects where retained, and attachment objects. Each attachment
-is a discrete subobject and may also get a `file` facet. The compound object owns relationships
-among the parts, but the parts remain independently addressable, analyzable, and searchable.
+`mail_message` facet and likely a `container` facet. In normal ingest it contains Gmail metadata,
+RFC822 headers, body objects, a MIME-structure object without embedded payload bytes, and attachment
+objects. It must not also retain the full raw RFC822 container when decomposed body or attachment
+objects are stored, because that would duplicate payload bytes inside the MIME container. Each
+attachment is a discrete subobject and may also get a `file` facet. The compound object owns
+relationships among the parts, but the parts remain independently addressable, analyzable, and
+searchable.
 
 The same rule applies outside mail. A webpage compound can contain raw HTML, MHTML, PDF render, and
 screenshot objects. A song compound can contain MP3, FLAC, cover art, and metadata objects. An album
@@ -143,8 +155,9 @@ FILESTORE modeling tool for "one conceptual thing with multiple concrete represe
 
 If two Gmail messages carry the same attachment bytes, FILESTORE stores two compound email objects
 but one shared attachment file object. The two compounds each have their own Gmail metadata object,
-RFC822/header object, body object, and compound manifest. Both compounds point at the same
-attachment digest through their `compound.parts` and `contains`/`part_of` relationships.
+RFC822/header object, body object, MIME-structure object, and compound manifest. Both compounds
+point at the same attachment digest through their `compound.parts` and `contains`/`part_of`
+relationships.
 
 ANALYSIS sees those subobjects as ordinary objects. RFC822/header objects can yield identities,
 message IDs, temporal data, location hints, and graph nodes. Attachment objects are analyzed like
@@ -180,6 +193,30 @@ primary broker because durable acknowledgements, worker pools, priority queues, 
 dead-letter queues fit the workload well.
 Production connections use the RabbitMQ `gmeow` vhost. Integration tests use the separate
 `gmeow-test` vhost.
+
+### Service Interface Protocol
+
+Go services communicate over gRPC with typed protobuf contracts in `proto/gmeow/v1/`. The default
+transport is Unix-domain sockets under `/run/gmeow/`; loopback TCP is allowed only when explicitly
+configured.
+
+The stable service interfaces are:
+
+- `FilestoreService`: source-object lookup/claim/release, object streaming write/read, compound
+  creation, manifest/structure reads, annotation writes, source cursor writes, and verification.
+- `QueryService`: projection, rebuild/project-changed, search, structure, relationship, graph,
+  analysis-status, vector-search, and source-cursor queries.
+- `SchedulerService`: scan, enqueue, force, requeue, dead-letter inspection, status, and
+  object-change notification.
+
+The protocol must not use a whole-request JSON envelope. Stable domain shapes are first-class
+protobuf messages. JSON is permitted only as `bytes *_json` leaf fields for dynamic maps such as
+facet metadata, analyzer output data, cursor payloads, overlays, graph metadata, and search result
+attributes.
+
+Large content crosses the FILESTORE boundary through client-streamed `PutObjectFrame` messages and
+server-streamed `ObjectChunk` reads. The FILESTORE server is the first durable writer for payload
+bytes; sources do not pre-spool just to calculate hashes.
 
 ### INTERFACE Has No Primacy
 
@@ -410,7 +447,7 @@ Common compound part roles:
 - `email_body`;
 - `attachment`;
 - `gmail_data`;
-- `raw_rfc822`;
+- `mime_structure`;
 - `derived_text`;
 - `raw_html`;
 - `mhtml_archive`;
@@ -436,8 +473,10 @@ Example Gmail shape:
 
 - parent compound object: `mail_message` + `container` facets;
 - Gmail API metadata object: `email_metadata` or `analysis_output` role;
+- RFC822 headers object: `email_part` role with header bytes or normalized header JSON;
 - stripped message text object: `email_part` and/or `file` facet depending on representation;
-- raw RFC822 object: `file` facet;
+- MIME structure object: `email_part` or `analysis_output` role with MIME tree metadata only, no
+  embedded body or attachment payload bytes;
 - each attachment object: `file` facet, possibly with source-specific provenance and later
   `analysis_output` relationships.
 
@@ -489,7 +528,7 @@ Relationships are typed edges between content objects or between content objects
 Examples:
 
 - `contains`: Gmail message contains attachment digest;
-- `part_of`: attachment/body/raw object belongs to a compound parent;
+- `part_of`: attachment/body/header object belongs to a compound parent;
 - `export_of`: Drive PDF export is derived from Drive document object;
 - `revision_of`: object is a newer version of another object;
 - `analysis_of`: generated text is analysis output for a binary object;
@@ -545,6 +584,8 @@ SOURCE adapters and push collectors emit normalized source events:
 - `source_name`;
 - `event_kind`: ingest, update, delete, tombstone, hydrate, action_result;
 - `external_id`;
+- `external_version`: source-native version, revision, history marker, segment generation, or
+  equivalent stable change token when available;
 - `cursor`;
 - `content`: one or more byte streams, paths, or already-known digests;
 - `metadata`;
@@ -560,6 +601,11 @@ Build first. Everything depends on it.
 Required behavior:
 
 - put/get CAS objects by BLAKE3 digest;
+- lookup an exact source identity/version to return an existing digest before payload streaming;
+- acquire and release source ingest claims so concurrent SOURCE workers do not stream the same
+  source object at the same time;
+- attach provenance to an existing digest without transferring payload bytes when a trusted
+  source/version lookup proves it is already known;
 - assign immutable object IDs and identity strategies before object creation;
 - create one object directory per digest;
 - write every object with `blob.zstd` plus immutable emergency `recovery.json` sidecar;
@@ -582,6 +628,9 @@ Required behavior:
 Implementation notes:
 
 - keep writes crash-safe: temp file, fsync, atomic rename, directory fsync;
+- for network byte ingest, SOURCE streams directly to FILESTORE and FILESTORE writes payload bytes
+  exactly once while hashing; hidden in-progress paths inside the FILESTORE root are the eventual
+  object write, not source-side staging or a second payload copy;
 - create blob and emergency sidecar as an atomic object-write unit; if either file is missing, the
   object is incomplete and must be reported by verification;
 - write annotation files atomically and independently so analysis/overlay updates do not rewrite
@@ -590,6 +639,8 @@ Implementation notes:
   ANALYSIS workers;
 - keep dedupe centralized: callers never predeclare object uniqueness or create alternate IDs for
   identical bytes;
+- require SOURCE adapters to perform lookup -> source-ingest-claim -> stream -> commit/release for
+  any source object with a stable external identity/version;
 - reject compound creation when the caller cannot provide a valid stable object ID for the selected
   facet/source strategy;
 - avoid source-specific fields in core structs;
@@ -718,8 +769,8 @@ Adapter interface:
 Initial source strategy:
 
 - Gmail adapter: emits real compound FILESTORE objects with `mail_message` + `container` facets and
-  body/raw/attachment subobjects; supports rich live search/retrieve, history cursor, backfill,
-  actions, and hydration;
+  metadata/header/body/MIME-structure/attachment subobjects; supports rich live search/retrieve,
+  history cursor, backfill, actions, and hydration;
 - Drive adapter: emits `file` and optionally `container` objects for files, folders, revisions, and
   exports; ingest/export/change tracking can land as a later slice;
 - ringme/push adapter: emits `phone`, `file`, or other declared facets through a file spool or API
@@ -765,6 +816,7 @@ MCP is first in sequence only. It has no architectural primacy.
 | Vector search | pgvector |
 | Broker | RabbitMQ |
 | RabbitMQ client | `rabbitmq/amqp091-go` |
+| Service RPC | `google.golang.org/grpc` + generated typed protobuf |
 | BLAKE3 | `lukechampine/blake3` |
 | Zstd | `klauspost/compress/zstd` |
 | Retry/backoff | `cenkalti/backoff/v4` |
@@ -1434,7 +1486,8 @@ Ownership boundaries:
 
 1. User calls `mail_search(..., full_msg=true)` or retrieves a Gmail live hit requiring full content.
 2. Gmail live search finds a Gmail message ID not present in FILESTORE.
-3. Gmail downloads the full message/API payload, RFC822/header/body parts, and required attachments.
+3. Gmail downloads metadata, RFC822 headers, body parts, MIME structure, and required attachments
+   without retaining a raw RFC822 duplicate when decomposed parts are stored.
 4. Gmail submits the complete `mail_message` compound and subobjects to FILESTORE.
 5. FILESTORE dedupes attachments/files, writes object directories, and emits analysis/projection
    events.
@@ -1481,7 +1534,7 @@ Ownership boundaries:
 | Compound object created | FILESTORE creates an actual object with its own digest, manifest, and facets; QUERY does not invent it |
 | Compound created twice with same object ID | Both ingests resolve to `BLAKE3("compound:{object_id}")` and merge into one object |
 | Compound created without object ID | FILESTORE rejects it before writing blob, sidecar, or manifest |
-| Gmail message ingested | A real compound FILESTORE object with `mail_message` + `container` facets is created with body/raw/attachment subobjects |
+| Gmail message ingested | A real compound FILESTORE object with `mail_message` + `container` facets is created with metadata/header/body/MIME-structure/attachment subobjects and no raw RFC822 duplicate |
 | Gmail attachment ingested | Attachment is a discrete object with a `file` facet and `part_of`/`contains` relationships |
 | RFC822 header object analyzed | Analyzer outputs identities, graph nodes, temporal data, and location hints without reading facets |
 | Message body object analyzed | Analyzer treats it as text content, not as an email-domain object |
