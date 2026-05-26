@@ -714,6 +714,43 @@ func TestVerifyReportsCompressedRecoveryHashMismatch(t *testing.T) {
 	assertFinding(t, report, "recovery_compressed_size_mismatch")
 }
 
+func TestVerifyReportsInterruptedAnnotationWrites(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		store.objectPath(digest, "analysis.summary.json.zst"),
+		[]byte("not zstd"),
+		0o640,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		store.objectPath(digest, ".analysis.summary.json.zst.interrupted"),
+		[]byte("partial"),
+		0o640,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := store.Verify(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Status != VerifyStatusError {
+		t.Fatalf("expected interrupted annotation write report: %#v", report)
+	}
+	assertFinding(t, report, "annotation_read_failed")
+	assertFinding(t, report, "staged_write_leftover")
+}
+
 func TestVerifyReportsObjectDirectoryUnderWrongPrefix(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()

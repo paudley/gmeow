@@ -30,6 +30,11 @@ FORBIDDEN_TRACKED_PATHS = {
     "config.toml",
     "config/gmeow.yaml",
     "config/gmeow.example.yaml",
+    "main.py",
+    "src/gmeow",
+    "tests",
+    "typings",
+    "uv.lock",
 }
 
 
@@ -56,7 +61,15 @@ def _missing_required_files() -> list[str]:
 
 
 def _forbidden_tracked_paths(tracked_set: set[str]) -> list[str]:
-    return [f"forbidden tracked local config path: {rel}" for rel in sorted(FORBIDDEN_TRACKED_PATHS & tracked_set) if (ROOT / rel).exists()]
+    failures: list[str] = []
+    for rel in sorted(FORBIDDEN_TRACKED_PATHS):
+        if rel in tracked_set and (ROOT / rel).exists():
+            failures.append(f"forbidden tracked path: {rel}")
+            continue
+        prefix = rel.rstrip("/") + "/"
+        if any(path.startswith(prefix) for path in tracked_set) and (ROOT / rel).exists():
+            failures.append(f"forbidden tracked path: {rel}")
+    return failures
 
 
 def _missing_spdx_headers(tracked: list[str]) -> list[str]:

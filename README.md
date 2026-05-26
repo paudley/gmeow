@@ -6,7 +6,7 @@
 
 FILESTORE-first local knowledge services for agents.
 
-Gmeow is in a Go rewrite. Phases 0-7 provide the greenfield runtime: shared contracts, SOPS-backed config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, Go ANALYSIS worker runtime, Go SOURCE adapters, shared application services, MCP/REST/read-only IMAP interfaces, and operational hardening.
+Gmeow is in a Go rewrite. Phases 0-6 provide the greenfield runtime: shared contracts, SOPS-backed config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, Go ANALYSIS worker runtime, Go SOURCE adapters, shared application services, and MCP/REST/read-only IMAP interfaces. Phase 7 adds operational hardening.
 
 Gmeow is designed for trusted single-user local systems. By default it binds to `127.0.0.1` and does not add application-level authentication. Do not expose it directly to an untrusted network.
 

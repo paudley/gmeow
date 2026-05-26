@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/observability"
@@ -169,6 +170,49 @@ func (store *FilesystemStore) verifyObject(
 				"compound_dangling_part",
 				fmt.Sprintf("part %s: %v", part.Digest, err),
 			)
+		}
+	}
+
+	store.verifyAnnotations(report, digest, path)
+}
+
+func (store *FilesystemStore) verifyAnnotations(
+	report *VerifyReport,
+	digest contracts.ObjectDigest,
+	path string,
+) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		report.addFinding(digest, path, "annotation_list_failed", err.Error())
+
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		entryPath := filepath.Join(path, name)
+		if strings.HasPrefix(name, ".") {
+			report.addFinding(
+				digest,
+				entryPath,
+				"staged_write_leftover",
+				"interrupted atomic write left a staged file",
+			)
+
+			continue
+		}
+
+		if !isProjectionAnnotationFilename(name) {
+			continue
+		}
+
+		var annotation contracts.Annotation
+		if err := store.readCompressedJSON(entryPath, &annotation); err != nil {
+			report.addFinding(digest, entryPath, "annotation_read_failed", err.Error())
 		}
 	}
 }

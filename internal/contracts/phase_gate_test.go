@@ -202,6 +202,24 @@ func TestPhaseSixPythonPresentationHelpersStayRetired(t *testing.T) {
 	}
 }
 
+func TestPhaseSevenOldPythonApplicationScaffoldingIsRemoved(t *testing.T) {
+	root := repoRoot(t)
+	retired := []string{
+		"src/gmeow",
+		"main.py",
+		"tests",
+		"typings",
+		"uv.lock",
+	}
+	for _, relative := range retired {
+		if _, err := os.Stat(filepath.Join(root, relative)); err == nil {
+			t.Fatalf("retired old Python application path is present: %s", relative)
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat retired path %s: %v", relative, err)
+		}
+	}
+}
+
 func TestPhaseSixInterfacesDependOnAppServices(t *testing.T) {
 	root := filepath.Join(repoRoot(t), "internal", "interface")
 	forbidden := []string{
