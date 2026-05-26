@@ -285,6 +285,31 @@ func TestWalkProjectionReadsAnnotationsAndIgnoresRecovery(t *testing.T) {
 	}
 }
 
+func TestWalkSourceCursorsReadsSourceState(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	if err := store.WriteSourceCursor(ctx, contracts.SourceCursor{
+		SourceKind: "gmail",
+		SourceName: "primary",
+		Cursor:     map[string]any{"history_id": "42"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cursors := []contracts.SourceCursor{}
+	if err := store.WalkSourceCursors(ctx, func(cursor contracts.SourceCursor) error {
+		cursors = append(cursors, cursor)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cursors) != 1 ||
+		cursors[0].SourceKind != "gmail" ||
+		cursors[0].SourceName != "primary" ||
+		cursors[0].Cursor["history_id"] != "42" {
+		t.Fatalf("unexpected source cursors: %#v", cursors)
+	}
+}
+
 func TestWriteAnnotationRejectsMissingObject(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	err := store.WriteAnnotation(context.Background(), contracts.Annotation{

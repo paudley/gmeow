@@ -17,9 +17,10 @@ import (
 )
 
 type Index struct {
-	source  query.ProjectionSource
-	mutex   sync.RWMutex
-	objects map[contracts.ObjectDigest]projectedObject
+	source        query.ProjectionSource
+	mutex         sync.RWMutex
+	objects       map[contracts.ObjectDigest]projectedObject
+	sourceCursors map[string]contracts.SourceCursor
 }
 
 type projectedObject struct {
@@ -29,8 +30,9 @@ type projectedObject struct {
 
 func New(source query.ProjectionSource) *Index {
 	return &Index{
-		source:  source,
-		objects: map[contracts.ObjectDigest]projectedObject{},
+		source:        source,
+		objects:       map[contracts.ObjectDigest]projectedObject{},
+		sourceCursors: map[string]contracts.SourceCursor{},
 	}
 }
 
@@ -71,13 +73,39 @@ func (index *Index) Rebuild(ctx context.Context) error {
 	}
 	index.mutex.Lock()
 	index.objects = map[contracts.ObjectDigest]projectedObject{}
+	index.sourceCursors = map[string]contracts.SourceCursor{}
 	index.mutex.Unlock()
 	if index.source == nil {
 		return nil
 	}
-	return index.source.WalkProjection(ctx, func(object filestore.ProjectionObject) error {
-		return index.ProjectObject(ctx, object)
+	if err := index.source.WalkProjection(
+		ctx,
+		func(object filestore.ProjectionObject) error {
+			return index.ProjectObject(ctx, object)
+		},
+	); err != nil {
+		return err
+	}
+	cursorSource, ok := index.source.(query.SourceCursorProjectionSource)
+	if !ok {
+		return nil
+	}
+	return cursorSource.WalkSourceCursors(ctx, func(cursor contracts.SourceCursor) error {
+		return index.ProjectSourceCursor(ctx, cursor)
 	})
+}
+
+func (index *Index) ProjectSourceCursor(
+	ctx context.Context,
+	cursor contracts.SourceCursor,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	index.mutex.Lock()
+	defer index.mutex.Unlock()
+	index.sourceCursors[sourceCursorKey(cursor)] = cursor
+	return nil
 }
 
 func (index *Index) Search(
@@ -220,12 +248,21 @@ func (index *Index) AnalysisStatus(
 			!containsDigest(request.ObjectDigests, object.manifest.ObjectDigest) {
 			continue
 		}
+		annotationsByName := map[string]contracts.Annotation{}
 		for _, annotation := range object.annotations {
 			if annotation.Kind != "analysis" {
 				continue
 			}
+			annotationsByName[annotation.AnalyzerName] = annotation
 			if len(request.AnalyzerNames) > 0 &&
 				!containsString(request.AnalyzerNames, annotation.AnalyzerName) {
+				continue
+			}
+			if len(request.Analyzers) > 0 &&
+				!containsAnalyzerSpec(request.Analyzers, annotation.AnalyzerName) {
+				continue
+			}
+			if containsAnalyzerSpec(request.Analyzers, annotation.AnalyzerName) {
 				continue
 			}
 			status := "complete"
@@ -241,6 +278,14 @@ func (index *Index) AnalysisStatus(
 				Data:         annotation.Data,
 			})
 		}
+		statuses = append(
+			statuses,
+			requiredAnalyzerStatuses(
+				object.manifest.ObjectDigest,
+				annotationsByName,
+				request,
+			)...,
+		)
 	}
 	limit := normalizedLimit(request.Limit)
 	if len(statuses) > limit {
@@ -293,6 +338,43 @@ func (index *Index) VectorSearch(
 	return contracts.VectorSearchResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Results:       results,
+	}, nil
+}
+
+func (index *Index) SourceCursors(
+	ctx context.Context,
+	request contracts.SourceCursorRequest,
+) (contracts.SourceCursorResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return contracts.SourceCursorResponse{}, err
+	}
+	index.mutex.RLock()
+	defer index.mutex.RUnlock()
+	cursors := make([]contracts.SourceCursor, 0, len(index.sourceCursors))
+	for _, cursor := range index.sourceCursors {
+		if len(request.SourceKinds) > 0 &&
+			!containsString(request.SourceKinds, cursor.SourceKind) {
+			continue
+		}
+		if len(request.SourceNames) > 0 &&
+			!containsString(request.SourceNames, cursor.SourceName) {
+			continue
+		}
+		cursors = append(cursors, cursor)
+	}
+	sort.SliceStable(cursors, func(left, right int) bool {
+		if cursors[left].SourceKind != cursors[right].SourceKind {
+			return cursors[left].SourceKind < cursors[right].SourceKind
+		}
+		return cursors[left].SourceName < cursors[right].SourceName
+	})
+	limit := normalizedLimit(request.Limit)
+	if len(cursors) > limit {
+		cursors = cursors[:limit]
+	}
+	return contracts.SourceCursorResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Cursors:       cursors,
 	}, nil
 }
 
@@ -492,6 +574,71 @@ func containsDigest(
 		}
 	}
 	return false
+}
+
+func containsAnalyzerSpec(values []contracts.AnalyzerSpec, name string) bool {
+	for _, item := range values {
+		if item.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func requiredAnalyzerStatuses(
+	digest contracts.ObjectDigest,
+	annotationsByName map[string]contracts.Annotation,
+	request contracts.AnalysisStatusRequest,
+) []contracts.AnalysisStatus {
+	statuses := []contracts.AnalysisStatus{}
+	for _, analyzer := range request.Analyzers {
+		if len(request.AnalyzerNames) > 0 &&
+			!containsString(request.AnalyzerNames, analyzer.Name) {
+			continue
+		}
+		annotation, ok := annotationsByName[analyzer.Name]
+		if !ok {
+			statuses = append(statuses, contracts.AnalysisStatus{
+				ObjectDigest: digest,
+				AnalyzerName: analyzer.Name,
+				AnalyzerVer:  analyzer.Version,
+				Status:       "missing",
+				Data:         map[string]any{"required_version": analyzer.Version},
+			})
+			continue
+		}
+		if analyzer.Version != "" && annotation.AnalyzerVer != analyzer.Version {
+			statuses = append(statuses, contracts.AnalysisStatus{
+				ObjectDigest: digest,
+				AnalyzerName: analyzer.Name,
+				AnalyzerVer:  annotation.AnalyzerVer,
+				Status:       "stale",
+				GeneratedAt:  annotation.GeneratedAt,
+				Data: map[string]any{
+					"current_version":  annotation.AnalyzerVer,
+					"required_version": analyzer.Version,
+				},
+			})
+			continue
+		}
+		status := "complete"
+		if value, ok := annotation.Data["status"].(string); ok && value != "" {
+			status = value
+		}
+		statuses = append(statuses, contracts.AnalysisStatus{
+			ObjectDigest: annotation.ObjectDigest,
+			AnalyzerName: annotation.AnalyzerName,
+			AnalyzerVer:  annotation.AnalyzerVer,
+			Status:       status,
+			GeneratedAt:  annotation.GeneratedAt,
+			Data:         annotation.Data,
+		})
+	}
+	return statuses
+}
+
+func sourceCursorKey(cursor contracts.SourceCursor) string {
+	return cursor.SourceKind + "\x00" + cursor.SourceName
 }
 
 var _ query.Index = (*Index)(nil)

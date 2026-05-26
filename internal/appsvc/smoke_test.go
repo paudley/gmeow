@@ -133,6 +133,13 @@ func (store *fakeStore) WriteAnnotation(context.Context, contracts.Annotation) e
 	return nil
 }
 
+func (store *fakeStore) WriteSourceCursor(
+	context.Context,
+	contracts.SourceCursor,
+) error {
+	return nil
+}
+
 func (store *fakeStore) Verify(context.Context) (filestore.VerifyReport, error) {
 	return filestore.VerifyReport{Status: filestore.VerifyStatusOK}, nil
 }
@@ -155,6 +162,13 @@ func (index *fakeIndex) ProjectObject(
 	_ filestore.ProjectionObject,
 ) error {
 	index.projected = true
+	return nil
+}
+
+func (index *fakeIndex) ProjectSourceCursor(
+	context.Context,
+	contracts.SourceCursor,
+) error {
 	return nil
 }
 
@@ -216,6 +230,15 @@ func (index *fakeIndex) VectorSearch(
 	contracts.VectorSearchRequest,
 ) (contracts.VectorSearchResponse, error) {
 	return contracts.VectorSearchResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+	}, nil
+}
+
+func (index *fakeIndex) SourceCursors(
+	context.Context,
+	contracts.SourceCursorRequest,
+) (contracts.SourceCursorResponse, error) {
+	return contracts.SourceCursorResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 	}, nil
 }

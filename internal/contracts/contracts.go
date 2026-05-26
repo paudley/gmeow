@@ -232,6 +232,7 @@ type AnalysisStatusRequest struct {
 	SchemaVersion SchemaVersion  `json:"schema_version"`
 	ObjectDigests []ObjectDigest `json:"object_digests,omitempty"`
 	AnalyzerNames []string       `json:"analyzer_names,omitempty"`
+	Analyzers     []AnalyzerSpec `json:"analyzers,omitempty"`
 	Limit         int            `json:"limit,omitempty"`
 }
 
@@ -267,4 +268,24 @@ type VectorSearchResult struct {
 type VectorSearchResponse struct {
 	SchemaVersion SchemaVersion        `json:"schema_version"`
 	Results       []VectorSearchResult `json:"results"`
+}
+
+type SourceCursor struct {
+	SchemaVersion SchemaVersion  `json:"schema_version"`
+	SourceKind    string         `json:"source_kind"`
+	SourceName    string         `json:"source_name"`
+	Cursor        map[string]any `json:"cursor"`
+	UpdatedAt     time.Time      `json:"updated_at,omitempty"`
+}
+
+type SourceCursorRequest struct {
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	SourceKinds   []string      `json:"source_kinds,omitempty"`
+	SourceNames   []string      `json:"source_names,omitempty"`
+	Limit         int           `json:"limit,omitempty"`
+}
+
+type SourceCursorResponse struct {
+	SchemaVersion SchemaVersion  `json:"schema_version"`
+	Cursors       []SourceCursor `json:"cursors"`
 }

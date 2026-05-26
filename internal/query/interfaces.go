@@ -14,6 +14,10 @@ type ProjectionSource interface {
 	WalkProjection(ctx context.Context, fn filestore.ProjectionFunc) error
 }
 
+type SourceCursorProjectionSource interface {
+	WalkSourceCursors(ctx context.Context, fn filestore.SourceCursorProjectionFunc) error
+}
+
 type Index interface {
 	Project(
 		ctx context.Context,
@@ -21,6 +25,7 @@ type Index interface {
 		annotations []contracts.Annotation,
 	) error
 	ProjectObject(ctx context.Context, object filestore.ProjectionObject) error
+	ProjectSourceCursor(ctx context.Context, cursor contracts.SourceCursor) error
 	Search(
 		ctx context.Context,
 		request contracts.SearchRequest,
@@ -45,5 +50,9 @@ type Index interface {
 		ctx context.Context,
 		request contracts.VectorSearchRequest,
 	) (contracts.VectorSearchResponse, error)
+	SourceCursors(
+		ctx context.Context,
+		request contracts.SourceCursorRequest,
+	) (contracts.SourceCursorResponse, error)
 	Rebuild(ctx context.Context) error
 }

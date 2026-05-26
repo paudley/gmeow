@@ -26,6 +26,7 @@ type Store interface {
 		digest contracts.ObjectDigest,
 	) (contracts.Structure, error)
 	WriteAnnotation(ctx context.Context, annotation contracts.Annotation) error
+	WriteSourceCursor(ctx context.Context, cursor contracts.SourceCursor) error
 	Verify(ctx context.Context) (VerifyReport, error)
 }
 
@@ -45,6 +46,8 @@ type ProjectionObject struct {
 }
 
 type ProjectionFunc func(ProjectionObject) error
+
+type SourceCursorProjectionFunc func(contracts.SourceCursor) error
 
 type PutRequest struct {
 	Reader        io.Reader

@@ -77,13 +77,38 @@ func TestSearchFiltersProjectedObjects(t *testing.T) {
 	status, err := index.AnalysisStatus(
 		context.Background(),
 		contracts.AnalysisStatusRequest{
-			AnalyzerNames: []string{"summary"},
+			Analyzers: []contracts.AnalyzerSpec{
+				{Name: "summary", Version: "2"},
+				{Name: "entities", Version: "1"},
+			},
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(status.Statuses) != 1 || status.Statuses[0].Status != "complete" {
-		t.Fatalf("expected analysis status, got %#v", status)
+	if len(status.Statuses) != 2 ||
+		status.Statuses[0].Status != "stale" ||
+		status.Statuses[1].Status != "missing" {
+		t.Fatalf("expected stale and missing analysis statuses, got %#v", status)
+	}
+	if err := index.ProjectSourceCursor(context.Background(), contracts.SourceCursor{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		SourceKind:    "fixture",
+		SourceName:    "unit",
+		Cursor:        map[string]any{"page": "next"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cursors, err := index.SourceCursors(
+		context.Background(),
+		contracts.SourceCursorRequest{
+			SourceKinds: []string{"fixture"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cursors.Cursors) != 1 || cursors.Cursors[0].SourceName != "unit" {
+		t.Fatalf("expected source cursor, got %#v", cursors)
 	}
 }

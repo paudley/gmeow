@@ -31,6 +31,7 @@ const (
 	blobFilename                     = "blob.zst"
 	recoveryFilename                 = "recovery.json"
 	manifestFilename                 = "manifest.json.zst"
+	sourceCursorFilename             = "cursor.json.zst"
 	schemaVersion                    = "1"
 )
 
@@ -262,6 +263,29 @@ func (store *FilesystemStore) WriteAnnotation(
 	)
 }
 
+func (store *FilesystemStore) WriteSourceCursor(
+	ctx context.Context,
+	cursor contracts.SourceCursor,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cursor.SourceKind) == "" {
+		return errors.New("source cursor kind is required")
+	}
+	if strings.TrimSpace(cursor.SourceName) == "" {
+		return errors.New("source cursor name is required")
+	}
+	cursor.SchemaVersion = contracts.SchemaVersionPhase00
+	if cursor.UpdatedAt.IsZero() {
+		cursor.UpdatedAt = time.Now().UTC()
+	}
+	if cursor.Cursor == nil {
+		cursor.Cursor = map[string]any{}
+	}
+	return store.writeCompressedJSON(store.sourceCursorPath(cursor), cursor)
+}
+
 func (store *FilesystemStore) WalkProjection(
 	ctx context.Context,
 	fn ProjectionFunc,
@@ -304,6 +328,42 @@ func (store *FilesystemStore) WalkProjection(
 				return err
 			}
 			return filepath.SkipDir
+		},
+	)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func (store *FilesystemStore) WalkSourceCursors(
+	ctx context.Context,
+	fn SourceCursorProjectionFunc,
+) error {
+	if fn == nil {
+		return errors.New("source cursor projection callback is required")
+	}
+	base := filepath.Join(store.root, "source-cursors")
+	err := filepath.WalkDir(
+		base,
+		func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				if errors.Is(walkErr, os.ErrNotExist) && path == base {
+					return nil
+				}
+				return walkErr
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entry.IsDir() || entry.Name() != sourceCursorFilename {
+				return nil
+			}
+			var cursor contracts.SourceCursor
+			if err := store.readCompressedJSON(path, &cursor); err != nil {
+				return err
+			}
+			return fn(cursor)
 		},
 	)
 	if errors.Is(err, os.ErrNotExist) {
@@ -692,6 +752,18 @@ func (store *FilesystemStore) objectPath(
 func (store *FilesystemStore) objectDir(digest contracts.ObjectDigest) string {
 	value := string(digest)
 	return filepath.Join(store.root, "objects", "blake3", value[:2], value[2:4], value)
+}
+
+func (store *FilesystemStore) sourceCursorPath(
+	cursor contracts.SourceCursor,
+) string {
+	return filepath.Join(
+		store.root,
+		"source-cursors",
+		safePathComponent(cursor.SourceKind),
+		safePathComponent(cursor.SourceName),
+		sourceCursorFilename,
+	)
 }
 
 type compoundEnvelope struct {
@@ -1152,6 +1224,11 @@ func uniqueStrings(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func safePathComponent(value string) string {
+	replacer := strings.NewReplacer("/", "_", "\\", "_", "\x00", "_")
+	return replacer.Replace(strings.TrimSpace(value))
 }
 
 func cloneMap(value map[string]any) map[string]any {

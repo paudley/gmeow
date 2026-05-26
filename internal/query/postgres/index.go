@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -49,6 +51,14 @@ type AgeStatus struct {
 	GraphID   int64
 	Nodes     string
 	Error     string
+}
+
+type ageSearchPathExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+type embeddingObjectReader interface {
+	Open(context.Context, contracts.ObjectDigest) (io.ReadCloser, error)
 }
 
 func New(
@@ -116,11 +126,13 @@ func validateRequiredProjectionCapabilities(
 			return fmt.Errorf("required PostgreSQL extension %q is not enabled", extension)
 		}
 	}
-	if _, err := pool.Exec(ctx, "SET search_path=ag_catalog, public"); err != nil {
-		return fmt.Errorf("set AGE search path: %w", err)
+	conn, err := acquireAgeConn(ctx, pool)
+	if err != nil {
+		return err
 	}
+	defer conn.Release()
 	var graphExists bool
-	if err := pool.QueryRow(
+	if err := conn.QueryRow(
 		ctx,
 		"SELECT EXISTS (SELECT 1 FROM ag_graph WHERE name = 'gmeow_graph')",
 	).Scan(&graphExists); err != nil {
@@ -130,6 +142,26 @@ func validateRequiredProjectionCapabilities(
 		return errors.New("required AGE graph \"gmeow_graph\" is not initialized")
 	}
 	return nil
+}
+
+func acquireAgeConn(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) (*pgxpool.Conn, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire AGE connection: %w", err)
+	}
+	if err := setAgeSearchPath(ctx, conn); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("set AGE search path: %w", err)
+	}
+	return conn, nil
+}
+
+func setAgeSearchPath(ctx context.Context, execer ageSearchPathExecutor) error {
+	_, err := execer.Exec(ctx, "SET search_path=ag_catalog, public")
+	return err
 }
 
 func (index *Index) Project(
@@ -162,11 +194,43 @@ func (index *Index) ProjectObject(
 	if err := deleteAgeFactsForDigest(ctx, tx, object.Manifest.ObjectDigest); err != nil {
 		return err
 	}
-	if err := projectObjectTx(ctx, tx, object); err != nil {
+	if err := projectObjectTx(ctx, tx, object, index.source); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit projection transaction: %w", err)
+	}
+	return nil
+}
+
+func (index *Index) ProjectSourceCursor(
+	ctx context.Context,
+	cursor contracts.SourceCursor,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(nonNilMap(cursor.Cursor))
+	if err != nil {
+		return err
+	}
+	if cursor.UpdatedAt.IsZero() {
+		cursor.UpdatedAt = time.Now().UTC()
+	}
+	if _, err := index.pool.Exec(
+		ctx,
+		`INSERT INTO query_source_cursors(source_name, source_kind, cursor_json, updated_at)
+		 VALUES($1,$2,$3,$4)
+		 ON CONFLICT(source_name) DO UPDATE SET
+		   source_kind = excluded.source_kind,
+		   cursor_json = excluded.cursor_json,
+		   updated_at = excluded.updated_at`,
+		cursor.SourceName,
+		cursor.SourceKind,
+		encoded,
+		cursor.UpdatedAt,
+	); err != nil {
+		return fmt.Errorf("project source cursor %s: %w", cursor.SourceName, err)
 	}
 	return nil
 }
@@ -217,6 +281,15 @@ func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 		}
 		return nil
 	})
+	if err != nil {
+		report.Elapsed = time.Since(started)
+		return report, err
+	}
+	if cursorSource, ok := index.source.(query.SourceCursorProjectionSource); ok {
+		err = cursorSource.WalkSourceCursors(ctx, func(cursor contracts.SourceCursor) error {
+			return index.ProjectSourceCursor(ctx, cursor)
+		})
+	}
 	report.Elapsed = time.Since(started)
 	return report, err
 }
@@ -557,6 +630,9 @@ func (index *Index) AnalysisStatus(
 	ctx context.Context,
 	request contracts.AnalysisStatusRequest,
 ) (contracts.AnalysisStatusResponse, error) {
+	if len(request.Analyzers) > 0 {
+		return index.analysisStatusWithRequirements(ctx, request)
+	}
 	args := []any{}
 	where := []string{"true"}
 	if len(request.ObjectDigests) > 0 {
@@ -606,6 +682,147 @@ func (index *Index) AnalysisStatus(
 	}, rows.Err()
 }
 
+func (index *Index) analysisStatusWithRequirements(
+	ctx context.Context,
+	request contracts.AnalysisStatusRequest,
+) (contracts.AnalysisStatusResponse, error) {
+	objects, err := index.analysisStatusObjects(ctx, request.ObjectDigests)
+	if err != nil {
+		return contracts.AnalysisStatusResponse{}, err
+	}
+	existing, err := index.analysisStatusRowsFor(ctx, request)
+	if err != nil {
+		return contracts.AnalysisStatusResponse{}, err
+	}
+	statuses := []contracts.AnalysisStatus{}
+	for _, digest := range objects {
+		for _, analyzer := range request.Analyzers {
+			if len(request.AnalyzerNames) > 0 &&
+				!containsString(request.AnalyzerNames, analyzer.Name) {
+				continue
+			}
+			status, ok := existing[digest][analyzer.Name]
+			if !ok {
+				statuses = append(statuses, contracts.AnalysisStatus{
+					ObjectDigest: digest,
+					AnalyzerName: analyzer.Name,
+					AnalyzerVer:  analyzer.Version,
+					Status:       "missing",
+					Data:         map[string]any{"required_version": analyzer.Version},
+				})
+				continue
+			}
+			if analyzer.Version != "" && status.AnalyzerVer != analyzer.Version {
+				status.Status = "stale"
+				status.Data = map[string]any{
+					"current_version":  status.AnalyzerVer,
+					"required_version": analyzer.Version,
+				}
+			}
+			statuses = append(statuses, status)
+		}
+	}
+	limit := normalizedLimit(request.Limit)
+	if len(statuses) > limit {
+		statuses = statuses[:limit]
+	}
+	return contracts.AnalysisStatusResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Statuses:      statuses,
+	}, nil
+}
+
+func (index *Index) analysisStatusObjects(
+	ctx context.Context,
+	digests []contracts.ObjectDigest,
+) ([]contracts.ObjectDigest, error) {
+	args := []any{}
+	where := "true"
+	if len(digests) > 0 {
+		args = append(args, digests)
+		where = fmt.Sprintf("object_digest = ANY($%d)", len(args))
+	}
+	rows, err := index.pool.Query(
+		ctx,
+		fmt.Sprintf(
+			`SELECT object_digest
+			   FROM query_objects
+			  WHERE %s
+			  ORDER BY object_digest`,
+			where,
+		),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	objects := []contracts.ObjectDigest{}
+	for rows.Next() {
+		var digest contracts.ObjectDigest
+		if err := rows.Scan(&digest); err != nil {
+			return nil, err
+		}
+		objects = append(objects, digest)
+	}
+	return objects, rows.Err()
+}
+
+func (index *Index) analysisStatusRowsFor(
+	ctx context.Context,
+	request contracts.AnalysisStatusRequest,
+) (map[contracts.ObjectDigest]map[string]contracts.AnalysisStatus, error) {
+	analyzerNames := analyzerSpecNames(request.Analyzers)
+	args := []any{analyzerNames}
+	where := []string{"analyzer_name = ANY($1)"}
+	if len(request.ObjectDigests) > 0 {
+		args = append(args, request.ObjectDigests)
+		where = append(where, fmt.Sprintf("object_digest = ANY($%d)", len(args)))
+	}
+	rows, err := index.pool.Query(ctx, fmt.Sprintf(
+		`SELECT object_digest, analyzer_name, analyzer_version, status, generated_at, data_json
+		   FROM query_object_analysis
+		  WHERE %s
+		  ORDER BY object_digest, analyzer_name`,
+		strings.Join(where, " AND "),
+	), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	statuses := map[contracts.ObjectDigest]map[string]contracts.AnalysisStatus{}
+	for rows.Next() {
+		var status contracts.AnalysisStatus
+		var data []byte
+		if err := rows.Scan(
+			&status.ObjectDigest,
+			&status.AnalyzerName,
+			&status.AnalyzerVer,
+			&status.Status,
+			&status.GeneratedAt,
+			&data,
+		); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(data, &status.Data); err != nil {
+			return nil, err
+		}
+		if statuses[status.ObjectDigest] == nil {
+			statuses[status.ObjectDigest] = map[string]contracts.AnalysisStatus{}
+		}
+		statuses[status.ObjectDigest][status.AnalyzerName] = status
+	}
+	return statuses, rows.Err()
+}
+
+func analyzerSpecNames(analyzers []contracts.AnalyzerSpec) []string {
+	names := make([]string, 0, len(analyzers))
+	for _, analyzer := range analyzers {
+		names = append(names, analyzer.Name)
+	}
+	return names
+}
+
 func (index *Index) VectorSearch(
 	ctx context.Context,
 	request contracts.VectorSearchRequest,
@@ -617,6 +834,8 @@ func (index *Index) VectorSearch(
 	}
 	args := []any{vectorLiteral(request.Vector)}
 	where := []string{"e.embedding IS NOT NULL"}
+	args = append(args, len(request.Vector))
+	where = append(where, fmt.Sprintf("e.dimensions = $%d", len(args)))
 	if request.Model != "" {
 		args = append(args, request.Model)
 		where = append(where, fmt.Sprintf("e.model = $%d", len(args)))
@@ -665,13 +884,67 @@ func (index *Index) VectorSearch(
 	}, rows.Err()
 }
 
+func (index *Index) SourceCursors(
+	ctx context.Context,
+	request contracts.SourceCursorRequest,
+) (contracts.SourceCursorResponse, error) {
+	args := []any{}
+	where := []string{"true"}
+	if len(request.SourceKinds) > 0 {
+		args = append(args, request.SourceKinds)
+		where = append(where, fmt.Sprintf("source_kind = ANY($%d)", len(args)))
+	}
+	if len(request.SourceNames) > 0 {
+		args = append(args, request.SourceNames)
+		where = append(where, fmt.Sprintf("source_name = ANY($%d)", len(args)))
+	}
+	args = append(args, normalizedLimit(request.Limit))
+	rows, err := index.pool.Query(ctx, fmt.Sprintf(
+		`SELECT source_kind, source_name, cursor_json, updated_at
+		   FROM query_source_cursors
+		  WHERE %s
+		  ORDER BY source_kind, source_name
+		  LIMIT $%d`,
+		strings.Join(where, " AND "),
+		len(args),
+	), args...)
+	if err != nil {
+		return contracts.SourceCursorResponse{}, err
+	}
+	defer rows.Close()
+	cursors := []contracts.SourceCursor{}
+	for rows.Next() {
+		var cursor contracts.SourceCursor
+		var data []byte
+		if err := rows.Scan(
+			&cursor.SourceKind,
+			&cursor.SourceName,
+			&data,
+			&cursor.UpdatedAt,
+		); err != nil {
+			return contracts.SourceCursorResponse{}, err
+		}
+		cursor.SchemaVersion = contracts.SchemaVersionPhase00
+		if err := json.Unmarshal(data, &cursor.Cursor); err != nil {
+			return contracts.SourceCursorResponse{}, err
+		}
+		cursors = append(cursors, cursor)
+	}
+	return contracts.SourceCursorResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Cursors:       cursors,
+	}, rows.Err()
+}
+
 func (index *Index) AgeStatus(ctx context.Context) AgeStatus {
-	if _, err := index.pool.Exec(ctx, "SET search_path=ag_catalog, public"); err != nil {
+	conn, err := acquireAgeConn(ctx, index.pool)
+	if err != nil {
 		return AgeStatus{Graph: "gmeow_graph", Error: err.Error()}
 	}
+	defer conn.Release()
 	var status AgeStatus
 	status.Graph = "gmeow_graph"
-	err := index.pool.QueryRow(
+	err = conn.QueryRow(
 		ctx,
 		"SELECT graphid, name FROM ag_graph WHERE name = 'gmeow_graph'",
 	).Scan(&status.GraphID, &status.Graph)
@@ -680,7 +953,7 @@ func (index *Index) AgeStatus(ctx context.Context) AgeStatus {
 		return status
 	}
 	var nodes string
-	if err := index.pool.QueryRow(
+	if err := conn.QueryRow(
 		ctx,
 		"SELECT * FROM cypher('gmeow_graph', $$MATCH (n) RETURN count(n)$$) AS (nodes agtype)",
 	).Scan(&nodes); err != nil {
@@ -711,10 +984,12 @@ func (index *Index) AgeCypher(
 	if !strings.Contains(" "+strings.ToLower(cypher)+" ", " limit ") {
 		cypher = fmt.Sprintf("%s LIMIT %d", cypher, normalizedLimit(limit))
 	}
-	if _, err := index.pool.Exec(ctx, "SET search_path=ag_catalog, public"); err != nil {
+	conn, err := acquireAgeConn(ctx, index.pool)
+	if err != nil {
 		return nil, err
 	}
-	rows, err := index.pool.Query(ctx, ageSQL(cypher, columns))
+	defer conn.Release()
+	rows, err := conn.Query(ctx, ageSQL(cypher, columns))
 	if err != nil {
 		return nil, err
 	}
@@ -736,16 +1011,18 @@ func (index *Index) AgeCypher(
 }
 
 func (index *Index) clearAgeGraph(ctx context.Context) error {
-	if _, err := index.pool.Exec(ctx, "SET search_path=ag_catalog, public"); err != nil {
-		return fmt.Errorf("set AGE search path: %w", err)
+	conn, err := acquireAgeConn(ctx, index.pool)
+	if err != nil {
+		return err
 	}
-	if _, err := index.pool.Exec(
+	defer conn.Release()
+	if _, err := conn.Exec(
 		ctx,
 		"SELECT * FROM cypher('gmeow_graph', $$MATCH ()-[r]->() DELETE r$$) AS (value agtype)",
 	); err != nil {
 		return fmt.Errorf("clear AGE graph edges: %w", err)
 	}
-	if _, err := index.pool.Exec(
+	if _, err := conn.Exec(
 		ctx,
 		"SELECT * FROM cypher('gmeow_graph', $$MATCH (n) DELETE n$$) AS (value agtype)",
 	); err != nil {
@@ -758,6 +1035,7 @@ func projectObjectTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	object filestore.ProjectionObject,
+	source query.ProjectionSource,
 ) error {
 	manifestJSON, err := json.Marshal(object.Manifest)
 	if err != nil {
@@ -846,6 +1124,7 @@ func projectObjectTx(
 		tx,
 		object.Manifest,
 		object.Annotations,
+		source,
 	); err != nil {
 		return err
 	}
@@ -863,7 +1142,7 @@ func deleteAgeFactsForDigest(
 	tx pgx.Tx,
 	digest contracts.ObjectDigest,
 ) error {
-	if _, err := tx.Exec(ctx, "SET search_path=ag_catalog, public"); err != nil {
+	if err := setAgeSearchPath(ctx, tx); err != nil {
 		return fmt.Errorf("set AGE search path: %w", err)
 	}
 	cypher := fmt.Sprintf(
@@ -872,6 +1151,12 @@ func deleteAgeFactsForDigest(
 	)
 	if _, err := tx.Exec(ctx, ageSQL(cypher, "value agtype")); err != nil {
 		return fmt.Errorf("delete AGE facts for %s: %w", digest, err)
+	}
+	if _, err := tx.Exec(
+		ctx,
+		ageSQL(`MATCH (n) WHERE NOT (n)--() DELETE n`, "value agtype"),
+	); err != nil {
+		return fmt.Errorf("delete stale AGE nodes for %s: %w", digest, err)
 	}
 	return nil
 }
@@ -1058,7 +1343,7 @@ func insertAgeGraphRows(
 	if len(manifest.Graph) == 0 {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, "SET search_path=ag_catalog, public"); err != nil {
+	if err := setAgeSearchPath(ctx, tx); err != nil {
 		return fmt.Errorf("set AGE search path: %w", err)
 	}
 	for _, fact := range manifest.Graph {
@@ -1115,8 +1400,9 @@ func insertEmbeddingRows(
 	tx pgx.Tx,
 	manifest contracts.Manifest,
 	annotations []contracts.Annotation,
+	source query.ProjectionSource,
 ) error {
-	rows := embeddingRowsFrom(manifest, annotations)
+	rows := embeddingRowsFrom(ctx, source, manifest, annotations)
 	for _, row := range rows {
 		if _, err := tx.Exec(
 			ctx,
@@ -1247,15 +1533,19 @@ type embeddingRow struct {
 }
 
 func embeddingRowsFrom(
+	ctx context.Context,
+	source query.ProjectionSource,
 	manifest contracts.Manifest,
 	annotations []contracts.Annotation,
 ) []embeddingRow {
 	rows := []embeddingRow{}
 	for _, item := range manifest.Embeddings {
+		vector := embeddingVectorFromSource(ctx, source, item.ObjectDigest)
 		rows = append(rows, embeddingRow{
 			model:      item.Model,
 			digest:     item.ObjectDigest,
 			dimensions: item.Dimensions,
+			vector:     vector,
 		})
 	}
 	for _, annotation := range annotations {
@@ -1278,6 +1568,53 @@ func embeddingRowsFrom(
 		}
 	}
 	return rows
+}
+
+func embeddingVectorFromSource(
+	ctx context.Context,
+	source query.ProjectionSource,
+	digest contracts.ObjectDigest,
+) *string {
+	reader, ok := source.(embeddingObjectReader)
+	if !ok || digest == "" {
+		return nil
+	}
+	opened, err := reader.Open(ctx, digest)
+	if err != nil {
+		return nil
+	}
+	defer opened.Close()
+	content, err := io.ReadAll(opened)
+	if err != nil {
+		return nil
+	}
+	return vectorJSONLiteral(content)
+}
+
+func vectorJSONLiteral(content []byte) *string {
+	var value any
+	if err := json.Unmarshal(content, &value); err != nil {
+		return nil
+	}
+	return vectorValueLiteral(value)
+}
+
+func vectorValueLiteral(value any) *string {
+	switch typed := value.(type) {
+	case []any:
+		return vectorAnyLiteral(typed)
+	case map[string]any:
+		for _, key := range []string{"vector", "embedding"} {
+			if vector := vectorValueLiteral(typed[key]); vector != nil {
+				return vector
+			}
+		}
+		values, ok := typed["embeddings"].([]any)
+		if ok && len(values) > 0 {
+			return vectorValueLiteral(values[0])
+		}
+	}
+	return nil
 }
 
 type summaryRow struct {
@@ -1459,6 +1796,15 @@ func nonNilMap(value map[string]any) map[string]any {
 		return map[string]any{}
 	}
 	return value
+}
+
+func containsString(values []string, value string) bool {
+	for _, item := range values {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmpty(values ...string) string {
