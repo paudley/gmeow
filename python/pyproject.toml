@@ -18,6 +18,7 @@ test = [
 ]
 
 [project.scripts]
+gmeow-intel = "gmeow_intel.worker:main"
 gmeow-intel-worker = "gmeow_intel.worker:main"
 
 [build-system]
