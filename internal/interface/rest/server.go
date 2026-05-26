@@ -11,9 +11,11 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"blackcat.ca/gmeow/internal/appsvc"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/observability"
 )
 
 type Server struct {
@@ -50,8 +52,23 @@ func NewHandler(services *appsvc.Services) http.Handler {
 	mux.HandleFunc(
 		"GET /v1/ops_status",
 		func(writer http.ResponseWriter, request *http.Request) {
+			started := time.Now()
+			defer func() {
+				observability.DefaultMetrics().ObserveDuration(
+					"gmeow_interface_latency",
+					time.Since(started),
+				)
+			}()
+
 			output, err := services.OpsStatus(request.Context())
 			writeJSON(writer, output, err)
+		},
+	)
+	mux.HandleFunc(
+		"GET /metrics",
+		func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			_, _ = writer.Write([]byte(observability.DefaultMetrics().PrometheusText()))
 		},
 	)
 
@@ -110,6 +127,14 @@ func handleJSON[In, Out any](
 	handler func(context.Context, In) (Out, error),
 ) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
+		started := time.Now()
+		defer func() {
+			observability.DefaultMetrics().ObserveDuration(
+				"gmeow_interface_latency",
+				time.Since(started),
+			)
+		}()
+
 		var input In
 		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
 			http.Error(writer, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)

@@ -980,6 +980,13 @@ func TestVerifyReportsCorruptBytesMissingRecoveryAndDanglingPart(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	healthy, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("healthy"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	report, err := store.Verify(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -992,6 +999,13 @@ func TestVerifyReportsCorruptBytesMissingRecoveryAndDanglingPart(t *testing.T) {
 	assertFinding(t, report, "compound_dangling_part")
 	if _, err := store.Open(ctx, digest); err == nil {
 		t.Fatal("expected normal read to fail on corrupt blob")
+	}
+	reader, err := store.Open(ctx, healthy)
+	if err != nil {
+		t.Fatalf("corrupt object poisoned unrelated read: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

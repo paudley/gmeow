@@ -146,13 +146,27 @@ func newSchedulerDeadLetterCommand(out io.Writer, configPath *string) *cobra.Com
 }
 
 func newSchedulerRequeueCommand(out io.Writer, configPath *string) *cobra.Command {
-	var limit int
+	var (
+		confirmInstance string
+		limit           int
+	)
 
 	command := &cobra.Command{
 		Use:   "requeue",
 		Short: "Requeue dead-lettered analysis jobs",
 		RunE: func(command *cobra.Command, _ []string) error {
-			service, closeFn, err := openScheduler(command.Context(), configPath)
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"scheduler requeue",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+			service, closeFn, err := openSchedulerLoaded(command.Context(), loaded)
 			if err != nil {
 				return err
 			}
@@ -172,6 +186,8 @@ func newSchedulerRequeueCommand(out io.Writer, configPath *string) *cobra.Comman
 		},
 	}
 	command.Flags().IntVar(&limit, "limit", 20, "maximum dead-letter jobs to requeue")
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "confirm production-like instance id before requeueing")
 
 	return command
 }

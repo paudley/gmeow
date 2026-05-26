@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/observability"
 )
 
 type Runtime struct {
@@ -103,6 +104,7 @@ func (runtime *Runtime) Handle(ctx context.Context, receipt JobReceipt) error {
 }
 
 func (runtime *Runtime) Process(ctx context.Context, job contracts.AnalyzerJob) error {
+	started := time.Now()
 	if err := validateJob(job); err != nil {
 		return err
 	}
@@ -118,13 +120,17 @@ func (runtime *Runtime) Process(ctx context.Context, job contracts.AnalyzerJob) 
 
 	annotation, err := analyzer.Analyze(ctx, runtime.store, job)
 	if err != nil {
+		observability.DefaultMetrics().AddCounter("gmeow_failed_analyzers", 1)
 		return err
 	}
 
 	annotation = normalizeAnnotation(annotation, job, runtime.now())
 	if err := runtime.store.WriteAnnotation(ctx, annotation); err != nil {
+		observability.DefaultMetrics().AddCounter("gmeow_failed_analyzers", 1)
 		return fmt.Errorf("write analysis annotation: %w", err)
 	}
+	observability.DefaultMetrics().
+		ObserveDuration("gmeow_analysis_latency", time.Since(started))
 
 	return nil
 }

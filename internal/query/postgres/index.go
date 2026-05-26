@@ -20,6 +20,7 @@ import (
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
+	"blackcat.ca/gmeow/internal/observability"
 	"blackcat.ca/gmeow/internal/query"
 )
 
@@ -319,6 +320,7 @@ func (index *Index) ProjectChangedReport(
 		},
 	)
 	report.Elapsed = time.Since(started)
+	observability.DefaultMetrics().ObserveDuration("gmeow_projection_lag", report.Elapsed)
 
 	return report, err
 }
@@ -390,6 +392,7 @@ func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 	}
 
 	report.Elapsed = time.Since(started)
+	observability.DefaultMetrics().ObserveDuration("gmeow_projection_lag", report.Elapsed)
 
 	return report, err
 }

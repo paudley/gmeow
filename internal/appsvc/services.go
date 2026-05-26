@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/observability"
 	"blackcat.ca/gmeow/internal/source"
 )
 
@@ -230,6 +231,7 @@ func (services *Services) MailSearch(
 		}
 	}
 	if firstErr != nil && len(fused) == 0 {
+		observability.DefaultMetrics().AddCounter("gmeow_source_errors", 1)
 		return ObjectSearchResponse{}, firstErr
 	}
 
@@ -413,6 +415,14 @@ func (services *Services) OpsStatus(ctx context.Context) (OpsStatusResponse, err
 		} else {
 			response.Scheduler = status
 			response.Counts["scheduler_pending"] = status.Pending
+			response.Counts["scheduler_retry"] = status.Retry
+			response.Counts["scheduler_failed"] = status.Failed
+			response.Counts["scheduler_dead_letter"] = status.DeadLetter
+			metrics := observability.DefaultMetrics()
+			metrics.SetGauge("gmeow_queue_depth_pending", float64(status.Pending))
+			metrics.SetGauge("gmeow_queue_depth_retry", float64(status.Retry))
+			metrics.SetGauge("gmeow_failed_analyzers", float64(status.Failed))
+			metrics.SetGauge("gmeow_dead_letter_jobs", float64(status.DeadLetter))
 		}
 	}
 
@@ -428,6 +438,9 @@ func (services *Services) OpsStatus(ctx context.Context) (OpsStatusResponse, err
 
 	if len(response.Errors) == 0 {
 		response.Errors = nil
+	}
+	response.Metadata = map[string]any{
+		"metrics": observability.DefaultMetrics().Snapshot(),
 	}
 
 	return response, nil

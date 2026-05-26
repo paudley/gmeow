@@ -43,6 +43,30 @@ func TestRESTMailSearchUsesAppServices(t *testing.T) {
 	}
 }
 
+func TestRESTMetricsExposesPrometheusText(t *testing.T) {
+	services := testServices(t, "metrics mail")
+	server := httptest.NewServer(NewHandler(services))
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %s", response.Status)
+	}
+	if contentType := response.Header.Get(
+		"Content-Type",
+	); !strings.Contains(
+		contentType,
+		"text/plain",
+	) {
+		t.Fatalf("unexpected content type: %s", contentType)
+	}
+}
+
 func testServices(t *testing.T, text string) *appsvc.Services {
 	t.Helper()
 	ctx := context.Background()

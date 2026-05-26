@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/observability"
 )
 
 func (store *FilesystemStore) Verify(ctx context.Context) (VerifyReport, error) {
@@ -69,6 +70,8 @@ func (store *FilesystemStore) Verify(ctx context.Context) (VerifyReport, error) 
 	if len(report.Findings) > 0 {
 		report.Status = VerifyStatusError
 	}
+	observability.DefaultMetrics().
+		SetGauge("gmeow_corrupt_objects", float64(len(report.Findings)))
 
 	return report, nil
 }

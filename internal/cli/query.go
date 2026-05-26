@@ -95,12 +95,21 @@ func newQueryMigrateCommand(configPath *string) *cobra.Command {
 }
 
 func newQueryRebuildCommand(out io.Writer, configPath *string) *cobra.Command {
-	return &cobra.Command{
+	var confirmInstance string
+
+	command := &cobra.Command{
 		Use:   "rebuild",
 		Short: "Rebuild QUERY from FILESTORE",
 		RunE: func(command *cobra.Command, _ []string) error {
 			loaded, err := config.Load(config.Options{Path: *configPath})
 			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"query rebuild",
+				confirmInstance,
+			); err != nil {
 				return err
 			}
 
@@ -127,6 +136,10 @@ func newQueryRebuildCommand(out io.Writer, configPath *string) *cobra.Command {
 			return err
 		},
 	}
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "confirm production-like instance id before rebuilding")
+
+	return command
 }
 
 func newQueryProjectChangedCommand(out io.Writer, configPath *string) *cobra.Command {

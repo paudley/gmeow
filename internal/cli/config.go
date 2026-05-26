@@ -140,13 +140,22 @@ func newSecretSetCommand(in io.Reader, configPath *string) *cobra.Command {
 }
 
 func newSecretUnsetCommand(configPath *string) *cobra.Command {
-	return &cobra.Command{
+	var confirmInstance string
+
+	command := &cobra.Command{
 		Use:   "unset <name>",
 		Short: "Validate a secret removal request",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			loaded, err := config.Load(config.Options{Path: *configPath})
 			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"config secret unset",
+				confirmInstance,
+			); err != nil {
 				return err
 			}
 
@@ -162,6 +171,10 @@ func newSecretUnsetCommand(configPath *string) *cobra.Command {
 			return removeSecretLeaf(selectedConfigPath(*configPath), name)
 		},
 	}
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "confirm production-like instance id before deleting")
+
+	return command
 }
 
 func secretUpdateMetadata(encryptedLeaf string) string {

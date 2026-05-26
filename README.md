@@ -6,7 +6,7 @@
 
 FILESTORE-first local knowledge services for agents.
 
-Gmeow is in a Go rewrite. Phases 0-6 provide the greenfield runtime: shared contracts, SOPS-backed config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, Go ANALYSIS worker runtime, Go SOURCE adapters, shared application services, and MCP/REST/read-only IMAP interfaces.
+Gmeow is in a Go rewrite. Phases 0-7 provide the greenfield runtime: shared contracts, SOPS-backed config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, Go ANALYSIS worker runtime, Go SOURCE adapters, shared application services, MCP/REST/read-only IMAP interfaces, and operational hardening.
 
 Gmeow is designed for trusted single-user local systems. By default it binds to `127.0.0.1` and does not add application-level authentication. Do not expose it directly to an untrusted network.
 
@@ -35,7 +35,6 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 ## Install
 
 ```bash
-uv sync --extra test
 mkdir -p ~/.config/gmeow
 cp gmeow.toml-example gmeow.toml
 age-keygen -o ~/.config/gmeow/key.txt
@@ -114,9 +113,10 @@ go run ./cmd/gmeow --config gmeow.toml rest-serve
 go run ./cmd/gmeow --config gmeow.toml imap-serve
 ```
 
-Phase 01/02 development commands include `gmeow-admin filestore verify`,
-`gmeow-admin query rebuild`, and `gmeow-admin query project-changed --since <RFC3339>` for
-FILESTORE verification and QUERY projection work.
+Operational commands include `gmeow-admin filestore verify`, `gmeow-admin query rebuild`,
+and `gmeow-admin query project-changed --since <RFC3339>` for FILESTORE verification and QUERY
+projection work. Broad or destructive production-like operations require explicit instance
+confirmation.
 SCHEDULER provides `gmeow-admin scheduler scan`, `status`, `dead-letter`, `requeue`, and `force`;
 RabbitMQ is mandatory. Production queues use the `gmeow.` prefix on the `gmeow` vhost; integration
 tests use the `gmeow.test.` prefix on the `gmeow-test` vhost.
@@ -167,6 +167,8 @@ running local PostgreSQL service. Tests must clean only test-owned rows and must
 databases or schemas.
 
 Before publishing, run the checklist in `docs/PUBLIC_RELEASE_CHECKLIST.md`.
+
+FILESTORE backup and restore procedures live in `docs/FILESTORE_BACKUP_RESTORE.md`.
 
 ## License
 
