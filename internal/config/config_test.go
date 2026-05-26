@@ -171,33 +171,12 @@ func TestLoadRejectsWrongRabbitMQVHost(t *testing.T) {
 }
 
 func TestValidateSourceCapabilitiesByKind(t *testing.T) {
-	valid := Config{
-		System: SystemConfig{
-			ConfigVersion: currentConfigVersion,
-			InstanceID:    "test",
-			DataDir:       "data",
-		},
-		Filestore: FilestoreConfig{Root: "data/filestore"},
-		Postgres: PostgresConfig{
-			Host:     "127.0.0.1",
-			Port:     5432,
-			Database: "gmeow",
-			User:     "gmeow",
-		},
-		RabbitMQ: RabbitMQConfig{
-			Host:      "127.0.0.1",
-			Port:      5672,
-			User:      "gmeow",
-			VHost:     "gmeow",
-			TestUser:  "gmeow-test",
-			TestVHost: "gmeow-test",
-		},
-		Sources: []SourceConfig{{
-			Name:         "primary",
-			Kind:         "gmail",
-			Capabilities: []string{"hydrate", "live_search", "actions"},
-		}},
-	}
+	valid := validConfig()
+	valid.Sources = []SourceConfig{{
+		Name:         "primary",
+		Kind:         "gmail",
+		Capabilities: []string{"hydrate", "live_search", "actions"},
+	}}
 	if err := validateConfig(valid); err != nil {
 		t.Fatal(err)
 	}
@@ -215,6 +194,48 @@ func TestValidateSourceCapabilitiesByKind(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "does not support capability") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateInterfaceConfig(t *testing.T) {
+	valid := validConfig()
+	valid.Interfaces = []InterfaceConfig{
+		{Name: "mcp", Kind: "mcp"},
+		{Name: "rest", Kind: "rest", Host: "127.0.0.1", Port: 8765},
+		{Name: "imap", Kind: "imap", Host: "127.0.0.1", Port: 1143, Username: "reader", Facets: []string{"mail_message"}},
+	}
+	if err := validateConfig(valid); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]InterfaceConfig{
+		"unsupported kind": {Name: "bad", Kind: "smtp", Host: "127.0.0.1", Port: 2525},
+		"non-loopback":     {Name: "rest", Kind: "rest", Host: "0.0.0.0", Port: 8765},
+		"imap username":    {Name: "imap", Kind: "imap", Host: "127.0.0.1", Port: 1143, Facets: []string{"mail_message"}},
+		"imap facet":       {Name: "imap", Kind: "imap", Host: "127.0.0.1", Port: 1143, Username: "reader", Facets: []string{"file"}},
+	}
+	for name, iface := range cases {
+		t.Run(name, func(t *testing.T) {
+			invalid := validConfig()
+			invalid.Interfaces = []InterfaceConfig{iface}
+			if err := validateConfig(invalid); err == nil {
+				t.Fatal("expected invalid interface to fail")
+			}
+		})
+	}
+}
+
+func TestSourceCredentialSecretIsReferenced(t *testing.T) {
+	parsed := Config{
+		Sources: []SourceConfig{{
+			Name:             "primary",
+			Kind:             "gmail",
+			CredentialSecret: "gmail_credentials_json",
+		}},
+	}
+	references := secretReferences(parsed)
+	if references["gmail_credentials_json"] != 1 {
+		t.Fatalf("expected gmail credential secret reference, got %#v", references)
 	}
 }
 
@@ -376,6 +397,31 @@ func writeConfig(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func validConfig() Config {
+	return Config{
+		System: SystemConfig{
+			ConfigVersion: currentConfigVersion,
+			InstanceID:    "test",
+			DataDir:       "data",
+		},
+		Filestore: FilestoreConfig{Root: "data/filestore"},
+		Postgres: PostgresConfig{
+			Host:     "127.0.0.1",
+			Port:     5432,
+			Database: "gmeow",
+			User:     "gmeow",
+		},
+		RabbitMQ: RabbitMQConfig{
+			Host:      "127.0.0.1",
+			Port:      5672,
+			User:      "gmeow",
+			VHost:     "gmeow",
+			TestUser:  "gmeow-test",
+			TestVHost: "gmeow-test",
+		},
+	}
 }
 
 func repoConfigPath(t *testing.T) string {

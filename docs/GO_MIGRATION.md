@@ -1196,7 +1196,8 @@ Deliverables:
 - structured logging and trace IDs;
 - development docker/core-data assumptions documented;
 - release workflow split: Go binaries/containers outside PyPI, Python ANALYSIS package on PyPI;
-- smoke test that starts with fake FILESTORE, fake QUERY, and fake analyzer.
+- smoke test that starts real in-repo FILESTORE, QUERY, and analyzer implementations with local
+  test storage.
 
 Exit criteria:
 
@@ -1248,7 +1249,8 @@ Deliverables:
 - incremental projection from changed annotation files;
 - text search, vector placeholder paths, graph edge projection, facet filters, compound expansion,
   metadata/structure queries, and analyzer status queries;
-- fake in-memory QUERY for service tests.
+- package-local in-memory QUERY implementation for tests that do not need PostgreSQL, plus
+  PostgreSQL-backed tests for QUERY behavior and app-service orchestration.
 
 Exit criteria:
 
@@ -1599,19 +1601,20 @@ Testing should define the architecture contract, not just implementation details
 - **Contract tests:** every SOURCE adapter emits valid source events; every ANALYZER obeys spec and
   writes expected manifest sections; every INTERFACE plane calls shared services.
 - **Integration tests:** FILESTORE object-directory walk + QUERY rebuild; SCHEDULER + RabbitMQ +
-  fake worker; source ingest through projection; forced analysis from MCP/REST through to annotation
-  update; `mail_search` fan-out across fake QUERY and fake Gmail backends.
+  test worker; source ingest through projection; forced analysis from MCP/REST through to annotation
+  update; `mail_search` fan-out through real app-service, QUERY, SOURCE, and Gmail-adapter code
+  paths, with mocks only below external APIs such as Google Gmail.
 - **Failure tests:** duplicate ingest, worker crash before ack, worker crash after FILESTORE write,
   stale analyzer output, parent refresh after subobject analysis, dead-letter requeue, corrupt CAS
   object, missing emergency sidecar, missing manifest, PostgreSQL wipe.
 - **Performance tests:** ingest throughput, projection lag, queue latency by priority, search p95/p99,
   semantic search latency, rebuild time by object count.
 
-Fakes are allowed for narrow service tests and unsafe or unavailable external systems such as live
-Gmail/Drive, but they are not sufficient proof for core workflows. Any feature that changes an
-operator command, config bootstrap, FILESTORE write path, QUERY rebuild, scheduler enqueue, or
-worker acknowledgement path needs at least one representative functional test using the real command
-path.
+Mocks are allowed only at external-system boundaries such as live Google Gmail/Drive APIs,
+unavailable model endpoints, and network services that cannot be exercised safely in a given test.
+They are not sufficient proof for core workflows. Any feature that changes an operator command,
+config bootstrap, FILESTORE write path, QUERY rebuild, scheduler enqueue, or worker acknowledgement
+path needs at least one representative functional test using the real in-repo code path.
 
 ## Risks And Mitigations
 
@@ -1619,8 +1622,9 @@ path.
    outputs as CAS objects and reference them instead of bloating manifests.
 2. **Emergency sidecars become a shadow metadata system.** Make them write-once, minimal, and
    ignored by all normal processes; they are for human recovery only.
-3. **QUERY leaks into the domain.** Enforce dependency direction with package boundaries and fake
-   QUERY implementations in tests.
+3. **QUERY leaks into the domain.** Enforce dependency direction with package boundaries and tests
+   that exercise real QUERY interfaces without importing concrete implementations into domain or
+   interface packages.
 4. **Facets become vague tags.** Keep facet schemas versioned and enforce "at least one facet" at
    FILESTORE ingest time.
 5. **Compound objects collapse back into source-specific blobs.** Require subobjects and typed

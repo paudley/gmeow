@@ -11,12 +11,10 @@ Alembic runtime have been retired. Runtime entrypoints now point operators to th
   files.
 - **Protocols** — [`protocols.py`](./protocols.py) hosts structural protocol types used by
   retained helper modules.
-- **Object helpers** — [`cache.py`](./cache.py), [`parser.py`](./parser.py),
+- **Object helpers** - [`cache.py`](./cache.py), [`parser.py`](./parser.py),
   [`graph.py`](./graph.py), [`kg.py`](./kg.py), [`metadata.py`](./metadata.py), and
-  [`resilience.py`](./resilience.py) remain until later phases remove the final presentation and
-  operations helpers.
-- **Utility helpers** — [`http_json.py`](./http_json.py), [`toon.py`](./toon.py), and
-  [`_typing.py`](./_typing.py).
+  [`resilience.py`](./resilience.py) remain as transitional non-interface helpers.
+- **Utility helpers** - [`_typing.py`](./_typing.py).
 
 ## External Tool Prerequisites
 
@@ -26,4 +24,4 @@ Alembic runtime have been retired. Runtime entrypoints now point operators to th
 ## Operational Notes
 
 - Gmail/source behavior is implemented in Go SOURCE adapters.
-- The compact response encoding helper is TOON; see [`toon.py`](./toon.py) for the encoding rules.
+- Public REST, MCP, and IMAP interfaces are implemented by the Go runtime.

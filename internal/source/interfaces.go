@@ -68,6 +68,15 @@ type LiveSearchAdapter interface {
 	LiveSearch(ctx context.Context, request LiveSearchRequest) ([]LiveSearchResult, error)
 }
 
+type HydratingLiveSearchAdapter interface {
+	LiveSearchAdapter
+	SearchAndHydrate(
+		ctx context.Context,
+		service IngestService,
+		request LiveSearchRequest,
+	) ([]LiveSearchResult, error)
+}
+
 type LiveRetrieveAdapter interface {
 	Adapter
 	LiveRetrieve(ctx context.Context, externalID string) (IngestObject, error)
@@ -136,6 +145,11 @@ type CompoundObject struct {
 
 type Service struct {
 	store FilestoreClient
+}
+
+type IngestService interface {
+	Ingest(ctx context.Context, object IngestObject) (contracts.ObjectDigest, bool, error)
+	LookupSourceObject(ctx context.Context, ref contracts.SourceObjectRef) (contracts.ObjectDigest, bool, error)
 }
 
 func NewService(store FilestoreClient) (*Service, error) {
@@ -216,6 +230,13 @@ func (service *Service) Ingest(
 	})
 
 	return digest, true, err
+}
+
+func (service *Service) LookupSourceObject(
+	ctx context.Context,
+	ref contracts.SourceObjectRef,
+) (contracts.ObjectDigest, bool, error) {
+	return service.store.LookupSourceObject(ctx, ref)
 }
 
 func (service *Service) WriteCursor(

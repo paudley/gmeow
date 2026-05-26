@@ -6,7 +6,7 @@
 
 FILESTORE-first local knowledge services for agents.
 
-Gmeow is in a Go rewrite. Phases 0-5 provide the greenfield foundation: shared contracts, SOPS-backed config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, Go ANALYSIS worker runtime, and Go SOURCE adapters.
+Gmeow is in a Go rewrite. Phases 0-6 provide the greenfield runtime: shared contracts, SOPS-backed config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, Go ANALYSIS worker runtime, Go SOURCE adapters, shared application services, and MCP/REST/read-only IMAP interfaces.
 
 Gmeow is designed for trusted single-user local systems. By default it binds to `127.0.0.1` and does not add application-level authentication. Do not expose it directly to an untrusted network.
 
@@ -20,8 +20,7 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Provides admin commands for config, FILESTORE verification, QUERY projection, and SCHEDULER operations.
 - Runs Go ANALYSIS workers that consume scheduler jobs, read/write FILESTORE through typed gRPC, and support explicit `gmeow-intel` external analyzer adapters for Python/model behavior.
 - Provides Go SOURCE adapters for local filesystem fixtures, push/ringme records, the Gmail SOURCE adapter for ingest/hydrate/live search/live retrieve/actions, and design-only Drive capability checks.
-
-MCP, REST, and IMAP return in the Go INTERFACE phase.
+- Exposes shared application services through `gmeow mcp-serve`, `gmeow rest-serve`, and read-only `gmeow imap-serve`; user-facing `search`, `mail-search`, `retrieve`, `ops-status`, and `force-analysis` commands use the same service layer.
 
 ## Features
 
@@ -110,6 +109,9 @@ go run ./cmd/gmeow --config gmeow.toml status
 go run ./cmd/gmeow --config gmeow.toml filestore-serve
 go run ./cmd/gmeow --config gmeow.toml query-serve
 go run ./cmd/gmeow --config gmeow.toml scheduler-serve
+go run ./cmd/gmeow --config gmeow.toml mcp-serve
+go run ./cmd/gmeow --config gmeow.toml rest-serve
+go run ./cmd/gmeow --config gmeow.toml imap-serve
 ```
 
 Phase 01/02 development commands include `gmeow-admin filestore verify`,
@@ -133,9 +135,11 @@ Go binaries and future container images are released outside PyPI. The only plan
 `python/` (`gmeow-intel`), which contains Python-native ANALYSIS workers and shared job/annotation
 contract validation.
 
-## MCP
+## Interfaces
 
-MCP returns in the Go INTERFACE phase. Phase 00 does not start MCP, REST, or IMAP services.
+MCP tools, REST endpoints, CLI workflows, and read-only IMAP all call the shared Go application
+services. Protocol packages parse requests and shape responses; they do not import concrete
+FILESTORE, QUERY, SOURCE, or SCHEDULER implementations.
 
 ## Local Data
 
@@ -147,8 +151,8 @@ By default, local data is ignored by git and stored under `data/`:
 
 ## Archive and IMAP
 
-Archive and IMAP behavior return in the Go INTERFACE phase. They are not operator-facing phase 0-5
-runtime surfaces.
+IMAP is read-only and exposes only objects with the `mail_message` facet. Non-mail facets remain
+invisible to IMAP clients.
 
 ## Development
 

@@ -134,7 +134,7 @@ func (adapter *GmailAdapter) LiveSearch(
 
 func (adapter *GmailAdapter) SearchAndHydrate(
 	ctx context.Context,
-	service *Service,
+	service IngestService,
 	request LiveSearchRequest,
 ) ([]LiveSearchResult, error) {
 	results, err := adapter.LiveSearch(ctx, request)
@@ -149,7 +149,7 @@ func (adapter *GmailAdapter) SearchAndHydrate(
 			ExternalID:      results[index].ExternalID,
 			ExternalVersion: results[index].ExternalVersion,
 		}
-		digest, found, err := service.store.LookupSourceObject(ctx, ref)
+		digest, found, err := service.LookupSourceObject(ctx, ref)
 		if err != nil {
 			return nil, err
 		}
@@ -223,7 +223,7 @@ func (adapter *GmailAdapter) ApplyAction(
 
 func (adapter *GmailAdapter) IngestMessage(
 	ctx context.Context,
-	service *Service,
+	service IngestService,
 	message GmailMessage,
 ) (contracts.ObjectDigest, bool, error) {
 	object, err := adapter.messageObject(ctx, service, message)
@@ -236,7 +236,7 @@ func (adapter *GmailAdapter) IngestMessage(
 
 func (adapter *GmailAdapter) messageObject(
 	ctx context.Context,
-	service *Service,
+	service IngestService,
 	message GmailMessage,
 ) (IngestObject, error) {
 	if strings.TrimSpace(message.MessageID) == "" {
@@ -288,7 +288,7 @@ func (adapter *GmailAdapter) messageObject(
 
 func (adapter *GmailAdapter) writeMessageParts(
 	ctx context.Context,
-	service *Service,
+	service IngestService,
 	message GmailMessage,
 	observed time.Time,
 ) ([]contracts.CompoundPart, error) {

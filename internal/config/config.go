@@ -114,17 +114,22 @@ type SchedulerPriority struct {
 }
 
 type InterfaceConfig struct {
-	Name string `toml:"name"`
-	Kind string `toml:"kind"`
-	Host string `toml:"host"`
-	Port int    `toml:"port"`
+	Name     string   `toml:"name"`
+	Kind     string   `toml:"kind"`
+	Host     string   `toml:"host"`
+	Username string   `toml:"username"`
+	Password string   `toml:"password"`
+	Facets   []string `toml:"facets"`
+	Port     int      `toml:"port"`
 }
 
 type SourceConfig struct {
-	Name         string   `toml:"name"`
-	Kind         string   `toml:"kind"`
-	Facets       []string `toml:"facets"`
-	Capabilities []string `toml:"capabilities"`
+	Name             string   `toml:"name"`
+	Kind             string   `toml:"kind"`
+	CredentialSecret string   `toml:"credential_secret"`
+	UserID           string   `toml:"user_id"`
+	Facets           []string `toml:"facets"`
+	Capabilities     []string `toml:"capabilities"`
 }
 
 type AnalysisConfig struct {
@@ -580,6 +585,65 @@ func validateConfig(parsed Config) error {
 		}
 	}
 
+	for _, iface := range parsed.Interfaces {
+		if err := validateInterface(iface); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateInterface(iface InterfaceConfig) error {
+	if strings.TrimSpace(iface.Name) == "" {
+		return errors.New("interface requires name")
+	}
+
+	switch strings.TrimSpace(iface.Kind) {
+	case "mcp":
+		if iface.Host != "" || iface.Port != 0 {
+			if err := validateInterfaceHostPort(iface); err != nil {
+				return err
+			}
+		}
+	case "rest":
+		if err := validateInterfaceHostPort(iface); err != nil {
+			return err
+		}
+	case "imap":
+		if err := validateInterfaceHostPort(iface); err != nil {
+			return err
+		}
+		if strings.TrimSpace(iface.Username) == "" {
+			return fmt.Errorf("interface %q kind imap requires username", iface.Name)
+		}
+		if len(iface.Facets) == 0 {
+			return fmt.Errorf("interface %q kind imap requires facets = [\"mail_message\"]", iface.Name)
+		}
+		for _, facet := range iface.Facets {
+			if facet != "mail_message" {
+				return fmt.Errorf("interface %q kind imap may only expose mail_message facet", iface.Name)
+			}
+		}
+	default:
+		return fmt.Errorf("interface %q has unsupported kind %q", iface.Name, iface.Kind)
+	}
+
+	return nil
+}
+
+func validateInterfaceHostPort(iface InterfaceConfig) error {
+	if strings.TrimSpace(iface.Host) == "" {
+		return fmt.Errorf("interface %q requires host", iface.Name)
+	}
+	parsed := net.ParseIP(iface.Host)
+	if parsed == nil || !parsed.IsLoopback() {
+		return fmt.Errorf("interface %q host must be a loopback IP", iface.Name)
+	}
+	if iface.Port <= 0 || iface.Port > 65535 {
+		return fmt.Errorf("interface %q port must be between 1 and 65535", iface.Name)
+	}
+
 	return nil
 }
 
@@ -677,6 +741,9 @@ func secretReferences(parsed Config) map[string]int {
 	add(postgresPasswordName)
 	add(rabbitPasswordName)
 	add(testRabbitPassName)
+	for _, source := range parsed.Sources {
+		add(source.CredentialSecret)
+	}
 
 	return references
 }

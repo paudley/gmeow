@@ -8,14 +8,18 @@ each feature reports degraded state instead of preventing unrelated local operat
 """
 
 import contextlib
+import http.client
+import json
 from pathlib import Path
 from typing import Any, Protocol, cast
-
-from .http_json import HTTP_SERVER_ERROR, HttpJsonError, post_json
+from urllib.parse import urlparse
 
 CHECK_EXCEPTIONS = (AttributeError, KeyError, TypeError, ValueError, RuntimeError, OSError)
 DEFAULT_DICT_ANY = cast(dict[str, Any], None)
 DEFAULT_OBJECT = cast(object, None)
+HTTP_SERVER_ERROR = 500
+EMBEDDING_ENDPOINT_HOST_REQUIRED = "embedding endpoint host is required"
+UNSUPPORTED_EMBEDDING_ENDPOINT_SCHEME = "unsupported embedding endpoint scheme"
 
 
 class _ResilienceConfig(Protocol):
@@ -163,11 +167,36 @@ def _embedding_check(endpoint: str, model: str) -> dict[str, Any]:
     if not endpoint:
         return _check("degraded", "No embedding endpoint configured.")
     try:
-        status, _ = post_json(endpoint, {"model": model, "input": ["health check"]}, timeout=5.0)
+        status = _post_json_status(endpoint, {"model": model, "input": ["health check"]}, timeout=5.0)
         return _check("ok" if status < HTTP_SERVER_ERROR else "degraded", f"Embedding endpoint HTTP {status}.")
-    except (HttpJsonError, OSError, TimeoutError, ValueError, TypeError) as exc:
+    except (OSError, TimeoutError, ValueError, TypeError) as exc:
         return _check("degraded", repr(exc))
 
 
 def _check(status: str, detail: str) -> dict[str, Any]:
     return {"status": status, "detail": detail}
+
+
+def _post_json_status(url: str, payload: dict[str, Any], timeout: float) -> int:
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        connection_cls: type[http.client.HTTPConnection] = http.client.HTTPSConnection
+    elif parsed.scheme == "http":
+        connection_cls = http.client.HTTPConnection
+    else:
+        raise ValueError(UNSUPPORTED_EMBEDDING_ENDPOINT_SCHEME)
+    if not parsed.hostname:
+        raise ValueError(EMBEDDING_ENDPOINT_HOST_REQUIRED)
+
+    body = json.dumps(payload).encode("utf-8")
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    connection = connection_cls(parsed.hostname, parsed.port, timeout=timeout)
+    try:
+        connection.request("POST", path, body=body, headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        response.read()
+        return int(response.status)
+    finally:
+        connection.close()

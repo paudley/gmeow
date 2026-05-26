@@ -68,8 +68,14 @@ port = 8765
 [[interfaces]]
 name = "mcp"
 kind = "mcp"
+
+[[interfaces]]
+name = "imap"
+kind = "imap"
 host = "127.0.0.1"
-port = 8765
+port = 1143
+username = "gmeow"
+facets = ["mail_message"]
 
 [analysis.embeddings]
 endpoint = "http://127.0.0.1:8090/v1/embeddings"
@@ -127,3 +133,11 @@ worker_kind = "go"
 name = "query"
 kind = "query"
 facets = ["*"]
+
+# [[sources]]
+# name = "primary"
+# kind = "gmail"
+# credential_secret = "gmail_credentials_json"
+# user_id = "me"
+# facets = ["mail_message"]
+# capabilities = ["hydrate", "live_search", "live_retrieve", "actions"]

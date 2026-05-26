@@ -186,6 +186,58 @@ func TestPhaseFourToFivePythonRetiredPathsStayRetired(t *testing.T) {
 	}
 }
 
+func TestPhaseSixPythonPresentationHelpersStayRetired(t *testing.T) {
+	root := repoRoot(t)
+	retired := []string{
+		"src/gmeow/http_json.py",
+		"src/gmeow/toon.py",
+		"src/gmeow/markdown.py",
+	}
+	for _, relative := range retired {
+		if _, err := os.Stat(filepath.Join(root, relative)); err == nil {
+			t.Fatalf("retired phase 6 Python presentation helper is present: %s", relative)
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat retired path %s: %v", relative, err)
+		}
+	}
+}
+
+func TestPhaseSixInterfacesDependOnAppServices(t *testing.T) {
+	root := filepath.Join(repoRoot(t), "internal", "interface")
+	forbidden := []string{
+		"internal/filestore",
+		"internal/query/postgres",
+		"internal/query/memory",
+		"internal/scheduler/rabbitmq",
+	}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(content)
+		if !strings.Contains(text, "internal/appsvc") && !strings.HasSuffix(path, "interfaces.go") {
+			t.Fatalf("%s does not import appsvc", path)
+		}
+		for _, dependency := range forbidden {
+			if strings.Contains(text, dependency) {
+				t.Fatalf("%s imports forbidden concrete implementation %q", path, dependency)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTransitionalPythonSyncDoesNotOwnAnalysisScheduling(t *testing.T) {
 	path := filepath.Join(repoRoot(t), "src", "gmeow", "sync.py")
 	content, err := os.ReadFile(path)
@@ -229,7 +281,31 @@ func TestDocsDoNotReintroduceGmailRawPayloadDuplication(t *testing.T) {
 	}
 }
 
-func TestPublicDocsDescribePhaseZeroThroughFiveRuntime(t *testing.T) {
+func TestDocsDoNotPrescribeFakingInRepoPhaseSixCode(t *testing.T) {
+	root := repoRoot(t)
+	for _, relative := range []string{
+		"README.md",
+		"docs/GO_MIGRATION.md",
+		"docs/GO_PHASE_02_QUERY.md",
+		"docs/GO_PHASE_06_INTERFACE.md",
+	} {
+		content, err := os.ReadFile(filepath.Join(root, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, stale := range []string{
+			"fake QUERY",
+			"fake Gmail",
+			"fake FILESTORE",
+		} {
+			if strings.Contains(string(content), stale) {
+				t.Fatalf("%s still prescribes faking in-repo code with %q", relative, stale)
+			}
+		}
+	}
+}
+
+func TestPublicDocsDescribePhaseZeroThroughSixRuntime(t *testing.T) {
 	root := repoRoot(t)
 	readme, err := os.ReadFile(filepath.Join(root, "README.md"))
 	if err != nil {
@@ -237,21 +313,26 @@ func TestPublicDocsDescribePhaseZeroThroughFiveRuntime(t *testing.T) {
 	}
 	text := string(readme)
 	for _, required := range []string{
-		"Phases 0-5",
+		"Phases 0-6",
 		"Go ANALYSIS worker runtime",
 		"Go SOURCE adapters",
 		"Gmail SOURCE adapter",
+		"gmeow mcp-serve",
+		"gmeow rest-serve",
+		"read-only `gmeow imap-serve`",
 		"gmeow-intel",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf(
-				"README.md does not describe completed phase 0-5 runtime surface %q",
+				"README.md does not describe completed phase 0-6 runtime surface %q",
 				required,
 			)
 		}
 	}
 	for _, stale := range []string{
 		"Phases 0-3 provide",
+		"MCP returns in the Go INTERFACE phase",
+		"Archive and IMAP behavior return in the Go INTERFACE phase",
 		"Gmail SOURCE adapters, and ANALYSIS workers return in later Go migration phases",
 		"Gmail provisioning and source runtime behavior move in later Go migration phases",
 	} {

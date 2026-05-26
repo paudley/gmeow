@@ -258,6 +258,21 @@ func (client *FilestoreClient) ReadManifest(
 	return FromPBManifest(response.GetManifest())
 }
 
+func (client *FilestoreClient) GetStructure(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) (contracts.Structure, error) {
+	response, err := client.client.GetStructure(
+		ctx,
+		&pb.GetStructureRequest{Digest: string(digest)},
+	)
+	if err != nil {
+		return contracts.Structure{}, err
+	}
+
+	return FromPBStructure(response.GetStructure())
+}
+
 func (client *FilestoreClient) WriteSourceCursor(
 	ctx context.Context,
 	cursor contracts.SourceCursor,
@@ -288,6 +303,24 @@ func (client *FilestoreClient) WriteAnnotation(
 		ctx,
 		&pb.WriteAnnotationRequest{Annotation: converted},
 	)
+
+	return err
+}
+
+func (client *FilestoreClient) WriteOverlays(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	overlays map[string]any,
+) error {
+	encoded, err := encodeMap(overlays)
+	if err != nil {
+		return err
+	}
+
+	_, err = client.client.WriteOverlays(ctx, &pb.WriteOverlaysRequest{
+		Digest:       string(digest),
+		OverlaysJson: encoded,
+	})
 
 	return err
 }
