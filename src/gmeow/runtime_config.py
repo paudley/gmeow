@@ -315,4 +315,3 @@ def _string_object_dict(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return {str(key): item for key, item in cast(dict[object, Any], value).items()}
-

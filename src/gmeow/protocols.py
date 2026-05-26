@@ -192,7 +192,6 @@ class SyncCache(Protocol):
         """Return deferred attachment hydration status."""
         ...
 
-
     def get_message(self, message_id: str) -> dict[str, Any]:
         """Return a cached message mapping."""
         ...

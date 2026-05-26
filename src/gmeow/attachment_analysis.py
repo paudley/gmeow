@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any, TypedDict, cast
 
 from ._typing import ensure_dict
-from .runtime_config import AttachmentAnalysisConfig
 from .http_json import HttpJsonError, post_json
+from .runtime_config import AttachmentAnalysisConfig
 
 
 class _OpenAIContentPart(TypedDict, total=False):
