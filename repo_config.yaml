@@ -126,6 +126,15 @@ python:
   module_docs:
     source_docs_path: docs/SOURCE_DOCS.md
     banned_doc_filenames: []
+  pytest_gate:
+    enabled: true
+    test_command:
+      - uv
+      - run
+      - --frozen
+      - pytest
+      - python/tests
+      - --strict-markers
   catch_and_silence:
     enabled: true
   security_patterns:
