@@ -336,5 +336,10 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(go test *)"
+    ]
   }
 }
