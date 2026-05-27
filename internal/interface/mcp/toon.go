@@ -30,17 +30,19 @@ type toonSearchOutput struct {
 }
 
 type toonSearchResult struct {
-	Rank    int     `toon:"rank"`
-	Digest  string  `toon:"digest"`
-	Score   float64 `toon:"score"`
-	Title   string  `toon:"title"`
-	Snippet string  `toon:"snippet"`
-	Facets  string  `toon:"facets"`
-	Pending string  `toon:"pending"`
+	Message *toonMessage `toon:"message,omitempty"`
+	Rank    int          `toon:"rank"`
+	Digest  string       `toon:"digest"`
+	Score   float64      `toon:"score"`
+	Title   string       `toon:"title"`
+	Snippet string       `toon:"snippet"`
+	Facets  string       `toon:"facets"`
+	Pending string       `toon:"pending"`
 }
 
 type toonRetrieveOutput struct {
 	Tool        string              `toon:"tool"`
+	Message     *toonMessage        `toon:"message,omitempty"`
 	Digest      string              `toon:"digest"`
 	ObjectID    string              `toon:"object_id,omitempty"`
 	MediaType   string              `toon:"media_type,omitempty"`
@@ -53,6 +55,66 @@ type toonRetrieveOutput struct {
 	Compound    toonCompoundOutput  `toon:"compound,omitempty"`
 	Content     string              `toon:"content,omitempty"`
 	Size        int64               `toon:"size"`
+}
+
+type toonMessageSummaryOutput struct {
+	Tool    string       `toon:"tool"`
+	Message *toonMessage `toon:"message"`
+}
+
+type toonSummarySearchOutput struct {
+	Tool     string                   `toon:"tool"`
+	Query    string                   `toon:"query,omitempty"`
+	Messages []toonSummaryMessageItem `toon:"messages"`
+	Total    int                      `toon:"total"`
+	Returned int                      `toon:"returned"`
+}
+
+type toonSummaryMessageItem struct {
+	IDSubject string `toon:"msgid_subject"`
+	ToFrom    string `toon:"to_from"`
+	Summary   string `toon:"summary"`
+}
+
+type toonMessage struct {
+	MessageID       string              `toon:"message_id,omitempty"`
+	Digest          string              `toon:"digest"`
+	ObjectID        string              `toon:"object_id,omitempty"`
+	ThreadID        string              `toon:"thread_id,omitempty"`
+	SelectedHeaders toonSelectedHeaders `toon:"selected_headers"`
+	Summary         string              `toon:"summary,omitempty"`
+	Bullets         []string            `toon:"bullets,omitempty"`
+	Categories      []string            `toon:"categories,omitempty"`
+	Graph           toonMessageGraph    `toon:"graph,omitempty"`
+	Body            string              `toon:"body,omitempty"`
+	Attachments     []toonAttachment    `toon:"attachments"`
+}
+
+type toonSelectedHeaders struct {
+	Date    string `toon:"date,omitempty"`
+	From    string `toon:"from,omitempty"`
+	To      string `toon:"to,omitempty"`
+	Cc      string `toon:"cc,omitempty"`
+	Subject string `toon:"subject,omitempty"`
+}
+
+type toonMessageGraph struct {
+	Source  map[string]any  `toon:"source,omitempty"`
+	Topics  []string        `toon:"topics,omitempty"`
+	Actions []string        `toon:"actions,omitempty"`
+	Links   []toonGraphLink `toon:"links,omitempty"`
+}
+
+type toonGraphLink struct {
+	Rel string `toon:"rel"`
+	URL string `toon:"url"`
+}
+
+type toonAttachment struct {
+	RetrievalID string `toon:"retrieval_id"`
+	Filename    string `toon:"filename,omitempty"`
+	MediaType   string `toon:"media_type,omitempty"`
+	Summary     string `toon:"summary,omitempty"`
 }
 
 type toonStructureOutput struct {
@@ -228,6 +290,7 @@ func toonSearch(
 		results = append(results, toonSearchResult{
 			Rank:    index + 1,
 			Digest:  string(result.ObjectDigest),
+			Message: toonMessageFromCanonical(result.Message),
 			Score:   result.Score,
 			Title:   result.Title,
 			Snippet: result.Snippet,
@@ -262,6 +325,89 @@ func toonRetrieve(response appsvc.RetrieveResponse) toonRetrieveOutput {
 		Provenance:  toonProvenance(manifest.Provenance),
 		Compound:    toonCompound(manifest.Compound, false),
 		Content:     response.Content,
+		Message:     toonMessageFromCanonical(response.Message),
+	}
+}
+
+func toonMessageSummary(message appsvc.CanonicalMessage) toonMessageSummaryOutput {
+	return toonMessageSummaryOutput{
+		Tool:    "message_summary",
+		Message: toonMessageFromCanonical(&message),
+	}
+}
+
+func toonSummarySearch(response appsvc.SummarySearchResponse) toonSummarySearchOutput {
+	messages := make([]toonSummaryMessageItem, 0, len(response.Messages))
+	for _, message := range response.Messages {
+		messages = append(messages, toonSummaryMessageItem{
+			IDSubject: summaryIDSubject(message),
+			ToFrom:    message.To + " / " + message.From,
+			Summary:   message.Summary,
+		})
+	}
+
+	return toonSummarySearchOutput{
+		Tool:     "summary_search",
+		Query:    response.Query,
+		Total:    response.Total,
+		Returned: response.Returned,
+		Messages: messages,
+	}
+}
+
+func summaryIDSubject(message appsvc.MessageSummaryListItem) string {
+	parts := []string{firstNonEmpty(message.MessageID, message.Digest)}
+	if message.Date != "" {
+		parts = append(parts, message.Date)
+	}
+	parts = append(parts, message.Subject)
+
+	return strings.Join(parts, " / ")
+}
+
+func toonMessageFromCanonical(message *appsvc.CanonicalMessage) *toonMessage {
+	if message == nil {
+		return nil
+	}
+
+	attachments := make([]toonAttachment, 0, len(message.Attachments))
+	for _, attachment := range message.Attachments {
+		attachments = append(attachments, toonAttachment{
+			RetrievalID: attachment.RetrievalID,
+			Filename:    attachment.Filename,
+			MediaType:   attachment.MediaType,
+			Summary:     attachment.Summary,
+		})
+	}
+
+	links := make([]toonGraphLink, 0, len(message.Graph.Links))
+	for _, link := range message.Graph.Links {
+		links = append(links, toonGraphLink{Rel: link.Rel, URL: link.URL})
+	}
+
+	return &toonMessage{
+		MessageID: message.MessageID,
+		Digest:    message.Digest,
+		ObjectID:  message.ObjectID,
+		ThreadID:  message.ThreadID,
+		SelectedHeaders: toonSelectedHeaders{
+			Date:    message.SelectedHeaders.Date,
+			From:    message.SelectedHeaders.From,
+			To:      message.SelectedHeaders.To,
+			Cc:      message.SelectedHeaders.Cc,
+			Subject: message.SelectedHeaders.Subject,
+		},
+		Summary:    message.Summary,
+		Bullets:    append([]string{}, message.Bullets...),
+		Categories: append([]string{}, message.Categories...),
+		Graph: toonMessageGraph{
+			Source:  message.Graph.Source,
+			Topics:  append([]string{}, message.Graph.Topics...),
+			Actions: append([]string{}, message.Graph.Actions...),
+			Links:   links,
+		},
+		Body:        message.Body,
+		Attachments: attachments,
 	}
 }
 
@@ -613,6 +759,7 @@ func toonSearchFromMap(tool string, value map[string]any) (toonSearchOutput, boo
 		results = append(results, toonSearchResult{
 			Rank:    index + 1,
 			Digest:  stringValue(row["object_digest"]),
+			Message: toonMessageFromValue(row["message"]),
 			Score:   floatValue(row["score"]),
 			Title:   stringValue(row["title"]),
 			Snippet: stringValue(row["snippet"]),
@@ -652,7 +799,69 @@ func toonRetrieveFromMap(value map[string]any) (toonRetrieveOutput, bool) {
 		Provenance:  toonProvenanceRowsFromValue(manifest["provenance"]),
 		Compound:    toonCompoundFromValue(manifest["compound"], false),
 		Content:     stringValue(value["content"]),
+		Message:     toonMessageFromValue(value["message"]),
 	}, true
+}
+
+func toonMessageFromValue(value any) *toonMessage {
+	raw, ok := mapValue(value)
+	if !ok {
+		return nil
+	}
+	headers, _ := mapValue(raw["selected_headers"])
+	graph, _ := mapValue(raw["graph"])
+	source, _ := mapValue(graph["source"])
+
+	links := []toonGraphLink{}
+	for _, rawLink := range listValueOrEmpty(graph["links"]) {
+		link, ok := mapValue(rawLink)
+		if !ok {
+			continue
+		}
+		links = append(links, toonGraphLink{
+			Rel: stringValue(link["rel"]),
+			URL: stringValue(link["url"]),
+		})
+	}
+
+	attachments := []toonAttachment{}
+	for _, rawAttachment := range listValueOrEmpty(raw["attachments"]) {
+		attachment, ok := mapValue(rawAttachment)
+		if !ok {
+			continue
+		}
+		attachments = append(attachments, toonAttachment{
+			RetrievalID: stringValue(attachment["retrieval_id"]),
+			Filename:    stringValue(attachment["filename"]),
+			MediaType:   stringValue(attachment["media_type"]),
+			Summary:     stringValue(attachment["summary"]),
+		})
+	}
+
+	return &toonMessage{
+		MessageID: stringValue(raw["message_id"]),
+		Digest:    stringValue(raw["digest"]),
+		ObjectID:  stringValue(raw["object_id"]),
+		ThreadID:  stringValue(raw["thread_id"]),
+		SelectedHeaders: toonSelectedHeaders{
+			Date:    stringValue(headers["date"]),
+			From:    stringValue(headers["from"]),
+			To:      stringValue(headers["to"]),
+			Cc:      stringValue(headers["cc"]),
+			Subject: stringValue(headers["subject"]),
+		},
+		Summary:    stringValue(raw["summary"]),
+		Bullets:    stringListValue(raw["bullets"]),
+		Categories: stringListValue(raw["categories"]),
+		Graph: toonMessageGraph{
+			Source:  source,
+			Topics:  stringListValue(graph["topics"]),
+			Actions: stringListValue(graph["actions"]),
+			Links:   links,
+		},
+		Body:        stringValue(raw["body"]),
+		Attachments: attachments,
+	}
 }
 
 func toonGraphFromMap(value map[string]any) (toonGraphOutput, bool) {
@@ -863,6 +1072,15 @@ func listValue(value any) ([]any, bool) {
 	list, ok := value.([]any)
 
 	return list, ok
+}
+
+func listValueOrEmpty(value any) []any {
+	list, ok := listValue(value)
+	if !ok {
+		return nil
+	}
+
+	return list
 }
 
 func stringListValue(value any) []string {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -197,6 +198,14 @@ func (adapter *GmailAdapter) pullFull(
 	limit int,
 ) ([]IngestObject, contracts.SourceCursor, error) {
 	query := stringValue(cursor["query"])
+	log.Printf(
+		"source gmail list: started source=%s/%s mode=full query=%q page_token=%q limit=%d",
+		adapter.Kind(),
+		adapter.name,
+		query,
+		stringValue(cursor["page_token"]),
+		limit,
+	)
 	page, err := adapter.backend.ListMessages(ctx, GmailListRequest{
 		Query:     query,
 		PageToken: stringValue(cursor["page_token"]),
@@ -206,6 +215,14 @@ func (adapter *GmailAdapter) pullFull(
 		cursor["last_error"] = err.Error()
 		return nil, adapter.cursor(cursor), err
 	}
+	log.Printf(
+		"source gmail list: completed source=%s/%s hits=%d next_page=%t result_estimate=%d",
+		adapter.Kind(),
+		adapter.name,
+		len(page.Hits),
+		page.NextPageToken != "",
+		page.ResultEstimate,
+	)
 
 	objects, failedID, err := adapter.hydrateHits(ctx, service, page.Hits)
 	if err != nil {
@@ -291,6 +308,7 @@ func (adapter *GmailAdapter) hydrateHits(
 ) ([]IngestObject, string, error) {
 	objects := make([]IngestObject, 0, len(hits))
 	for _, hit := range hits {
+		log.Printf("source gmail hydrate: started message_id=%s", hit.MessageID)
 		message, err := adapter.backend.GetMessage(ctx, hit.MessageID)
 		if err != nil {
 			return nil, hit.MessageID, err
@@ -302,6 +320,7 @@ func (adapter *GmailAdapter) hydrateHits(
 		if err != nil {
 			return nil, hit.MessageID, err
 		}
+		log.Printf("source gmail hydrate: completed message_id=%s", hit.MessageID)
 		objects = append(objects, object)
 	}
 
@@ -315,6 +334,7 @@ func (adapter *GmailAdapter) hydrateMessageIDs(
 ) ([]IngestObject, string, error) {
 	objects := make([]IngestObject, 0, len(messageIDs))
 	for _, messageID := range messageIDs {
+		log.Printf("source gmail hydrate: started message_id=%s", messageID)
 		message, err := adapter.backend.GetMessage(ctx, messageID)
 		if err != nil {
 			return nil, messageID, err
@@ -323,6 +343,7 @@ func (adapter *GmailAdapter) hydrateMessageIDs(
 		if err != nil {
 			return nil, messageID, err
 		}
+		log.Printf("source gmail hydrate: completed message_id=%s", messageID)
 		objects = append(objects, object)
 	}
 
@@ -481,18 +502,30 @@ func (adapter *GmailAdapter) messageObject(
 			ContentRoles: []string{"source", "mail_message"},
 			Facets: []contracts.Facet{
 				{
-					Kind: "mail_message",
-					Metadata: map[string]any{
-						"message_id": message.MessageID,
-						"thread_id":  message.ThreadID,
-						"subject":    firstNonEmpty(message.Subject, message.Headers["subject"]),
-					},
+					Kind:     "mail_message",
+					Metadata: gmailMailMessageMetadata(message),
 				},
 				{Kind: "container"},
 			},
 			Parts: parts,
 		},
 	}, nil
+}
+
+func gmailMailMessageMetadata(message GmailMessage) map[string]any {
+	metadata := map[string]any{
+		"message_id": message.MessageID,
+		"thread_id":  message.ThreadID,
+		"subject": firstNonEmpty(
+			message.Subject,
+			headerValue(message.Headers, "subject"),
+		),
+	}
+	if rfcMessageID := headerValue(message.Headers, "message-id"); rfcMessageID != "" {
+		metadata["rfc_message_id"] = rfcMessageID
+	}
+
+	return metadata
 }
 
 func (adapter *GmailAdapter) writeMessageParts(
@@ -550,6 +583,11 @@ func (adapter *GmailAdapter) writeMessageParts(
 
 	parts := make([]contracts.CompoundPart, 0, len(partInputs)+len(message.Attachments))
 	for index, input := range partInputs {
+		log.Printf(
+			"source gmail part write: started message_id=%s role=%s",
+			message.MessageID,
+			input.role,
+		)
 		digest, _, err := service.Ingest(ctx, IngestObject{
 			ObservedAt:   observed,
 			Reader:       bytes.NewReader(input.payload),
@@ -565,6 +603,12 @@ func (adapter *GmailAdapter) writeMessageParts(
 		if err != nil {
 			return nil, err
 		}
+		log.Printf(
+			"source gmail part write: completed message_id=%s role=%s digest=%s",
+			message.MessageID,
+			input.role,
+			digest,
+		)
 
 		parts = append(parts, contracts.CompoundPart{
 			Digest: digest,
@@ -578,6 +622,11 @@ func (adapter *GmailAdapter) writeMessageParts(
 			attachment.ID,
 			attachment.FileName,
 			fmt.Sprintf("%d", index),
+		)
+		log.Printf(
+			"source gmail part write: started message_id=%s role=attachment attachment_id=%s",
+			message.MessageID,
+			attachmentID,
 		)
 		digest, _, err := service.Ingest(ctx, IngestObject{
 			ObservedAt:   observed,
@@ -599,6 +648,12 @@ func (adapter *GmailAdapter) writeMessageParts(
 		if err != nil {
 			return nil, err
 		}
+		log.Printf(
+			"source gmail part write: completed message_id=%s role=attachment attachment_id=%s digest=%s",
+			message.MessageID,
+			attachmentID,
+			digest,
+		)
 
 		parts = append(parts, contracts.CompoundPart{
 			Digest: digest,
@@ -630,6 +685,16 @@ func sortedHeaders(headers map[string]string) []map[string]string {
 	}
 
 	return out
+}
+
+func headerValue(headers map[string]string, name string) string {
+	for candidate, value := range headers {
+		if strings.EqualFold(candidate, name) {
+			return value
+		}
+	}
+
+	return ""
 }
 
 func gmailMIMEStructure(message GmailMessage) map[string]any {

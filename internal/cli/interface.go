@@ -190,7 +190,7 @@ func openInterfaceServicesLoaded(
 		return nil, nil, err
 	}
 
-	sourceService, err := source.NewServiceWithNotifier(filestoreClient, schedulerClient)
+	sourceService, err := source.NewService(filestoreClient)
 	if err != nil {
 		_ = schedulerClient.Close()
 		_ = queryClient.Close()

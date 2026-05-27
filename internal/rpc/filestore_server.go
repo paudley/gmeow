@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -19,8 +20,9 @@ import (
 type FilestoreServer struct {
 	pb.UnimplementedFilestoreServiceServer
 
-	notifier ObjectChangeNotifier
-	store    filestore.Store
+	notifier  ObjectChangeNotifier
+	notifySem chan struct{}
+	store     filestore.Store
 }
 
 type ObjectChangeNotifier interface {
@@ -42,7 +44,10 @@ func NewFilestoreServer(
 	store filestore.Store,
 	options ...FilestoreServerOption,
 ) *FilestoreServer {
-	server := &FilestoreServer{store: store}
+	server := &FilestoreServer{
+		notifySem: make(chan struct{}, 8),
+		store:     store,
+	}
 	for _, option := range options {
 		option(server)
 	}
@@ -173,13 +178,7 @@ func (server *FilestoreServer) PutObject(
 		return put.err
 	}
 
-	if err := server.notifyObjectChanged(
-		stream.Context(),
-		put.digest,
-		"object_changed",
-	); err != nil {
-		return err
-	}
+	server.notifyObjectChangedAsync(stream.Context(), put.digest, "object_changed")
 
 	return stream.SendAndClose(&pb.PutObjectResponse{Digest: string(put.digest)})
 }
@@ -202,11 +201,13 @@ func (server *FilestoreServer) AttachProvenance(
 		return nil, err
 	}
 
-	return &pb.Empty{}, server.notifyObjectChanged(
+	server.notifyObjectChangedAsync(
 		ctx,
 		contracts.ObjectDigest(request.GetDigest()),
 		"object_changed",
 	)
+
+	return &pb.Empty{}, nil
 }
 
 func (server *FilestoreServer) PutCompound(
@@ -242,9 +243,7 @@ func (server *FilestoreServer) PutCompound(
 		return nil, err
 	}
 
-	if err := server.notifyObjectChanged(ctx, digest, "object_changed"); err != nil {
-		return nil, err
-	}
+	server.notifyObjectChangedAsync(ctx, digest, "object_changed")
 
 	return &pb.PutCompoundResponse{Digest: string(digest)}, nil
 }
@@ -354,7 +353,9 @@ func (server *FilestoreServer) WriteAnnotation(
 		return nil, err
 	}
 
-	return &pb.Empty{}, server.notifyProjectionRefresh(ctx, annotation.ObjectDigest)
+	server.notifyProjectionRefreshAsync(ctx, annotation.ObjectDigest)
+
+	return &pb.Empty{}, nil
 }
 
 func (server *FilestoreServer) WriteOverlays(
@@ -376,7 +377,9 @@ func (server *FilestoreServer) WriteOverlays(
 		return nil, err
 	}
 
-	return &pb.Empty{}, server.notifyProjectionRefresh(ctx, digest)
+	server.notifyProjectionRefreshAsync(ctx, digest)
+
+	return &pb.Empty{}, nil
 }
 
 func (server *FilestoreServer) notifyObjectChanged(
@@ -415,6 +418,60 @@ func (server *FilestoreServer) notifyProjectionRefresh(
 	})
 
 	return err
+}
+
+func (server *FilestoreServer) notifyObjectChangedAsync(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	reason string,
+) {
+	if server.notifier == nil {
+		return
+	}
+
+	go func() {
+		server.acquireNotifySlot()
+		defer server.releaseNotifySlot()
+		err := server.notifyObjectChanged(context.WithoutCancel(ctx), digest, reason)
+		if err != nil {
+			log.Printf(
+				"filestore notification failed digest=%s reason=%s error=%v",
+				digest,
+				reason,
+				err,
+			)
+		}
+	}()
+}
+
+func (server *FilestoreServer) notifyProjectionRefreshAsync(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) {
+	if server.notifier == nil {
+		return
+	}
+
+	go func() {
+		server.acquireNotifySlot()
+		defer server.releaseNotifySlot()
+		err := server.notifyProjectionRefresh(context.WithoutCancel(ctx), digest)
+		if err != nil {
+			log.Printf(
+				"filestore projection notification failed digest=%s error=%v",
+				digest,
+				err,
+			)
+		}
+	}()
+}
+
+func (server *FilestoreServer) acquireNotifySlot() {
+	server.notifySem <- struct{}{}
+}
+
+func (server *FilestoreServer) releaseNotifySlot() {
+	<-server.notifySem
 }
 
 func (server *FilestoreServer) WriteSourceCursor(

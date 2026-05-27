@@ -184,6 +184,10 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	metadata := mailMessageMetadataForTest(t, manifest)
+	if metadata["rfc_message_id"] != "<m1@example.test>" {
+		t.Fatalf("expected RFC Message-ID projection, got %#v", metadata)
+	}
 	if !hasRelationship(
 		manifest.Relationships,
 		"contains",
@@ -208,6 +212,21 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 			manifest.Relationships,
 		)
 	}
+}
+
+func mailMessageMetadataForTest(
+	t *testing.T,
+	manifest contracts.Manifest,
+) map[string]any {
+	t.Helper()
+	for _, facet := range manifest.Facets {
+		if facet.Kind == "mail_message" {
+			return facet.Metadata
+		}
+	}
+
+	t.Fatalf("manifest missing mail_message facet: %#v", manifest.Facets)
+	return nil
 }
 
 func TestDriveAdapterFailsUnsupportedOperationsWithActionableError(t *testing.T) {

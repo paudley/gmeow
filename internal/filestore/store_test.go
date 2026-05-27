@@ -233,6 +233,51 @@ func TestSourceIngestClaimSerializesConcurrentWriters(t *testing.T) {
 	}
 }
 
+func TestSourceIngestClaimReclaimsExpiredLock(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	ref := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1:mime_structure",
+		ExternalVersion: "history-1",
+	}
+	claim, acquired, err := store.TryAcquireSourceIngest(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acquired {
+		t.Fatal("expected first claim to acquire")
+	}
+	lockPath := store.sourceObjectLockPath(ref)
+	expired := time.Now().Add(-(sourceIngestClaimTTL + time.Minute))
+	if err := os.Chtimes(lockPath, expired, expired); err != nil {
+		t.Fatal(err)
+	}
+	claim.AcquiredAt = expired
+	encoded, err := canonicalJSON(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, encoded, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(lockPath, expired, expired); err != nil {
+		t.Fatal(err)
+	}
+
+	nextClaim, acquired, err := store.TryAcquireSourceIngest(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acquired {
+		t.Fatal("expected expired claim to be reclaimed")
+	}
+	if nextClaim.ClaimID == claim.ClaimID {
+		t.Fatal("expected replacement claim")
+	}
+}
+
 func TestPutRejectsObjectWithoutFacet(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 
@@ -953,6 +998,78 @@ func TestCompoundStableIdentityAndStructure(t *testing.T) {
 		`"object_id":"mail_message:<message@example.test>"`,
 	) {
 		t.Fatalf("compound envelope was not stored as blob: %s", envelope)
+	}
+}
+
+func TestCompoundMergeReplacesSameRoleAndOrderPart(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	oldMetadata, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader(`{"version":"old"}`),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newMetadata, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader(`{"version":"new"}`),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("body text"),
+		Facets: []contracts.Facet{{Kind: "email_part"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parent, err := store.PutCompound(ctx, CompoundPutRequest{
+		ObjectID: "mail_message:<refresh@example.test>",
+		Facets:   []contracts.Facet{{Kind: "mail_message"}, {Kind: "container"}},
+		Parts: []contracts.CompoundPart{
+			{Digest: body, Role: "email_body", Order: 1},
+			{Digest: oldMetadata, Role: "gmail_data", Order: 2},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = store.PutCompound(ctx, CompoundPutRequest{
+		ObjectID: "mail_message:<refresh@example.test>",
+		Facets:   []contracts.Facet{{Kind: "mail_message"}, {Kind: "container"}},
+		Parts: []contracts.CompoundPart{
+			{Digest: body, Role: "email_body", Order: 1},
+			{Digest: newMetadata, Role: "gmail_data", Order: 2},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	structure, err := store.GetStructure(ctx, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataParts := structure.PartsByRole["gmail_data"]
+	if len(metadataParts) != 1 {
+		t.Fatalf("gmail_data parts = %#v, want one current part", metadataParts)
+	}
+	if metadataParts[0].Digest != newMetadata {
+		t.Fatalf("gmail_data digest = %s, want %s", metadataParts[0].Digest, newMetadata)
+	}
+
+	manifest, err := store.ReadManifest(ctx, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relationship := range manifest.Relationships {
+		if relationship.To == oldMetadata || relationship.From == oldMetadata {
+			t.Fatalf("stale relationship to replaced part remained: %#v", relationship)
+		}
 	}
 }
 

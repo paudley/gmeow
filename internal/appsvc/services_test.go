@@ -93,6 +93,74 @@ func TestMailSearchUsesRealQueryAndGmailAdapter(t *testing.T) {
 	}
 }
 
+func TestSummarySearchUsesLiveGmailHydration(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	queryService := testsupport.StartQueryGRPC(t, ctx, filestoreService.Store)
+	defer queryService.Close()
+	sourceService, err := source.NewService(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &countingGmailBackend{
+		gmailExternalBackend: gmailExternalBackend{
+			hits: []source.GmailSearchHit{
+				{MessageID: "fresh", Version: "1"},
+			},
+			messages: map[string]source.GmailMessage{
+				"fresh": {
+					MessageID: "fresh",
+					Version:   "1",
+					ThreadID:  "thread-1",
+					Subject:   "fresh bob",
+					Headers: map[string]string{
+						"Date":       "Wed, 27 May 2026 09:15:00 -0600",
+						"From":       "Alice <alice@example.test>",
+						"To":         "Bob <bob@example.test>",
+						"Subject":    "fresh bob",
+						"Message-ID": "<fresh@example.test>",
+					},
+					Body:         []byte("hello bob fresh"),
+					BodyMediaTyp: "text/plain",
+				},
+			},
+		},
+	}
+	gmail, err := source.NewGmailAdapter("primary", backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	services, err := appsvc.New(appsvc.Options{
+		Query:   queryService.Client,
+		Objects: filestoreService.Client,
+		Sources: appsvc.NewStaticSourceRegistry(gmail),
+		Ingest:  sourceService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := services.SummarySearch(ctx, appsvc.SearchOptions{
+		Query: "bob",
+		Limit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if backend.searches != 1 {
+		t.Fatalf("expected summary_search to use Gmail live search, got %d", backend.searches)
+	}
+	if response.Returned != 1 ||
+		response.Messages[0].MessageID != "<fresh@example.test>" ||
+		response.Messages[0].Subject != "fresh bob" ||
+		response.Messages[0].From != "alice@example.test" ||
+		response.Messages[0].To != "bob@example.test" {
+		t.Fatalf("summary search response = %#v", response)
+	}
+}
+
 func TestSourceActionUsesRealGmailAdapterAndRejectsWrongFacet(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
@@ -206,6 +274,20 @@ func TestForceAnalysisUsesRealSchedulerService(t *testing.T) {
 type gmailExternalBackend struct {
 	hits     []source.GmailSearchHit
 	messages map[string]source.GmailMessage
+}
+
+type countingGmailBackend struct {
+	gmailExternalBackend
+	searches int
+}
+
+func (backend *countingGmailBackend) Search(
+	ctx context.Context,
+	query string,
+	limit int,
+) ([]source.GmailSearchHit, error) {
+	backend.searches++
+	return backend.gmailExternalBackend.Search(ctx, query, limit)
 }
 
 func (backend gmailExternalBackend) Search(
