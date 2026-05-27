@@ -12,6 +12,7 @@ GO ?= go
 GMEOW ?= $(GO) run ./cmd/gmeow
 GMEOW_ADMIN ?= $(GO) run ./cmd/gmeow-admin
 CONFIG ?= gmeow.toml
+BIN_DIR ?= bin
 
 empty :=
 space := $(empty) $(empty)
@@ -137,7 +138,8 @@ go-test: ## Run Go tests.
 
 go-build: ## Build Go binaries.
 	$(call section,Building Go binaries)
-	$(GO) build ./cmd/gmeow ./cmd/gmeow-admin ./cmd/gmeow-worker
+	mkdir -p "$(BIN_DIR)"
+	$(GO) build -o "$(BIN_DIR)/" ./cmd/gmeow ./cmd/gmeow-admin ./cmd/gmeow-worker
 
 go-check: go-format go-vet go-test go-build ## Run the Go Phase 00 quality gate.
 
