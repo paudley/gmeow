@@ -29,6 +29,8 @@ const (
 	QueryService_AnalysisStatus_FullMethodName            = "/gmeow.v1.QueryService/AnalysisStatus"
 	QueryService_VectorSearch_FullMethodName              = "/gmeow.v1.QueryService/VectorSearch"
 	QueryService_SourceCursors_FullMethodName             = "/gmeow.v1.QueryService/SourceCursors"
+	QueryService_JMAPMailboxes_FullMethodName             = "/gmeow.v1.QueryService/JMAPMailboxes"
+	QueryService_JMAPEmailStates_FullMethodName           = "/gmeow.v1.QueryService/JMAPEmailStates"
 	QueryService_CreateOrGetOperation_FullMethodName      = "/gmeow.v1.QueryService/CreateOrGetOperation"
 	QueryService_AppendOperationProgress_FullMethodName   = "/gmeow.v1.QueryService/AppendOperationProgress"
 	QueryService_CompleteOperation_FullMethodName         = "/gmeow.v1.QueryService/CompleteOperation"
@@ -53,6 +55,8 @@ type QueryServiceClient interface {
 	AnalysisStatus(ctx context.Context, in *AnalysisStatusRequest, opts ...grpc.CallOption) (*AnalysisStatusResponse, error)
 	VectorSearch(ctx context.Context, in *VectorSearchRequest, opts ...grpc.CallOption) (*VectorSearchResponse, error)
 	SourceCursors(ctx context.Context, in *SourceCursorRequest, opts ...grpc.CallOption) (*SourceCursorResponse, error)
+	JMAPMailboxes(ctx context.Context, in *JMAPMailboxRequest, opts ...grpc.CallOption) (*JMAPMailboxResponse, error)
+	JMAPEmailStates(ctx context.Context, in *JMAPEmailStateRequest, opts ...grpc.CallOption) (*JMAPEmailStateResponse, error)
 	CreateOrGetOperation(ctx context.Context, in *CreateOperationRequest, opts ...grpc.CallOption) (*CreateOrGetOperationResponse, error)
 	AppendOperationProgress(ctx context.Context, in *AppendOperationProgressRequest, opts ...grpc.CallOption) (*Empty, error)
 	CompleteOperation(ctx context.Context, in *CompleteOperationRequest, opts ...grpc.CallOption) (*Empty, error)
@@ -171,6 +175,26 @@ func (c *queryServiceClient) SourceCursors(ctx context.Context, in *SourceCursor
 	return out, nil
 }
 
+func (c *queryServiceClient) JMAPMailboxes(ctx context.Context, in *JMAPMailboxRequest, opts ...grpc.CallOption) (*JMAPMailboxResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JMAPMailboxResponse)
+	err := c.cc.Invoke(ctx, QueryService_JMAPMailboxes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) JMAPEmailStates(ctx context.Context, in *JMAPEmailStateRequest, opts ...grpc.CallOption) (*JMAPEmailStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JMAPEmailStateResponse)
+	err := c.cc.Invoke(ctx, QueryService_JMAPEmailStates_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *queryServiceClient) CreateOrGetOperation(ctx context.Context, in *CreateOperationRequest, opts ...grpc.CallOption) (*CreateOrGetOperationResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateOrGetOperationResponse)
@@ -265,6 +289,8 @@ type QueryServiceServer interface {
 	AnalysisStatus(context.Context, *AnalysisStatusRequest) (*AnalysisStatusResponse, error)
 	VectorSearch(context.Context, *VectorSearchRequest) (*VectorSearchResponse, error)
 	SourceCursors(context.Context, *SourceCursorRequest) (*SourceCursorResponse, error)
+	JMAPMailboxes(context.Context, *JMAPMailboxRequest) (*JMAPMailboxResponse, error)
+	JMAPEmailStates(context.Context, *JMAPEmailStateRequest) (*JMAPEmailStateResponse, error)
 	CreateOrGetOperation(context.Context, *CreateOperationRequest) (*CreateOrGetOperationResponse, error)
 	AppendOperationProgress(context.Context, *AppendOperationProgressRequest) (*Empty, error)
 	CompleteOperation(context.Context, *CompleteOperationRequest) (*Empty, error)
@@ -312,6 +338,12 @@ func (UnimplementedQueryServiceServer) VectorSearch(context.Context, *VectorSear
 }
 func (UnimplementedQueryServiceServer) SourceCursors(context.Context, *SourceCursorRequest) (*SourceCursorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SourceCursors not implemented")
+}
+func (UnimplementedQueryServiceServer) JMAPMailboxes(context.Context, *JMAPMailboxRequest) (*JMAPMailboxResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method JMAPMailboxes not implemented")
+}
+func (UnimplementedQueryServiceServer) JMAPEmailStates(context.Context, *JMAPEmailStateRequest) (*JMAPEmailStateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method JMAPEmailStates not implemented")
 }
 func (UnimplementedQueryServiceServer) CreateOrGetOperation(context.Context, *CreateOperationRequest) (*CreateOrGetOperationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateOrGetOperation not implemented")
@@ -538,6 +570,42 @@ func _QueryService_SourceCursors_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _QueryService_JMAPMailboxes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JMAPMailboxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).JMAPMailboxes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_JMAPMailboxes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).JMAPMailboxes(ctx, req.(*JMAPMailboxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_JMAPEmailStates_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JMAPEmailStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).JMAPEmailStates(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_JMAPEmailStates_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).JMAPEmailStates(ctx, req.(*JMAPEmailStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _QueryService_CreateOrGetOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateOperationRequest)
 	if err := dec(in); err != nil {
@@ -728,6 +796,14 @@ var QueryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SourceCursors",
 			Handler:    _QueryService_SourceCursors_Handler,
+		},
+		{
+			MethodName: "JMAPMailboxes",
+			Handler:    _QueryService_JMAPMailboxes_Handler,
+		},
+		{
+			MethodName: "JMAPEmailStates",
+			Handler:    _QueryService_JMAPEmailStates_Handler,
 		},
 		{
 			MethodName: "CreateOrGetOperation",

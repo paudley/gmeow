@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
 	"blackcat.ca/gmeow/internal/appsvc"
+	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/observability"
 )
 
@@ -79,6 +81,68 @@ type methodResponse struct {
 type jmapError struct {
 	Type        string `json:"type"`
 	Description string `json:"description,omitempty"`
+}
+
+type getArguments struct {
+	AccountID string   `json:"accountId"`
+	IDs       []string `json:"ids"`
+}
+
+type queryArguments struct {
+	AccountID string `json:"accountId"`
+	Limit     int    `json:"limit"`
+	Position  int    `json:"position"`
+}
+
+type mailboxGetResponse struct {
+	AccountID string        `json:"accountId"`
+	State     string        `json:"state"`
+	List      []jmapMailbox `json:"list"`
+	NotFound  []string      `json:"notFound,omitempty"`
+}
+
+type jmapMailbox struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	ParentID  *string `json:"parentId"`
+	Role      *string `json:"role"`
+	SortOrder int     `json:"sortOrder"`
+}
+
+type emailQueryResponse struct {
+	AccountID           string   `json:"accountId"`
+	QueryState          string   `json:"queryState"`
+	CanCalculateChanges bool     `json:"canCalculateChanges"`
+	Position            int      `json:"position"`
+	IDs                 []string `json:"ids"`
+	Total               int      `json:"total"`
+}
+
+type emailGetResponse struct {
+	AccountID string      `json:"accountId"`
+	State     string      `json:"state"`
+	List      []jmapEmail `json:"list"`
+	NotFound  []string    `json:"notFound,omitempty"`
+}
+
+type jmapEmail struct {
+	MailboxIDs map[string]bool `json:"mailboxIds"`
+	Keywords   map[string]bool `json:"keywords"`
+	ID         string          `json:"id"`
+	BlobID     string          `json:"blobId"`
+	ThreadID   string          `json:"threadId,omitempty"`
+	MessageID  []string        `json:"messageId,omitempty"`
+	From       []emailAddress  `json:"from,omitempty"`
+	To         []emailAddress  `json:"to,omitempty"`
+	Subject    string          `json:"subject,omitempty"`
+	ReceivedAt string          `json:"receivedAt,omitempty"`
+	Preview    string          `json:"preview,omitempty"`
+	Size       int64           `json:"size"`
+}
+
+type emailAddress struct {
+	Name  string `json:"name,omitempty"`
+	Email string `json:"email"`
 }
 
 func New(
@@ -212,7 +276,10 @@ func (handler handler) handleAPI(writer http.ResponseWriter, request *http.Reque
 		SessionState:    "0",
 	}
 	for _, call := range input.MethodCalls {
-		output.MethodResponses = append(output.MethodResponses, handler.dispatch(call))
+		output.MethodResponses = append(
+			output.MethodResponses,
+			handler.dispatch(request.Context(), call),
+		)
 	}
 
 	writeJSON(writer, output, nil)
@@ -231,7 +298,7 @@ func (handler handler) handleDownload(
 	}, nil)
 }
 
-func (handler handler) dispatch(call methodCall) methodResponse {
+func (handler handler) dispatch(ctx context.Context, call methodCall) methodResponse {
 	switch call.Name {
 	case "Core/echo":
 		var arguments map[string]any
@@ -246,6 +313,12 @@ func (handler handler) dispatch(call methodCall) methodResponse {
 		}
 
 		return methodResponse{Name: call.Name, Arguments: arguments, ClientID: call.ClientID}
+	case "Mailbox/get":
+		return handler.handleMailboxGet(ctx, call)
+	case "Email/query":
+		return handler.handleEmailQuery(ctx, call)
+	case "Email/get":
+		return handler.handleEmailGet(ctx, call)
 	default:
 		return methodResponse{
 			Name: "error",
@@ -256,6 +329,259 @@ func (handler handler) dispatch(call methodCall) methodResponse {
 			ClientID: call.ClientID,
 		}
 	}
+}
+
+func (handler handler) handleMailboxGet(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
+	var arguments getArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+
+	mailboxes, err := handler.services.JMAPMailboxes(ctx)
+	if err != nil {
+		return serverFail(call.ClientID, err.Error())
+	}
+	wanted := map[string]bool{}
+	for _, id := range arguments.IDs {
+		wanted[id] = true
+	}
+	list := make([]jmapMailbox, 0, len(mailboxes))
+	found := map[string]bool{}
+	for _, mailbox := range mailboxes {
+		if len(wanted) > 0 && !wanted[mailbox.MailboxID] {
+			continue
+		}
+		found[mailbox.MailboxID] = true
+		list = append(list, toJMAPMailbox(mailbox))
+	}
+	notFound := []string{}
+	for _, id := range arguments.IDs {
+		if !found[id] {
+			notFound = append(notFound, id)
+		}
+	}
+
+	return methodResponse{
+		Name: "Mailbox/get",
+		Arguments: mailboxGetResponse{
+			AccountID: "gmeow",
+			State:     "0",
+			List:      list,
+			NotFound:  notFound,
+		},
+		ClientID: call.ClientID,
+	}
+}
+
+func (handler handler) handleEmailQuery(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
+	var arguments queryArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+
+	response, err := handler.services.JMAPEmailQuery(
+		ctx,
+		arguments.Position,
+		arguments.Limit,
+	)
+	if err != nil {
+		return serverFail(call.ClientID, err.Error())
+	}
+	ids := make([]string, 0, len(response.IDs))
+	for _, id := range response.IDs {
+		ids = append(ids, string(id))
+	}
+
+	return methodResponse{
+		Name: "Email/query",
+		Arguments: emailQueryResponse{
+			AccountID:           "gmeow",
+			QueryState:          "0",
+			CanCalculateChanges: false,
+			Position:            response.Offset,
+			IDs:                 ids,
+			Total:               response.Total,
+		},
+		ClientID: call.ClientID,
+	}
+}
+
+func (handler handler) handleEmailGet(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
+	var arguments getArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+
+	digests := make([]contracts.ObjectDigest, 0, len(arguments.IDs))
+	for _, id := range arguments.IDs {
+		if strings.TrimSpace(id) != "" {
+			digests = append(digests, contracts.ObjectDigest(id))
+		}
+	}
+	states, err := handler.services.JMAPEmailStates(ctx, digests)
+	if err != nil {
+		return serverFail(call.ClientID, err.Error())
+	}
+
+	list := make([]jmapEmail, 0, len(digests))
+	notFound := []string{}
+	for _, digest := range digests {
+		retrieved, err := handler.services.Retrieve(ctx, digest, false)
+		if err != nil || retrieved.Message == nil {
+			notFound = append(notFound, string(digest))
+			continue
+		}
+		state, ok := states[digest]
+		if !ok {
+			notFound = append(notFound, string(digest))
+			continue
+		}
+		list = append(list, toJMAPEmail(digest, retrieved, state))
+	}
+
+	return methodResponse{
+		Name: "Email/get",
+		Arguments: emailGetResponse{
+			AccountID: "gmeow",
+			State:     "0",
+			List:      list,
+			NotFound:  notFound,
+		},
+		ClientID: call.ClientID,
+	}
+}
+
+func invalidArguments(clientID string, err error) methodResponse {
+	return methodResponse{
+		Name:      "error",
+		Arguments: jmapError{Type: "invalidArguments", Description: err.Error()},
+		ClientID:  clientID,
+	}
+}
+
+func serverFail(clientID, description string) methodResponse {
+	return methodResponse{
+		Name:      "error",
+		Arguments: jmapError{Type: "serverFail", Description: description},
+		ClientID:  clientID,
+	}
+}
+
+func validateAccountID(accountID string) error {
+	if accountID == "" || accountID == "gmeow" {
+		return nil
+	}
+
+	return fmt.Errorf("unknown accountId %q", accountID)
+}
+
+func toJMAPMailbox(mailbox contracts.JMAPMailbox) jmapMailbox {
+	var parentID *string
+	if mailbox.ParentID != "" {
+		parentID = &mailbox.ParentID
+	}
+	var role *string
+	if mailbox.Role != "" {
+		role = &mailbox.Role
+	}
+
+	return jmapMailbox{
+		ID:        mailbox.MailboxID,
+		Name:      mailbox.Name,
+		ParentID:  parentID,
+		Role:      role,
+		SortOrder: mailbox.SortOrder,
+	}
+}
+
+func toJMAPEmail(
+	digest contracts.ObjectDigest,
+	retrieved appsvc.RetrieveResponse,
+	state contracts.JMAPEmailState,
+) jmapEmail {
+	message := retrieved.Message
+	email := jmapEmail{
+		MailboxIDs: boolSet(state.MailboxIDs),
+		Keywords:   boolSet(state.Keywords),
+		ID:         string(digest),
+		BlobID:     string(digest),
+		ThreadID:   state.ThreadID,
+		Size:       retrieved.Manifest.Size,
+	}
+	if message == nil {
+		return email
+	}
+
+	email.Subject = message.SelectedHeaders.Subject
+	email.Preview = message.Summary
+	email.MessageID = messageIDs(message.MessageID)
+	email.From = addressList(message.SelectedHeaders.From)
+	email.To = addressList(message.SelectedHeaders.To)
+	if !state.ReceivedAt.IsZero() {
+		email.ReceivedAt = state.ReceivedAt.UTC().Format(time.RFC3339Nano)
+	}
+
+	return email
+}
+
+func boolSet(values []string) map[string]bool {
+	out := map[string]bool{}
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			out[value] = true
+		}
+	}
+
+	return out
+}
+
+func messageIDs(value string) []string {
+	trimmed := strings.Trim(strings.TrimSpace(value), "<>")
+	if trimmed == "" {
+		return nil
+	}
+
+	return []string{trimmed}
+}
+
+func addressList(value string) []emailAddress {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	parsed, err := mail.ParseAddress(trimmed)
+	if err != nil {
+		return []emailAddress{{Email: trimmed}}
+	}
+
+	return []emailAddress{{Name: parsed.Name, Email: parsed.Address}}
 }
 
 func (handler handler) session(request *http.Request) sessionResource {

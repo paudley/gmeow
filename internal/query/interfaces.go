@@ -64,6 +64,11 @@ type Index interface {
 		ctx context.Context,
 		request contracts.SourceCursorRequest,
 	) (contracts.SourceCursorResponse, error)
+	JMAPMailboxes(ctx context.Context) ([]contracts.JMAPMailbox, error)
+	JMAPEmailStates(
+		ctx context.Context,
+		digests []contracts.ObjectDigest,
+	) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error)
 	CreateOrGet(
 		ctx context.Context,
 		request contracts.CreateOperationRequest,

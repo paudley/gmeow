@@ -291,6 +291,65 @@ func (server *QueryServer) SourceCursors(
 	}, nil
 }
 
+func (server *QueryServer) JMAPMailboxes(
+	ctx context.Context,
+	_ *pb.JMAPMailboxRequest,
+) (*pb.JMAPMailboxResponse, error) {
+	mailboxes, err := server.index.JMAPMailboxes(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	converted := make([]*pb.JMAPMailbox, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		converted = append(converted, &pb.JMAPMailbox{
+			MailboxId:   mailbox.MailboxID,
+			Name:        mailbox.Name,
+			Role:        mailbox.Role,
+			ParentId:    mailbox.ParentID,
+			SortOrder:   int32(mailbox.SortOrder),
+			IsSystem:    mailbox.IsSystem,
+			IsDestroyed: mailbox.IsDestroyed,
+			CreatedAt:   formatTime(mailbox.CreatedAt),
+			UpdatedAt:   formatTime(mailbox.UpdatedAt),
+		})
+	}
+
+	return &pb.JMAPMailboxResponse{Mailboxes: converted}, nil
+}
+
+func (server *QueryServer) JMAPEmailStates(
+	ctx context.Context,
+	request *pb.JMAPEmailStateRequest,
+) (*pb.JMAPEmailStateResponse, error) {
+	digests := make([]contracts.ObjectDigest, 0, len(request.GetObjectDigests()))
+	for _, digest := range request.GetObjectDigests() {
+		digests = append(digests, contracts.ObjectDigest(digest))
+	}
+	states, err := server.index.JMAPEmailStates(ctx, digests)
+	if err != nil {
+		return nil, err
+	}
+
+	converted := make([]*pb.JMAPEmailState, 0, len(states))
+	for _, digest := range digests {
+		state, ok := states[digest]
+		if !ok {
+			continue
+		}
+		converted = append(converted, &pb.JMAPEmailState{
+			ObjectDigest:  string(state.ObjectDigest),
+			ThreadId:      state.ThreadID,
+			MailboxIds:    append([]string{}, state.MailboxIDs...),
+			Keywords:      append([]string{}, state.Keywords...),
+			StateSequence: state.StateSequence,
+			ReceivedAt:    formatTime(state.ReceivedAt),
+		})
+	}
+
+	return &pb.JMAPEmailStateResponse{States: converted}, nil
+}
+
 func (server *QueryServer) Rebuild(
 	ctx context.Context,
 	_ *pb.Empty,

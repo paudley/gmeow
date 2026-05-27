@@ -22,7 +22,10 @@ import (
 	"blackcat.ca/gmeow/internal/source"
 )
 
-const MailMessageFacet = "mail_message"
+const (
+	MailMessageFacet = "mail_message"
+	jmapDefaultLimit = 50
+)
 
 var (
 	emailAddressExpression = regexp.MustCompile(`<([^<>@\s]+@[^<>@\s]+)>`)
@@ -171,6 +174,13 @@ type OpsStatusResponse struct {
 	Errors    map[string]string              `json:"errors,omitempty"`
 	Counts    map[string]int                 `json:"counts,omitempty"`
 	Metadata  map[string]any                 `json:"metadata,omitempty"`
+}
+
+type JMAPEmailQueryResponse struct {
+	IDs    []contracts.ObjectDigest `json:"ids"`
+	Total  int                      `json:"total"`
+	Offset int                      `json:"offset"`
+	Limit  int                      `json:"limit"`
 }
 
 type StaticSourceRegistry struct {
@@ -640,6 +650,59 @@ func (services *Services) AnalysisStatus(
 	request contracts.AnalysisStatusRequest,
 ) (contracts.AnalysisStatusResponse, error) {
 	return services.query.AnalysisStatus(ctx, request)
+}
+
+func (services *Services) JMAPMailboxes(
+	ctx context.Context,
+) ([]contracts.JMAPMailbox, error) {
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return nil, errors.New("JMAP query reader is not configured")
+	}
+
+	return reader.JMAPMailboxes(ctx)
+}
+
+func (services *Services) JMAPEmailStates(
+	ctx context.Context,
+	digests []contracts.ObjectDigest,
+) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error) {
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return nil, errors.New("JMAP query reader is not configured")
+	}
+
+	return reader.JMAPEmailStates(ctx, digests)
+}
+
+func (services *Services) JMAPEmailQuery(
+	ctx context.Context,
+	offset, limit int,
+) (JMAPEmailQueryResponse, error) {
+	if limit <= 0 {
+		limit = jmapDefaultLimit
+	}
+	response, err := services.query.Search(ctx, contracts.SearchRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Facets:        []string{MailMessageFacet},
+		Limit:         limit,
+		Offset:        offset,
+	})
+	if err != nil {
+		return JMAPEmailQueryResponse{}, err
+	}
+
+	ids := make([]contracts.ObjectDigest, 0, len(response.Results))
+	for _, result := range response.Results {
+		ids = append(ids, result.ObjectDigest)
+	}
+
+	return JMAPEmailQueryResponse{
+		IDs:    ids,
+		Total:  response.Total,
+		Offset: offset,
+		Limit:  limit,
+	}, nil
 }
 
 func (services *Services) ForceAnalysis(

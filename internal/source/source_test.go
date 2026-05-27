@@ -140,6 +140,9 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 			"subject":    "Subject",
 			"message-id": "<m1@example.test>",
 		},
+		Metadata: map[string]any{
+			"label_ids": []string{"INBOX", "UNREAD"},
+		},
 		Body: []byte("hello body"),
 		Attachments: []GmailAttachment{{
 			ID:        "a1",
@@ -187,6 +190,10 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 	metadata := mailMessageMetadataForTest(t, manifest)
 	if metadata["rfc_message_id"] != "<m1@example.test>" {
 		t.Fatalf("expected RFC Message-ID projection, got %#v", metadata)
+	}
+	if labels := stringSliceValue(metadata["label_ids"]); len(labels) != 2 ||
+		labels[0] != "INBOX" || labels[1] != "UNREAD" {
+		t.Fatalf("expected Gmail label IDs in mail facet metadata, got %#v", metadata)
 	}
 	if !hasRelationship(
 		manifest.Relationships,

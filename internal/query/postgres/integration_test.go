@@ -188,6 +188,58 @@ func TestPostgresProjectsFilestore(t *testing.T) {
 	if missing.Total != 0 {
 		t.Fatalf("non-matching provenance filter returned results: %#v", missing)
 	}
+	mailboxes, err := index.JMAPMailboxes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mailboxes) == 0 || mailboxes[0].MailboxID != jmapMailboxAll {
+		t.Fatalf("unexpected JMAP mailbox seed: %#v", mailboxes)
+	}
+	mailDigest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("hello from inbox"),
+		MediaType: "application/vnd.gmeow.gmail-message+json",
+		Facets: []contracts.Facet{{
+			Kind: "mail_message",
+			Metadata: map[string]any{
+				"message_id": "gmail-message-1",
+				"thread_id":  "gmail-thread-1",
+				"label_ids":  []string{"INBOX", "UNREAD", "STARRED"},
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "gmail",
+			SourceName: sourceName,
+			ExternalID: "gmail-message-1",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupDigests = append(cleanupDigests, mailDigest)
+	mailManifest, err := store.ReadManifest(ctx, mailDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Project(ctx, mailManifest, nil); err != nil {
+		t.Fatal(err)
+	}
+	jmapStates, err := index.JMAPEmailStates(
+		ctx,
+		[]contracts.ObjectDigest{mailDigest},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jmapState, ok := jmapStates[mailDigest]
+	if !ok {
+		t.Fatalf("missing JMAP state for %s", mailDigest)
+	}
+	if jmapState.ThreadID != "gmail-thread-1" ||
+		!containsString(jmapState.MailboxIDs, jmapMailboxInbox) ||
+		containsString(jmapState.Keywords, jmapKeywordSeen) ||
+		!containsString(jmapState.Keywords, jmapKeywordFlagged) {
+		t.Fatalf("unexpected JMAP state: %#v", jmapState)
+	}
 	embeddingDigest, err := store.Put(ctx, filestore.PutRequest{
 		Reader:       strings.NewReader(`{"vector":[0.1,0.2,0.3]}`),
 		MediaType:    "application/json",

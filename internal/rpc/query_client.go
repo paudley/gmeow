@@ -314,6 +314,75 @@ func (client *QueryClient) SourceCursors(
 	}, nil
 }
 
+func (client *QueryClient) JMAPMailboxes(
+	ctx context.Context,
+) ([]contracts.JMAPMailbox, error) {
+	response, err := client.client.JMAPMailboxes(ctx, &pb.JMAPMailboxRequest{})
+	if err != nil {
+		return nil, err
+	}
+
+	mailboxes := make([]contracts.JMAPMailbox, 0, len(response.GetMailboxes()))
+	for _, mailbox := range response.GetMailboxes() {
+		createdAt, err := parseTime(mailbox.GetCreatedAt())
+		if err != nil {
+			return nil, err
+		}
+		updatedAt, err := parseTime(mailbox.GetUpdatedAt())
+		if err != nil {
+			return nil, err
+		}
+		mailboxes = append(mailboxes, contracts.JMAPMailbox{
+			CreatedAt:   createdAt,
+			UpdatedAt:   updatedAt,
+			MailboxID:   mailbox.GetMailboxId(),
+			Name:        mailbox.GetName(),
+			Role:        mailbox.GetRole(),
+			ParentID:    mailbox.GetParentId(),
+			SortOrder:   int(mailbox.GetSortOrder()),
+			IsSystem:    mailbox.GetIsSystem(),
+			IsDestroyed: mailbox.GetIsDestroyed(),
+		})
+	}
+
+	return mailboxes, nil
+}
+
+func (client *QueryClient) JMAPEmailStates(
+	ctx context.Context,
+	digests []contracts.ObjectDigest,
+) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error) {
+	values := make([]string, 0, len(digests))
+	for _, digest := range digests {
+		values = append(values, string(digest))
+	}
+	response, err := client.client.JMAPEmailStates(ctx, &pb.JMAPEmailStateRequest{
+		ObjectDigests: values,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	states := make(map[contracts.ObjectDigest]contracts.JMAPEmailState)
+	for _, state := range response.GetStates() {
+		receivedAt, err := parseTime(state.GetReceivedAt())
+		if err != nil {
+			return nil, err
+		}
+		digest := contracts.ObjectDigest(state.GetObjectDigest())
+		states[digest] = contracts.JMAPEmailState{
+			ReceivedAt:    receivedAt,
+			ObjectDigest:  digest,
+			ThreadID:      state.GetThreadId(),
+			MailboxIDs:    append([]string{}, state.GetMailboxIds()...),
+			Keywords:      append([]string{}, state.GetKeywords()...),
+			StateSequence: state.GetStateSequence(),
+		}
+	}
+
+	return states, nil
+}
+
 func (client *QueryClient) Rebuild(ctx context.Context) error {
 	_, err := client.client.Rebuild(ctx, &pb.Empty{})
 

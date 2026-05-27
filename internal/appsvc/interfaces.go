@@ -38,6 +38,14 @@ type QueryReader interface {
 	) (contracts.SourceCursorResponse, error)
 }
 
+type JMAPQueryReader interface {
+	JMAPMailboxes(ctx context.Context) ([]contracts.JMAPMailbox, error)
+	JMAPEmailStates(
+		ctx context.Context,
+		digests []contracts.ObjectDigest,
+	) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error)
+}
+
 type ObjectReader interface {
 	ReadManifest(
 		ctx context.Context,

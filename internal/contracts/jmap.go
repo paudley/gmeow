@@ -1,0 +1,27 @@
+// SPDX-FileCopyrightText: 2026 Blackcat Informatics Inc.
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package contracts
+
+import "time"
+
+type JMAPMailbox struct {
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	MailboxID   string    `json:"mailbox_id"`
+	Name        string    `json:"name"`
+	Role        string    `json:"role,omitempty"`
+	ParentID    string    `json:"parent_id,omitempty"`
+	SortOrder   int       `json:"sort_order,omitempty"`
+	IsSystem    bool      `json:"is_system,omitempty"`
+	IsDestroyed bool      `json:"is_destroyed,omitempty"`
+}
+
+type JMAPEmailState struct {
+	ReceivedAt    time.Time    `json:"received_at,omitempty"`
+	ObjectDigest  ObjectDigest `json:"object_digest"`
+	ThreadID      string       `json:"thread_id,omitempty"`
+	MailboxIDs    []string     `json:"mailbox_ids,omitempty"`
+	Keywords      []string     `json:"keywords,omitempty"`
+	StateSequence int64        `json:"state_sequence,omitempty"`
+}
