@@ -22,19 +22,23 @@ import (
 const MailMessageFacet = "mail_message"
 
 type Services struct {
-	query     QueryReader
-	objects   ObjectReader
-	scheduler SchedulerClient
-	sources   SourceRegistry
-	ingest    SourceIngestService
+	query            QueryReader
+	objects          ObjectReader
+	scheduler        SchedulerClient
+	sources          SourceRegistry
+	ingest           SourceIngestService
+	operations       OperationStore
+	operationWaiters map[string]*operationWaiter
+	operationMu      sync.Mutex
 }
 
 type Options struct {
-	Query     QueryReader
-	Objects   ObjectReader
-	Scheduler SchedulerClient
-	Sources   SourceRegistry
-	Ingest    SourceIngestService
+	Query      QueryReader
+	Objects    ObjectReader
+	Scheduler  SchedulerClient
+	Sources    SourceRegistry
+	Ingest     SourceIngestService
+	Operations OperationStore
 }
 
 type SearchOptions struct {
@@ -103,12 +107,23 @@ func New(options Options) (*Services, error) {
 		return nil, errors.New("appsvc object reader is required")
 	}
 
+	operations := options.Operations
+	if operations == nil {
+		if queryOperations, ok := options.Query.(OperationStore); ok {
+			operations = queryOperations
+		} else {
+			operations = NewMemoryOperationStore()
+		}
+	}
+
 	return &Services{
-		query:     options.Query,
-		objects:   options.Objects,
-		scheduler: options.Scheduler,
-		sources:   options.Sources,
-		ingest:    options.Ingest,
+		query:            options.Query,
+		objects:          options.Objects,
+		scheduler:        options.Scheduler,
+		sources:          options.Sources,
+		ingest:           options.Ingest,
+		operations:       operations,
+		operationWaiters: map[string]*operationWaiter{},
 	}, nil
 }
 

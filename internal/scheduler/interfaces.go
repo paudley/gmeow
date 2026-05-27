@@ -5,9 +5,9 @@ package scheduler
 
 import (
 	"context"
-	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
 )
 
 type Scheduler interface {
@@ -59,8 +59,8 @@ type Broker interface {
 	) (contracts.ReconcilePendingResponse, error)
 	ProcessProjectionRefreshes(
 		ctx context.Context,
-		projector ProjectionRefresher,
 		limit int,
+		refresh ProjectionRefreshFunc,
 	) (int, error)
 	RouteFailure(ctx context.Context, job contracts.AnalyzerJob) error
 	Status(ctx context.Context) (contracts.SchedulerStatus, error)
@@ -73,5 +73,10 @@ type Broker interface {
 }
 
 type ProjectionRefresher interface {
-	ProjectChanged(ctx context.Context, since time.Time) error
+	ProjectObject(ctx context.Context, object filestore.ProjectionObject) error
 }
+
+type ProjectionRefreshFunc func(
+	ctx context.Context,
+	digests []contracts.ObjectDigest,
+) error

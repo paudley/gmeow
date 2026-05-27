@@ -44,7 +44,8 @@ the concise ownership contract.
 - Gmail backfill is a BACKEND/SOURCE workflow. It pages Gmail, hydrates
   messages, writes Gmail compound objects and source cursors to FILESTORE, and
   stops there. FILESTORE notification then lets SCHEDULER derive analysis and
-  projection work through the normal scheduler-owned RabbitMQ path.
+  projection work through the normal scheduler-owned RabbitMQ path. Inbox
+  refresh uses its own cursor and can run while historical backfill is active.
 - INTERFACE talks to QUERY and BACKENDS through application service contracts.
   It does not own storage, queue, analysis, or database transport details. MCP,
   REST, IMAP, and CLI handlers must reach other Gmeow services through gRPC
@@ -63,8 +64,10 @@ the concise ownership contract.
    with exponential backoff without rescheduling successful analyzer outputs.
    Before running an analyzer, ANALYSIS asks FILESTORE whether the exact
    analyzer name/version annotation already exists and skips complete work.
-5. SCHEDULER processes projection refresh work by calling QUERY over gRPC;
-   QUERY projects FILESTORE manifests and annotations into PostgreSQL.
+5. SCHEDULER processes projection refresh work by loading the queued object
+   digests from FILESTORE and calling QUERY over gRPC; QUERY projects those
+   manifests and annotations into PostgreSQL. Runtime projection refresh must
+   not walk the FILESTORE root.
 6. INTERFACE serves REST, IMAP, MCP, and CLI workflows by calling QUERY,
    FILESTORE-facing retrieval services, SCHEDULER, and BACKENDS through typed
    service boundaries.

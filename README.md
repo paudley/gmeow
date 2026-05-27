@@ -77,7 +77,7 @@ ssl_mode = "require"
 host = "127.0.0.1"
 port = 5672
 user = "gmeow"
-vhost = "gmeow"
+vhost = "gmeow-prod"
 test_user = "gmeow-test"
 test_vhost = "gmeow-test"
 
@@ -103,22 +103,29 @@ Google Workspace domain-wide delegation set `delegated_subject` on the Gmail sou
 the credential JSON in the referenced `[secrets]` leaf. Gmail actions remain deliberately narrow:
 apply/remove label, archive, mark read, and star. SOURCE actions are gated by adapter capability and
 matching object provenance/facets.
+When both backfill and inbox refresh are enabled, the source service runs them concurrently. The
+inbox refresh uses its own cursor namespace and does not wait for historical backfill to complete.
 
 ## Run
 
 ```bash
-go run ./cmd/gmeow-admin --config gmeow.toml config validate
-go run ./cmd/gmeow --config gmeow.toml status
-go run ./cmd/gmeow --config gmeow.toml query-serve
-go run ./cmd/gmeow --config gmeow.toml scheduler-serve
-go run ./cmd/gmeow --config gmeow.toml filestore-serve
-go run ./cmd/gmeow-admin --config gmeow.toml scheduler run
-go run ./cmd/gmeow-worker --config gmeow.toml run
-go run ./cmd/gmeow --config gmeow.toml mcp-serve
-go run ./cmd/gmeow --config gmeow.toml mcp-http-serve
-go run ./cmd/gmeow --config gmeow.toml rest-serve
-go run ./cmd/gmeow --config gmeow.toml imap-serve
+make go-build
+bin/gmeow-admin --config gmeow.toml config validate
+bin/gmeow --config gmeow.toml status
+bin/gmeow --config gmeow.toml query-serve
+bin/gmeow --config gmeow.toml scheduler-serve
+bin/gmeow --config gmeow.toml filestore-serve
+bin/gmeow-admin --config gmeow.toml scheduler run
+bin/gmeow-worker --config gmeow.toml run
+bin/gmeow --config gmeow.toml mcp-serve
+bin/gmeow --config gmeow.toml mcp-http-serve
+bin/gmeow --config gmeow.toml rest-serve
+bin/gmeow --config gmeow.toml imap-serve
 ```
+
+`make go-build` writes `gmeow`, `gmeow-admin`, and `gmeow-worker` to `./bin/`
+by default. Override `BIN_DIR` only when packaging or deploying to an explicit
+operator-owned path.
 
 Operational commands include `gmeow-admin filestore verify`, `gmeow-admin query rebuild`,
 and `gmeow-admin query project-changed --since <RFC3339>` for FILESTORE verification and QUERY
@@ -127,10 +134,15 @@ confirmation.
 SCHEDULER provides `gmeow-admin scheduler scan`, `status`, `failed`, `dead-letter`, `requeue`, and
 `force`; RabbitMQ is mandatory. FILESTORE notifies SCHEDULER over gRPC after object and annotation
 writes. Object changes schedule missing/stale analyzer work, while analysis annotation writes enqueue
-projection refresh only. Production queues use the `gmeow.` prefix on the `gmeow` vhost; integration
-tests use the `gmeow.test.` prefix on the `gmeow-test` vhost.
+projection refresh only. Runtime projection refresh messages carry exact object digests; SCHEDULER
+loads and projects only those objects. Full FILESTORE walks are reserved for explicit
+operator-initiated scan, rebuild, and verification workflows.
 
-ANALYSIS workers are started with `go run ./cmd/gmeow-worker --config gmeow.toml run`.
+Production RabbitMQ vhost and queue prefix are deployment-specific configuration. The example uses
+the `gmeow-prod` vhost and `gmeow.` queue prefix; integration tests use the `gmeow-test` vhost and
+`gmeow.test.` queue prefix.
+
+ANALYSIS workers are started with `bin/gmeow-worker --config gmeow.toml run`.
 Workers check FILESTORE for an existing matching analyzer name/version before execution, so
 rescheduled failures or stale RabbitMQ messages skip completed analyzer outputs instead of rerunning
 NER, summaries, embeddings, or categorization.
@@ -168,6 +180,10 @@ FILESTORE, QUERY, SOURCE, or SCHEDULER implementations.
 By default, local data is ignored by git and stored under `data/`:
 
 - `data/filestore/` is the Go FILESTORE root.
+- `data/filestore/source-index/` stores source identity lookup records so SOURCE hydrate/search
+  paths do not walk object directories.
+- `data/filestore/compound-parent-index/` stores reverse child-to-parent references so annotation
+  refresh can update compound parents without scanning the filestore.
 - PostgreSQL, RabbitMQ, object storage, query indexes, analysis annotations, and source state are
   runtime data.
 

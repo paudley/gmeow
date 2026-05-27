@@ -10,8 +10,10 @@ interface requests, failed jobs, repair requests, and projection needs. It owns
 priority, retry, exponential backoff, dead-letter routing, requeue, and
 deterministic job identity.
 
-Production queues use the `gmeow.` prefix on the `gmeow` vhost. Integration
-tests use the `gmeow.test.` prefix on the `gmeow-test` vhost.
+Production RabbitMQ vhost and queue prefix are deployment configuration, not
+hardcoded runtime policy. The production example uses the `gmeow-prod` vhost
+and `gmeow.` queue prefix. Integration tests use the `gmeow-test` vhost and
+`gmeow.test.` queue prefix.
 
 ## Analysis Jobs
 
@@ -30,6 +32,11 @@ analyzer output by checking FILESTORE.
 FILESTORE object and annotation changes can require QUERY refresh. SCHEDULER
 decides and calls QUERY over gRPC. QUERY owns PostgreSQL; SCHEDULER owns when
 projection refresh should happen.
+
+Projection refresh queue messages carry exact object digests. Runtime refresh
+processing loads those named objects from FILESTORE and calls QUERY projection
+for each object. It must not walk the FILESTORE root; full scans are explicit
+operator workflows.
 
 ## Admin Operations
 

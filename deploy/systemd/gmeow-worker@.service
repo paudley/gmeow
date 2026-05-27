@@ -13,8 +13,6 @@ User=gmeow
 Group=gmeow
 Slice=gmeow.slice
 UMask=0077
-RuntimeDirectory=gmeow
-RuntimeDirectoryMode=0750
 StateDirectory=gmeow
 StateDirectoryMode=0750
 LogsDirectory=gmeow
@@ -22,6 +20,9 @@ LogsDirectoryMode=0750
 ConfigurationDirectory=gmeow
 ConfigurationDirectoryMode=0750
 EnvironmentFile=-/etc/gmeow/gmeow.env
+Environment=UV_CACHE_DIR=/var/lib/gmeow/uv-cache
+Environment=UV_PROJECT_ENVIRONMENT=/var/lib/gmeow/python-venv
+Environment=XDG_CACHE_HOME=/var/lib/gmeow/cache
 ExecStartPre=/usr/local/bin/gmeow-worker --config /etc/gmeow/gmeow.toml status
 ExecStart=/usr/local/bin/gmeow-worker --config /etc/gmeow/gmeow.toml run
 Restart=on-failure
@@ -54,7 +55,7 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources @mount
+SystemCallFilter=~@privileged @mount
 LockPersonality=yes
 
 [Install]

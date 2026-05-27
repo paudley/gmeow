@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 dist/
 build/
+bin/
 data/
 *.egg-info/
 .env
@@ -42,3 +43,6 @@ htmlcov/
 gmeow.toml
 .coding-ethos/*.lock
 .claude/settings.local.json
+.claude/settings.local.json
+.gemini/settings.json
+.mcp.json

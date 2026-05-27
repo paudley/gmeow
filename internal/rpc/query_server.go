@@ -310,6 +310,99 @@ func (server *QueryServer) ProjectChanged(
 	return &pb.Empty{}, server.index.ProjectChanged(ctx, since)
 }
 
+func (server *QueryServer) CreateOrGetOperation(
+	ctx context.Context,
+	request *pb.CreateOperationRequest,
+) (*pb.CreateOrGetOperationResponse, error) {
+	record, created, err := server.index.CreateOrGet(ctx, contracts.CreateOperationRequest{
+		OperationID: request.GetOperationId(),
+		RequestHash: request.GetRequestHash(),
+		Name:        request.GetName(),
+		Request:     append([]byte{}, request.GetRequestJson()...),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.CreateOrGetOperationResponse{
+		Operation: ToPBOperationRecord(record),
+		Created:   created,
+	}, nil
+}
+
+func (server *QueryServer) AppendOperationProgress(
+	ctx context.Context,
+	request *pb.AppendOperationProgressRequest,
+) (*pb.Empty, error) {
+	if request.GetEvent() == nil {
+		return nil, status.Error(codes.InvalidArgument, "progress event is required")
+	}
+	progress, err := FromPBOperationProgress(
+		[]*pb.OperationProgressEvent{request.GetEvent()},
+	)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	return &pb.Empty{}, server.index.AppendProgress(
+		ctx,
+		request.GetOperationId(),
+		progress[0],
+	)
+}
+
+func (server *QueryServer) CompleteOperation(
+	ctx context.Context,
+	request *pb.CompleteOperationRequest,
+) (*pb.Empty, error) {
+	return &pb.Empty{}, server.index.Complete(
+		ctx,
+		request.GetOperationId(),
+		append([]byte{}, request.GetResultJson()...),
+	)
+}
+
+func (server *QueryServer) FailOperation(
+	ctx context.Context,
+	request *pb.FailOperationRequest,
+) (*pb.Empty, error) {
+	return &pb.Empty{}, server.index.Fail(
+		ctx,
+		request.GetOperationId(),
+		request.GetMessage(),
+	)
+}
+
+func (server *QueryServer) GetOperation(
+	ctx context.Context,
+	request *pb.OperationLookupRequest,
+) (*pb.OperationLookupResponse, error) {
+	record, found, err := server.index.Get(ctx, request.GetOperationId())
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.OperationLookupResponse{
+		Operation: ToPBOperationRecord(record),
+		Found:     found,
+	}, nil
+}
+
+func (server *QueryServer) GetOperationByRequestHash(
+	ctx context.Context,
+	request *pb.OperationByRequestHashRequest,
+) (*pb.OperationLookupResponse, error) {
+	record, found, err := server.index.GetByRequestHash(ctx, request.GetRequestHash())
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.OperationLookupResponse{
+		Operation: ToPBOperationRecord(record),
+		Found:     found,
+	}, nil
+}
+
 func fromPBRelationshipFilter(
 	filter *pb.RelationshipFilter,
 ) contracts.RelationshipFilter {

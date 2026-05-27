@@ -30,8 +30,10 @@ target to managed services.
 
 ## Install
 
-Install the Go binaries as root-owned executable files at the paths referenced
-by the unit files.
+Build the Go binaries with `make go-build`. By default this creates
+`./bin/gmeow`, `./bin/gmeow-admin`, and `./bin/gmeow-worker`; package or install
+those exact binaries at the paths referenced by the unit files or by a local
+systemd drop-in. Do not rely on `go run` for managed services.
 
 Install configuration and secrets under the configuration directory referenced
 by the unit files, with directory mode `0750` and file mode `0640`.
@@ -83,6 +85,13 @@ The default service hardening makes the rest of the filesystem read-only to the
 service processes. Keep configured writable paths inside the state directory or
 add a narrow systemd drop-in for the specific unit that needs another path.
 
+For source checkouts used directly as deployments, point the unit command paths
+at the checkout's `bin/` directory and set `WorkingDirectory` plus configured
+data paths explicitly in a drop-in. The production checkout used by operators
+may keep FILESTORE data at a path such as `~/Active.running/gmeow/data`; that
+path must be writable by the service user through the configured systemd
+hardening.
+
 ## Hardening
 
 The service units use `Type=exec`, bounded restart backoff, explicit config
@@ -98,6 +107,9 @@ These defaults fit the current production shape:
 - QUERY is the only service that needs PostgreSQL access.
 - SCHEDULER is the only service that needs RabbitMQ access.
 - Analysis workers talk to FILESTORE and SCHEDULER job delivery only.
+- Worker units set `UV_CACHE_DIR`, `UV_PROJECT_ENVIRONMENT`, and
+  `XDG_CACHE_HOME` under `/var/lib/gmeow` so Python analyzer environments and
+  caches stay inside the writable state directory.
 
 If a deployment adds local GPU inference, FUSE mounts, hardware devices, or a
 nonstandard writable path, use a systemd drop-in for that one unit instead of

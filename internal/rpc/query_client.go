@@ -5,6 +5,7 @@ package rpc
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -325,6 +326,115 @@ func (client *QueryClient) ProjectChanged(ctx context.Context, since time.Time) 
 	})
 
 	return err
+}
+
+func (client *QueryClient) CreateOrGet(
+	ctx context.Context,
+	request contracts.CreateOperationRequest,
+) (contracts.OperationRecord, bool, error) {
+	response, err := client.client.CreateOrGetOperation(ctx, &pb.CreateOperationRequest{
+		OperationId: request.OperationID,
+		RequestHash: request.RequestHash,
+		Name:        request.Name,
+		RequestJson: append([]byte{}, request.Request...),
+	})
+	if err != nil {
+		return contracts.OperationRecord{}, false, err
+	}
+
+	record, err := FromPBOperationRecord(response.GetOperation())
+	if err != nil {
+		return contracts.OperationRecord{}, false, err
+	}
+
+	return record, response.GetCreated(), nil
+}
+
+func (client *QueryClient) AppendProgress(
+	ctx context.Context,
+	operationID string,
+	event contracts.OperationProgressEvent,
+) error {
+	_, err := client.client.AppendOperationProgress(
+		ctx,
+		&pb.AppendOperationProgressRequest{
+			OperationId: operationID,
+			Event:       ToPBOperationProgress([]contracts.OperationProgressEvent{event})[0],
+		},
+	)
+
+	return err
+}
+
+func (client *QueryClient) Complete(
+	ctx context.Context,
+	operationID string,
+	result json.RawMessage,
+) error {
+	_, err := client.client.CompleteOperation(ctx, &pb.CompleteOperationRequest{
+		OperationId: operationID,
+		ResultJson:  append([]byte{}, result...),
+	})
+
+	return err
+}
+
+func (client *QueryClient) Fail(
+	ctx context.Context,
+	operationID string,
+	message string,
+) error {
+	_, err := client.client.FailOperation(ctx, &pb.FailOperationRequest{
+		OperationId: operationID,
+		Message:     message,
+	})
+
+	return err
+}
+
+func (client *QueryClient) Get(
+	ctx context.Context,
+	operationID string,
+) (contracts.OperationRecord, bool, error) {
+	response, err := client.client.GetOperation(ctx, &pb.OperationLookupRequest{
+		OperationId: operationID,
+	})
+	if err != nil {
+		return contracts.OperationRecord{}, false, err
+	}
+	if !response.GetFound() {
+		return contracts.OperationRecord{}, false, nil
+	}
+
+	record, err := FromPBOperationRecord(response.GetOperation())
+	if err != nil {
+		return contracts.OperationRecord{}, false, err
+	}
+
+	return record, true, nil
+}
+
+func (client *QueryClient) GetByRequestHash(
+	ctx context.Context,
+	requestHash string,
+) (contracts.OperationRecord, bool, error) {
+	response, err := client.client.GetOperationByRequestHash(
+		ctx,
+		&pb.OperationByRequestHashRequest{RequestHash: requestHash},
+	)
+	if err != nil {
+		return contracts.OperationRecord{}, false, err
+	}
+	if !response.GetFound() {
+		return contracts.OperationRecord{}, false, nil
+	}
+
+	record, err := FromPBOperationRecord(response.GetOperation())
+	if err != nil {
+		return contracts.OperationRecord{}, false, err
+	}
+
+	return record, true, nil
 }
 
 func toPBRelationshipFilter(

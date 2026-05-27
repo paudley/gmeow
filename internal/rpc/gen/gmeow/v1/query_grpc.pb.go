@@ -19,18 +19,24 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	QueryService_Project_FullMethodName             = "/gmeow.v1.QueryService/Project"
-	QueryService_ProjectObject_FullMethodName       = "/gmeow.v1.QueryService/ProjectObject"
-	QueryService_ProjectSourceCursor_FullMethodName = "/gmeow.v1.QueryService/ProjectSourceCursor"
-	QueryService_Search_FullMethodName              = "/gmeow.v1.QueryService/Search"
-	QueryService_Structure_FullMethodName           = "/gmeow.v1.QueryService/Structure"
-	QueryService_Relationships_FullMethodName       = "/gmeow.v1.QueryService/Relationships"
-	QueryService_Graph_FullMethodName               = "/gmeow.v1.QueryService/Graph"
-	QueryService_AnalysisStatus_FullMethodName      = "/gmeow.v1.QueryService/AnalysisStatus"
-	QueryService_VectorSearch_FullMethodName        = "/gmeow.v1.QueryService/VectorSearch"
-	QueryService_SourceCursors_FullMethodName       = "/gmeow.v1.QueryService/SourceCursors"
-	QueryService_Rebuild_FullMethodName             = "/gmeow.v1.QueryService/Rebuild"
-	QueryService_ProjectChanged_FullMethodName      = "/gmeow.v1.QueryService/ProjectChanged"
+	QueryService_Project_FullMethodName                   = "/gmeow.v1.QueryService/Project"
+	QueryService_ProjectObject_FullMethodName             = "/gmeow.v1.QueryService/ProjectObject"
+	QueryService_ProjectSourceCursor_FullMethodName       = "/gmeow.v1.QueryService/ProjectSourceCursor"
+	QueryService_Search_FullMethodName                    = "/gmeow.v1.QueryService/Search"
+	QueryService_Structure_FullMethodName                 = "/gmeow.v1.QueryService/Structure"
+	QueryService_Relationships_FullMethodName             = "/gmeow.v1.QueryService/Relationships"
+	QueryService_Graph_FullMethodName                     = "/gmeow.v1.QueryService/Graph"
+	QueryService_AnalysisStatus_FullMethodName            = "/gmeow.v1.QueryService/AnalysisStatus"
+	QueryService_VectorSearch_FullMethodName              = "/gmeow.v1.QueryService/VectorSearch"
+	QueryService_SourceCursors_FullMethodName             = "/gmeow.v1.QueryService/SourceCursors"
+	QueryService_CreateOrGetOperation_FullMethodName      = "/gmeow.v1.QueryService/CreateOrGetOperation"
+	QueryService_AppendOperationProgress_FullMethodName   = "/gmeow.v1.QueryService/AppendOperationProgress"
+	QueryService_CompleteOperation_FullMethodName         = "/gmeow.v1.QueryService/CompleteOperation"
+	QueryService_FailOperation_FullMethodName             = "/gmeow.v1.QueryService/FailOperation"
+	QueryService_GetOperation_FullMethodName              = "/gmeow.v1.QueryService/GetOperation"
+	QueryService_GetOperationByRequestHash_FullMethodName = "/gmeow.v1.QueryService/GetOperationByRequestHash"
+	QueryService_Rebuild_FullMethodName                   = "/gmeow.v1.QueryService/Rebuild"
+	QueryService_ProjectChanged_FullMethodName            = "/gmeow.v1.QueryService/ProjectChanged"
 )
 
 // QueryServiceClient is the client API for QueryService service.
@@ -47,6 +53,12 @@ type QueryServiceClient interface {
 	AnalysisStatus(ctx context.Context, in *AnalysisStatusRequest, opts ...grpc.CallOption) (*AnalysisStatusResponse, error)
 	VectorSearch(ctx context.Context, in *VectorSearchRequest, opts ...grpc.CallOption) (*VectorSearchResponse, error)
 	SourceCursors(ctx context.Context, in *SourceCursorRequest, opts ...grpc.CallOption) (*SourceCursorResponse, error)
+	CreateOrGetOperation(ctx context.Context, in *CreateOperationRequest, opts ...grpc.CallOption) (*CreateOrGetOperationResponse, error)
+	AppendOperationProgress(ctx context.Context, in *AppendOperationProgressRequest, opts ...grpc.CallOption) (*Empty, error)
+	CompleteOperation(ctx context.Context, in *CompleteOperationRequest, opts ...grpc.CallOption) (*Empty, error)
+	FailOperation(ctx context.Context, in *FailOperationRequest, opts ...grpc.CallOption) (*Empty, error)
+	GetOperation(ctx context.Context, in *OperationLookupRequest, opts ...grpc.CallOption) (*OperationLookupResponse, error)
+	GetOperationByRequestHash(ctx context.Context, in *OperationByRequestHashRequest, opts ...grpc.CallOption) (*OperationLookupResponse, error)
 	Rebuild(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 	ProjectChanged(ctx context.Context, in *ProjectChangedRequest, opts ...grpc.CallOption) (*Empty, error)
 }
@@ -159,6 +171,66 @@ func (c *queryServiceClient) SourceCursors(ctx context.Context, in *SourceCursor
 	return out, nil
 }
 
+func (c *queryServiceClient) CreateOrGetOperation(ctx context.Context, in *CreateOperationRequest, opts ...grpc.CallOption) (*CreateOrGetOperationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateOrGetOperationResponse)
+	err := c.cc.Invoke(ctx, QueryService_CreateOrGetOperation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) AppendOperationProgress(ctx context.Context, in *AppendOperationProgressRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, QueryService_AppendOperationProgress_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) CompleteOperation(ctx context.Context, in *CompleteOperationRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, QueryService_CompleteOperation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) FailOperation(ctx context.Context, in *FailOperationRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, QueryService_FailOperation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) GetOperation(ctx context.Context, in *OperationLookupRequest, opts ...grpc.CallOption) (*OperationLookupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OperationLookupResponse)
+	err := c.cc.Invoke(ctx, QueryService_GetOperation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) GetOperationByRequestHash(ctx context.Context, in *OperationByRequestHashRequest, opts ...grpc.CallOption) (*OperationLookupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OperationLookupResponse)
+	err := c.cc.Invoke(ctx, QueryService_GetOperationByRequestHash_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *queryServiceClient) Rebuild(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Empty)
@@ -193,6 +265,12 @@ type QueryServiceServer interface {
 	AnalysisStatus(context.Context, *AnalysisStatusRequest) (*AnalysisStatusResponse, error)
 	VectorSearch(context.Context, *VectorSearchRequest) (*VectorSearchResponse, error)
 	SourceCursors(context.Context, *SourceCursorRequest) (*SourceCursorResponse, error)
+	CreateOrGetOperation(context.Context, *CreateOperationRequest) (*CreateOrGetOperationResponse, error)
+	AppendOperationProgress(context.Context, *AppendOperationProgressRequest) (*Empty, error)
+	CompleteOperation(context.Context, *CompleteOperationRequest) (*Empty, error)
+	FailOperation(context.Context, *FailOperationRequest) (*Empty, error)
+	GetOperation(context.Context, *OperationLookupRequest) (*OperationLookupResponse, error)
+	GetOperationByRequestHash(context.Context, *OperationByRequestHashRequest) (*OperationLookupResponse, error)
 	Rebuild(context.Context, *Empty) (*Empty, error)
 	ProjectChanged(context.Context, *ProjectChangedRequest) (*Empty, error)
 	mustEmbedUnimplementedQueryServiceServer()
@@ -234,6 +312,24 @@ func (UnimplementedQueryServiceServer) VectorSearch(context.Context, *VectorSear
 }
 func (UnimplementedQueryServiceServer) SourceCursors(context.Context, *SourceCursorRequest) (*SourceCursorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SourceCursors not implemented")
+}
+func (UnimplementedQueryServiceServer) CreateOrGetOperation(context.Context, *CreateOperationRequest) (*CreateOrGetOperationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateOrGetOperation not implemented")
+}
+func (UnimplementedQueryServiceServer) AppendOperationProgress(context.Context, *AppendOperationProgressRequest) (*Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method AppendOperationProgress not implemented")
+}
+func (UnimplementedQueryServiceServer) CompleteOperation(context.Context, *CompleteOperationRequest) (*Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method CompleteOperation not implemented")
+}
+func (UnimplementedQueryServiceServer) FailOperation(context.Context, *FailOperationRequest) (*Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method FailOperation not implemented")
+}
+func (UnimplementedQueryServiceServer) GetOperation(context.Context, *OperationLookupRequest) (*OperationLookupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetOperation not implemented")
+}
+func (UnimplementedQueryServiceServer) GetOperationByRequestHash(context.Context, *OperationByRequestHashRequest) (*OperationLookupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetOperationByRequestHash not implemented")
 }
 func (UnimplementedQueryServiceServer) Rebuild(context.Context, *Empty) (*Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method Rebuild not implemented")
@@ -442,6 +538,114 @@ func _QueryService_SourceCursors_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _QueryService_CreateOrGetOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateOperationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).CreateOrGetOperation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_CreateOrGetOperation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).CreateOrGetOperation(ctx, req.(*CreateOperationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_AppendOperationProgress_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AppendOperationProgressRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).AppendOperationProgress(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_AppendOperationProgress_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).AppendOperationProgress(ctx, req.(*AppendOperationProgressRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_CompleteOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompleteOperationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).CompleteOperation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_CompleteOperation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).CompleteOperation(ctx, req.(*CompleteOperationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_FailOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FailOperationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).FailOperation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_FailOperation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).FailOperation(ctx, req.(*FailOperationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_GetOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OperationLookupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).GetOperation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_GetOperation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).GetOperation(ctx, req.(*OperationLookupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_GetOperationByRequestHash_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OperationByRequestHashRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).GetOperationByRequestHash(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_GetOperationByRequestHash_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).GetOperationByRequestHash(ctx, req.(*OperationByRequestHashRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _QueryService_Rebuild_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(Empty)
 	if err := dec(in); err != nil {
@@ -524,6 +728,30 @@ var QueryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SourceCursors",
 			Handler:    _QueryService_SourceCursors_Handler,
+		},
+		{
+			MethodName: "CreateOrGetOperation",
+			Handler:    _QueryService_CreateOrGetOperation_Handler,
+		},
+		{
+			MethodName: "AppendOperationProgress",
+			Handler:    _QueryService_AppendOperationProgress_Handler,
+		},
+		{
+			MethodName: "CompleteOperation",
+			Handler:    _QueryService_CompleteOperation_Handler,
+		},
+		{
+			MethodName: "FailOperation",
+			Handler:    _QueryService_FailOperation_Handler,
+		},
+		{
+			MethodName: "GetOperation",
+			Handler:    _QueryService_GetOperation_Handler,
+		},
+		{
+			MethodName: "GetOperationByRequestHash",
+			Handler:    _QueryService_GetOperationByRequestHash_Handler,
 		},
 		{
 			MethodName: "Rebuild",

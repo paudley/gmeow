@@ -22,3 +22,10 @@ durable work messages that can be redelivered or rederived.
 If PostgreSQL is lost, recreate the database/extensions, run migrations, and rebuild QUERY from
 FILESTORE. Do not use `recovery.json` sidecars for normal rebuilds; they are emergency human
 recovery aids only.
+
+Normal runtime paths must not walk FILESTORE. Whole-tree walks belong to these
+explicit operator workflows: backup verification, restore verification, QUERY
+rebuild, changed-projection repair, and scheduler scan/repair. SOURCE lookup
+uses `source-index/`, and compound parent refresh uses
+`compound-parent-index/`; if either index is missing for historical data,
+normal ingest or an explicit repair workflow recreates it.

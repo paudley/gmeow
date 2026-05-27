@@ -99,6 +99,46 @@ func TestMCPStreamableHTTPMailSearchUsesAppServices(t *testing.T) {
 	}
 }
 
+func TestMCPStreamableHTTPObjectRetrieveIncludesContent(t *testing.T) {
+	ctx := context.Background()
+	services, digest := testServicesWithDigest(t, "hello streamable retrieve")
+	httpServer := httptest.NewServer(NewStreamableHandler(
+		services,
+		HTTPOptions{SessionTimeout: time.Minute},
+	))
+	defer httpServer.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: httpServer.URL + streamableEndpoint,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "object_retrieve",
+		Arguments: map[string]any{
+			"digest":          string(digest),
+			"include_content": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("tool returned error: %#v", result.Content)
+	}
+	content, err := appsvc.JSONText(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "hello streamable retrieve") {
+		t.Fatalf("expected retrieved content in structured output: %s", content)
+	}
+}
+
 func TestMCPStreamableHTTPHandlesConcurrentSessions(t *testing.T) {
 	ctx := context.Background()
 	services := testServices(t, "hello concurrent mcp mail")
@@ -304,6 +344,16 @@ func postMCPMessage(t *testing.T, endpoint, message string) *http.Response {
 
 func testServices(t *testing.T, text string) *appsvc.Services {
 	t.Helper()
+	services, _ := testServicesWithDigest(t, text)
+
+	return services
+}
+
+func testServicesWithDigest(
+	t *testing.T,
+	text string,
+) (*appsvc.Services, contracts.ObjectDigest) {
+	t.Helper()
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
 	t.Cleanup(filestoreService.Close)
@@ -334,5 +384,5 @@ func testServices(t *testing.T, text string) *appsvc.Services {
 		t.Fatal(err)
 	}
 
-	return services
+	return services, digest
 }

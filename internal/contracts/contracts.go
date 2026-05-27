@@ -3,7 +3,10 @@
 
 package contracts
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type SchemaVersion int
 
@@ -295,6 +298,68 @@ type SearchResponse struct {
 	Results       []SearchResult `json:"results"`
 	SchemaVersion SchemaVersion  `json:"schema_version"`
 	Total         int            `json:"total"`
+}
+
+type OperationStatus string
+
+const (
+	OperationStatusRunning  OperationStatus = "running"
+	OperationStatusComplete OperationStatus = "complete"
+	OperationStatusFailed   OperationStatus = "failed"
+)
+
+type OperationProgressEvent struct {
+	At       time.Time `json:"at"`
+	Stage    string    `json:"stage"`
+	Message  string    `json:"message,omitempty"`
+	Progress float64   `json:"progress,omitempty"`
+	Total    float64   `json:"total,omitempty"`
+}
+
+type OperationRecord struct {
+	CreatedAt   time.Time                `json:"created_at"`
+	UpdatedAt   time.Time                `json:"updated_at"`
+	CompletedAt time.Time                `json:"completed_at,omitempty"`
+	Progress    []OperationProgressEvent `json:"progress,omitempty"`
+	Request     json.RawMessage          `json:"request,omitempty"`
+	Result      json.RawMessage          `json:"result,omitempty"`
+	OperationID string                   `json:"operation_id"`
+	RequestHash string                   `json:"request_hash"`
+	Name        string                   `json:"name"`
+	Status      OperationStatus          `json:"status"`
+	Error       string                   `json:"error,omitempty"`
+}
+
+type CreateOperationRequest struct {
+	Request     json.RawMessage `json:"request"`
+	OperationID string          `json:"operation_id"`
+	RequestHash string          `json:"request_hash"`
+	Name        string          `json:"name"`
+}
+
+type OperationStatusRequest struct {
+	OperationID string `json:"operation_id"`
+}
+
+type OperationResultRequest struct {
+	OperationID string `json:"operation_id"`
+}
+
+type OperationStatusResponse struct {
+	CreatedAt   time.Time                `json:"created_at"`
+	UpdatedAt   time.Time                `json:"updated_at"`
+	CompletedAt time.Time                `json:"completed_at,omitempty"`
+	Progress    []OperationProgressEvent `json:"progress,omitempty"`
+	OperationID string                   `json:"operation_id"`
+	RequestHash string                   `json:"request_hash"`
+	Name        string                   `json:"name"`
+	Status      OperationStatus          `json:"status"`
+	Error       string                   `json:"error,omitempty"`
+}
+
+type OperationResultResponse struct {
+	Operation OperationStatusResponse `json:"operation"`
+	Result    map[string]any          `json:"result,omitempty"`
 }
 
 type ProvenanceFilter struct {

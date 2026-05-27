@@ -17,6 +17,12 @@ service QueryService {
   rpc AnalysisStatus(AnalysisStatusRequest) returns (AnalysisStatusResponse);
   rpc VectorSearch(VectorSearchRequest) returns (VectorSearchResponse);
   rpc SourceCursors(SourceCursorRequest) returns (SourceCursorResponse);
+  rpc CreateOrGetOperation(CreateOperationRequest) returns (CreateOrGetOperationResponse);
+  rpc AppendOperationProgress(AppendOperationProgressRequest) returns (Empty);
+  rpc CompleteOperation(CompleteOperationRequest) returns (Empty);
+  rpc FailOperation(FailOperationRequest) returns (Empty);
+  rpc GetOperation(OperationLookupRequest) returns (OperationLookupResponse);
+  rpc GetOperationByRequestHash(OperationByRequestHashRequest) returns (OperationLookupResponse);
   rpc Rebuild(Empty) returns (Empty);
   rpc ProjectChanged(ProjectChangedRequest) returns (Empty);
 }
@@ -153,6 +159,63 @@ message SourceCursorRequest {
 message SourceCursorResponse {
   int32 schema_version = 1;
   repeated SourceCursor cursors = 2;
+}
+
+message OperationProgressEvent {
+  string at = 1;
+  string stage = 2;
+  string message = 3;
+  double progress = 4;
+  double total = 5;
+}
+
+message OperationRecord {
+  string operation_id = 1;
+  string request_hash = 2;
+  string name = 3;
+  bytes request_json = 4;
+  string status = 5;
+  repeated OperationProgressEvent progress = 6;
+  bytes result_json = 7;
+  string error = 8;
+  string created_at = 9;
+  string updated_at = 10;
+  string completed_at = 11;
+}
+
+message CreateOperationRequest {
+  string operation_id = 1;
+  string request_hash = 2;
+  string name = 3;
+  bytes request_json = 4;
+}
+
+message CreateOrGetOperationResponse {
+  OperationRecord operation = 1;
+  bool created = 2;
+}
+
+message AppendOperationProgressRequest {
+  string operation_id = 1;
+  OperationProgressEvent event = 2;
+}
+
+message CompleteOperationRequest {
+  string operation_id = 1;
+  bytes result_json = 2;
+}
+
+message FailOperationRequest {
+  string operation_id = 1;
+  string message = 2;
+}
+
+message OperationLookupRequest { string operation_id = 1; }
+message OperationByRequestHashRequest { string request_hash = 1; }
+
+message OperationLookupResponse {
+  OperationRecord operation = 1;
+  bool found = 2;
 }
 
 message ProjectChangedRequest { string since = 1; }

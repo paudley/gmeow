@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -40,7 +41,14 @@ const (
 var errStopWalk = errors.New("stop filestore walk")
 
 type FilesystemStore struct {
-	root string
+	root     string
+	locksMu  sync.Mutex
+	keyLocks map[string]*filesystemKeyLock
+}
+
+type filesystemKeyLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 func NewFilesystemStore(root string) *FilesystemStore {
@@ -95,6 +103,13 @@ func (store *FilesystemStore) Put(
 	); err != nil {
 		return "", err
 	}
+	if err := store.recordSourceObjectIndexes(
+		ctx,
+		digest,
+		request.Provenance,
+	); err != nil {
+		return "", err
+	}
 
 	cleanup = false
 
@@ -133,10 +148,14 @@ func (store *FilesystemStore) AttachProvenance(
 	manifest.Provenance = mergeProvenance(manifest.Provenance, provenance)
 	manifest.UpdatedAt = time.Now().UTC()
 
-	return store.writeCompressedJSON(
+	if err := store.writeCompressedJSON(
 		store.objectPath(digest, manifestFilename),
 		manifest,
-	)
+	); err != nil {
+		return err
+	}
+
+	return store.recordSourceObjectIndexes(ctx, digest, provenance)
 }
 
 func (store *FilesystemStore) PutCompound(
@@ -198,6 +217,16 @@ func (store *FilesystemStore) PutCompound(
 		request.SourceHint,
 		manifest,
 	); err != nil {
+		return "", err
+	}
+	if err := store.recordSourceObjectIndexes(
+		ctx,
+		digest,
+		request.Provenance,
+	); err != nil {
+		return "", err
+	}
+	if err := store.recordCompoundParentIndexes(ctx, digest, parts); err != nil {
 		return "", err
 	}
 
@@ -392,7 +421,7 @@ func (store *FilesystemStore) WriteAnnotation(
 	}
 
 	if annotation.Kind == "analysis" {
-		return store.refreshParentsForSubobject(ctx, annotation.ObjectDigest)
+		return store.refreshIndexedParentsForSubobject(ctx, annotation.ObjectDigest)
 	}
 
 	return nil
@@ -502,179 +531,6 @@ func (store *FilesystemStore) ReadSourceCursor(
 	return stored, true, nil
 }
 
-func (store *FilesystemStore) refreshParentsForSubobject(
-	ctx context.Context,
-	childDigest contracts.ObjectDigest,
-) error {
-	childAnnotations, err := store.readObjectAnnotations(childDigest)
-	if err != nil {
-		return err
-	}
-
-	summaries := []map[string]any{}
-
-	for _, annotation := range childAnnotations {
-		if annotation.Kind != "analysis" {
-			continue
-		}
-
-		summaries = append(summaries, map[string]any{
-			"analyzer_name":    annotation.AnalyzerName,
-			"analyzer_version": annotation.AnalyzerVer,
-			"generated_at":     annotation.GeneratedAt,
-			"status": firstNonEmpty(
-				stringFromAny(annotation.Data["status"]),
-				"complete",
-			),
-		})
-	}
-
-	if len(summaries) == 0 {
-		return nil
-	}
-
-	return store.WalkProjection(ctx, func(object ProjectionObject) error {
-		if len(object.Findings) > 0 || !manifestContainsPart(object.Manifest, childDigest) {
-			return nil
-		}
-
-		manifest := object.Manifest
-		if manifest.Analysis == nil {
-			manifest.Analysis = map[string]any{}
-		}
-
-		partAnalysis, ok := manifest.Analysis["part_analysis"].(map[string]any)
-		if !ok {
-			partAnalysis = map[string]any{}
-		}
-
-		partAnalysis[string(childDigest)] = map[string]any{
-			"refreshed_at": time.Now().UTC(),
-			"annotations":  summaries,
-		}
-		manifest.Analysis["part_analysis"] = partAnalysis
-		manifest.UpdatedAt = time.Now().UTC()
-
-		return store.writeCompressedJSON(
-			store.objectPath(manifest.ObjectDigest, manifestFilename),
-			manifest,
-		)
-	})
-}
-
-func (store *FilesystemStore) readObjectAnnotations(
-	digest contracts.ObjectDigest,
-) ([]contracts.Annotation, error) {
-	object := ProjectionObject{
-		Digest: digest,
-		Path:   store.objectDir(digest),
-	}
-	store.readProjectionObject(&object)
-
-	if len(object.Findings) > 0 {
-		return nil, fmt.Errorf(
-			"read annotations for %s: %s",
-			digest,
-			object.Findings[0].Message,
-		)
-	}
-
-	return object.Annotations, nil
-}
-
-func manifestContainsPart(
-	manifest contracts.Manifest,
-	digest contracts.ObjectDigest,
-) bool {
-	for _, part := range manifest.Compound.Parts {
-		if part.Digest == digest {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (store *FilesystemStore) WalkProjection(
-	ctx context.Context,
-	fn ProjectionFunc,
-) error {
-	if fn == nil {
-		return errors.New("projection callback is required")
-	}
-
-	base := filepath.Join(store.root, "objects", "blake3")
-
-	err := filepath.WalkDir(
-		base,
-		func(path string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				if errors.Is(walkErr, os.ErrNotExist) && path == base {
-					return nil
-				}
-
-				return walkErr
-			}
-
-			err := ctx.Err()
-			if err != nil {
-				return err
-			}
-
-			if !entry.IsDir() || !looksLikeDigest(entry.Name()) {
-				return nil
-			}
-
-			digest := contracts.ObjectDigest(entry.Name())
-
-			object := ProjectionObject{
-				Digest: digest,
-				Path:   path,
-			}
-			if expectedPath := store.objectDir(digest); path != expectedPath {
-				object.Findings = append(object.Findings, ProjectionFinding{
-					Digest:  digest,
-					Path:    path,
-					Code:    "object_path_mismatch",
-					Message: "expected " + expectedPath,
-				})
-			} else {
-				store.readProjectionObject(&object)
-			}
-
-			err = fn(object)
-			if err != nil {
-				return err
-			}
-
-			return filepath.SkipDir
-		},
-	)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-
-	return err
-}
-
-func (store *FilesystemStore) WalkChangedProjection(
-	ctx context.Context,
-	since time.Time,
-	fn ProjectionFunc,
-) error {
-	if fn == nil {
-		return errors.New("projection callback is required")
-	}
-
-	return store.WalkProjection(ctx, func(object ProjectionObject) error {
-		if len(object.Findings) > 0 || projectionObjectChangedAfter(object, since) {
-			return fn(object)
-		}
-
-		return nil
-	})
-}
-
 func (store *FilesystemStore) WalkSourceCursors(
 	ctx context.Context,
 	fn SourceCursorProjectionFunc,
@@ -719,82 +575,6 @@ func (store *FilesystemStore) WalkSourceCursors(
 	}
 
 	return err
-}
-
-func (store *FilesystemStore) readProjectionObject(object *ProjectionObject) {
-	manifestPath := filepath.Join(object.Path, manifestFilename)
-	if err := store.readCompressedJSON(manifestPath, &object.Manifest); err != nil {
-		object.Findings = append(object.Findings, ProjectionFinding{
-			Digest:  object.Digest,
-			Path:    manifestPath,
-			Code:    "manifest_read_failed",
-			Message: err.Error(),
-		})
-
-		return
-	}
-
-	if object.Manifest.ObjectDigest == "" {
-		object.Manifest.ObjectDigest = object.Digest
-	}
-
-	entries, err := os.ReadDir(object.Path)
-	if err != nil {
-		object.Findings = append(object.Findings, ProjectionFinding{
-			Digest:  object.Digest,
-			Path:    object.Path,
-			Code:    "annotation_list_failed",
-			Message: err.Error(),
-		})
-
-		return
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !isProjectionAnnotationFilename(entry.Name()) {
-			continue
-		}
-
-		path := filepath.Join(object.Path, entry.Name())
-
-		var annotation contracts.Annotation
-		err := store.readCompressedJSON(path, &annotation)
-		if err != nil {
-			object.Findings = append(object.Findings, ProjectionFinding{
-				Digest:  object.Digest,
-				Path:    path,
-				Code:    "annotation_read_failed",
-				Message: err.Error(),
-			})
-
-			continue
-		}
-
-		if annotation.ObjectDigest == "" {
-			annotation.ObjectDigest = object.Digest
-		}
-
-		if annotation.Kind == "" {
-			annotation.Kind = strings.TrimSuffix(entry.Name(), ".json.zst")
-		}
-
-		object.Annotations = append(object.Annotations, annotation)
-	}
-
-	sort.SliceStable(object.Annotations, func(left, right int) bool {
-		leftAnnotation := object.Annotations[left]
-
-		rightAnnotation := object.Annotations[right]
-		if leftAnnotation.Kind != rightAnnotation.Kind {
-			return leftAnnotation.Kind < rightAnnotation.Kind
-		}
-
-		if leftAnnotation.AnalyzerName != rightAnnotation.AnalyzerName {
-			return leftAnnotation.AnalyzerName < rightAnnotation.AnalyzerName
-		}
-
-		return leftAnnotation.AnalyzerVer < rightAnnotation.AnalyzerVer
-	})
 }
 
 func (store *FilesystemStore) writeObject(
@@ -1248,6 +1028,29 @@ func (store *FilesystemStore) sourceObjectLockPath(
 	key := sourceObjectRefKey(ref)
 
 	return filepath.Join(store.root, "source-locks", key[:2], key[2:4], key+".json")
+}
+
+func (store *FilesystemStore) sourceObjectIndexPath(
+	ref contracts.SourceObjectRef,
+) string {
+	key := sourceObjectRefKey(ref)
+
+	return filepath.Join(store.root, "source-index", key[:2], key[2:4], key+".json")
+}
+
+func (store *FilesystemStore) compoundParentIndexPath(
+	childDigest contracts.ObjectDigest,
+) string {
+	value := string(childDigest)
+
+	return filepath.Join(
+		store.root,
+		"compound-parent-index",
+		"blake3",
+		value[:2],
+		value[2:4],
+		value+".json",
+	)
 }
 
 func (store *FilesystemStore) sourceCursorPath(

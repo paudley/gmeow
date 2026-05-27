@@ -5,6 +5,7 @@ package query
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -63,6 +64,22 @@ type Index interface {
 		ctx context.Context,
 		request contracts.SourceCursorRequest,
 	) (contracts.SourceCursorResponse, error)
+	CreateOrGet(
+		ctx context.Context,
+		request contracts.CreateOperationRequest,
+	) (contracts.OperationRecord, bool, error)
+	AppendProgress(
+		ctx context.Context,
+		operationID string,
+		event contracts.OperationProgressEvent,
+	) error
+	Complete(ctx context.Context, operationID string, result json.RawMessage) error
+	Fail(ctx context.Context, operationID, message string) error
+	Get(ctx context.Context, operationID string) (contracts.OperationRecord, bool, error)
+	GetByRequestHash(
+		ctx context.Context,
+		requestHash string,
+	) (contracts.OperationRecord, bool, error)
 	Rebuild(ctx context.Context) error
 	ProjectChanged(ctx context.Context, since time.Time) error
 }

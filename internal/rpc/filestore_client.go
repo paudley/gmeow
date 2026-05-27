@@ -50,27 +50,56 @@ func (client *FilestoreClient) Open(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 ) (io.ReadCloser, error) {
-	stream, err := client.client.Open(ctx, &pb.OpenRequest{Digest: string(digest)})
+	streamCtx, cancel := context.WithCancel(ctx)
+	stream, err := client.client.Open(
+		streamCtx,
+		&pb.OpenRequest{Digest: string(digest)},
+	)
 	if err != nil {
+		cancel()
+
 		return nil, err
 	}
 
-	var buffer bytes.Buffer
+	return &objectStreamReader{stream: stream, cancel: cancel}, nil
+}
 
-	for {
-		chunk, recvErr := stream.Recv()
-		if errors.Is(recvErr, io.EOF) {
-			return io.NopCloser(bytes.NewReader(buffer.Bytes())), nil
+type objectStreamReader struct {
+	stream pb.FilestoreService_OpenClient
+	cancel context.CancelFunc
+	buffer bytes.Buffer
+	closed bool
+}
+
+func (reader *objectStreamReader) Read(target []byte) (int, error) {
+	if reader.closed {
+		return 0, io.ErrClosedPipe
+	}
+	if len(target) == 0 {
+		return 0, nil
+	}
+
+	for reader.buffer.Len() == 0 {
+		chunk, err := reader.stream.Recv()
+		if err != nil {
+			return 0, err
 		}
-
-		if recvErr != nil {
-			return nil, recvErr
-		}
-
-		if _, err := buffer.Write(chunk.GetData()); err != nil {
-			return nil, err
+		if len(chunk.GetData()) > 0 {
+			_, _ = reader.buffer.Write(chunk.GetData())
 		}
 	}
+
+	return reader.buffer.Read(target)
+}
+
+func (reader *objectStreamReader) Close() error {
+	if reader.closed {
+		return nil
+	}
+	reader.closed = true
+	reader.cancel()
+
+	return nil
 }
 
 func (client *FilestoreClient) LookupSourceObject(
@@ -394,7 +423,10 @@ type CompoundPutRequest struct {
 }
 
 func dial(ctx context.Context, endpoint Endpoint) (*grpc.ClientConn, error) {
-	options := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	options := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(retryUnaryClientInterceptor),
+	}
 
 	target := endpoint.Address
 	switch endpoint.Network {

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,29 +29,32 @@ func (store *FilesystemStore) LookupSourceObject(
 		return "", false, err
 	}
 
-	var found contracts.ObjectDigest
-
-	err := store.WalkProjection(ctx, func(object ProjectionObject) error {
-		if len(object.Findings) > 0 {
-			return nil
-		}
-
-		for _, provenance := range object.Manifest.Provenance {
-			if sourceRefMatches(provenance, ref) {
-				found = object.Manifest.ObjectDigest
-
-				return errStopWalk
-			}
-		}
-
-		return nil
-	})
-	if errors.Is(err, errStopWalk) {
-		return found, true, nil
+	var entry sourceObjectIndexEntry
+	err := readJSON(store.sourceObjectIndexPath(ref), &entry)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
 	}
-
 	if err != nil {
 		return "", false, err
+	}
+	if !sourceObjectRefsEqual(entry.SourceObject, ref) {
+		return "", false, errors.New("source object index key does not match payload")
+	}
+	if err := validateObjectDigest(entry.ObjectDigest); err != nil {
+		return "", false, err
+	}
+
+	manifest, err := store.ReadManifest(ctx, entry.ObjectDigest)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	for _, provenance := range manifest.Provenance {
+		if sourceRefMatches(provenance, ref) {
+			return entry.ObjectDigest, true, nil
+		}
 	}
 
 	return "", false, nil
@@ -199,10 +203,17 @@ func sourceRefMatches(
 	provenance contracts.Provenance,
 	ref contracts.SourceObjectRef,
 ) bool {
-	return provenance.SourceKind == ref.SourceKind &&
-		provenance.SourceName == ref.SourceName &&
-		provenance.ExternalID == ref.ExternalID &&
-		provenance.ExternalVersion == ref.ExternalVersion
+	return sourceObjectRefsEqual(sourceObjectRefFromProvenance(provenance), ref)
+}
+
+func sourceObjectRefsEqual(
+	left contracts.SourceObjectRef,
+	right contracts.SourceObjectRef,
+) bool {
+	return left.SourceKind == right.SourceKind &&
+		left.SourceName == right.SourceName &&
+		left.ExternalID == right.ExternalID &&
+		left.ExternalVersion == right.ExternalVersion
 }
 
 func sourceObjectRefKey(ref contracts.SourceObjectRef) string {
@@ -223,4 +234,191 @@ func sourceObjectLockID(ref contracts.SourceObjectRef, acquiredAt time.Time) str
 	}, "\x00")))
 
 	return hex.EncodeToString(sum[:])
+}
+
+type sourceObjectIndexEntry struct {
+	SourceObject contracts.SourceObjectRef `json:"source_object"`
+	ObjectDigest contracts.ObjectDigest    `json:"object_digest"`
+	UpdatedAt    time.Time                 `json:"updated_at"`
+}
+
+type compoundParentIndexRecord struct {
+	SchemaVersion int                    `json:"schema_version"`
+	ChildDigest   contracts.ObjectDigest `json:"child_digest"`
+	Parents       []compoundParentEdge   `json:"parents"`
+}
+
+type compoundParentEdge struct {
+	ParentDigest contracts.ObjectDigest `json:"parent_digest"`
+	Role         string                 `json:"role"`
+	UpdatedAt    time.Time              `json:"updated_at"`
+}
+
+func (store *FilesystemStore) recordSourceObjectIndexes(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	provenance []contracts.Provenance,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(provenance) == 0 {
+		return nil
+	}
+	if err := validateObjectDigest(digest); err != nil {
+		return err
+	}
+
+	updatedAt := time.Now().UTC()
+	for _, item := range provenance {
+		ref := sourceObjectRefFromProvenance(item)
+		if ref.SourceKind == "" && ref.SourceName == "" && ref.ExternalID == "" {
+			continue
+		}
+		if ref.SourceKind == "" || ref.SourceName == "" || ref.ExternalID == "" {
+			continue
+		}
+		if err := validateSourceObjectRef(ref); err != nil {
+			return err
+		}
+		entry := sourceObjectIndexEntry{
+			SourceObject: ref,
+			ObjectDigest: digest,
+			UpdatedAt:    updatedAt,
+		}
+		if err := atomicWriteJSON(store.sourceObjectIndexPath(ref), entry); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (store *FilesystemStore) recordCompoundParentIndexes(
+	ctx context.Context,
+	parentDigest contracts.ObjectDigest,
+	parts []contracts.CompoundPart,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	if err := validateObjectDigest(parentDigest); err != nil {
+		return err
+	}
+
+	updatedAt := time.Now().UTC()
+	byChild := map[contracts.ObjectDigest][]compoundParentEdge{}
+	for _, part := range parts {
+		if err := validateCompoundPart(part); err != nil {
+			return err
+		}
+		byChild[part.Digest] = append(byChild[part.Digest], compoundParentEdge{
+			ParentDigest: parentDigest,
+			Role:         part.Role,
+			UpdatedAt:    updatedAt,
+		})
+	}
+
+	for childDigest, edges := range byChild {
+		if err := store.mergeCompoundParentIndex(ctx, childDigest, edges); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (store *FilesystemStore) mergeCompoundParentIndex(
+	ctx context.Context,
+	childDigest contracts.ObjectDigest,
+	edges []compoundParentEdge,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateObjectDigest(childDigest); err != nil {
+		return err
+	}
+
+	unlock := store.lockKey("compound-parent-index:" + string(childDigest))
+	defer unlock()
+
+	path := store.compoundParentIndexPath(childDigest)
+	record := compoundParentIndexRecord{
+		SchemaVersion: int(contracts.SchemaVersionPhase00),
+		ChildDigest:   childDigest,
+	}
+	if err := readJSON(path, &record); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if record.ChildDigest != "" && record.ChildDigest != childDigest {
+		return errors.New("compound parent index key does not match payload")
+	}
+	record.SchemaVersion = int(contracts.SchemaVersionPhase00)
+	record.ChildDigest = childDigest
+
+	merged := map[string]compoundParentEdge{}
+	for _, parent := range record.Parents {
+		if err := validateObjectDigest(parent.ParentDigest); err != nil {
+			continue
+		}
+		merged[compoundParentEdgeKey(parent)] = parent
+	}
+	for _, edge := range edges {
+		if err := validateObjectDigest(edge.ParentDigest); err != nil {
+			return err
+		}
+		merged[compoundParentEdgeKey(edge)] = edge
+	}
+
+	record.Parents = make([]compoundParentEdge, 0, len(merged))
+	for _, edge := range merged {
+		record.Parents = append(record.Parents, edge)
+	}
+	sortCompoundParentEdges(record.Parents)
+
+	return atomicWriteJSON(path, record)
+}
+
+func (store *FilesystemStore) compoundParentsForChild(
+	ctx context.Context,
+	childDigest contracts.ObjectDigest,
+) ([]compoundParentEdge, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateObjectDigest(childDigest); err != nil {
+		return nil, err
+	}
+
+	var record compoundParentIndexRecord
+	err := readJSON(store.compoundParentIndexPath(childDigest), &record)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if record.ChildDigest != childDigest {
+		return nil, errors.New("compound parent index key does not match payload")
+	}
+
+	return append([]compoundParentEdge{}, record.Parents...), nil
+}
+
+func compoundParentEdgeKey(edge compoundParentEdge) string {
+	return string(edge.ParentDigest) + "\x00" + edge.Role
+}
+
+func sortCompoundParentEdges(edges []compoundParentEdge) {
+	sort.SliceStable(edges, func(left, right int) bool {
+		if edges[left].ParentDigest != edges[right].ParentDigest {
+			return edges[left].ParentDigest < edges[right].ParentDigest
+		}
+
+		return edges[left].Role < edges[right].Role
+	})
 }

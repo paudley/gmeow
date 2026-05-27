@@ -29,7 +29,7 @@ ssl_mode = "require"
 host = "127.0.0.1"
 port = 5672
 user = "gmeow"
-vhost = "gmeow"
+vhost = "gmeow-prod"
 test_user = "gmeow-test"
 test_vhost = "gmeow-test"
 

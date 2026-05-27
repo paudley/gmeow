@@ -297,7 +297,7 @@ func TestAnalysisJobSourcePersistsFailureCauseInFailedJob(t *testing.T) {
 	}
 }
 
-func TestProcessProjectionRefreshesProjectsOncePerBatch(t *testing.T) {
+func TestProcessProjectionRefreshesRefreshesQueuedDigests(t *testing.T) {
 	cfg := testRabbitMQConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -315,16 +315,24 @@ func TestProcessProjectionRefreshesProjectsOncePerBatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	projector := &countingProjector{}
+	var refreshed []contracts.ObjectDigest
 
-	processed, err := broker.ProcessProjectionRefreshes(ctx, projector, 100)
+	processed, err := broker.ProcessProjectionRefreshes(
+		ctx,
+		100,
+		func(_ context.Context, digests []contracts.ObjectDigest) error {
+			refreshed = append(refreshed, digests...)
+
+			return nil
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if processed != 2 || projector.calls != 1 {
-		t.Fatalf("expected one projection refresh batch, processed=%d calls=%d",
+	if processed != 2 || len(refreshed) != 2 {
+		t.Fatalf("expected projection refresh digests, processed=%d digests=%#v",
 			processed,
-			projector.calls,
+			refreshed,
 		)
 	}
 	status, err := broker.Status(ctx)
@@ -617,14 +625,4 @@ func purgeQueues(t *testing.T, broker *Broker) {
 			t.Fatalf("purge %s: %v", name, err)
 		}
 	}
-}
-
-type countingProjector struct {
-	calls int
-}
-
-func (projector *countingProjector) ProjectChanged(context.Context, time.Time) error {
-	projector.calls++
-
-	return nil
 }

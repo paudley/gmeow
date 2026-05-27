@@ -26,7 +26,10 @@ const (
 	CapabilityExport       = "export"
 )
 
-var ErrUnsupportedOperation = errors.New("unsupported source operation")
+var (
+	ErrUnsupportedOperation   = errors.New("unsupported source operation")
+	ErrSourceIngestInProgress = errors.New("source ingest already in progress")
+)
 
 type FilestoreClient interface {
 	LookupSourceObject(
@@ -223,7 +226,8 @@ func (service *Service) Ingest(
 
 		if !acquired {
 			return "", false, fmt.Errorf(
-				"source ingest already in progress for %s/%s/%s",
+				"%w for %s/%s/%s",
+				ErrSourceIngestInProgress,
 				ref.SourceKind,
 				ref.SourceName,
 				ref.ExternalID,
@@ -455,6 +459,14 @@ func (service *Service) writeBackfillCursor(
 		return service.WriteCursor(ctx, adapter, next)
 	}
 
+	latest, found, err := service.ReadCursor(ctx, adapter)
+	if err != nil {
+		return err
+	}
+	if found {
+		stored = latest
+	}
+
 	return service.WriteCursor(ctx, adapter, namespacedCursor(stored, next, key))
 }
 
@@ -505,6 +517,11 @@ func (service *Service) ingestBackfillPage(
 	for result := range results {
 		report.Processed++
 		if result.err != nil {
+			if errors.Is(result.err, ErrSourceIngestInProgress) {
+				report.Skipped++
+
+				continue
+			}
 			report.Failed++
 			report.FailedMessageIDs = append(
 				report.FailedMessageIDs,
