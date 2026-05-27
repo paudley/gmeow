@@ -118,7 +118,7 @@ python:
   test_paths:
     - python/tests
   stub_paths:
-    - typings
+    - python/typings
   extra_paths:
     - python/gmeow_intel
   venv_path: .
