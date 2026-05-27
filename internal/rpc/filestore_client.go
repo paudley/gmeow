@@ -423,7 +423,10 @@ type CompoundPutRequest struct {
 }
 
 func dial(ctx context.Context, endpoint Endpoint) (*grpc.ClientConn, error) {
-	options := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	options := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(retryUnaryClientInterceptor),
+	}
 
 	target := endpoint.Address
 	switch endpoint.Network {

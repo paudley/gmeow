@@ -89,6 +89,32 @@ func TestIngestSourceClaimSerializesHydration(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected concurrent source ingest claim to block hydration")
 	}
+	if !errors.Is(err, ErrSourceIngestInProgress) {
+		t.Fatalf("expected source ingest claim error, got %v", err)
+	}
+}
+
+func TestBackfillSkipsConcurrentSourceIngestClaim(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	service, err := NewService(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := service.RunBackfill(ctx, duplicatePullAdapter{}, BackfillRequest{
+		Cursor:      map[string]any{},
+		PageSize:    2,
+		Concurrency: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Processed != 2 || report.Created != 1 || report.Skipped != 1 ||
+		report.Failed != 0 {
+		t.Fatalf("unexpected duplicate ingest report: %#v", report)
+	}
 }
 
 func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
@@ -734,6 +760,53 @@ func (*expiredHistoryGmailBackend) ListHistory(
 	GmailHistoryRequest,
 ) (GmailHistoryPage, error) {
 	return GmailHistoryPage{Expired: true}, nil
+}
+
+type duplicatePullAdapter struct{}
+
+func (duplicatePullAdapter) Name() string {
+	return "primary"
+}
+
+func (duplicatePullAdapter) Kind() string {
+	return "gmail"
+}
+
+func (duplicatePullAdapter) Capabilities() []string {
+	return []string{CapabilityBackfill}
+}
+
+func (duplicatePullAdapter) Pull(
+	_ context.Context,
+	_ IngestService,
+	request PullRequest,
+) ([]IngestObject, contracts.SourceCursor, error) {
+	cursor := cloneCursor(request.Cursor)
+	cursor["completed"] = true
+
+	return []IngestObject{
+			{
+				Reader:      strings.NewReader("hello"),
+				SourceKind:  "gmail",
+				SourceName:  "primary",
+				ExternalID:  "message-1",
+				ExternalVer: "v1",
+				Facets:      []contracts.Facet{{Kind: "file"}},
+			},
+			{
+				Reader:      strings.NewReader("hello"),
+				SourceKind:  "gmail",
+				SourceName:  "primary",
+				ExternalID:  "message-1",
+				ExternalVer: "v1",
+				Facets:      []contracts.Facet{{Kind: "file"}},
+			},
+		},
+		contracts.SourceCursor{
+			SourceKind: "gmail",
+			SourceName: "primary",
+			Cursor:     cursor,
+		}, nil
 }
 
 func hasRelationship(

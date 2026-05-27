@@ -208,11 +208,12 @@ func openInterfaceServicesLoaded(
 	}
 
 	services, err := appsvc.New(appsvc.Options{
-		Query:     queryClient,
-		Objects:   filestoreClient,
-		Scheduler: schedulerClient,
-		Sources:   sourceRegistry,
-		Ingest:    sourceService,
+		Query:      queryClient,
+		Objects:    filestoreClient,
+		Scheduler:  schedulerClient,
+		Sources:    sourceRegistry,
+		Ingest:     sourceService,
+		Operations: queryClient,
 	})
 	if err != nil {
 		closeSources()

@@ -49,6 +49,8 @@ func NewHandler(services *appsvc.Services) http.Handler {
 	mux.HandleFunc("POST /v1/analysis_status", handleJSON(services.AnalysisStatus))
 	mux.HandleFunc("POST /v1/force_analysis", handleJSON(services.ForceAnalysis))
 	mux.HandleFunc("POST /v1/source_action", handleJSON(services.SourceAction))
+	mux.HandleFunc("POST /v1/operation_status", handleJSON(services.OperationStatus))
+	mux.HandleFunc("POST /v1/operation_result", handleJSON(services.OperationResult))
 	mux.HandleFunc(
 		"GET /v1/ops_status",
 		func(writer http.ResponseWriter, request *http.Request) {

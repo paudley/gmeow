@@ -60,15 +60,33 @@ func New(services *appsvc.Services) (*Server, error) {
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "gmeow", Version: "phase-6"}, nil)
 	addTool(server, "object_search", "search projected objects", services.ObjectSearch)
-	addTool(
+	addToolWithRequest(
 		server,
 		"mail_search",
 		"search mail messages across index and live sources",
-		services.MailSearch,
+		func(
+			ctx context.Context,
+			request *mcp.CallToolRequest,
+			input appsvc.SearchOptions,
+		) (contracts.OperationResultResponse, error) {
+			return services.MailSearchOperation(ctx, input, mcpProgressSink(ctx, request))
+		},
 	)
-	addTool(server, "object_retrieve", "retrieve an object manifest and optional content",
-		func(ctx context.Context, input retrieveInput) (appsvc.RetrieveResponse, error) {
-			return services.Retrieve(ctx, input.Digest, input.IncludeContent)
+	addToolWithRequest(
+		server,
+		"object_retrieve",
+		"retrieve an object manifest and optional content",
+		func(
+			ctx context.Context,
+			request *mcp.CallToolRequest,
+			input retrieveInput,
+		) (contracts.OperationResultResponse, error) {
+			return services.ObjectRetrieveOperation(
+				ctx,
+				string(input.Digest),
+				input.IncludeContent,
+				mcpProgressSink(ctx, request),
+			)
 		},
 	)
 	addDigestTool(server, "get_structure", "get object structure", services.Structure)
@@ -90,14 +108,69 @@ func New(services *appsvc.Services) (*Server, error) {
 		"expand compound object parts",
 		services.Compound,
 	)
-	addTool(
+	addToolWithRequest(
 		server,
 		"graph_explore",
 		"explore projected graph facts",
-		services.GraphExplore,
+		func(
+			ctx context.Context,
+			request *mcp.CallToolRequest,
+			input contracts.GraphRequest,
+		) (contracts.OperationResultResponse, error) {
+			return services.GraphExploreOperation(ctx, input, mcpProgressSink(ctx, request))
+		},
 	)
-	addTool(server, "analysis_status", "inspect analysis status", services.AnalysisStatus)
-	addTool(server, "force_analysis", "force analyzer scheduling", services.ForceAnalysis)
+	addToolWithRequest(server, "analysis_status", "inspect analysis status",
+		func(
+			ctx context.Context,
+			request *mcp.CallToolRequest,
+			input contracts.AnalysisStatusRequest,
+		) (contracts.OperationResultResponse, error) {
+			return services.AnalysisStatusOperation(ctx, input, mcpProgressSink(ctx, request))
+		},
+	)
+	addToolWithRequest(server, "force_analysis", "force analyzer scheduling",
+		func(
+			ctx context.Context,
+			request *mcp.CallToolRequest,
+			input appsvc.ForceAnalysisRequest,
+		) (contracts.OperationResultResponse, error) {
+			return services.ForceAnalysisOperation(ctx, input, mcpProgressSink(ctx, request))
+		},
+	)
+	addToolWithRequest(server, "operation_status", "inspect a durable interface operation",
+		func(
+			ctx context.Context,
+			_ *mcp.CallToolRequest,
+			input contracts.OperationStatusRequest,
+		) (contracts.OperationStatusResponse, error) {
+			return services.OperationStatus(ctx, input)
+		},
+	)
+	addToolWithRequest(
+		server,
+		"operation_result",
+		"retrieve a completed durable interface operation result",
+		func(
+			ctx context.Context,
+			_ *mcp.CallToolRequest,
+			input contracts.OperationResultRequest,
+		) (contracts.OperationResultResponse, error) {
+			return services.OperationResult(ctx, input)
+		},
+	)
+	addToolWithRequest(
+		server,
+		"operation_resume",
+		"resume waiting for a durable interface operation",
+		func(
+			ctx context.Context,
+			request *mcp.CallToolRequest,
+			input contracts.OperationResultRequest,
+		) (contracts.OperationResultResponse, error) {
+			return services.OperationResume(ctx, input, mcpProgressSink(ctx, request))
+		},
+	)
 	addTool(
 		server,
 		"source_action",
@@ -267,13 +340,54 @@ func addTool[In, Out any](
 	description string,
 	handler func(context.Context, In) (Out, error),
 ) {
+	addToolWithRequest(
+		server,
+		name,
+		description,
+		func(ctx context.Context, _ *mcp.CallToolRequest, input In) (Out, error) {
+			return handler(ctx, input)
+		},
+	)
+}
+
+func addToolWithRequest[In, Out any](
+	server *mcp.Server,
+	name string,
+	description string,
+	handler func(context.Context, *mcp.CallToolRequest, In) (Out, error),
+) {
 	mcp.AddTool(
 		server,
 		&mcp.Tool{Name: name, Description: description},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
-			output, err := handler(ctx, input)
+		func(ctx context.Context, request *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
+			output, err := handler(ctx, request, input)
 
 			return nil, output, err
 		},
 	)
+}
+
+func mcpProgressSink(
+	ctx context.Context,
+	request *mcp.CallToolRequest,
+) appsvc.OperationProgressSink {
+	if request == nil || request.Session == nil ||
+		request.Params.GetProgressToken() == nil {
+		return nil
+	}
+
+	progressToken := request.Params.GetProgressToken()
+
+	return func(event contracts.OperationProgressEvent) {
+		message := event.Message
+		if message == "" {
+			message = event.Stage
+		}
+		_ = request.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+			ProgressToken: progressToken,
+			Progress:      event.Progress,
+			Total:         event.Total,
+			Message:       message,
+		})
+	}
 }

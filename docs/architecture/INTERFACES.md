@@ -30,6 +30,14 @@ MCP Streamable HTTP supports `POST /mcp`, `GET /mcp`, `DELETE /mcp`,
 `Mcp-Session-Id`, `Last-Event-ID` replay, health, metrics, and loopback-first
 operation.
 
+Long-running MCP tools run as durable interface operations. `mail_search`,
+`object_retrieve`, `graph_explore`, `analysis_status`, and `force_analysis`
+return an operation envelope with an `operation_id`, stream progress when the
+MCP client supplied a progress token, and persist their final result through
+QUERY-owned operation storage. Clients can use `operation_status`,
+`operation_result`, or `operation_resume` after a transport reconnect. REST also
+exposes `POST /v1/operation_status` and `POST /v1/operation_result`.
+
 ## Search Behavior
 
 Generic MCP and REST search can cross facets. `mail_search` is pre-facetted for

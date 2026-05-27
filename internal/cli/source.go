@@ -20,6 +20,8 @@ import (
 	"blackcat.ca/gmeow/internal/source/sourcegrpc"
 )
 
+var configuredSourceRetryDelay = 30 * time.Second
+
 func newSourceCommand(out io.Writer, configPath *string) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "source",
@@ -305,55 +307,63 @@ func runConfiguredSourceWork(
 		}
 	}
 
-	errs := make(chan error, 2)
 	if sourceConfig.Backfill.Enabled {
 		go func() {
-			fmt.Printf("source backfill: started source=%s/%s\n", adapter.Kind(), adapter.Name())
-			_, err := service.RunBackfill(ctx, pull, source.BackfillRequest{
-				Cursor: map[string]any{
-					"mode":  firstNonEmpty(sourceConfig.Backfill.Mode, "full"),
-					"query": sourceConfig.Backfill.Query,
-				},
-				CursorKey:   firstNonEmpty(sourceConfig.Backfill.CursorKey, "backfill"),
-				PageSize:    sourceConfig.Backfill.PageSize,
-				MaxPages:    sourceConfig.Backfill.MaxPages,
-				Concurrency: sourceConfig.Backfill.Concurrency,
-				Resume:      sourceConfig.Backfill.Resume,
-			})
-			if err != nil && ctx.Err() == nil {
-				fmt.Printf(
-					"source backfill: failed source=%s/%s error=%v\n",
-					adapter.Kind(),
-					adapter.Name(),
-					err,
-				)
-				errs <- err
-
-				return
-			}
-			if ctx.Err() == nil {
-				fmt.Printf(
-					"source backfill: completed source=%s/%s\n",
-					adapter.Kind(),
-					adapter.Name(),
-				)
-			}
+			runConfiguredBackfill(ctx, service, pull, sourceConfig)
 		}()
 	}
 	if sourceConfig.InboxRefresh.Enabled {
 		go func() {
-			err := runConfiguredInboxRefresh(ctx, service, pull, sourceConfig)
-			if err != nil && ctx.Err() == nil {
-				errs <- err
-			}
+			runConfiguredInboxRefresh(ctx, service, pull, sourceConfig)
 		}()
 	}
 
-	select {
-	case <-ctx.Done():
-		return nil
-	case err := <-errs:
-		return err
+	<-ctx.Done()
+
+	return nil
+}
+
+func runConfiguredBackfill(
+	ctx context.Context,
+	service *source.Service,
+	pull source.PullAdapter,
+	sourceConfig config.SourceConfig,
+) {
+	for ctx.Err() == nil {
+		fmt.Printf("source backfill: started source=%s/%s\n", pull.Kind(), pull.Name())
+		_, err := service.RunBackfill(ctx, pull, source.BackfillRequest{
+			Cursor: map[string]any{
+				"mode":  firstNonEmpty(sourceConfig.Backfill.Mode, "full"),
+				"query": sourceConfig.Backfill.Query,
+			},
+			CursorKey:   firstNonEmpty(sourceConfig.Backfill.CursorKey, "backfill"),
+			PageSize:    sourceConfig.Backfill.PageSize,
+			MaxPages:    sourceConfig.Backfill.MaxPages,
+			Concurrency: sourceConfig.Backfill.Concurrency,
+			Resume:      sourceConfig.Backfill.Resume,
+		})
+		if err != nil && ctx.Err() == nil {
+			fmt.Printf(
+				"source backfill: failed source=%s/%s error=%v\n",
+				pull.Kind(),
+				pull.Name(),
+				err,
+			)
+			if !waitConfiguredSourceRetry(ctx) {
+				return
+			}
+
+			continue
+		}
+		if ctx.Err() == nil {
+			fmt.Printf(
+				"source backfill: completed source=%s/%s\n",
+				pull.Kind(),
+				pull.Name(),
+			)
+		}
+
+		return
 	}
 }
 
@@ -362,7 +372,7 @@ func runConfiguredInboxRefresh(
 	service *source.Service,
 	pull source.PullAdapter,
 	sourceConfig config.SourceConfig,
-) error {
+) {
 	interval := sourceRefreshInterval(sourceConfig.InboxRefresh.Interval)
 	for {
 		query := firstNonEmpty(
@@ -393,8 +403,11 @@ func runConfiguredInboxRefresh(
 				pull.Name(),
 				err,
 			)
+			if !waitConfiguredSourceRetry(ctx) {
+				return
+			}
 
-			return err
+			continue
 		}
 		fmt.Printf(
 			"source inbox refresh: completed source=%s/%s processed=%d created=%d skipped=%d completed=%t\n",
@@ -411,9 +424,21 @@ func runConfiguredInboxRefresh(
 		case <-ctx.Done():
 			timer.Stop()
 
-			return nil
+			return
 		case <-timer.C:
 		}
+	}
+}
+
+func waitConfiguredSourceRetry(ctx context.Context) bool {
+	timer := time.NewTimer(configuredSourceRetryDelay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
