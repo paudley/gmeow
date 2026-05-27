@@ -45,22 +45,23 @@ type retrieveInput struct {
 	IncludeContent bool                   `json:"include_content,omitempty" jsonschema:"include up to 1MiB of object content"`
 }
 
-type provenanceOutput struct {
-	Provenance []contracts.Provenance `json:"provenance"`
-}
-
-type facetsOutput struct {
-	Facets []contracts.Facet `json:"facets"`
-}
-
 func New(services *appsvc.Services) (*Server, error) {
 	if services == nil {
 		return nil, errors.New("MCP app services are required")
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "gmeow", Version: "phase-6"}, nil)
-	addTool(server, "object_search", "search projected objects", services.ObjectSearch)
-	addToolWithRequest(
+	addToonTool(server, "object_search", "search projected objects",
+		func(ctx context.Context, input appsvc.SearchOptions) (any, error) {
+			response, err := services.ObjectSearch(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonSearch("object_search", input, response), nil
+		},
+	)
+	addToonToolWithRequest(
 		server,
 		"mail_search",
 		"search mail messages across index and live sources",
@@ -68,11 +69,20 @@ func New(services *appsvc.Services) (*Server, error) {
 			ctx context.Context,
 			request *mcp.CallToolRequest,
 			input appsvc.SearchOptions,
-		) (contracts.OperationResultResponse, error) {
-			return services.MailSearchOperation(ctx, input, mcpProgressSink(ctx, request))
+		) (any, error) {
+			response, err := services.MailSearchOperation(
+				ctx,
+				input,
+				mcpProgressSink(ctx, request),
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonOperationForTool("mail_search", response), nil
 		},
 	)
-	addToolWithRequest(
+	addToonToolWithRequest(
 		server,
 		"object_retrieve",
 		"retrieve an object manifest and optional content",
@@ -80,35 +90,64 @@ func New(services *appsvc.Services) (*Server, error) {
 			ctx context.Context,
 			request *mcp.CallToolRequest,
 			input retrieveInput,
-		) (contracts.OperationResultResponse, error) {
-			return services.ObjectRetrieveOperation(
+		) (any, error) {
+			response, err := services.ObjectRetrieveOperation(
 				ctx,
 				string(input.Digest),
 				input.IncludeContent,
 				mcpProgressSink(ctx, request),
 			)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonOperationForTool("object_retrieve", response), nil
 		},
 	)
-	addDigestTool(server, "get_structure", "get object structure", services.Structure)
-	addDigestTool(server, "get_provenance", "get object provenance",
-		func(ctx context.Context, digest contracts.ObjectDigest) (provenanceOutput, error) {
+	addToonDigestTool(server, "get_structure", "get object structure",
+		func(ctx context.Context, digest contracts.ObjectDigest) (any, error) {
+			response, err := services.Structure(ctx, digest)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonStructure(response), nil
+		},
+	)
+	addToonDigestTool(server, "get_provenance", "get object provenance",
+		func(ctx context.Context, digest contracts.ObjectDigest) (any, error) {
 			provenance, err := services.Provenance(ctx, digest)
-			return provenanceOutput{Provenance: provenance}, err
+			if err != nil {
+				return nil, err
+			}
+
+			return toonProvenanceResult(provenance), nil
 		},
 	)
-	addDigestTool(server, "get_facets", "get object facets",
-		func(ctx context.Context, digest contracts.ObjectDigest) (facetsOutput, error) {
+	addToonDigestTool(server, "get_facets", "get object facets",
+		func(ctx context.Context, digest contracts.ObjectDigest) (any, error) {
 			facets, err := services.Facets(ctx, digest)
-			return facetsOutput{Facets: facets}, err
+			if err != nil {
+				return nil, err
+			}
+
+			return toonFacetsResult(facets), nil
 		},
 	)
-	addDigestTool(
+	addToonDigestTool(
 		server,
 		"compound_expand",
 		"expand compound object parts",
-		services.Compound,
+		func(ctx context.Context, digest contracts.ObjectDigest) (any, error) {
+			compound, err := services.Compound(ctx, digest)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonCompound(compound, true), nil
+		},
 	)
-	addToolWithRequest(
+	addToonToolWithRequest(
 		server,
 		"graph_explore",
 		"explore projected graph facts",
@@ -116,38 +155,73 @@ func New(services *appsvc.Services) (*Server, error) {
 			ctx context.Context,
 			request *mcp.CallToolRequest,
 			input contracts.GraphRequest,
-		) (contracts.OperationResultResponse, error) {
-			return services.GraphExploreOperation(ctx, input, mcpProgressSink(ctx, request))
+		) (any, error) {
+			response, err := services.GraphExploreOperation(
+				ctx,
+				input,
+				mcpProgressSink(ctx, request),
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonOperationForTool("graph_explore", response), nil
 		},
 	)
-	addToolWithRequest(server, "analysis_status", "inspect analysis status",
+	addToonToolWithRequest(server, "analysis_status", "inspect analysis status",
 		func(
 			ctx context.Context,
 			request *mcp.CallToolRequest,
 			input contracts.AnalysisStatusRequest,
-		) (contracts.OperationResultResponse, error) {
-			return services.AnalysisStatusOperation(ctx, input, mcpProgressSink(ctx, request))
+		) (any, error) {
+			response, err := services.AnalysisStatusOperation(
+				ctx,
+				input,
+				mcpProgressSink(ctx, request),
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonOperationForTool("analysis_status", response), nil
 		},
 	)
-	addToolWithRequest(server, "force_analysis", "force analyzer scheduling",
+	addToonToolWithRequest(server, "force_analysis", "force analyzer scheduling",
 		func(
 			ctx context.Context,
 			request *mcp.CallToolRequest,
 			input appsvc.ForceAnalysisRequest,
-		) (contracts.OperationResultResponse, error) {
-			return services.ForceAnalysisOperation(ctx, input, mcpProgressSink(ctx, request))
+		) (any, error) {
+			response, err := services.ForceAnalysisOperation(
+				ctx,
+				input,
+				mcpProgressSink(ctx, request),
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonOperationForTool("force_analysis", response), nil
 		},
 	)
-	addToolWithRequest(server, "operation_status", "inspect a durable interface operation",
+	addToonToolWithRequest(
+		server,
+		"operation_status",
+		"inspect a durable interface operation",
 		func(
 			ctx context.Context,
 			_ *mcp.CallToolRequest,
 			input contracts.OperationStatusRequest,
-		) (contracts.OperationStatusResponse, error) {
-			return services.OperationStatus(ctx, input)
+		) (any, error) {
+			response, err := services.OperationStatus(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonOperation(response), nil
 		},
 	)
-	addToolWithRequest(
+	addToonToolWithRequest(
 		server,
 		"operation_result",
 		"retrieve a completed durable interface operation result",
@@ -155,11 +229,16 @@ func New(services *appsvc.Services) (*Server, error) {
 			ctx context.Context,
 			_ *mcp.CallToolRequest,
 			input contracts.OperationResultRequest,
-		) (contracts.OperationResultResponse, error) {
-			return services.OperationResult(ctx, input)
+		) (any, error) {
+			response, err := services.OperationResult(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonOperationResult(response), nil
 		},
 	)
-	addToolWithRequest(
+	addToonToolWithRequest(
 		server,
 		"operation_resume",
 		"resume waiting for a durable interface operation",
@@ -167,19 +246,36 @@ func New(services *appsvc.Services) (*Server, error) {
 			ctx context.Context,
 			request *mcp.CallToolRequest,
 			input contracts.OperationResultRequest,
-		) (contracts.OperationResultResponse, error) {
-			return services.OperationResume(ctx, input, mcpProgressSink(ctx, request))
+		) (any, error) {
+			response, err := services.OperationResume(ctx, input, mcpProgressSink(ctx, request))
+			if err != nil {
+				return nil, err
+			}
+
+			return toonOperationResume(response), nil
 		},
 	)
-	addTool(
+	addToonTool(
 		server,
 		"source_action",
 		"apply a source-specific action",
-		services.SourceAction,
+		func(ctx context.Context, input appsvc.SourceActionRequest) (any, error) {
+			response, err := services.SourceAction(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonSourceAction(response), nil
+		},
 	)
-	addTool(server, "ops_status", "inspect operational status",
-		func(ctx context.Context, _ map[string]any) (appsvc.OpsStatusResponse, error) {
-			return services.OpsStatus(ctx)
+	addToonTool(server, "ops_status", "inspect operational status",
+		func(ctx context.Context, _ map[string]any) (any, error) {
+			response, err := services.OpsStatus(ctx)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonOpsStatus(response), nil
 		},
 	)
 
@@ -318,51 +414,57 @@ func (server *HTTPServer) Addr() string {
 	return server.listener.Addr().String()
 }
 
-func addDigestTool[Out any](
+func addToonDigestTool(
 	server *mcp.Server,
 	name string,
 	description string,
-	handler func(context.Context, contracts.ObjectDigest) (Out, error),
+	handler func(context.Context, contracts.ObjectDigest) (any, error),
 ) {
-	addTool(
+	addToonTool(
 		server,
 		name,
 		description,
-		func(ctx context.Context, input digestInput) (Out, error) {
+		func(ctx context.Context, input digestInput) (any, error) {
 			return handler(ctx, input.Digest)
 		},
 	)
 }
 
-func addTool[In, Out any](
+func addToonTool[In any](
 	server *mcp.Server,
 	name string,
 	description string,
-	handler func(context.Context, In) (Out, error),
+	handler func(context.Context, In) (any, error),
 ) {
-	addToolWithRequest(
+	addToonToolWithRequest(
 		server,
 		name,
 		description,
-		func(ctx context.Context, _ *mcp.CallToolRequest, input In) (Out, error) {
+		func(ctx context.Context, _ *mcp.CallToolRequest, input In) (any, error) {
 			return handler(ctx, input)
 		},
 	)
 }
 
-func addToolWithRequest[In, Out any](
+func addToonToolWithRequest[In any](
 	server *mcp.Server,
 	name string,
 	description string,
-	handler func(context.Context, *mcp.CallToolRequest, In) (Out, error),
+	handler func(context.Context, *mcp.CallToolRequest, In) (any, error),
 ) {
-	mcp.AddTool(
+	mcp.AddTool[In, any](
 		server,
 		&mcp.Tool{Name: name, Description: description},
-		func(ctx context.Context, request *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
+		func(ctx context.Context, request *mcp.CallToolRequest, input In) (*mcp.CallToolResult, any, error) {
 			output, err := handler(ctx, request, input)
+			if err != nil {
+				result, encodeErr := toonToolError(name, err)
 
-			return nil, output, err
+				return result, nil, encodeErr
+			}
+			result, err := toonToolResult(output)
+
+			return result, nil, err
 		},
 	)
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	toon "github.com/toon-format/toon-go"
 
 	"blackcat.ca/gmeow/internal/appsvc"
 	"blackcat.ca/gmeow/internal/contracts"
@@ -21,9 +22,9 @@ import (
 	"blackcat.ca/gmeow/internal/testsupport"
 )
 
-func TestMCPMailSearchUsesAppServices(t *testing.T) {
+func TestMCPToolsReturnToonOnlyContent(t *testing.T) {
 	ctx := context.Background()
-	services := testServices(t, "hello mcp mail")
+	services, digest := testServicesWithDigest(t, "hello mcp mail")
 	server, err := New(services)
 	if err != nil {
 		t.Fatal(err)
@@ -51,18 +52,153 @@ func TestMCPMailSearchUsesAppServices(t *testing.T) {
 	default:
 	}
 
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "mail_search",
-		Arguments: map[string]any{"query": "mcp", "limit": 5},
-	})
-	if err != nil {
-		t.Fatal(err)
+	mail := callToolToon(
+		t,
+		ctx,
+		session,
+		"mail_search",
+		map[string]any{"query": "mcp", "limit": 5},
+		false,
+	)
+	operationID, ok := mail.object["operation_id"].(string)
+	if !ok || operationID == "" {
+		t.Fatalf("mail_search operation_id missing from TOON: %#v", mail.object)
 	}
-	if result.IsError {
-		t.Fatalf("tool returned error: %#v", result.Content)
+
+	tests := []struct {
+		arguments map[string]any
+		name      string
+		wantTool  string
+		wantKeys  []string
+		wantText  []string
+		isError   bool
+	}{
+		{
+			name:      "object_search",
+			arguments: map[string]any{"query": "hello", "limit": 5},
+			wantTool:  "object_search",
+			wantKeys:  []string{"query", "results", "returned", "total"},
+		},
+		{
+			name: "object_retrieve",
+			arguments: map[string]any{
+				"digest":          string(digest),
+				"include_content": true,
+			},
+			wantTool: "object_retrieve",
+			wantKeys: []string{"operation_id", "name", "result", "status"},
+			wantText: []string{"content: hello mcp mail"},
+		},
+		{
+			name:      "get_structure",
+			arguments: map[string]any{"digest": string(digest)},
+			wantTool:  "get_structure",
+			wantKeys:  []string{"digest", "facets"},
+		},
+		{
+			name:      "get_provenance",
+			arguments: map[string]any{"digest": string(digest)},
+			wantTool:  "get_provenance",
+			wantKeys:  []string{"provenance"},
+		},
+		{
+			name:      "get_facets",
+			arguments: map[string]any{"digest": string(digest)},
+			wantTool:  "get_facets",
+			wantKeys:  []string{"facets"},
+			wantText:  []string{"mail_message"},
+		},
+		{
+			name:      "compound_expand",
+			arguments: map[string]any{"digest": string(digest)},
+			wantTool:  "compound_expand",
+			wantKeys:  []string{"is_compound"},
+		},
+		{
+			name: "graph_explore",
+			arguments: map[string]any{
+				"node":           string(digest),
+				"limit":          5,
+				"schema_version": 1,
+			},
+			wantTool: "graph_explore",
+			wantKeys: []string{"operation_id", "result", "status"},
+		},
+		{
+			name: "analysis_status",
+			arguments: map[string]any{
+				"object_digests": []any{string(digest)},
+				"limit":          5,
+				"schema_version": 1,
+			},
+			wantTool: "analysis_status",
+			wantKeys: []string{"operation_id", "result", "status"},
+		},
+		{
+			name:      "force_analysis",
+			arguments: map[string]any{"digest": string(digest)},
+			wantTool:  "force_analysis",
+			wantKeys:  []string{"error"},
+			isError:   true,
+		},
+		{
+			name:      "operation_status",
+			arguments: map[string]any{"operation_id": operationID},
+			wantTool:  "operation_status",
+			wantKeys:  []string{"operation_id", "name", "progress", "status"},
+		},
+		{
+			name:      "operation_result",
+			arguments: map[string]any{"operation_id": operationID},
+			wantTool:  "operation_result",
+			wantKeys:  []string{"operation_id", "name", "result", "status"},
+		},
+		{
+			name:      "operation_resume",
+			arguments: map[string]any{"operation_id": operationID},
+			wantTool:  "operation_resume",
+			wantKeys:  []string{"operation_id", "name", "result", "status"},
+		},
+		{
+			name:      "source_action",
+			arguments: map[string]any{"digest": string(digest), "action": "archive"},
+			wantTool:  "source_action",
+			wantKeys:  []string{"error"},
+			isError:   true,
+		},
+		{
+			name:      "ops_status",
+			arguments: map[string]any{},
+			wantTool:  "ops_status",
+			wantKeys:  []string{"counts", "scheduler"},
+		},
 	}
-	if result.StructuredContent == nil {
-		t.Fatalf("expected structured content: %#v", result)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			call := callToolToon(
+				t,
+				ctx,
+				session,
+				test.name,
+				test.arguments,
+				test.isError,
+			)
+			decoded := call.object
+			if decoded["tool"] != test.wantTool {
+				t.Fatalf("tool = %#v, want %q in %#v", decoded["tool"], test.wantTool, decoded)
+			}
+			for _, key := range test.wantKeys {
+				if _, ok := decoded[key]; !ok {
+					t.Fatalf("%s missing key %q in %#v", test.name, key, decoded)
+				}
+			}
+			for _, snippet := range test.wantText {
+				if !strings.Contains(call.text, snippet) {
+					t.Fatalf("%s missing TOON snippet %q in:\n%s", test.name, snippet, call.text)
+				}
+			}
+		})
 	}
 }
 
@@ -94,8 +230,9 @@ func TestMCPStreamableHTTPMailSearchUsesAppServices(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("tool returned error: %#v", result.Content)
 	}
-	if result.StructuredContent == nil {
-		t.Fatalf("expected structured content: %#v", result)
+	text := toonText(t, result)
+	if !strings.Contains(text, "tool: mail_search") {
+		t.Fatalf("expected TOON mail_search output, got:\n%s", text)
 	}
 }
 
@@ -130,12 +267,50 @@ func TestMCPStreamableHTTPObjectRetrieveIncludesContent(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("tool returned error: %#v", result.Content)
 	}
-	content, err := appsvc.JSONText(result.StructuredContent)
+	text := toonText(t, result)
+	if !strings.Contains(text, "tool: object_retrieve") ||
+		!strings.Contains(text, "hello streamable retrieve") {
+		t.Fatalf("expected retrieved content in TOON output: %s", text)
+	}
+}
+
+func TestToonSearchOutputUsesTableRows(t *testing.T) {
+	result, err := toonToolResult(toonSearch(
+		"object_search",
+		appsvc.SearchOptions{Query: "needle"},
+		appsvc.ObjectSearchResponse{
+			Total: 2,
+			Results: []appsvc.ObjectSearchResult{
+				{
+					ObjectDigest: "digest-1",
+					Title:        "first",
+					Snippet:      "alpha",
+					Facets:       []string{"mail_message"},
+					Score:        1.25,
+				},
+				{
+					ObjectDigest:      "digest-2",
+					Title:             "second",
+					Snippet:           "beta",
+					ProjectionPending: true,
+				},
+			},
+		},
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(content, "hello streamable retrieve") {
-		t.Fatalf("expected retrieved content in structured output: %s", content)
+	text := toonText(t, result)
+	for _, snippet := range []string{
+		"tool: object_search",
+		"query: needle",
+		"results[2]{rank,digest,score,title,snippet,facets,pending}:",
+		`1,digest-1,1.25,first,alpha,mail_message,""`,
+		`2,digest-2,0,second,beta,"",projection`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("missing %q in:\n%s", snippet, text)
+		}
 	}
 }
 
@@ -340,6 +515,68 @@ func postMCPMessage(t *testing.T, endpoint, message string) *http.Response {
 	}
 
 	return response
+}
+
+type toonCall struct {
+	object map[string]any
+	text   string
+}
+
+func callToolToon(
+	t *testing.T,
+	ctx context.Context,
+	session *mcp.ClientSession,
+	name string,
+	arguments map[string]any,
+	wantError bool,
+) toonCall {
+	t.Helper()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      name,
+		Arguments: arguments,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError != wantError {
+		t.Fatalf(
+			"%s IsError = %t, want %t:\n%s",
+			name,
+			result.IsError,
+			wantError,
+			toonText(t, result),
+		)
+	}
+	text := toonText(t, result)
+	decoded, err := toon.DecodeString(text)
+	if err != nil {
+		t.Fatalf("decode TOON for %s: %v\n%s", name, err, text)
+	}
+	object, ok := decoded.(map[string]any)
+	if !ok {
+		t.Fatalf("decoded TOON for %s = %[2]T %[2]v, want object", name, decoded)
+	}
+
+	return toonCall{object: object, text: text}
+}
+
+func toonText(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
+	if result.StructuredContent != nil {
+		t.Fatalf("structuredContent = %#v, want nil", result.StructuredContent)
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("content blocks = %d, want 1: %#v", len(result.Content), result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content block = %T, want TextContent", result.Content[0])
+	}
+	if strings.HasPrefix(strings.TrimSpace(text.Text), "{") {
+		t.Fatalf("content is JSON, want TOON: %s", text.Text)
+	}
+
+	return text.Text
 }
 
 func testServices(t *testing.T, text string) *appsvc.Services {

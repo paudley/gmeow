@@ -30,6 +30,10 @@ MCP Streamable HTTP supports `POST /mcp`, `GET /mcp`, `DELETE /mcp`,
 `Mcp-Session-Id`, `Last-Event-ID` replay, health, metrics, and loopback-first
 operation.
 
+MCP tool results are agent-facing TOON text. Gmeow does not emit JSON text or
+`structuredContent` from MCP tools; JSON remains a REST and dynamic metadata
+leaf format, while MCP content is shaped explicitly for TOON-speaking agents.
+
 Long-running MCP tools run as durable interface operations. `mail_search`,
 `object_retrieve`, `graph_explore`, `analysis_status`, and `force_analysis`
 return an operation envelope with an `operation_id`, stream progress when the
