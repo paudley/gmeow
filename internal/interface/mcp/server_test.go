@@ -5,6 +5,7 @@ package mcpiface
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -314,6 +315,57 @@ func TestToonSearchOutputUsesTableRows(t *testing.T) {
 	}
 }
 
+func TestToonOpsStatusConvertsJSONDecodedMetrics(t *testing.T) {
+	output := toonOpsStatus(appsvc.OpsStatusResponse{
+		Metadata: map[string]any{
+			"metrics": map[string]any{
+				"latency": float64(1.5),
+				"queued":  float64(2),
+				"ignored": "not numeric",
+			},
+		},
+	})
+
+	if output.Metrics["latency"] != 1.5 {
+		t.Fatalf("latency metric = %v, want 1.5", output.Metrics["latency"])
+	}
+	if output.Metrics["queued"] != 2 {
+		t.Fatalf("queued metric = %v, want 2", output.Metrics["queued"])
+	}
+	if _, ok := output.Metrics["ignored"]; ok {
+		t.Fatalf("non-numeric metric copied into output: %#v", output.Metrics)
+	}
+}
+
+func TestToonNestedOperationResultUsesExplicitMapAdapters(t *testing.T) {
+	output, ok := toonNestedOperationResult("mail_search", map[string]any{
+		"total": float64(1),
+		"results": []any{
+			map[string]any{
+				"object_digest":      "digest-1",
+				"score":              float64(0.75),
+				"title":              "subject",
+				"snippet":            "preview",
+				"facets":             []any{"mail_message", "thread"},
+				"analysis_pending":   true,
+				"projection_pending": false,
+			},
+		},
+	}).(toonSearchOutput)
+	if !ok {
+		t.Fatalf("nested result = %T, want toonSearchOutput", output)
+	}
+	if output.Total != 1 || output.Returned != 1 {
+		t.Fatalf("search totals = %#v", output)
+	}
+	if output.Results[0].Facets != "mail_message|thread" {
+		t.Fatalf("facets = %q, want joined facets", output.Results[0].Facets)
+	}
+	if output.Results[0].Pending != "analysis" {
+		t.Fatalf("pending = %q, want analysis", output.Results[0].Pending)
+	}
+}
+
 func TestMCPStreamableHTTPHandlesConcurrentSessions(t *testing.T) {
 	ctx := context.Background()
 	services := testServices(t, "hello concurrent mcp mail")
@@ -572,7 +624,7 @@ func toonText(t *testing.T, result *mcp.CallToolResult) string {
 	if !ok {
 		t.Fatalf("content block = %T, want TextContent", result.Content[0])
 	}
-	if strings.HasPrefix(strings.TrimSpace(text.Text), "{") {
+	if json.Valid([]byte(strings.TrimSpace(text.Text))) {
 		t.Fatalf("content is JSON, want TOON: %s", text.Text)
 	}
 

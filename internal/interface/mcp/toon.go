@@ -4,7 +4,6 @@
 package mcpiface
 
 import (
-	"encoding/json"
 	"sort"
 	"strings"
 	"time"
@@ -486,29 +485,24 @@ func toonNestedOperationResult(name string, result map[string]any) any {
 
 	switch name {
 	case "mail_search":
-		var response appsvc.ObjectSearchResponse
-		if decodeMap(result, &response) == nil {
-			return toonSearch("mail_search", appsvc.SearchOptions{}, response)
+		if output, ok := toonSearchFromMap("mail_search", result); ok {
+			return output
 		}
 	case "object_retrieve":
-		var response appsvc.RetrieveResponse
-		if decodeMap(result, &response) == nil {
-			return toonRetrieve(response)
+		if output, ok := toonRetrieveFromMap(result); ok {
+			return output
 		}
 	case "graph_explore":
-		var response contracts.GraphResponse
-		if decodeMap(result, &response) == nil {
-			return toonGraph(contracts.GraphRequest{}, response)
+		if output, ok := toonGraphFromMap(result); ok {
+			return output
 		}
 	case "analysis_status":
-		var response contracts.AnalysisStatusResponse
-		if decodeMap(result, &response) == nil {
-			return toonAnalysisStatus(response)
+		if output, ok := toonAnalysisStatusFromMap(result); ok {
+			return output
 		}
 	case "force_analysis":
-		var response contracts.SchedulerScanResponse
-		if decodeMap(result, &response) == nil {
-			return toonForceAnalysis(appsvc.ForceAnalysisRequest{}, response)
+		if output, ok := toonForceAnalysisFromMap(result); ok {
+			return output
 		}
 	}
 
@@ -542,7 +536,7 @@ func toonSourceAction(response source.ActionResult) toonSourceActionOutput {
 }
 
 func toonOpsStatus(response appsvc.OpsStatusResponse) toonOpsStatusOutput {
-	metrics, _ := response.Metadata["metrics"].(map[string]float64)
+	metrics := floatMapValue(response.Metadata["metrics"])
 	cursors := make([]toonSourceCursor, 0, len(response.Cursors.Cursors))
 	for _, cursor := range response.Cursors.Cursors {
 		cursors = append(cursors, toonSourceCursor{
@@ -605,13 +599,332 @@ func sortParts(parts []toonPartRow) {
 	})
 }
 
-func decodeMap(value map[string]any, output any) error {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return err
+func toonSearchFromMap(tool string, value map[string]any) (toonSearchOutput, bool) {
+	rawResults, ok := listValue(value["results"])
+	if !ok {
+		return toonSearchOutput{}, false
+	}
+	results := make([]toonSearchResult, 0, len(rawResults))
+	for index, rawResult := range rawResults {
+		row, ok := mapValue(rawResult)
+		if !ok {
+			continue
+		}
+		results = append(results, toonSearchResult{
+			Rank:    index + 1,
+			Digest:  stringValue(row["object_digest"]),
+			Score:   floatValue(row["score"]),
+			Title:   stringValue(row["title"]),
+			Snippet: stringValue(row["snippet"]),
+			Facets:  strings.Join(stringListValue(row["facets"]), "|"),
+			Pending: pendingState(
+				boolValue(row["analysis_pending"]),
+				boolValue(row["projection_pending"]),
+			),
+		})
 	}
 
-	return json.Unmarshal(encoded, output)
+	return toonSearchOutput{
+		Tool:     tool,
+		Total:    intValue(value["total"]),
+		Returned: len(results),
+		Results:  results,
+	}, true
+}
+
+func toonRetrieveFromMap(value map[string]any) (toonRetrieveOutput, bool) {
+	manifest, ok := mapValue(value["manifest"])
+	if !ok {
+		return toonRetrieveOutput{}, false
+	}
+
+	return toonRetrieveOutput{
+		Tool:        "object_retrieve",
+		Digest:      stringValue(manifest["digest"]),
+		ObjectID:    stringValue(manifest["object_id"]),
+		MediaType:   stringValue(manifest["media_type"]),
+		Size:        int64Value(manifest["size"]),
+		Compression: stringValue(manifest["compression"]),
+		CreatedAt:   stringValue(manifest["created_at"]),
+		UpdatedAt:   stringValue(manifest["updated_at"]),
+		Facets:      toonFacetRowsFromValue(manifest["facets"]),
+		Titles:      toonTitlesFromValue(manifest["titles"]),
+		Provenance:  toonProvenanceRowsFromValue(manifest["provenance"]),
+		Compound:    toonCompoundFromValue(manifest["compound"], false),
+		Content:     stringValue(value["content"]),
+	}, true
+}
+
+func toonGraphFromMap(value map[string]any) (toonGraphOutput, bool) {
+	rawFacts, ok := listValue(value["facts"])
+	if !ok {
+		return toonGraphOutput{}, false
+	}
+	facts := make([]toonFactRow, 0, len(rawFacts))
+	for _, rawFact := range rawFacts {
+		fact, ok := mapValue(rawFact)
+		if !ok {
+			continue
+		}
+		facts = append(facts, toonFactRow{
+			Subject:   stringValue(fact["subject"]),
+			Predicate: stringValue(fact["predicate"]),
+			Object:    stringValue(fact["object"]),
+			Metadata:  anyMapValue(fact["metadata"]),
+		})
+	}
+
+	return toonGraphOutput{
+		Tool:     "graph_explore",
+		Returned: len(facts),
+		Facts:    facts,
+	}, true
+}
+
+func toonAnalysisStatusFromMap(value map[string]any) (toonAnalysisOutput, bool) {
+	rawStatuses, ok := listValue(value["statuses"])
+	if !ok {
+		return toonAnalysisOutput{}, false
+	}
+	statuses := make([]toonAnalysisStatusRow, 0, len(rawStatuses))
+	for _, rawStatus := range rawStatuses {
+		status, ok := mapValue(rawStatus)
+		if !ok {
+			continue
+		}
+		statuses = append(statuses, toonAnalysisStatusRow{
+			Digest:      stringValue(status["object_digest"]),
+			Analyzer:    stringValue(status["analyzer_name"]),
+			Version:     stringValue(status["analyzer_version"]),
+			Status:      stringValue(status["status"]),
+			GeneratedAt: stringValue(status["generated_at"]),
+			Data:        anyMapValue(status["data"]),
+		})
+	}
+
+	return toonAnalysisOutput{
+		Tool:     "analysis_status",
+		Returned: len(statuses),
+		Statuses: statuses,
+	}, true
+}
+
+func toonForceAnalysisFromMap(value map[string]any) (toonForceAnalysisOutput, bool) {
+	if _, ok := value["scanned"]; !ok {
+		return toonForceAnalysisOutput{}, false
+	}
+
+	return toonForceAnalysisOutput{
+		Tool:     "force_analysis",
+		Scanned:  intValue(value["scanned"]),
+		Enqueued: intValue(value["enqueued"]),
+		Skipped:  intValue(value["skipped"]),
+		Failed:   intValue(value["failed"]),
+	}, true
+}
+
+func toonFacetRowsFromValue(value any) []toonFacetRow {
+	rawFacets, ok := listValue(value)
+	if !ok {
+		return nil
+	}
+	facets := make([]toonFacetRow, 0, len(rawFacets))
+	for _, rawFacet := range rawFacets {
+		facet, ok := mapValue(rawFacet)
+		if !ok {
+			continue
+		}
+		facets = append(facets, toonFacetRow{
+			Kind:    stringValue(facet["kind"]),
+			Name:    stringValue(facet["name"]),
+			Version: stringValue(facet["version"]),
+			Data:    firstMapValue(facet["attributes"], facet["metadata"]),
+		})
+	}
+
+	return facets
+}
+
+func toonTitlesFromValue(value any) []string {
+	rawTitles, ok := listValue(value)
+	if !ok {
+		return nil
+	}
+	titles := make([]string, 0, len(rawTitles))
+	for _, rawTitle := range rawTitles {
+		title, ok := mapValue(rawTitle)
+		if !ok {
+			continue
+		}
+		if value := stringValue(title["value"]); value != "" {
+			titles = append(titles, value)
+		}
+	}
+
+	return titles
+}
+
+func toonProvenanceRowsFromValue(value any) []toonProvenanceRow {
+	rawProvenance, ok := listValue(value)
+	if !ok {
+		return nil
+	}
+	provenance := make([]toonProvenanceRow, 0, len(rawProvenance))
+	for _, rawEntry := range rawProvenance {
+		entry, ok := mapValue(rawEntry)
+		if !ok {
+			continue
+		}
+		provenance = append(provenance, toonProvenanceRow{
+			ObservedAt:      stringValue(entry["observed_at"]),
+			SourceKind:      stringValue(entry["source_kind"]),
+			SourceName:      stringValue(entry["source_name"]),
+			ExternalID:      stringValue(entry["external_id"]),
+			ExternalVersion: stringValue(entry["external_version"]),
+		})
+	}
+
+	return provenance
+}
+
+func toonCompoundFromValue(value any, includeTool bool) toonCompoundOutput {
+	compound, ok := mapValue(value)
+	if !ok {
+		return toonCompoundOutput{}
+	}
+	rawParts, _ := listValue(compound["parts"])
+	parts := make([]toonPartRow, 0, len(rawParts))
+	for _, rawPart := range rawParts {
+		part, ok := mapValue(rawPart)
+		if !ok {
+			continue
+		}
+		parts = append(parts, toonPartRow{
+			Role:     stringValue(part["role"]),
+			Digest:   stringValue(part["digest"]),
+			Order:    intValue(part["order"]),
+			Required: boolValue(part["required"]),
+		})
+	}
+	sortParts(parts)
+
+	output := toonCompoundOutput{
+		IsCompound: boolValue(compound["is_compound"]),
+		Parts:      parts,
+	}
+	if includeTool {
+		output.Tool = "compound_expand"
+	}
+
+	return output
+}
+
+func firstMapValue(values ...any) map[string]any {
+	for _, value := range values {
+		if mapped := anyMapValue(value); len(mapped) > 0 {
+			return mapped
+		}
+	}
+
+	return nil
+}
+
+func anyMapValue(value any) map[string]any {
+	mapped, _ := mapValue(value)
+
+	return mapped
+}
+
+func floatMapValue(value any) map[string]float64 {
+	if direct, ok := value.(map[string]float64); ok {
+		return direct
+	}
+	raw, ok := mapValue(value)
+	if !ok {
+		return nil
+	}
+	result := make(map[string]float64, len(raw))
+	for key, value := range raw {
+		if value, ok := numberValue(value); ok {
+			result[key] = value
+		}
+	}
+
+	return result
+}
+
+func mapValue(value any) (map[string]any, bool) {
+	mapped, ok := value.(map[string]any)
+
+	return mapped, ok
+}
+
+func listValue(value any) ([]any, bool) {
+	list, ok := value.([]any)
+
+	return list, ok
+}
+
+func stringListValue(value any) []string {
+	rawValues, ok := listValue(value)
+	if !ok {
+		return nil
+	}
+	values := make([]string, 0, len(rawValues))
+	for _, rawValue := range rawValues {
+		if value := stringValue(rawValue); value != "" {
+			values = append(values, value)
+		}
+	}
+
+	return values
+}
+
+func stringValue(value any) string {
+	if value, ok := value.(string); ok {
+		return value
+	}
+
+	return ""
+}
+
+func boolValue(value any) bool {
+	if value, ok := value.(bool); ok {
+		return value
+	}
+
+	return false
+}
+
+func floatValue(value any) float64 {
+	number, _ := numberValue(value)
+
+	return number
+}
+
+func numberValue(value any) (float64, bool) {
+	switch value := value.(type) {
+	case float64:
+		return value, true
+	case float32:
+		return float64(value), true
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case int32:
+		return float64(value), true
+	default:
+		return 0, false
+	}
+}
+
+func intValue(value any) int {
+	return int(floatValue(value))
+}
+
+func int64Value(value any) int64 {
+	return int64(floatValue(value))
 }
 
 func firstNonEmpty(values ...string) string {
