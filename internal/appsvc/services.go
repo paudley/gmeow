@@ -200,6 +200,12 @@ type JMAPEmailMutation struct {
 	ReplaceKeywords  bool                   `json:"replace_keywords,omitempty"`
 }
 
+type JMAPBlob struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	Size int64  `json:"size"`
+}
+
 type StaticSourceRegistry struct {
 	adapters []source.Adapter
 }
@@ -738,6 +744,52 @@ func (services *Services) JMAPThreads(
 	return reader.JMAPThreads(ctx, ids)
 }
 
+func (services *Services) JMAPBlobGet(
+	ctx context.Context,
+	ids []string,
+) (map[string]JMAPBlob, []string, error) {
+	blobs := map[string]JMAPBlob{}
+	notFound := []string{}
+	for _, id := range ids {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		manifest, err := services.objects.ReadManifest(
+			ctx,
+			contracts.ObjectDigest(trimmed),
+		)
+		if err != nil {
+			notFound = append(notFound, id)
+			continue
+		}
+		blobs[id] = jmapBlobFromManifest(trimmed, manifest)
+	}
+
+	return blobs, notFound, nil
+}
+
+func (services *Services) JMAPBlobOpen(
+	ctx context.Context,
+	id string,
+) (JMAPBlob, io.ReadCloser, error) {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return JMAPBlob{}, nil, errors.New("blob id is required")
+	}
+	digest := contracts.ObjectDigest(trimmed)
+	manifest, err := services.objects.ReadManifest(ctx, digest)
+	if err != nil {
+		return JMAPBlob{}, nil, err
+	}
+	reader, err := services.objects.Open(ctx, digest)
+	if err != nil {
+		return JMAPBlob{}, nil, err
+	}
+
+	return jmapBlobFromManifest(trimmed, manifest), reader, nil
+}
+
 func (services *Services) UpdateJMAPEmailState(
 	ctx context.Context,
 	mutation JMAPEmailMutation,
@@ -799,6 +851,19 @@ func (services *Services) UpdateJMAPEmailState(
 	}
 
 	return reader.UpdateJMAPEmailState(ctx, update)
+}
+
+func jmapBlobFromManifest(id string, manifest contracts.Manifest) JMAPBlob {
+	mediaType := strings.TrimSpace(manifest.MediaType)
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+
+	return JMAPBlob{
+		ID:   id,
+		Type: mediaType,
+		Size: manifest.Size,
+	}
 }
 
 func (services *Services) ForceAnalysis(

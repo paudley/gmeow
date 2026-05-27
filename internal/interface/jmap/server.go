@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/mail"
@@ -149,9 +151,22 @@ type threadGetResponse struct {
 	NotFound  []string     `json:"notFound,omitempty"`
 }
 
+type blobGetResponse struct {
+	AccountID string     `json:"accountId"`
+	State     string     `json:"state"`
+	List      []jmapBlob `json:"list"`
+	NotFound  []string   `json:"notFound,omitempty"`
+}
+
 type jmapThread struct {
 	ID       string   `json:"id"`
 	EmailIDs []string `json:"emailIds"`
+}
+
+type jmapBlob struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	Size int64  `json:"size"`
 }
 
 type setArguments struct {
@@ -329,15 +344,65 @@ func (handler handler) handleAPI(writer http.ResponseWriter, request *http.Reque
 
 func (handler handler) handleDownload(
 	writer http.ResponseWriter,
-	_ *http.Request,
+	request *http.Request,
 ) {
 	started := time.Now()
 	defer observeLatency(started)
 
-	writeJSON(writer, jmapError{
-		Type:        "notFound",
-		Description: "blob download is not implemented yet",
-	}, nil)
+	if err := validateAccountID(request.PathValue("accountId")); err != nil {
+		writeJSONStatus(
+			writer,
+			http.StatusBadRequest,
+			jmapError{Type: "invalidArguments", Description: err.Error()},
+		)
+
+		return
+	}
+	if handler.services == nil {
+		writeJSONStatus(
+			writer,
+			http.StatusInternalServerError,
+			jmapError{
+				Type:        "serverFail",
+				Description: "JMAP app services are not configured",
+			},
+		)
+
+		return
+	}
+
+	blob, reader, err := handler.services.JMAPBlobOpen(
+		request.Context(),
+		request.PathValue("blobId"),
+	)
+	if err != nil {
+		writeJSONStatus(
+			writer,
+			http.StatusNotFound,
+			jmapError{Type: "notFound", Description: err.Error()},
+		)
+
+		return
+	}
+	defer reader.Close()
+
+	writer.Header().Set("Content-Type", blob.Type)
+	if blob.Size >= 0 {
+		writer.Header().Set("Content-Length", fmt.Sprintf("%d", blob.Size))
+	}
+	if filename := downloadFilename(request.PathValue("name")); filename != "" {
+		writer.Header().Set(
+			"Content-Disposition",
+			mime.FormatMediaType("attachment", map[string]string{"filename": filename}),
+		)
+	}
+	if _, err := io.Copy(writer, reader); err != nil {
+		observability.Logger(request.Context()).Warn(
+			"jmap download stream failed",
+			"error", err,
+			"blob_id", blob.ID,
+		)
+	}
 }
 
 func (handler handler) dispatch(ctx context.Context, call methodCall) methodResponse {
@@ -355,6 +420,8 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 		}
 
 		return methodResponse{Name: call.Name, Arguments: arguments, ClientID: call.ClientID}
+	case "Blob/get":
+		return handler.handleBlobGet(ctx, call)
 	case "Mailbox/get":
 		return handler.handleMailboxGet(ctx, call)
 	case "Mailbox/query":
@@ -376,6 +443,46 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 			},
 			ClientID: call.ClientID,
 		}
+	}
+}
+
+func (handler handler) handleBlobGet(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
+	var arguments getArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+
+	blobs, notFound, err := handler.services.JMAPBlobGet(ctx, arguments.IDs)
+	if err != nil {
+		return serverFail(call.ClientID, err.Error())
+	}
+	list := make([]jmapBlob, 0, len(arguments.IDs))
+	for _, id := range arguments.IDs {
+		blob, ok := blobs[id]
+		if !ok {
+			continue
+		}
+		list = append(list, toJMAPBlob(blob))
+	}
+
+	return methodResponse{
+		Name: "Blob/get",
+		Arguments: blobGetResponse{
+			AccountID: "gmeow",
+			State:     "0",
+			List:      list,
+			NotFound:  notFound,
+		},
+		ClientID: call.ClientID,
 	}
 }
 
@@ -702,6 +809,14 @@ func toJMAPMailbox(mailbox contracts.JMAPMailbox) jmapMailbox {
 	}
 }
 
+func toJMAPBlob(blob appsvc.JMAPBlob) jmapBlob {
+	return jmapBlob{
+		ID:   blob.ID,
+		Type: blob.Type,
+		Size: blob.Size,
+	}
+}
+
 func toJMAPEmail(
 	digest contracts.ObjectDigest,
 	retrieved appsvc.RetrieveResponse,
@@ -851,6 +966,14 @@ func emptyJMAPErrorMapAsNil(values map[string]jmapError) map[string]jmapError {
 	return values
 }
 
+func downloadFilename(value string) string {
+	filename := strings.TrimSpace(value)
+	filename = strings.ReplaceAll(filename, "/", "_")
+	filename = strings.ReplaceAll(filename, "\\", "_")
+
+	return filename
+}
+
 func (handler handler) session(request *http.Request) sessionResource {
 	base := requestBaseURL(request)
 
@@ -948,6 +1071,14 @@ func writeJSON(writer http.ResponseWriter, output any, err error) {
 	}
 
 	writer.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(writer).Encode(output); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func writeJSONStatus(writer http.ResponseWriter, status int, output any) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
 	if err := json.NewEncoder(writer).Encode(output); err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 	}

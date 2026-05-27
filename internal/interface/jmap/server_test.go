@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -477,6 +478,129 @@ func TestJMAPThreadGetReturnsEmailIDs(t *testing.T) {
 	}
 }
 
+func TestJMAPBlobGetReturnsMetadata(t *testing.T) {
+	digest := contracts.ObjectDigest("digest-1")
+	services, err := appsvc.New(appsvc.Options{
+		Query: jmapQueryFixture{},
+		Objects: objectReaderFixture{
+			manifests: map[contracts.ObjectDigest]contracts.Manifest{
+				digest: {
+					ObjectDigest: digest,
+					MediaType:    "message/rfc822",
+					Size:         42,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:blob"],
+		"methodCalls":[["Blob/get",{"accountId":"gmeow","ids":["digest-1","missing"]},"b1"]]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &tuple); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	var blobs blobGetResponse
+	if err := json.Unmarshal(tuple[0], &name); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tuple[1], &blobs); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Blob/get" ||
+		len(blobs.List) != 1 ||
+		blobs.List[0].ID != "digest-1" ||
+		blobs.List[0].Type != "message/rfc822" ||
+		blobs.List[0].Size != 42 ||
+		len(blobs.NotFound) != 1 ||
+		blobs.NotFound[0] != "missing" {
+		t.Fatalf("unexpected blob response name=%q args=%#v", name, blobs)
+	}
+}
+
+func TestJMAPDownloadStreamsBlob(t *testing.T) {
+	digest := contracts.ObjectDigest("digest-1")
+	services, err := appsvc.New(appsvc.Options{
+		Query: jmapQueryFixture{},
+		Objects: objectReaderFixture{
+			manifests: map[contracts.ObjectDigest]contracts.Manifest{
+				digest: {
+					ObjectDigest: digest,
+					MediaType:    "message/rfc822",
+					Size:         int64(len("raw-message")),
+				},
+			},
+			content: map[contracts.ObjectDigest]string{
+				digest: "raw-message",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	request, err := http.NewRequest(
+		http.MethodGet,
+		server.URL+"/jmap/download/gmeow/digest-1/message.eml",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %s, want 200", response.Status)
+	}
+	if response.Header.Get("Content-Type") != "message/rfc822" {
+		t.Fatalf("content type = %q", response.Header.Get("Content-Type"))
+	}
+	if !strings.Contains(response.Header.Get("Content-Disposition"), "message.eml") {
+		t.Fatalf(
+			"content disposition = %q",
+			response.Header.Get("Content-Disposition"),
+		)
+	}
+	if string(body) != "raw-message" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 type jmapQueryFixture struct {
 	mailboxes  []contracts.JMAPMailbox
 	states     map[contracts.ObjectDigest]contracts.JMAPEmailState
@@ -569,12 +693,24 @@ func (jmapQueryFixture) SourceCursors(
 	return contracts.SourceCursorResponse{}, nil
 }
 
-type objectReaderFixture struct{}
+type objectReaderFixture struct {
+	manifests map[contracts.ObjectDigest]contracts.Manifest
+	content   map[contracts.ObjectDigest]string
+}
 
-func (objectReaderFixture) ReadManifest(
-	context.Context,
-	contracts.ObjectDigest,
+func (objects objectReaderFixture) ReadManifest(
+	_ context.Context,
+	digest contracts.ObjectDigest,
 ) (contracts.Manifest, error) {
+	if objects.manifests != nil {
+		manifest, ok := objects.manifests[digest]
+		if !ok {
+			return contracts.Manifest{}, os.ErrNotExist
+		}
+
+		return manifest, nil
+	}
+
 	return contracts.Manifest{}, nil
 }
 
@@ -585,10 +721,19 @@ func (objectReaderFixture) GetStructure(
 	return contracts.Structure{}, nil
 }
 
-func (objectReaderFixture) Open(
-	context.Context,
-	contracts.ObjectDigest,
+func (objects objectReaderFixture) Open(
+	_ context.Context,
+	digest contracts.ObjectDigest,
 ) (io.ReadCloser, error) {
+	if objects.content != nil {
+		content, ok := objects.content[digest]
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+
+		return io.NopCloser(strings.NewReader(content)), nil
+	}
+
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
