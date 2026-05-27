@@ -726,6 +726,18 @@ func (services *Services) JMAPEmailQuery(
 	}, nil
 }
 
+func (services *Services) JMAPThreads(
+	ctx context.Context,
+	ids []string,
+) (map[string]contracts.JMAPThread, error) {
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return nil, errors.New("JMAP query reader is not configured")
+	}
+
+	return reader.JMAPThreads(ctx, ids)
+}
+
 func (services *Services) UpdateJMAPEmailState(
 	ctx context.Context,
 	mutation JMAPEmailMutation,

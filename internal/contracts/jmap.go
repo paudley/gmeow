@@ -47,3 +47,8 @@ type JMAPEmailQueryResponse struct {
 	Offset int            `json:"offset"`
 	Limit  int            `json:"limit"`
 }
+
+type JMAPThread struct {
+	ID       string         `json:"id"`
+	EmailIDs []ObjectDigest `json:"email_ids"`
+}

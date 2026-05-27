@@ -142,6 +142,18 @@ type emailGetResponse struct {
 	NotFound  []string    `json:"notFound,omitempty"`
 }
 
+type threadGetResponse struct {
+	AccountID string       `json:"accountId"`
+	State     string       `json:"state"`
+	List      []jmapThread `json:"list"`
+	NotFound  []string     `json:"notFound,omitempty"`
+}
+
+type jmapThread struct {
+	ID       string   `json:"id"`
+	EmailIDs []string `json:"emailIds"`
+}
+
 type setArguments struct {
 	Update    map[string]map[string]json.RawMessage `json:"update,omitempty"`
 	AccountID string                                `json:"accountId"`
@@ -353,6 +365,8 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 		return handler.handleEmailGet(ctx, call)
 	case "Email/set":
 		return handler.handleEmailSet(ctx, call)
+	case "Thread/get":
+		return handler.handleThreadGet(ctx, call)
 	default:
 		return methodResponse{
 			Name: "error",
@@ -362,6 +376,52 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 			},
 			ClientID: call.ClientID,
 		}
+	}
+}
+
+func (handler handler) handleThreadGet(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
+	var arguments getArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+
+	threads, err := handler.services.JMAPThreads(ctx, arguments.IDs)
+	if err != nil {
+		return serverFail(call.ClientID, err.Error())
+	}
+	list := make([]jmapThread, 0, len(arguments.IDs))
+	notFound := []string{}
+	for _, id := range arguments.IDs {
+		thread, ok := threads[id]
+		if !ok {
+			notFound = append(notFound, id)
+			continue
+		}
+		emailIDs := make([]string, 0, len(thread.EmailIDs))
+		for _, emailID := range thread.EmailIDs {
+			emailIDs = append(emailIDs, string(emailID))
+		}
+		list = append(list, jmapThread{ID: thread.ID, EmailIDs: emailIDs})
+	}
+
+	return methodResponse{
+		Name: "Thread/get",
+		Arguments: threadGetResponse{
+			AccountID: "gmeow",
+			State:     "0",
+			List:      list,
+			NotFound:  notFound,
+		},
+		ClientID: call.ClientID,
 	}
 }
 

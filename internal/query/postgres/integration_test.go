@@ -253,6 +253,14 @@ func TestPostgresProjectsFilestore(t *testing.T) {
 	if jmapQuery.Total != 1 || len(jmapQuery.IDs) != 1 || jmapQuery.IDs[0] != mailDigest {
 		t.Fatalf("unexpected filtered JMAP email query: %#v", jmapQuery)
 	}
+	jmapThreads, err := index.JMAPThreads(ctx, []string{"gmail-thread-1", "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jmapThread, ok := jmapThreads["gmail-thread-1"]
+	if !ok || len(jmapThread.EmailIDs) != 1 || jmapThread.EmailIDs[0] != mailDigest {
+		t.Fatalf("unexpected JMAP thread response: %#v", jmapThreads)
+	}
 	embeddingDigest, err := store.Put(ctx, filestore.PutRequest{
 		Reader:       strings.NewReader(`{"vector":[0.1,0.2,0.3]}`),
 		MediaType:    "application/json",

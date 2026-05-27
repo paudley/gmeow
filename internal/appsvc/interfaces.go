@@ -48,6 +48,7 @@ type JMAPQueryReader interface {
 		ctx context.Context,
 		request contracts.JMAPEmailQueryRequest,
 	) (contracts.JMAPEmailQueryResponse, error)
+	JMAPThreads(ctx context.Context, ids []string) (map[string]contracts.JMAPThread, error)
 	UpdateJMAPEmailState(
 		ctx context.Context,
 		update contracts.JMAPEmailStateUpdate,

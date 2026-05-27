@@ -372,6 +372,37 @@ func (server *QueryServer) JMAPEmailQuery(
 	}, nil
 }
 
+func (server *QueryServer) JMAPThreads(
+	ctx context.Context,
+	request *pb.JMAPThreadRequest,
+) (*pb.JMAPThreadResponse, error) {
+	threads, err := server.index.JMAPThreads(
+		ctx,
+		append([]string{}, request.GetIds()...),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	converted := make([]*pb.JMAPThread, 0, len(request.GetIds()))
+	for _, id := range request.GetIds() {
+		thread, ok := threads[id]
+		if !ok {
+			continue
+		}
+		emailIDs := make([]string, 0, len(thread.EmailIDs))
+		for _, emailID := range thread.EmailIDs {
+			emailIDs = append(emailIDs, string(emailID))
+		}
+		converted = append(converted, &pb.JMAPThread{
+			Id:       thread.ID,
+			EmailIds: emailIDs,
+		})
+	}
+
+	return &pb.JMAPThreadResponse{Threads: converted}, nil
+}
+
 func (server *QueryServer) UpdateJMAPEmailState(
 	ctx context.Context,
 	request *pb.UpdateJMAPEmailStateRequest,

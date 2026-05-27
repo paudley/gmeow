@@ -404,6 +404,32 @@ func (client *QueryClient) JMAPEmailQuery(
 	}, nil
 }
 
+func (client *QueryClient) JMAPThreads(
+	ctx context.Context,
+	ids []string,
+) (map[string]contracts.JMAPThread, error) {
+	response, err := client.client.JMAPThreads(ctx, &pb.JMAPThreadRequest{
+		Ids: append([]string{}, ids...),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	threads := make(map[string]contracts.JMAPThread)
+	for _, thread := range response.GetThreads() {
+		emailIDs := make([]contracts.ObjectDigest, 0, len(thread.GetEmailIds()))
+		for _, emailID := range thread.GetEmailIds() {
+			emailIDs = append(emailIDs, contracts.ObjectDigest(emailID))
+		}
+		threads[thread.GetId()] = contracts.JMAPThread{
+			ID:       thread.GetId(),
+			EmailIDs: emailIDs,
+		}
+	}
+
+	return threads, nil
+}
+
 func (client *QueryClient) UpdateJMAPEmailState(
 	ctx context.Context,
 	update contracts.JMAPEmailStateUpdate,

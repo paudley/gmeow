@@ -144,7 +144,7 @@ func TestJMAPUnknownMethodReturnsJMAPError(t *testing.T) {
 	defer server.Close()
 	body := bytes.NewBufferString(`{
 		"using":["urn:ietf:params:jmap:mail"],
-		"methodCalls":[["Thread/get",{},"c1"]]
+		"methodCalls":[["Email/changes",{},"c1"]]
 	}`)
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
 	if err != nil {
@@ -412,9 +412,75 @@ func TestJMAPEmailQueryPassesFilterToAppServices(t *testing.T) {
 	}
 }
 
+func TestJMAPThreadGetReturnsEmailIDs(t *testing.T) {
+	services, err := appsvc.New(appsvc.Options{
+		Query: jmapQueryFixture{
+			threads: map[string]contracts.JMAPThread{
+				"thread-1": {
+					ID: "thread-1",
+					EmailIDs: []contracts.ObjectDigest{
+						contracts.ObjectDigest("digest-1"),
+						contracts.ObjectDigest("digest-2"),
+					},
+				},
+			},
+		},
+		Objects: objectReaderFixture{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:mail"],
+		"methodCalls":[["Thread/get",{"accountId":"gmeow","ids":["thread-1","missing"]},"t1"]]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &tuple); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	var threads threadGetResponse
+	if err := json.Unmarshal(tuple[0], &name); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tuple[1], &threads); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Thread/get" ||
+		len(threads.List) != 1 ||
+		threads.List[0].ID != "thread-1" ||
+		len(threads.List[0].EmailIDs) != 2 ||
+		threads.List[0].EmailIDs[0] != "digest-1" ||
+		len(threads.NotFound) != 1 ||
+		threads.NotFound[0] != "missing" {
+		t.Fatalf("unexpected thread response name=%q args=%#v", name, threads)
+	}
+}
+
 type jmapQueryFixture struct {
 	mailboxes  []contracts.JMAPMailbox
 	states     map[contracts.ObjectDigest]contracts.JMAPEmailState
+	threads    map[string]contracts.JMAPThread
 	search     contracts.SearchResponse
 	emailQuery contracts.JMAPEmailQueryResponse
 	requested  *contracts.JMAPEmailQueryRequest
@@ -448,6 +514,13 @@ func (query jmapQueryFixture) JMAPEmailQuery(
 		*query.requested = request
 	}
 	return query.emailQuery, nil
+}
+
+func (query jmapQueryFixture) JMAPThreads(
+	context.Context,
+	[]string,
+) (map[string]contracts.JMAPThread, error) {
+	return query.threads, nil
 }
 
 func (query jmapQueryFixture) UpdateJMAPEmailState(

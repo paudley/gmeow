@@ -208,6 +208,49 @@ func (index *Index) JMAPEmailQuery(
 	}, nil
 }
 
+func (index *Index) JMAPThreads(
+	ctx context.Context,
+	ids []string,
+) (map[string]contracts.JMAPThread, error) {
+	if len(ids) == 0 {
+		return map[string]contracts.JMAPThread{}, nil
+	}
+
+	threadIDs := uniqueSortedNonEmpty(ids)
+	rows, err := index.pool.Query(ctx, `
+		SELECT s.thread_id,
+		       array_agg(s.object_digest ORDER BY s.received_at ASC NULLS LAST, o.created_at ASC, s.object_digest) AS email_ids
+		  FROM jmap_email_state s
+		  JOIN query_objects o ON o.object_digest = s.object_digest
+		 WHERE s.thread_id = ANY($1::text[])
+		 GROUP BY s.thread_id`,
+		threadIDs)
+	if err != nil {
+		return nil, fmt.Errorf("query JMAP threads: %w", err)
+	}
+	defer rows.Close()
+
+	threads := make(map[string]contracts.JMAPThread)
+	for rows.Next() {
+		var (
+			threadID string
+			emailIDs []contracts.ObjectDigest
+		)
+		if err := rows.Scan(&threadID, &emailIDs); err != nil {
+			return nil, fmt.Errorf("scan JMAP thread: %w", err)
+		}
+		threads[threadID] = contracts.JMAPThread{
+			ID:       threadID,
+			EmailIDs: append([]contracts.ObjectDigest{}, emailIDs...),
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate JMAP threads: %w", err)
+	}
+
+	return threads, nil
+}
+
 func (index *Index) UpdateJMAPEmailState(
 	ctx context.Context,
 	update contracts.JMAPEmailStateUpdate,
