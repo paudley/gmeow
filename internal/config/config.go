@@ -114,13 +114,14 @@ type SchedulerPriority struct {
 }
 
 type InterfaceConfig struct {
-	Name     string   `toml:"name"`
-	Kind     string   `toml:"kind"`
-	Host     string   `toml:"host"`
-	Username string   `toml:"username"`
-	Password string   `toml:"password"`
-	Facets   []string `toml:"facets"`
-	Port     int      `toml:"port"`
+	Name           string   `toml:"name"`
+	Kind           string   `toml:"kind"`
+	Host           string   `toml:"host"`
+	Username       string   `toml:"username"`
+	Password       string   `toml:"password"`
+	SessionTimeout string   `toml:"session_timeout"`
+	Facets         []string `toml:"facets"`
+	Port           int      `toml:"port"`
 }
 
 type SourceConfig struct {
@@ -702,6 +703,15 @@ func validateInterface(iface InterfaceConfig) error {
 		if iface.Host != "" || iface.Port != 0 {
 			if err := validateInterfaceHostPort(iface); err != nil {
 				return err
+			}
+		}
+		if strings.TrimSpace(iface.SessionTimeout) != "" {
+			duration, err := time.ParseDuration(iface.SessionTimeout)
+			if err != nil {
+				return fmt.Errorf("interface %q session_timeout: %w", iface.Name, err)
+			}
+			if duration < 0 {
+				return fmt.Errorf("interface %q session_timeout must be positive", iface.Name)
 			}
 		}
 	case "rest":

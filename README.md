@@ -22,7 +22,7 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Provides admin commands for config, FILESTORE verification, QUERY projection, and SCHEDULER operations.
 - Runs Go ANALYSIS workers that consume scheduler jobs, read/write FILESTORE through typed gRPC, and support explicit `gmeow-intel` external analyzer adapters for Python/model behavior.
 - Provides Go SOURCE adapters for local filesystem fixtures, push/ringme records, the Gmail SOURCE adapter for ingest/hydrate/live search/live retrieve/actions, and design-only Drive capability checks.
-- Exposes shared application services through `gmeow mcp-serve`, `gmeow rest-serve`, and read-only `gmeow imap-serve`; user-facing `search`, `mail-search`, `retrieve`, `ops-status`, and `force-analysis` commands use the same service layer.
+- Exposes shared application services through stdio `gmeow mcp-serve`, Streamable HTTP `gmeow mcp-http-serve`, `gmeow rest-serve`, and read-only `gmeow imap-serve`; user-facing `search`, `mail-search`, `retrieve`, `ops-status`, and `force-analysis` commands use the same service layer.
 
 ## Features
 
@@ -115,6 +115,7 @@ go run ./cmd/gmeow --config gmeow.toml filestore-serve
 go run ./cmd/gmeow-admin --config gmeow.toml scheduler run
 go run ./cmd/gmeow-worker --config gmeow.toml run
 go run ./cmd/gmeow --config gmeow.toml mcp-serve
+go run ./cmd/gmeow --config gmeow.toml mcp-http-serve
 go run ./cmd/gmeow --config gmeow.toml rest-serve
 go run ./cmd/gmeow --config gmeow.toml imap-serve
 ```

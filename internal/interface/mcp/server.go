@@ -6,15 +6,34 @@ package mcpiface
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"blackcat.ca/gmeow/internal/appsvc"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/observability"
+)
+
+const (
+	defaultHTTPSessionTimeout = 30 * time.Minute
+	streamableEndpoint        = "/mcp"
 )
 
 type Server struct {
 	server *mcp.Server
+}
+
+type HTTPOptions struct {
+	SessionTimeout time.Duration
+}
+
+type HTTPServer struct {
+	httpServer *http.Server
+	listener   net.Listener
 }
 
 type digestInput struct {
@@ -96,6 +115,134 @@ func New(services *appsvc.Services) (*Server, error) {
 
 func (server *Server) Start(ctx context.Context) error {
 	return server.server.Run(ctx, &mcp.StdioTransport{})
+}
+
+func NewHTTP(
+	address string,
+	services *appsvc.Services,
+	options HTTPOptions,
+) (*HTTPServer, error) {
+	if strings.TrimSpace(address) == "" {
+		return nil, errors.New("MCP HTTP address is required")
+	}
+	if services == nil {
+		return nil, errors.New("MCP app services are required")
+	}
+
+	return &HTTPServer{
+		httpServer: &http.Server{
+			Addr:    address,
+			Handler: NewStreamableHandler(services, options),
+		},
+	}, nil
+}
+
+func NewStreamableHandler(services *appsvc.Services, options HTTPOptions) http.Handler {
+	sessionTimeout := options.SessionTimeout
+	if sessionTimeout == 0 {
+		sessionTimeout = defaultHTTPSessionTimeout
+	}
+
+	mux := http.NewServeMux()
+	mcpServer, err := New(services)
+	mux.HandleFunc(
+		"GET /healthz",
+		func(writer http.ResponseWriter, _ *http.Request) {
+			if err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+
+				return
+			}
+			writer.WriteHeader(http.StatusNoContent)
+		},
+	)
+	mux.HandleFunc(
+		"GET /metrics",
+		func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			_, _ = writer.Write([]byte(observability.DefaultMetrics().PrometheusText()))
+		},
+	)
+	if err != nil {
+		mux.HandleFunc(
+			streamableEndpoint,
+			func(writer http.ResponseWriter, _ *http.Request) {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+			},
+		)
+
+		return mux
+	}
+
+	streamable := mcp.NewStreamableHTTPHandler(
+		func(request *http.Request) *mcp.Server {
+			if request.URL.Path != streamableEndpoint {
+				return nil
+			}
+
+			return mcpServer.server
+		},
+		&mcp.StreamableHTTPOptions{
+			EventStore:     mcp.NewMemoryEventStore(nil),
+			SessionTimeout: sessionTimeout,
+		},
+	)
+	mux.Handle(streamableEndpoint, observeHTTP(streamable))
+
+	return mux
+}
+
+func observeHTTP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started := time.Now()
+		defer func() {
+			observability.DefaultMetrics().ObserveDuration(
+				"gmeow_interface_latency",
+				time.Since(started),
+			)
+		}()
+
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func (server *HTTPServer) Start(ctx context.Context) error {
+	listener, err := net.Listen("tcp", server.httpServer.Addr)
+	if err != nil {
+		return err
+	}
+	server.listener = listener
+
+	errc := make(chan error, 1)
+	go func() {
+		errc <- server.httpServer.Serve(listener)
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := server.httpServer.Shutdown(shutdownCtx)
+		if err != nil {
+			return err
+		}
+
+		return ctx.Err()
+	case err := <-errc:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+
+		return err
+	}
+}
+
+func (server *HTTPServer) Addr() string {
+	if server.listener == nil {
+		return server.httpServer.Addr
+	}
+
+	return server.listener.Addr().String()
 }
 
 func addDigestTool[Out any](

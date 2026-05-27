@@ -6,6 +6,9 @@
 Gmeow is a service-oriented system. Services communicate with each other over
 gRPC contracts; external protocols such as REST, IMAP, and MCP terminate at the
 interface service and are translated into internal service calls.
+Production MCP is served as Streamable HTTP with server-sent event streams,
+stateful sessions, and client-driven session termination; stdio MCP remains
+available for local MCP hosts.
 
 ## Ownership Rules
 
@@ -40,7 +43,9 @@ interface service and are translated into internal service calls.
   stops there. FILESTORE notification then lets SCHEDULER derive analysis and
   projection work through the normal scheduler-owned RabbitMQ path.
 - INTERFACE talks to QUERY and BACKENDS through application service contracts.
-  It does not own storage, queue, analysis, or database transport details.
+  It does not own storage, queue, analysis, or database transport details. MCP,
+  REST, IMAP, and CLI handlers must reach other Gmeow services through gRPC
+  clients only.
 
 ## Flow
 

@@ -68,6 +68,9 @@ port = 8765
 [[interfaces]]
 name = "mcp"
 kind = "mcp"
+host = "127.0.0.1"
+port = 9876
+session_timeout = "30m"
 
 [[interfaces]]
 name = "imap"

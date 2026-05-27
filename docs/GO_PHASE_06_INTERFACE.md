@@ -17,7 +17,8 @@ interfaces. INTERFACE does not own storage, query, analysis, or source behavior.
   - graph exploration;
   - source actions;
   - operational status.
-- Implement MCP tools over application services.
+- Implement MCP tools over application services, with stdio for local MCP hosts
+  and Streamable HTTP for supervised production interface serving.
 - Implement REST endpoints over the same services.
 - Implement `gmeow-admin` operational commands.
 - Implement IMAP projection over `mail_message` facet objects.
@@ -41,7 +42,8 @@ Remove remaining Python presentation helpers as Go interfaces reach parity:
 
 ## Functional Proof
 
-- MCP and REST return equivalent results for shared operations.
+- MCP Streamable HTTP, MCP stdio, and REST return equivalent results for shared
+  operations.
 - `mail_search("bob@dob.com")` fans out to QUERY and Gmail, fuses results, fetches missing structure
   from FILESTORE, and returns pending states for fresh live hits.
 - Forced analysis from MCP/REST raises priority and eventually updates FILESTORE/QUERY.

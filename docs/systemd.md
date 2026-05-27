@@ -19,7 +19,7 @@ RabbitMQ access, and analyzers only read and write FILESTORE.
 - `gmeow-workers.target` groups analysis workers such as
   `gmeow-worker@1.service`.
 - `gmeow-interfaces.target` groups user-facing interfaces:
-  `gmeow-rest.service` and `gmeow-imap.service`.
+  `gmeow-mcp.service`, `gmeow-rest.service`, and `gmeow-imap.service`.
 - `gmeow.slice` provides a shared resource-control cgroup for accounting and
   operator overrides.
 
@@ -51,7 +51,8 @@ is `gmeow.slice`, all `gmeow*.target` files, and all `gmeow*.service` files.
 
 Enable and start `gmeow.target`, then enable and start the desired instance
 units. A typical email deployment enables `gmeow-source@primary.service`,
-`gmeow-worker@1.service`, `gmeow-rest.service`, and `gmeow-imap.service`.
+`gmeow-worker@1.service`, `gmeow-mcp.service`, `gmeow-rest.service`, and
+`gmeow-imap.service`.
 
 Add more source or worker instances with additional template instances such as
 `gmeow-source@archive.service` or `gmeow-worker@2.service`.
@@ -121,7 +122,9 @@ Validate unit syntax with the systemd analyzer against the installed
 `gmeow*.service`, `gmeow*.target`, and `gmeow.slice` units before cutover.
 
 Inspect effective hardening with the systemd security analyzer for the core
-units, the enabled source instances, and the enabled worker instances.
+units, the enabled source instances, the enabled worker instances, and the
+enabled interface services.
 
-`mcp-serve` is not installed as a long-running daemon because it is a stdio MCP
-server entry point. Run it under the MCP host that owns its stdin and stdout.
+`gmeow-mcp.service` runs the production MCP Streamable HTTP interface. The
+`gmeow mcp-serve` command remains available for stdio MCP hosts that own stdin
+and stdout directly.

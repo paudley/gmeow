@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -37,6 +39,44 @@ func newMCPServeCommand(out io.Writer, configPath *string) *cobra.Command {
 				return err
 			}
 			_, _ = fmt.Fprintln(out, "mcp serve: stdio")
+
+			return server.Start(command.Context())
+		},
+	}
+}
+
+func newMCPHTTPServeCommand(out io.Writer, configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "mcp-http-serve",
+		Short: "Run the MCP interface over Streamable HTTP",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			iface, err := interfaceByKindWithAddress(loaded.Config.Interfaces, "mcp")
+			if err != nil {
+				return err
+			}
+			sessionTimeout, err := interfaceSessionTimeout(iface)
+			if err != nil {
+				return err
+			}
+			services, closeFn, err := openInterfaceServicesLoaded(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			server, err := mcpiface.NewHTTP(
+				interfaceAddress(iface),
+				services,
+				mcpiface.HTTPOptions{SessionTimeout: sessionTimeout},
+			)
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(out, "mcp http serve: %s\n", interfaceAddress(iface))
 
 			return server.Start(command.Context())
 		},
@@ -204,8 +244,36 @@ func interfaceByKind(
 	return config.InterfaceConfig{}, fmt.Errorf("no %s interface is configured", kind)
 }
 
+func interfaceByKindWithAddress(
+	interfaces []config.InterfaceConfig,
+	kind string,
+) (config.InterfaceConfig, error) {
+	for _, iface := range interfaces {
+		if strings.TrimSpace(iface.Kind) == kind && iface.Host != "" && iface.Port != 0 {
+			return iface, nil
+		}
+	}
+
+	return config.InterfaceConfig{}, fmt.Errorf(
+		"no addressed %s interface is configured",
+		kind,
+	)
+}
+
 func interfaceAddress(iface config.InterfaceConfig) string {
 	return net.JoinHostPort(iface.Host, fmt.Sprint(iface.Port))
+}
+
+func interfaceSessionTimeout(iface config.InterfaceConfig) (time.Duration, error) {
+	if strings.TrimSpace(iface.SessionTimeout) == "" {
+		return 0, nil
+	}
+	duration, err := time.ParseDuration(iface.SessionTimeout)
+	if err != nil {
+		return 0, fmt.Errorf("interface %q session_timeout: %w", iface.Name, err)
+	}
+
+	return duration, nil
 }
 
 func buildSourceRegistry(

@@ -274,6 +274,13 @@ func TestValidateInterfaceConfig(t *testing.T) {
 	valid := validConfig()
 	valid.Interfaces = []InterfaceConfig{
 		{Name: "mcp", Kind: "mcp"},
+		{
+			Name:           "mcp-http",
+			Kind:           "mcp",
+			Host:           "127.0.0.1",
+			Port:           9876,
+			SessionTimeout: "30m",
+		},
 		{Name: "rest", Kind: "rest", Host: "127.0.0.1", Port: 8765},
 		{
 			Name:     "imap",
@@ -291,6 +298,14 @@ func TestValidateInterfaceConfig(t *testing.T) {
 	cases := map[string]InterfaceConfig{
 		"unsupported kind": {Name: "bad", Kind: "smtp", Host: "127.0.0.1", Port: 2525},
 		"non-loopback":     {Name: "rest", Kind: "rest", Host: "0.0.0.0", Port: 8765},
+		"mcp non-loopback": {Name: "mcp-http", Kind: "mcp", Host: "0.0.0.0", Port: 9876},
+		"mcp timeout": {
+			Name:           "mcp-http",
+			Kind:           "mcp",
+			Host:           "127.0.0.1",
+			Port:           9876,
+			SessionTimeout: "bogus",
+		},
 		"imap username": {
 			Name:   "imap",
 			Kind:   "imap",
