@@ -1178,6 +1178,10 @@ type VectorSearchResult struct {
 	ObjectDigest  string                 `protobuf:"bytes,1,opt,name=object_digest,json=objectDigest,proto3" json:"object_digest,omitempty"`
 	Model         string                 `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
 	Distance      float64                `protobuf:"fixed64,3,opt,name=distance,proto3" json:"distance,omitempty"`
+	EmbeddingId   string                 `protobuf:"bytes,4,opt,name=embedding_id,json=embeddingId,proto3" json:"embedding_id,omitempty"`
+	Kind          string                 `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
+	SourceDigest  string                 `protobuf:"bytes,6,opt,name=source_digest,json=sourceDigest,proto3" json:"source_digest,omitempty"`
+	TextPreview   string                 `protobuf:"bytes,7,opt,name=text_preview,json=textPreview,proto3" json:"text_preview,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1231,6 +1235,34 @@ func (x *VectorSearchResult) GetDistance() float64 {
 		return x.Distance
 	}
 	return 0
+}
+
+func (x *VectorSearchResult) GetEmbeddingId() string {
+	if x != nil {
+		return x.EmbeddingId
+	}
+	return ""
+}
+
+func (x *VectorSearchResult) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *VectorSearchResult) GetSourceDigest() string {
+	if x != nil {
+		return x.SourceDigest
+	}
+	return ""
+}
+
+func (x *VectorSearchResult) GetTextPreview() string {
+	if x != nil {
+		return x.TextPreview
+	}
+	return ""
 }
 
 type VectorSearchResponse struct {
@@ -1540,11 +1572,15 @@ const file_gmeow_v1_query_proto_rawDesc = "" +
 	"dimensions\x12\x16\n" +
 	"\x06vector\x18\x04 \x03(\x02R\x06vector\x12\x16\n" +
 	"\x06facets\x18\x05 \x03(\tR\x06facets\x12\x14\n" +
-	"\x05limit\x18\x06 \x01(\x05R\x05limit\"k\n" +
+	"\x05limit\x18\x06 \x01(\x05R\x05limit\"\xea\x01\n" +
 	"\x12VectorSearchResult\x12#\n" +
 	"\robject_digest\x18\x01 \x01(\tR\fobjectDigest\x12\x14\n" +
 	"\x05model\x18\x02 \x01(\tR\x05model\x12\x1a\n" +
-	"\bdistance\x18\x03 \x01(\x01R\bdistance\"u\n" +
+	"\bdistance\x18\x03 \x01(\x01R\bdistance\x12!\n" +
+	"\fembedding_id\x18\x04 \x01(\tR\vembeddingId\x12\x12\n" +
+	"\x04kind\x18\x05 \x01(\tR\x04kind\x12#\n" +
+	"\rsource_digest\x18\x06 \x01(\tR\fsourceDigest\x12!\n" +
+	"\ftext_preview\x18\a \x01(\tR\vtextPreview\"u\n" +
 	"\x14VectorSearchResponse\x12%\n" +
 	"\x0eschema_version\x18\x01 \x01(\x05R\rschemaVersion\x126\n" +
 	"\aresults\x18\x02 \x03(\v2\x1c.gmeow.v1.VectorSearchResultR\aresults\"\x98\x01\n" +

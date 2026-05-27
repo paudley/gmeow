@@ -28,7 +28,7 @@ it must not own config loading, RabbitMQ topology, scheduling, FILESTORE writes,
   - embeddings through configured endpoint;
   - categorization replacement;
   - NER replacement;
-  - summary/centroid first pass or explicit placeholder.
+  - model-backed summary through a configured endpoint.
 - Implement external analyzer adapter support for quality-critical model/tool analyzers that cannot
   yet be replaced in Go without output regression. External adapters must be configured explicitly
   with command, arguments, timeout, analyzer name, and analyzer version.
@@ -53,8 +53,8 @@ adapter with a documented contract and a removal issue. Do not keep the old Pyth
 library dependency.
 
 Do not retire Python NER, categorization, semantic, or attachment analysis behavior merely because a
-Go placeholder exists. Retirement requires equal-or-better fixture results and explicit analyzer
-contract parity.
+weaker Go implementation exists. Retirement requires equal-or-better fixture results and explicit
+analyzer contract parity.
 
 ## Functional Proof
 
@@ -69,16 +69,24 @@ contract parity.
 - Compound parent structure reflects subobject analysis after commit.
 - Go-native replacements for Python-backed analyzers pass parity gates before the Python path is
   removed.
-- Unregistered Python/model analyzers fail closed rather than falling back to lower-quality Go
-  placeholders.
+- Unregistered Python/model analyzers fail closed rather than falling back to lower-quality
+  substitute implementations.
 - Python/model analyzers without an explicit external adapter command fail at worker startup.
 - Embedding jobs call the configured endpoint and record model, vector, and dimension metadata in
   FILESTORE analysis annotations.
-- Summary jobs either write an extractive summary or an explicit placeholder status.
+- Summary jobs call the configured model endpoint, validate strict JSON output, and fail closed on
+  empty, echoed, or malformed responses.
+- Model endpoint analyzers serialize requests per worker instance with a single in-flight request
+  and a 60s timeout. Endpoint unavailability is routed back through SCHEDULER failure processing so
+  only the failed analyzer job is retried with exponential backoff.
+- Production analyzer code must not emit fallback or placeholder markers. Missing dependencies,
+  unavailable model endpoints, and low-quality model responses are hard failures, not degraded
+  annotations.
 
 ## Exit Gate
 
-- ANALYSIS has functional worker tests using real RabbitMQ and FILESTORE where practical.
+- ANALYSIS has functional worker tests using scheduler-owned RabbitMQ job delivery and real
+  FILESTORE where practical.
 - Analyzer contract fixtures are shared with QUERY and INTERFACE tests.
 - Old Python analysis modules are deleted incrementally as their Go replacements are verified.
 - NER and categorization either meet or exceed the Python implementation in shared fixtures, or remain

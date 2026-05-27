@@ -37,6 +37,7 @@ func (*DriveAdapter) Capabilities() []string {
 
 func (adapter *DriveAdapter) Pull(
 	context.Context,
+	IngestService,
 	PullRequest,
 ) ([]IngestObject, contracts.SourceCursor, error) {
 	return nil, contracts.SourceCursor{}, adapter.unsupported("pull")

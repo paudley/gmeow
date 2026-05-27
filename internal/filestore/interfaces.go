@@ -43,6 +43,12 @@ type Store interface {
 		ctx context.Context,
 		digest contracts.ObjectDigest,
 	) (contracts.Structure, error)
+	HasAnalysisAnnotation(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+		analyzerName string,
+		analyzerVersion string,
+	) (bool, error)
 	WriteAnnotation(ctx context.Context, annotation contracts.Annotation) error
 	WriteOverlays(
 		ctx context.Context,
@@ -50,6 +56,10 @@ type Store interface {
 		overlays map[string]any,
 	) error
 	WriteSourceCursor(ctx context.Context, cursor contracts.SourceCursor) error
+	ReadSourceCursor(
+		ctx context.Context,
+		ref contracts.SourceCursorRef,
+	) (contracts.SourceCursor, bool, error)
 	WalkProjection(ctx context.Context, fn ProjectionFunc) error
 	WalkChangedProjection(
 		ctx context.Context,

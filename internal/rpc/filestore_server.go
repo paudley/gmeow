@@ -19,11 +19,35 @@ import (
 type FilestoreServer struct {
 	pb.UnimplementedFilestoreServiceServer
 
-	store filestore.Store
+	notifier ObjectChangeNotifier
+	store    filestore.Store
 }
 
-func NewFilestoreServer(store filestore.Store) *FilestoreServer {
-	return &FilestoreServer{store: store}
+type ObjectChangeNotifier interface {
+	NotifyObjectsChanged(
+		ctx context.Context,
+		request contracts.ObjectChangeRequest,
+	) (contracts.SchedulerScanResponse, error)
+}
+
+type FilestoreServerOption func(*FilestoreServer)
+
+func WithObjectChangeNotifier(notifier ObjectChangeNotifier) FilestoreServerOption {
+	return func(server *FilestoreServer) {
+		server.notifier = notifier
+	}
+}
+
+func NewFilestoreServer(
+	store filestore.Store,
+	options ...FilestoreServerOption,
+) *FilestoreServer {
+	server := &FilestoreServer{store: store}
+	for _, option := range options {
+		option(server)
+	}
+
+	return server
 }
 
 func (server *FilestoreServer) LookupSourceObject(
@@ -149,6 +173,10 @@ func (server *FilestoreServer) PutObject(
 		return put.err
 	}
 
+	if err := server.notifyObjectChanged(stream.Context(), put.digest, "object_changed"); err != nil {
+		return err
+	}
+
 	return stream.SendAndClose(&pb.PutObjectResponse{Digest: string(put.digest)})
 }
 
@@ -161,10 +189,19 @@ func (server *FilestoreServer) AttachProvenance(
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	return &pb.Empty{}, server.store.AttachProvenance(
+	err = server.store.AttachProvenance(
 		ctx,
 		contracts.ObjectDigest(request.GetDigest()),
 		provenance,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.Empty{}, server.notifyObjectChanged(
+		ctx,
+		contracts.ObjectDigest(request.GetDigest()),
+		"object_changed",
 	)
 }
 
@@ -198,6 +235,10 @@ func (server *FilestoreServer) PutCompound(
 		Parts:         parts,
 	})
 	if err != nil {
+		return nil, err
+	}
+
+	if err := server.notifyObjectChanged(ctx, digest, "object_changed"); err != nil {
 		return nil, err
 	}
 
@@ -279,6 +320,23 @@ func (server *FilestoreServer) GetStructure(
 	return &pb.GetStructureResponse{Structure: converted}, nil
 }
 
+func (server *FilestoreServer) HasAnalysisAnnotation(
+	ctx context.Context,
+	request *pb.HasAnalysisAnnotationRequest,
+) (*pb.HasAnalysisAnnotationResponse, error) {
+	found, err := server.store.HasAnalysisAnnotation(
+		ctx,
+		contracts.ObjectDigest(request.GetDigest()),
+		request.GetAnalyzerName(),
+		request.GetAnalyzerVersion(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.HasAnalysisAnnotationResponse{Found: found}, nil
+}
+
 func (server *FilestoreServer) WriteAnnotation(
 	ctx context.Context,
 	request *pb.WriteAnnotationRequest,
@@ -288,7 +346,11 @@ func (server *FilestoreServer) WriteAnnotation(
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	return &pb.Empty{}, server.store.WriteAnnotation(ctx, annotation)
+	if err := server.store.WriteAnnotation(ctx, annotation); err != nil {
+		return nil, err
+	}
+
+	return &pb.Empty{}, server.notifyProjectionRefresh(ctx, annotation.ObjectDigest)
 }
 
 func (server *FilestoreServer) WriteOverlays(
@@ -300,11 +362,55 @@ func (server *FilestoreServer) WriteOverlays(
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	return &pb.Empty{}, server.store.WriteOverlays(
+	digest := contracts.ObjectDigest(request.GetDigest())
+	err = server.store.WriteOverlays(
 		ctx,
-		contracts.ObjectDigest(request.GetDigest()),
+		digest,
 		overlays,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.Empty{}, server.notifyProjectionRefresh(ctx, digest)
+}
+
+func (server *FilestoreServer) notifyObjectChanged(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	reason string,
+) error {
+	if server.notifier == nil {
+		return nil
+	}
+
+	_, err := server.notifier.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigests: []contracts.ObjectDigest{digest},
+		RequestedBy:   "filestore",
+		Reason:        reason,
+	})
+
+	return err
+}
+
+func (server *FilestoreServer) notifyProjectionRefresh(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) error {
+	if server.notifier == nil {
+		return nil
+	}
+
+	_, err := server.notifier.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
+		SchemaVersion:  contracts.SchemaVersionPhase00,
+		ObjectDigests:  []contracts.ObjectDigest{digest},
+		RequestedBy:    "filestore",
+		Reason:         "projection_refresh",
+		ProjectionOnly: true,
+	})
+
+	return err
 }
 
 func (server *FilestoreServer) WriteSourceCursor(
@@ -317,6 +423,32 @@ func (server *FilestoreServer) WriteSourceCursor(
 	}
 
 	return &pb.Empty{}, server.store.WriteSourceCursor(ctx, cursor)
+}
+
+func (server *FilestoreServer) ReadSourceCursor(
+	ctx context.Context,
+	request *pb.ReadSourceCursorRequest,
+) (*pb.ReadSourceCursorResponse, error) {
+	cursor, found, err := server.store.ReadSourceCursor(ctx, contracts.SourceCursorRef{
+		SourceKind: request.GetSourceKind(),
+		SourceName: request.GetSourceName(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return &pb.ReadSourceCursorResponse{}, nil
+	}
+
+	converted, err := ToPBSourceCursor(cursor)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	return &pb.ReadSourceCursorResponse{
+		Cursor: converted,
+		Found:  true,
+	}, nil
 }
 
 func (server *FilestoreServer) Verify(

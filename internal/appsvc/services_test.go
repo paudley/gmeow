@@ -216,6 +216,22 @@ func (backend gmailExternalBackend) Search(
 	return append([]source.GmailSearchHit{}, backend.hits...), nil
 }
 
+func (backend gmailExternalBackend) ListMessages(
+	context.Context,
+	source.GmailListRequest,
+) (source.GmailListPage, error) {
+	return source.GmailListPage{
+		Hits: append([]source.GmailSearchHit{}, backend.hits...),
+	}, nil
+}
+
+func (backend gmailExternalBackend) ListHistory(
+	context.Context,
+	source.GmailHistoryRequest,
+) (source.GmailHistoryPage, error) {
+	return source.GmailHistoryPage{}, nil
+}
+
 func (backend gmailExternalBackend) GetMessage(
 	_ context.Context,
 	messageID string,

@@ -247,6 +247,10 @@ func (server *QueryServer) VectorSearch(
 		results = append(results, &pb.VectorSearchResult{
 			ObjectDigest: string(result.ObjectDigest),
 			Model:        result.Model,
+			EmbeddingId:  result.EmbeddingID,
+			Kind:         result.Kind,
+			SourceDigest: string(result.SourceDigest),
+			TextPreview:  result.TextPreview,
 			Distance:     result.Distance,
 		})
 	}

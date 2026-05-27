@@ -209,6 +209,18 @@ func buildSourceRegistry(
 	ctx context.Context,
 	loaded *config.Loaded,
 ) (*appsvc.StaticSourceRegistry, error) {
+	adapters, err := buildSourceAdapters(ctx, loaded)
+	if err != nil {
+		return nil, err
+	}
+
+	return appsvc.NewStaticSourceRegistry(adapters...), nil
+}
+
+func buildSourceAdapters(
+	ctx context.Context,
+	loaded *config.Loaded,
+) ([]source.Adapter, error) {
 	adapters := []source.Adapter{}
 	for _, sourceConfig := range loaded.Config.Sources {
 		switch sourceConfig.Kind {
@@ -220,6 +232,7 @@ func buildSourceRegistry(
 				ctx,
 				[]byte(loaded.Config.Secrets[sourceConfig.CredentialSecret]),
 				sourceConfig.UserID,
+				sourceConfig.DelegatedSubject,
 			)
 			if err != nil {
 				return nil, err
@@ -232,7 +245,7 @@ func buildSourceRegistry(
 		}
 	}
 
-	return appsvc.NewStaticSourceRegistry(adapters...), nil
+	return adapters, nil
 }
 
 func commandContext(ctx context.Context) context.Context {

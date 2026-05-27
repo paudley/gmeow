@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -42,6 +43,10 @@ type FilestoreClient interface {
 	AttachProvenance(context.Context, contracts.ObjectDigest, []contracts.Provenance) error
 	PutCompound(context.Context, rpc.CompoundPutRequest) (contracts.ObjectDigest, error)
 	WriteSourceCursor(context.Context, contracts.SourceCursor) error
+	ReadSourceCursor(
+		context.Context,
+		contracts.SourceCursorRef,
+	) (contracts.SourceCursor, bool, error)
 }
 
 type Adapter interface {
@@ -54,6 +59,7 @@ type PullAdapter interface {
 	Adapter
 	Pull(
 		ctx context.Context,
+		service IngestService,
 		request PullRequest,
 	) ([]IngestObject, contracts.SourceCursor, error)
 }
@@ -90,6 +96,24 @@ type ActionAdapter interface {
 type PullRequest struct {
 	Cursor map[string]any
 	Limit  int
+}
+
+type BackfillRequest struct {
+	Cursor      map[string]any
+	PageSize    int
+	MaxPages    int
+	Concurrency int
+}
+
+type BackfillReport struct {
+	FinalCursor      contracts.SourceCursor `json:"final_cursor"`
+	FailedMessageIDs []string               `json:"failed_message_ids,omitempty"`
+	Processed        int                    `json:"processed"`
+	Created          int                    `json:"created"`
+	Skipped          int                    `json:"skipped"`
+	Failed           int                    `json:"failed"`
+	Pages            int                    `json:"pages"`
+	Completed        bool                   `json:"completed"`
 }
 
 type LiveSearchRequest struct {
@@ -264,6 +288,217 @@ func (service *Service) WriteCursor(
 	}
 
 	return service.store.WriteSourceCursor(ctx, cursor)
+}
+
+func (service *Service) ReadCursor(
+	ctx context.Context,
+	adapter Adapter,
+) (contracts.SourceCursor, bool, error) {
+	if adapter == nil {
+		return contracts.SourceCursor{}, false, errors.New("source adapter is required")
+	}
+
+	return service.store.ReadSourceCursor(ctx, contracts.SourceCursorRef{
+		SourceKind: adapter.Kind(),
+		SourceName: adapter.Name(),
+	})
+}
+
+func (service *Service) RunBackfill(
+	ctx context.Context,
+	adapter PullAdapter,
+	request BackfillRequest,
+) (BackfillReport, error) {
+	if adapter == nil {
+		return BackfillReport{}, errors.New("source pull adapter is required")
+	}
+	if !hasCapability(adapter, CapabilityBackfill) {
+		return BackfillReport{}, fmt.Errorf(
+			"%w: source %s/%s does not support backfill",
+			ErrUnsupportedOperation,
+			adapter.Kind(),
+			adapter.Name(),
+		)
+	}
+
+	pageSize := request.PageSize
+	if pageSize <= 0 {
+		pageSize = 100
+	}
+	workerCount := request.Concurrency
+	if workerCount <= 0 {
+		workerCount = 4
+	}
+
+	cursor := cloneCursor(request.Cursor)
+	report := BackfillReport{}
+	if boolCursorValue(cursor, "completed") {
+		report.Completed = true
+		report.FinalCursor = contracts.SourceCursor{
+			SchemaVersion: contracts.SchemaVersionPhase00,
+			SourceKind:    adapter.Kind(),
+			SourceName:    adapter.Name(),
+			Cursor:        cursor,
+			UpdatedAt:     time.Now().UTC(),
+		}
+
+		return report, nil
+	}
+
+	for report.MaxPagesNotReached(request.MaxPages) {
+		objects, nextCursor, err := adapter.Pull(ctx, service, PullRequest{
+			Cursor: cursor,
+			Limit:  pageSize,
+		})
+		if err != nil {
+			report.FinalCursor = nextCursor
+			if nextCursor.SourceKind != "" && nextCursor.SourceName != "" {
+				_ = service.WriteCursor(ctx, adapter, nextCursor)
+			}
+
+			return report, err
+		}
+		if len(objects) == 0 && boolCursorValue(nextCursor.Cursor, "completed") {
+			report.Completed = true
+			report.FinalCursor = nextCursor
+			if err := service.WriteCursor(ctx, adapter, nextCursor); err != nil {
+				return report, err
+			}
+
+			return report, nil
+		}
+
+		pageReport := service.ingestBackfillPage(ctx, objects, workerCount)
+		report.Processed += pageReport.Processed
+		report.Created += pageReport.Created
+		report.Skipped += pageReport.Skipped
+		report.Failed += pageReport.Failed
+		report.FailedMessageIDs = append(
+			report.FailedMessageIDs,
+			pageReport.FailedMessageIDs...,
+		)
+		report.Pages++
+
+		nextCursor.Cursor = mergeBackfillCounts(nextCursor.Cursor, report)
+		report.Completed = boolCursorValue(nextCursor.Cursor, "completed")
+		report.FinalCursor = nextCursor
+		if err := service.WriteCursor(ctx, adapter, nextCursor); err != nil {
+			return report, err
+		}
+		if pageReport.Failed > 0 {
+			return report, fmt.Errorf(
+				"source backfill failed for %d message(s)",
+				pageReport.Failed,
+			)
+		}
+		if report.Completed {
+			return report, nil
+		}
+
+		cursor = cloneCursor(nextCursor.Cursor)
+	}
+
+	return report, nil
+}
+
+func (report BackfillReport) MaxPagesNotReached(maxPages int) bool {
+	return maxPages <= 0 || report.Pages < maxPages
+}
+
+func (service *Service) ingestBackfillPage(
+	ctx context.Context,
+	objects []IngestObject,
+	workerCount int,
+) BackfillReport {
+	jobs := make(chan IngestObject)
+	results := make(chan backfillIngestResult)
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for object := range jobs {
+				_, created, err := service.Ingest(ctx, object)
+				results <- backfillIngestResult{
+					messageID: object.ExternalID,
+					created:   created,
+					err:       err,
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		for _, object := range objects {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- object:
+			}
+		}
+	}()
+
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	report := BackfillReport{}
+	for result := range results {
+		report.Processed++
+		if result.err != nil {
+			report.Failed++
+			report.FailedMessageIDs = append(
+				report.FailedMessageIDs,
+				result.messageID,
+			)
+
+			continue
+		}
+		if result.created {
+			report.Created++
+		} else {
+			report.Skipped++
+		}
+	}
+
+	return report
+}
+
+type backfillIngestResult struct {
+	messageID string
+	err       error
+	created   bool
+}
+
+func cloneCursor(cursor map[string]any) map[string]any {
+	cloned := map[string]any{}
+	for key, value := range cursor {
+		cloned[key] = value
+	}
+
+	return cloned
+}
+
+func mergeBackfillCounts(
+	cursor map[string]any,
+	report BackfillReport,
+) map[string]any {
+	merged := cloneCursor(cursor)
+	merged["processed_count"] = report.Processed
+	merged["created_count"] = report.Created
+	merged["skipped_count"] = report.Skipped
+	merged["failed_count"] = report.Failed
+	merged["failed_message_ids"] = append([]string{}, report.FailedMessageIDs...)
+
+	return merged
+}
+
+func boolCursorValue(cursor map[string]any, key string) bool {
+	value, _ := cursor[key].(bool)
+
+	return value
 }
 
 func (service *Service) ApplyAction(

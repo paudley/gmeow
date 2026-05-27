@@ -270,6 +270,10 @@ func (client *QueryClient) VectorSearch(
 		results = append(results, contracts.VectorSearchResult{
 			ObjectDigest: contracts.ObjectDigest(result.GetObjectDigest()),
 			Model:        result.GetModel(),
+			EmbeddingID:  result.GetEmbeddingId(),
+			Kind:         result.GetKind(),
+			SourceDigest: contracts.ObjectDigest(result.GetSourceDigest()),
+			TextPreview:  result.GetTextPreview(),
 			Distance:     result.GetDistance(),
 		})
 	}

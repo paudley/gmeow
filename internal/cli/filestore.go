@@ -49,6 +49,14 @@ func newFilestoreServeCommand(
 			}
 
 			store := filestore.NewFilesystemStore(root)
+			schedulerClient, err := rpc.NewSchedulerClient(
+				command.Context(),
+				rpcEndpoint(loaded.Resolved.RPC.Scheduler),
+			)
+			if err != nil {
+				return err
+			}
+			defer schedulerClient.Close()
 
 			endpoint := rpcEndpoint(loaded.Resolved.RPC.Filestore)
 			if _, err := fmt.Fprintf(
@@ -61,7 +69,13 @@ func newFilestoreServeCommand(
 			}
 
 			return rpc.Serve(command.Context(), endpoint, func(server *grpc.Server) {
-				pb.RegisterFilestoreServiceServer(server, rpc.NewFilestoreServer(store))
+				pb.RegisterFilestoreServiceServer(
+					server,
+					rpc.NewFilestoreServer(
+						store,
+						rpc.WithObjectChangeNotifier(schedulerClient),
+					),
+				)
 			})
 		},
 	}

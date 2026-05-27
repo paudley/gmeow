@@ -979,6 +979,110 @@ func (x *GetStructureResponse) GetStructure() *Structure {
 	return nil
 }
 
+type HasAnalysisAnnotationRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Digest          string                 `protobuf:"bytes,1,opt,name=digest,proto3" json:"digest,omitempty"`
+	AnalyzerName    string                 `protobuf:"bytes,2,opt,name=analyzer_name,json=analyzerName,proto3" json:"analyzer_name,omitempty"`
+	AnalyzerVersion string                 `protobuf:"bytes,3,opt,name=analyzer_version,json=analyzerVersion,proto3" json:"analyzer_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *HasAnalysisAnnotationRequest) Reset() {
+	*x = HasAnalysisAnnotationRequest{}
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HasAnalysisAnnotationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HasAnalysisAnnotationRequest) ProtoMessage() {}
+
+func (x *HasAnalysisAnnotationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HasAnalysisAnnotationRequest.ProtoReflect.Descriptor instead.
+func (*HasAnalysisAnnotationRequest) Descriptor() ([]byte, []int) {
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *HasAnalysisAnnotationRequest) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
+func (x *HasAnalysisAnnotationRequest) GetAnalyzerName() string {
+	if x != nil {
+		return x.AnalyzerName
+	}
+	return ""
+}
+
+func (x *HasAnalysisAnnotationRequest) GetAnalyzerVersion() string {
+	if x != nil {
+		return x.AnalyzerVersion
+	}
+	return ""
+}
+
+type HasAnalysisAnnotationResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Found         bool                   `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HasAnalysisAnnotationResponse) Reset() {
+	*x = HasAnalysisAnnotationResponse{}
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HasAnalysisAnnotationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HasAnalysisAnnotationResponse) ProtoMessage() {}
+
+func (x *HasAnalysisAnnotationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HasAnalysisAnnotationResponse.ProtoReflect.Descriptor instead.
+func (*HasAnalysisAnnotationResponse) Descriptor() ([]byte, []int) {
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *HasAnalysisAnnotationResponse) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
+}
+
 type WriteAnnotationRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Annotation    *Annotation            `protobuf:"bytes,1,opt,name=annotation,proto3" json:"annotation,omitempty"`
@@ -988,7 +1092,7 @@ type WriteAnnotationRequest struct {
 
 func (x *WriteAnnotationRequest) Reset() {
 	*x = WriteAnnotationRequest{}
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[18]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1000,7 +1104,7 @@ func (x *WriteAnnotationRequest) String() string {
 func (*WriteAnnotationRequest) ProtoMessage() {}
 
 func (x *WriteAnnotationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[18]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1013,7 +1117,7 @@ func (x *WriteAnnotationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteAnnotationRequest.ProtoReflect.Descriptor instead.
 func (*WriteAnnotationRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{18}
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *WriteAnnotationRequest) GetAnnotation() *Annotation {
@@ -1033,7 +1137,7 @@ type WriteOverlaysRequest struct {
 
 func (x *WriteOverlaysRequest) Reset() {
 	*x = WriteOverlaysRequest{}
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[19]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1045,7 +1149,7 @@ func (x *WriteOverlaysRequest) String() string {
 func (*WriteOverlaysRequest) ProtoMessage() {}
 
 func (x *WriteOverlaysRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[19]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1058,7 +1162,7 @@ func (x *WriteOverlaysRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteOverlaysRequest.ProtoReflect.Descriptor instead.
 func (*WriteOverlaysRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{19}
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *WriteOverlaysRequest) GetDigest() string {
@@ -1084,7 +1188,7 @@ type WriteSourceCursorRequest struct {
 
 func (x *WriteSourceCursorRequest) Reset() {
 	*x = WriteSourceCursorRequest{}
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[20]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1096,7 +1200,7 @@ func (x *WriteSourceCursorRequest) String() string {
 func (*WriteSourceCursorRequest) ProtoMessage() {}
 
 func (x *WriteSourceCursorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[20]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1109,7 +1213,7 @@ func (x *WriteSourceCursorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteSourceCursorRequest.ProtoReflect.Descriptor instead.
 func (*WriteSourceCursorRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{20}
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *WriteSourceCursorRequest) GetCursor() *SourceCursor {
@@ -1117,6 +1221,110 @@ func (x *WriteSourceCursorRequest) GetCursor() *SourceCursor {
 		return x.Cursor
 	}
 	return nil
+}
+
+type ReadSourceCursorRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SourceKind    string                 `protobuf:"bytes,1,opt,name=source_kind,json=sourceKind,proto3" json:"source_kind,omitempty"`
+	SourceName    string                 `protobuf:"bytes,2,opt,name=source_name,json=sourceName,proto3" json:"source_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadSourceCursorRequest) Reset() {
+	*x = ReadSourceCursorRequest{}
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadSourceCursorRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadSourceCursorRequest) ProtoMessage() {}
+
+func (x *ReadSourceCursorRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadSourceCursorRequest.ProtoReflect.Descriptor instead.
+func (*ReadSourceCursorRequest) Descriptor() ([]byte, []int) {
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *ReadSourceCursorRequest) GetSourceKind() string {
+	if x != nil {
+		return x.SourceKind
+	}
+	return ""
+}
+
+func (x *ReadSourceCursorRequest) GetSourceName() string {
+	if x != nil {
+		return x.SourceName
+	}
+	return ""
+}
+
+type ReadSourceCursorResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Cursor        *SourceCursor          `protobuf:"bytes,1,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	Found         bool                   `protobuf:"varint,2,opt,name=found,proto3" json:"found,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadSourceCursorResponse) Reset() {
+	*x = ReadSourceCursorResponse{}
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadSourceCursorResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadSourceCursorResponse) ProtoMessage() {}
+
+func (x *ReadSourceCursorResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadSourceCursorResponse.ProtoReflect.Descriptor instead.
+func (*ReadSourceCursorResponse) Descriptor() ([]byte, []int) {
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *ReadSourceCursorResponse) GetCursor() *SourceCursor {
+	if x != nil {
+		return x.Cursor
+	}
+	return nil
+}
+
+func (x *ReadSourceCursorResponse) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
 }
 
 type VerifyRequest struct {
@@ -1127,7 +1335,7 @@ type VerifyRequest struct {
 
 func (x *VerifyRequest) Reset() {
 	*x = VerifyRequest{}
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[21]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1139,7 +1347,7 @@ func (x *VerifyRequest) String() string {
 func (*VerifyRequest) ProtoMessage() {}
 
 func (x *VerifyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[21]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1152,7 +1360,7 @@ func (x *VerifyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerifyRequest.ProtoReflect.Descriptor instead.
 func (*VerifyRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{21}
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{25}
 }
 
 type VerifyFinding struct {
@@ -1167,7 +1375,7 @@ type VerifyFinding struct {
 
 func (x *VerifyFinding) Reset() {
 	*x = VerifyFinding{}
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[22]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1179,7 +1387,7 @@ func (x *VerifyFinding) String() string {
 func (*VerifyFinding) ProtoMessage() {}
 
 func (x *VerifyFinding) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[22]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1192,7 +1400,7 @@ func (x *VerifyFinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerifyFinding.ProtoReflect.Descriptor instead.
 func (*VerifyFinding) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{22}
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *VerifyFinding) GetDigest() string {
@@ -1234,7 +1442,7 @@ type VerifyResponse struct {
 
 func (x *VerifyResponse) Reset() {
 	*x = VerifyResponse{}
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[23]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1246,7 +1454,7 @@ func (x *VerifyResponse) String() string {
 func (*VerifyResponse) ProtoMessage() {}
 
 func (x *VerifyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[23]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1259,7 +1467,7 @@ func (x *VerifyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerifyResponse.ProtoReflect.Descriptor instead.
 func (*VerifyResponse) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{23}
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *VerifyResponse) GetStatus() string {
@@ -1350,7 +1558,13 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\x13GetStructureRequest\x12\x16\n" +
 	"\x06digest\x18\x01 \x01(\tR\x06digest\"I\n" +
 	"\x14GetStructureResponse\x121\n" +
-	"\tstructure\x18\x01 \x01(\v2\x13.gmeow.v1.StructureR\tstructure\"N\n" +
+	"\tstructure\x18\x01 \x01(\v2\x13.gmeow.v1.StructureR\tstructure\"\x86\x01\n" +
+	"\x1cHasAnalysisAnnotationRequest\x12\x16\n" +
+	"\x06digest\x18\x01 \x01(\tR\x06digest\x12#\n" +
+	"\ranalyzer_name\x18\x02 \x01(\tR\fanalyzerName\x12)\n" +
+	"\x10analyzer_version\x18\x03 \x01(\tR\x0fanalyzerVersion\"5\n" +
+	"\x1dHasAnalysisAnnotationResponse\x12\x14\n" +
+	"\x05found\x18\x01 \x01(\bR\x05found\"N\n" +
 	"\x16WriteAnnotationRequest\x124\n" +
 	"\n" +
 	"annotation\x18\x01 \x01(\v2\x14.gmeow.v1.AnnotationR\n" +
@@ -1359,7 +1573,15 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\x06digest\x18\x01 \x01(\tR\x06digest\x12#\n" +
 	"\roverlays_json\x18\x02 \x01(\fR\foverlaysJson\"J\n" +
 	"\x18WriteSourceCursorRequest\x12.\n" +
-	"\x06cursor\x18\x01 \x01(\v2\x16.gmeow.v1.SourceCursorR\x06cursor\"\x0f\n" +
+	"\x06cursor\x18\x01 \x01(\v2\x16.gmeow.v1.SourceCursorR\x06cursor\"[\n" +
+	"\x17ReadSourceCursorRequest\x12\x1f\n" +
+	"\vsource_kind\x18\x01 \x01(\tR\n" +
+	"sourceKind\x12\x1f\n" +
+	"\vsource_name\x18\x02 \x01(\tR\n" +
+	"sourceName\"`\n" +
+	"\x18ReadSourceCursorResponse\x12.\n" +
+	"\x06cursor\x18\x01 \x01(\v2\x16.gmeow.v1.SourceCursorR\x06cursor\x12\x14\n" +
+	"\x05found\x18\x02 \x01(\bR\x05found\"\x0f\n" +
 	"\rVerifyRequest\"i\n" +
 	"\rVerifyFinding\x12\x16\n" +
 	"\x06digest\x18\x01 \x01(\tR\x06digest\x12\x12\n" +
@@ -1369,7 +1591,7 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\x0eVerifyResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x18\n" +
 	"\achecked\x18\x02 \x01(\x05R\achecked\x123\n" +
-	"\bfindings\x18\x03 \x03(\v2\x17.gmeow.v1.VerifyFindingR\bfindings2\xed\a\n" +
+	"\bfindings\x18\x03 \x03(\v2\x17.gmeow.v1.VerifyFindingR\bfindings2\xb2\t\n" +
 	"\x10FilestoreService\x12_\n" +
 	"\x12LookupSourceObject\x12#.gmeow.v1.LookupSourceObjectRequest\x1a$.gmeow.v1.LookupSourceObjectResponse\x12k\n" +
 	"\x16TryAcquireSourceIngest\x12'.gmeow.v1.TryAcquireSourceIngestRequest\x1a(.gmeow.v1.TryAcquireSourceIngestResponse\x12L\n" +
@@ -1379,10 +1601,12 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\vPutCompound\x12\x1c.gmeow.v1.PutCompoundRequest\x1a\x1d.gmeow.v1.PutCompoundResponse\x126\n" +
 	"\x04Open\x12\x15.gmeow.v1.OpenRequest\x1a\x15.gmeow.v1.ObjectChunk0\x01\x12M\n" +
 	"\fReadManifest\x12\x1d.gmeow.v1.ReadManifestRequest\x1a\x1e.gmeow.v1.ReadManifestResponse\x12M\n" +
-	"\fGetStructure\x12\x1d.gmeow.v1.GetStructureRequest\x1a\x1e.gmeow.v1.GetStructureResponse\x12D\n" +
+	"\fGetStructure\x12\x1d.gmeow.v1.GetStructureRequest\x1a\x1e.gmeow.v1.GetStructureResponse\x12h\n" +
+	"\x15HasAnalysisAnnotation\x12&.gmeow.v1.HasAnalysisAnnotationRequest\x1a'.gmeow.v1.HasAnalysisAnnotationResponse\x12D\n" +
 	"\x0fWriteAnnotation\x12 .gmeow.v1.WriteAnnotationRequest\x1a\x0f.gmeow.v1.Empty\x12@\n" +
 	"\rWriteOverlays\x12\x1e.gmeow.v1.WriteOverlaysRequest\x1a\x0f.gmeow.v1.Empty\x12H\n" +
-	"\x11WriteSourceCursor\x12\".gmeow.v1.WriteSourceCursorRequest\x1a\x0f.gmeow.v1.Empty\x12;\n" +
+	"\x11WriteSourceCursor\x12\".gmeow.v1.WriteSourceCursorRequest\x1a\x0f.gmeow.v1.Empty\x12Y\n" +
+	"\x10ReadSourceCursor\x12!.gmeow.v1.ReadSourceCursorRequest\x1a\".gmeow.v1.ReadSourceCursorResponse\x12;\n" +
 	"\x06Verify\x12\x17.gmeow.v1.VerifyRequest\x1a\x18.gmeow.v1.VerifyResponseB5Z3blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1;gmeowv1b\x06proto3"
 
 var (
@@ -1397,7 +1621,7 @@ func file_gmeow_v1_filestore_proto_rawDescGZIP() []byte {
 	return file_gmeow_v1_filestore_proto_rawDescData
 }
 
-var file_gmeow_v1_filestore_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_gmeow_v1_filestore_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_gmeow_v1_filestore_proto_goTypes = []any{
 	(*LookupSourceObjectRequest)(nil),      // 0: gmeow.v1.LookupSourceObjectRequest
 	(*LookupSourceObjectResponse)(nil),     // 1: gmeow.v1.LookupSourceObjectResponse
@@ -1417,75 +1641,84 @@ var file_gmeow_v1_filestore_proto_goTypes = []any{
 	(*ReadManifestResponse)(nil),           // 15: gmeow.v1.ReadManifestResponse
 	(*GetStructureRequest)(nil),            // 16: gmeow.v1.GetStructureRequest
 	(*GetStructureResponse)(nil),           // 17: gmeow.v1.GetStructureResponse
-	(*WriteAnnotationRequest)(nil),         // 18: gmeow.v1.WriteAnnotationRequest
-	(*WriteOverlaysRequest)(nil),           // 19: gmeow.v1.WriteOverlaysRequest
-	(*WriteSourceCursorRequest)(nil),       // 20: gmeow.v1.WriteSourceCursorRequest
-	(*VerifyRequest)(nil),                  // 21: gmeow.v1.VerifyRequest
-	(*VerifyFinding)(nil),                  // 22: gmeow.v1.VerifyFinding
-	(*VerifyResponse)(nil),                 // 23: gmeow.v1.VerifyResponse
-	(*SourceObjectRef)(nil),                // 24: gmeow.v1.SourceObjectRef
-	(*SourceIngestClaim)(nil),              // 25: gmeow.v1.SourceIngestClaim
-	(*Facet)(nil),                          // 26: gmeow.v1.Facet
-	(*Provenance)(nil),                     // 27: gmeow.v1.Provenance
-	(*Relationship)(nil),                   // 28: gmeow.v1.Relationship
-	(*CompoundPart)(nil),                   // 29: gmeow.v1.CompoundPart
-	(*Manifest)(nil),                       // 30: gmeow.v1.Manifest
-	(*Structure)(nil),                      // 31: gmeow.v1.Structure
-	(*Annotation)(nil),                     // 32: gmeow.v1.Annotation
-	(*SourceCursor)(nil),                   // 33: gmeow.v1.SourceCursor
-	(*Empty)(nil),                          // 34: gmeow.v1.Empty
+	(*HasAnalysisAnnotationRequest)(nil),   // 18: gmeow.v1.HasAnalysisAnnotationRequest
+	(*HasAnalysisAnnotationResponse)(nil),  // 19: gmeow.v1.HasAnalysisAnnotationResponse
+	(*WriteAnnotationRequest)(nil),         // 20: gmeow.v1.WriteAnnotationRequest
+	(*WriteOverlaysRequest)(nil),           // 21: gmeow.v1.WriteOverlaysRequest
+	(*WriteSourceCursorRequest)(nil),       // 22: gmeow.v1.WriteSourceCursorRequest
+	(*ReadSourceCursorRequest)(nil),        // 23: gmeow.v1.ReadSourceCursorRequest
+	(*ReadSourceCursorResponse)(nil),       // 24: gmeow.v1.ReadSourceCursorResponse
+	(*VerifyRequest)(nil),                  // 25: gmeow.v1.VerifyRequest
+	(*VerifyFinding)(nil),                  // 26: gmeow.v1.VerifyFinding
+	(*VerifyResponse)(nil),                 // 27: gmeow.v1.VerifyResponse
+	(*SourceObjectRef)(nil),                // 28: gmeow.v1.SourceObjectRef
+	(*SourceIngestClaim)(nil),              // 29: gmeow.v1.SourceIngestClaim
+	(*Facet)(nil),                          // 30: gmeow.v1.Facet
+	(*Provenance)(nil),                     // 31: gmeow.v1.Provenance
+	(*Relationship)(nil),                   // 32: gmeow.v1.Relationship
+	(*CompoundPart)(nil),                   // 33: gmeow.v1.CompoundPart
+	(*Manifest)(nil),                       // 34: gmeow.v1.Manifest
+	(*Structure)(nil),                      // 35: gmeow.v1.Structure
+	(*Annotation)(nil),                     // 36: gmeow.v1.Annotation
+	(*SourceCursor)(nil),                   // 37: gmeow.v1.SourceCursor
+	(*Empty)(nil),                          // 38: gmeow.v1.Empty
 }
 var file_gmeow_v1_filestore_proto_depIdxs = []int32{
-	24, // 0: gmeow.v1.LookupSourceObjectRequest.ref:type_name -> gmeow.v1.SourceObjectRef
-	24, // 1: gmeow.v1.TryAcquireSourceIngestRequest.ref:type_name -> gmeow.v1.SourceObjectRef
-	25, // 2: gmeow.v1.TryAcquireSourceIngestResponse.claim:type_name -> gmeow.v1.SourceIngestClaim
-	25, // 3: gmeow.v1.ReleaseSourceIngestRequest.claim:type_name -> gmeow.v1.SourceIngestClaim
+	28, // 0: gmeow.v1.LookupSourceObjectRequest.ref:type_name -> gmeow.v1.SourceObjectRef
+	28, // 1: gmeow.v1.TryAcquireSourceIngestRequest.ref:type_name -> gmeow.v1.SourceObjectRef
+	29, // 2: gmeow.v1.TryAcquireSourceIngestResponse.claim:type_name -> gmeow.v1.SourceIngestClaim
+	29, // 3: gmeow.v1.ReleaseSourceIngestRequest.claim:type_name -> gmeow.v1.SourceIngestClaim
 	6,  // 4: gmeow.v1.PutObjectFrame.start:type_name -> gmeow.v1.PutObjectStart
 	7,  // 5: gmeow.v1.PutObjectFrame.finish:type_name -> gmeow.v1.PutObjectFinish
-	26, // 6: gmeow.v1.PutObjectStart.facets:type_name -> gmeow.v1.Facet
-	27, // 7: gmeow.v1.PutObjectStart.provenance:type_name -> gmeow.v1.Provenance
-	28, // 8: gmeow.v1.PutObjectStart.relationships:type_name -> gmeow.v1.Relationship
-	27, // 9: gmeow.v1.AttachProvenanceRequest.provenance:type_name -> gmeow.v1.Provenance
-	26, // 10: gmeow.v1.PutCompoundRequest.facets:type_name -> gmeow.v1.Facet
-	27, // 11: gmeow.v1.PutCompoundRequest.provenance:type_name -> gmeow.v1.Provenance
-	28, // 12: gmeow.v1.PutCompoundRequest.relationships:type_name -> gmeow.v1.Relationship
-	29, // 13: gmeow.v1.PutCompoundRequest.parts:type_name -> gmeow.v1.CompoundPart
-	30, // 14: gmeow.v1.ReadManifestResponse.manifest:type_name -> gmeow.v1.Manifest
-	31, // 15: gmeow.v1.GetStructureResponse.structure:type_name -> gmeow.v1.Structure
-	32, // 16: gmeow.v1.WriteAnnotationRequest.annotation:type_name -> gmeow.v1.Annotation
-	33, // 17: gmeow.v1.WriteSourceCursorRequest.cursor:type_name -> gmeow.v1.SourceCursor
-	22, // 18: gmeow.v1.VerifyResponse.findings:type_name -> gmeow.v1.VerifyFinding
-	0,  // 19: gmeow.v1.FilestoreService.LookupSourceObject:input_type -> gmeow.v1.LookupSourceObjectRequest
-	2,  // 20: gmeow.v1.FilestoreService.TryAcquireSourceIngest:input_type -> gmeow.v1.TryAcquireSourceIngestRequest
-	4,  // 21: gmeow.v1.FilestoreService.ReleaseSourceIngest:input_type -> gmeow.v1.ReleaseSourceIngestRequest
-	5,  // 22: gmeow.v1.FilestoreService.PutObject:input_type -> gmeow.v1.PutObjectFrame
-	9,  // 23: gmeow.v1.FilestoreService.AttachProvenance:input_type -> gmeow.v1.AttachProvenanceRequest
-	10, // 24: gmeow.v1.FilestoreService.PutCompound:input_type -> gmeow.v1.PutCompoundRequest
-	12, // 25: gmeow.v1.FilestoreService.Open:input_type -> gmeow.v1.OpenRequest
-	14, // 26: gmeow.v1.FilestoreService.ReadManifest:input_type -> gmeow.v1.ReadManifestRequest
-	16, // 27: gmeow.v1.FilestoreService.GetStructure:input_type -> gmeow.v1.GetStructureRequest
-	18, // 28: gmeow.v1.FilestoreService.WriteAnnotation:input_type -> gmeow.v1.WriteAnnotationRequest
-	19, // 29: gmeow.v1.FilestoreService.WriteOverlays:input_type -> gmeow.v1.WriteOverlaysRequest
-	20, // 30: gmeow.v1.FilestoreService.WriteSourceCursor:input_type -> gmeow.v1.WriteSourceCursorRequest
-	21, // 31: gmeow.v1.FilestoreService.Verify:input_type -> gmeow.v1.VerifyRequest
-	1,  // 32: gmeow.v1.FilestoreService.LookupSourceObject:output_type -> gmeow.v1.LookupSourceObjectResponse
-	3,  // 33: gmeow.v1.FilestoreService.TryAcquireSourceIngest:output_type -> gmeow.v1.TryAcquireSourceIngestResponse
-	34, // 34: gmeow.v1.FilestoreService.ReleaseSourceIngest:output_type -> gmeow.v1.Empty
-	8,  // 35: gmeow.v1.FilestoreService.PutObject:output_type -> gmeow.v1.PutObjectResponse
-	34, // 36: gmeow.v1.FilestoreService.AttachProvenance:output_type -> gmeow.v1.Empty
-	11, // 37: gmeow.v1.FilestoreService.PutCompound:output_type -> gmeow.v1.PutCompoundResponse
-	13, // 38: gmeow.v1.FilestoreService.Open:output_type -> gmeow.v1.ObjectChunk
-	15, // 39: gmeow.v1.FilestoreService.ReadManifest:output_type -> gmeow.v1.ReadManifestResponse
-	17, // 40: gmeow.v1.FilestoreService.GetStructure:output_type -> gmeow.v1.GetStructureResponse
-	34, // 41: gmeow.v1.FilestoreService.WriteAnnotation:output_type -> gmeow.v1.Empty
-	34, // 42: gmeow.v1.FilestoreService.WriteOverlays:output_type -> gmeow.v1.Empty
-	34, // 43: gmeow.v1.FilestoreService.WriteSourceCursor:output_type -> gmeow.v1.Empty
-	23, // 44: gmeow.v1.FilestoreService.Verify:output_type -> gmeow.v1.VerifyResponse
-	32, // [32:45] is the sub-list for method output_type
-	19, // [19:32] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	30, // 6: gmeow.v1.PutObjectStart.facets:type_name -> gmeow.v1.Facet
+	31, // 7: gmeow.v1.PutObjectStart.provenance:type_name -> gmeow.v1.Provenance
+	32, // 8: gmeow.v1.PutObjectStart.relationships:type_name -> gmeow.v1.Relationship
+	31, // 9: gmeow.v1.AttachProvenanceRequest.provenance:type_name -> gmeow.v1.Provenance
+	30, // 10: gmeow.v1.PutCompoundRequest.facets:type_name -> gmeow.v1.Facet
+	31, // 11: gmeow.v1.PutCompoundRequest.provenance:type_name -> gmeow.v1.Provenance
+	32, // 12: gmeow.v1.PutCompoundRequest.relationships:type_name -> gmeow.v1.Relationship
+	33, // 13: gmeow.v1.PutCompoundRequest.parts:type_name -> gmeow.v1.CompoundPart
+	34, // 14: gmeow.v1.ReadManifestResponse.manifest:type_name -> gmeow.v1.Manifest
+	35, // 15: gmeow.v1.GetStructureResponse.structure:type_name -> gmeow.v1.Structure
+	36, // 16: gmeow.v1.WriteAnnotationRequest.annotation:type_name -> gmeow.v1.Annotation
+	37, // 17: gmeow.v1.WriteSourceCursorRequest.cursor:type_name -> gmeow.v1.SourceCursor
+	37, // 18: gmeow.v1.ReadSourceCursorResponse.cursor:type_name -> gmeow.v1.SourceCursor
+	26, // 19: gmeow.v1.VerifyResponse.findings:type_name -> gmeow.v1.VerifyFinding
+	0,  // 20: gmeow.v1.FilestoreService.LookupSourceObject:input_type -> gmeow.v1.LookupSourceObjectRequest
+	2,  // 21: gmeow.v1.FilestoreService.TryAcquireSourceIngest:input_type -> gmeow.v1.TryAcquireSourceIngestRequest
+	4,  // 22: gmeow.v1.FilestoreService.ReleaseSourceIngest:input_type -> gmeow.v1.ReleaseSourceIngestRequest
+	5,  // 23: gmeow.v1.FilestoreService.PutObject:input_type -> gmeow.v1.PutObjectFrame
+	9,  // 24: gmeow.v1.FilestoreService.AttachProvenance:input_type -> gmeow.v1.AttachProvenanceRequest
+	10, // 25: gmeow.v1.FilestoreService.PutCompound:input_type -> gmeow.v1.PutCompoundRequest
+	12, // 26: gmeow.v1.FilestoreService.Open:input_type -> gmeow.v1.OpenRequest
+	14, // 27: gmeow.v1.FilestoreService.ReadManifest:input_type -> gmeow.v1.ReadManifestRequest
+	16, // 28: gmeow.v1.FilestoreService.GetStructure:input_type -> gmeow.v1.GetStructureRequest
+	18, // 29: gmeow.v1.FilestoreService.HasAnalysisAnnotation:input_type -> gmeow.v1.HasAnalysisAnnotationRequest
+	20, // 30: gmeow.v1.FilestoreService.WriteAnnotation:input_type -> gmeow.v1.WriteAnnotationRequest
+	21, // 31: gmeow.v1.FilestoreService.WriteOverlays:input_type -> gmeow.v1.WriteOverlaysRequest
+	22, // 32: gmeow.v1.FilestoreService.WriteSourceCursor:input_type -> gmeow.v1.WriteSourceCursorRequest
+	23, // 33: gmeow.v1.FilestoreService.ReadSourceCursor:input_type -> gmeow.v1.ReadSourceCursorRequest
+	25, // 34: gmeow.v1.FilestoreService.Verify:input_type -> gmeow.v1.VerifyRequest
+	1,  // 35: gmeow.v1.FilestoreService.LookupSourceObject:output_type -> gmeow.v1.LookupSourceObjectResponse
+	3,  // 36: gmeow.v1.FilestoreService.TryAcquireSourceIngest:output_type -> gmeow.v1.TryAcquireSourceIngestResponse
+	38, // 37: gmeow.v1.FilestoreService.ReleaseSourceIngest:output_type -> gmeow.v1.Empty
+	8,  // 38: gmeow.v1.FilestoreService.PutObject:output_type -> gmeow.v1.PutObjectResponse
+	38, // 39: gmeow.v1.FilestoreService.AttachProvenance:output_type -> gmeow.v1.Empty
+	11, // 40: gmeow.v1.FilestoreService.PutCompound:output_type -> gmeow.v1.PutCompoundResponse
+	13, // 41: gmeow.v1.FilestoreService.Open:output_type -> gmeow.v1.ObjectChunk
+	15, // 42: gmeow.v1.FilestoreService.ReadManifest:output_type -> gmeow.v1.ReadManifestResponse
+	17, // 43: gmeow.v1.FilestoreService.GetStructure:output_type -> gmeow.v1.GetStructureResponse
+	19, // 44: gmeow.v1.FilestoreService.HasAnalysisAnnotation:output_type -> gmeow.v1.HasAnalysisAnnotationResponse
+	38, // 45: gmeow.v1.FilestoreService.WriteAnnotation:output_type -> gmeow.v1.Empty
+	38, // 46: gmeow.v1.FilestoreService.WriteOverlays:output_type -> gmeow.v1.Empty
+	38, // 47: gmeow.v1.FilestoreService.WriteSourceCursor:output_type -> gmeow.v1.Empty
+	24, // 48: gmeow.v1.FilestoreService.ReadSourceCursor:output_type -> gmeow.v1.ReadSourceCursorResponse
+	27, // 49: gmeow.v1.FilestoreService.Verify:output_type -> gmeow.v1.VerifyResponse
+	35, // [35:50] is the sub-list for method output_type
+	20, // [20:35] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_gmeow_v1_filestore_proto_init() }
@@ -1505,7 +1738,7 @@ func file_gmeow_v1_filestore_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gmeow_v1_filestore_proto_rawDesc), len(file_gmeow_v1_filestore_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   24,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

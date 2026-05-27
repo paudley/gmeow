@@ -77,57 +77,65 @@ port = 1143
 username = "gmeow"
 facets = ["mail_message"]
 
+[analysis]
+worker_concurrency = 4
+
 [analysis.embeddings]
 endpoint = "http://127.0.0.1:8090/v1/embeddings"
 model = "nomic-embed-text-v1.5"
 
+[analysis.summary]
+endpoint = "http://127.0.0.1:8082/v1/chat/completions"
+model = "gemma-4-E4B-it-uncensored-Q4_K_M.gguf"
+
 [[analysis.analyzers]]
 name = "text.extract"
-version = "phase04"
+version = "phase04-email-v2"
 worker_kind = "go"
 
 [[analysis.analyzers]]
 name = "rfc822.headers"
-version = "phase04"
+version = "phase04-email-v2"
 worker_kind = "go"
 
 [[analysis.analyzers]]
 name = "metadata.extract"
-version = "phase04"
+version = "phase04-email-v2"
 worker_kind = "go"
 
 [[analysis.analyzers]]
 name = "graph.facts"
-version = "phase04"
+version = "phase04-email-v2"
 worker_kind = "go"
 
 [[analysis.analyzers]]
 name = "embedding.endpoint"
-version = "phase04"
+version = "phase04-email-v2"
 worker_kind = "go"
 
 [[analysis.analyzers]]
-name = "summary.centroid"
-version = "phase04"
+name = "summary.model"
+version = "phase04-email-v2"
 worker_kind = "go"
 
 # Quality-critical Python/model analyzers must be explicit external adapters.
-# They are managed by the Go worker, which owns RabbitMQ, gRPC FILESTORE access, and ack/nack.
-# [[analysis.analyzers]]
-# name = "ner.spacy"
-# version = "python-current"
-# worker_kind = "python"
-# command = "gmeow-intel"
-# args = ["analyze", "ner.spacy"]
-# timeout = "2m"
-#
-# [[analysis.analyzers]]
-# name = "categories.sklearn"
-# version = "python-current"
-# worker_kind = "python"
-# command = "gmeow-intel"
-# args = ["analyze", "categories.sklearn"]
-# timeout = "2m"
+# They are managed by the Go worker, which owns scheduler-delivered jobs,
+# gRPC FILESTORE access, and ack/nack.
+[[analysis.analyzers]]
+name = "ner.spacy"
+version = "python-email-v1"
+worker_kind = "python"
+command = "gmeow-intel"
+args = ["analyze", "ner.spacy"]
+timeout = "2m"
+
+[[analysis.analyzers]]
+name = "categories.sklearn"
+version = "python-email-v1"
+worker_kind = "python"
+command = "gmeow-intel"
+args = ["analyze", "categories.sklearn"]
+timeout = "2m"
 
 [[search.backends]]
 name = "query"
@@ -139,5 +147,6 @@ facets = ["*"]
 # kind = "gmail"
 # credential_secret = "gmail_credentials_json"
 # user_id = "me"
+# delegated_subject = "user@example.com"
 # facets = ["mail_message"]
 # capabilities = ["hydrate", "live_search", "live_retrieve", "actions"]

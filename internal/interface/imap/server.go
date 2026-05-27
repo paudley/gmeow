@@ -148,7 +148,10 @@ func (server *Server) handleCommand(
 		_, _ = fmt.Fprintln(writer, `* LIST (\HasNoChildren) "/" "INBOX"`)
 		_, _ = fmt.Fprintf(writer, "%s OK LIST completed\r\n", tag)
 	case "SELECT", "EXAMINE":
-		results, err := server.services.MailSearch(ctx, appsvc.SearchOptions{Limit: 100})
+		results, err := server.services.ObjectSearch(ctx, appsvc.SearchOptions{
+			Facets: []string{appsvc.MailMessageFacet},
+			Limit:  100,
+		})
 		if err != nil {
 			_, _ = fmt.Fprintf(writer, "%s NO %s\r\n", tag, err)
 			return nil
@@ -162,9 +165,13 @@ func (server *Server) handleCommand(
 		if strings.EqualFold(query, "ALL") {
 			query = ""
 		}
-		results, err := server.services.MailSearch(
+		results, err := server.services.ObjectSearch(
 			ctx,
-			appsvc.SearchOptions{Query: query, Limit: 100},
+			appsvc.SearchOptions{
+				Query:  query,
+				Facets: []string{appsvc.MailMessageFacet},
+				Limit:  100,
+			},
 		)
 		if err != nil {
 			_, _ = fmt.Fprintf(writer, "%s NO %s\r\n", tag, err)

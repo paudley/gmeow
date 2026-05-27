@@ -190,7 +190,7 @@ func TestDriveAdapterFailsUnsupportedOperationsWithActionableError(t *testing.T)
 		t.Fatal(err)
 	}
 
-	_, _, err = adapter.Pull(context.Background(), PullRequest{})
+	_, _, err = adapter.Pull(context.Background(), nil, PullRequest{})
 	if !errors.Is(err, ErrUnsupportedOperation) ||
 		!strings.Contains(err.Error(), "design-only") {
 		t.Fatalf("expected design-only unsupported error, got %v", err)
@@ -235,6 +235,98 @@ func TestGmailSearchAndHydrateReusesExistingDigestWithoutFetchingPayload(t *test
 
 	if len(results) != 1 || results[0].ObjectDigest != existing || results[0].Hydrated {
 		t.Fatalf("expected existing FILESTORE digest without hydration: %#v", results)
+	}
+}
+
+func TestGmailBackfillPagesIntoFilestoreAndRerunDedupes(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	service, err := NewService(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := NewGmailAdapter("primary", &backfillGmailBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := service.RunBackfill(ctx, adapter, BackfillRequest{
+		Cursor:   map[string]any{"mode": "full", "query": "newer_than:30d"},
+		PageSize: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Completed || report.Processed != 2 || report.Created != 2 {
+		t.Fatalf("unexpected first backfill report: %#v", report)
+	}
+	cursor, found, err := service.ReadCursor(ctx, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || cursor.Cursor["completed"] != true {
+		t.Fatalf("expected persisted completed cursor, found=%t cursor=%#v", found, cursor)
+	}
+
+	digest, found, err := service.LookupSourceObject(ctx, contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "m1",
+		ExternalVersion: "h1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected backfilled Gmail source object")
+	}
+	structure, err := filestoreService.Client.GetStructure(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(structure.PartsByRole["email_body"]) == 0 {
+		t.Fatalf("backfill must create full Gmail compound parts: %#v", structure)
+	}
+
+	rerun, err := service.RunBackfill(ctx, adapter, BackfillRequest{
+		Cursor:   map[string]any{"mode": "full", "query": "newer_than:30d"},
+		PageSize: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rerun.Created != 0 || rerun.Skipped != 2 {
+		t.Fatalf("expected idempotent rerun, got %#v", rerun)
+	}
+}
+
+func TestGmailHistoryExpiredCursorFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	service, err := NewService(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := NewGmailAdapter("primary", &expiredHistoryGmailBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.RunBackfill(ctx, adapter, BackfillRequest{
+		Cursor:   map[string]any{"mode": "history", "history_anchor": "10"},
+		PageSize: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "history cursor expired") {
+		t.Fatalf("expected expired history cursor error, got %v", err)
+	}
+	cursor, found, err := service.ReadCursor(ctx, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || cursor.Cursor["history_expired"] != true {
+		t.Fatalf("expected persisted expired cursor, found=%t cursor=%#v", found, cursor)
 	}
 }
 
@@ -393,6 +485,20 @@ func (gmailExternalBackend) Search(
 	return nil, nil
 }
 
+func (gmailExternalBackend) ListMessages(
+	context.Context,
+	GmailListRequest,
+) (GmailListPage, error) {
+	return GmailListPage{}, nil
+}
+
+func (gmailExternalBackend) ListHistory(
+	context.Context,
+	GmailHistoryRequest,
+) (GmailHistoryPage, error) {
+	return GmailHistoryPage{}, nil
+}
+
 func (gmailExternalBackend) GetMessage(
 	context.Context,
 	string,
@@ -417,6 +523,20 @@ func (*searchOnlyGmailBackend) Search(
 	int,
 ) ([]GmailSearchHit, error) {
 	return []GmailSearchHit{{MessageID: "m1", Version: "v1"}}, nil
+}
+
+func (*searchOnlyGmailBackend) ListMessages(
+	context.Context,
+	GmailListRequest,
+) (GmailListPage, error) {
+	return GmailListPage{}, errors.New("not used")
+}
+
+func (*searchOnlyGmailBackend) ListHistory(
+	context.Context,
+	GmailHistoryRequest,
+) (GmailHistoryPage, error) {
+	return GmailHistoryPage{}, errors.New("not used")
 }
 
 func (*searchOnlyGmailBackend) GetMessage(
@@ -449,6 +569,20 @@ func (*actionGmailBackend) Search(
 	return nil, nil
 }
 
+func (*actionGmailBackend) ListMessages(
+	context.Context,
+	GmailListRequest,
+) (GmailListPage, error) {
+	return GmailListPage{}, errors.New("not used")
+}
+
+func (*actionGmailBackend) ListHistory(
+	context.Context,
+	GmailHistoryRequest,
+) (GmailHistoryPage, error) {
+	return GmailHistoryPage{}, errors.New("not used")
+}
+
 func (*actionGmailBackend) GetMessage(
 	context.Context,
 	string,
@@ -465,6 +599,83 @@ func (backend *actionGmailBackend) ModifyMessage(
 	backend.messageID = messageID
 
 	return map[string]any{"action": action}, nil
+}
+
+type backfillGmailBackend struct{}
+
+func (*backfillGmailBackend) Search(
+	context.Context,
+	string,
+	int,
+) ([]GmailSearchHit, error) {
+	return nil, errors.New("not used")
+}
+
+func (*backfillGmailBackend) ListMessages(
+	_ context.Context,
+	request GmailListRequest,
+) (GmailListPage, error) {
+	switch request.PageToken {
+	case "":
+		return GmailListPage{
+			Hits:          []GmailSearchHit{{MessageID: "m1", Version: "h1"}},
+			NextPageToken: "page-2",
+		}, nil
+	case "page-2":
+		return GmailListPage{
+			Hits: []GmailSearchHit{{MessageID: "m2", Version: "h2"}},
+		}, nil
+	default:
+		return GmailListPage{}, nil
+	}
+}
+
+func (*backfillGmailBackend) ListHistory(
+	context.Context,
+	GmailHistoryRequest,
+) (GmailHistoryPage, error) {
+	return GmailHistoryPage{}, errors.New("not used")
+}
+
+func (*backfillGmailBackend) GetMessage(
+	_ context.Context,
+	messageID string,
+) (GmailMessage, error) {
+	version := "h1"
+	if messageID == "m2" {
+		version = "h2"
+	}
+
+	return GmailMessage{
+		MessageID: messageID,
+		Version:   version,
+		ThreadID:  "thread-" + messageID,
+		Subject:   "Subject " + messageID,
+		Headers: map[string]string{
+			"subject": "Subject " + messageID,
+		},
+		Body: []byte("body " + messageID),
+	}, nil
+}
+
+func (*backfillGmailBackend) ModifyMessage(
+	context.Context,
+	string,
+	string,
+	map[string]any,
+) (map[string]any, error) {
+	return nil, errors.New("not used")
+}
+
+type expiredHistoryGmailBackend struct {
+	backfillGmailBackend
+}
+
+func (*expiredHistoryGmailBackend) ListHistory(
+	context.Context,
+	GmailHistoryRequest,
+) (GmailHistoryPage, error) {
+	return GmailHistoryPage{Expired: true}, nil
 }
 
 func hasRelationship(

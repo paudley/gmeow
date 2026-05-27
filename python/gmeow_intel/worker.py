@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 from collections.abc import Callable
+from typing import Any, cast
 
 from gmeow_intel.analyzers import categories, ner
 from gmeow_intel.contracts import Annotation, ExternalCommandRequest
@@ -31,8 +32,17 @@ def main() -> None:
 
     analyze = subcommands.add_parser("analyze")
     analyze.add_argument("analyzer")
+    subcommands.add_parser("discover-categories")
 
     args = parser.parse_args()
+    if args.command == "discover-categories":
+        messages = json.loads(sys.stdin.read())
+        if not isinstance(messages, list):
+            print("discover-categories expects a JSON array of message documents", file=sys.stderr)
+            raise SystemExit(2)
+        sys.stdout.write(json.dumps(categories.discover(_message_documents(cast(list[object], messages))), separators=(",", ":")))
+        return
+
     if args.command != "analyze":
         parser.error("unsupported command")
 
@@ -54,6 +64,17 @@ def main() -> None:
 
     annotation = analyzer(request)
     sys.stdout.write(json.dumps(annotation.model_dump(mode="json"), separators=(",", ":")))
+
+
+def _message_documents(value: list[object]) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            print("discover-categories expects message objects", file=sys.stderr)
+            raise SystemExit(2)
+        messages.append(cast(dict[str, Any], item))
+
+    return messages
 
 
 if __name__ == "__main__":

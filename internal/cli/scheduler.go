@@ -29,6 +29,11 @@ func newSchedulerCommand(out io.Writer, configPath *string) *cobra.Command {
 	}
 	command.AddCommand(newSchedulerScanCommand(out, configPath))
 	command.AddCommand(newSchedulerStatusCommand(out, configPath))
+	command.AddCommand(newSchedulerPendingCommand(out, configPath))
+	command.AddCommand(newSchedulerReconcilePendingCommand(out, configPath, "reconcile-pending"))
+	command.AddCommand(newSchedulerReconcilePendingCommand(out, configPath, "prune-pending"))
+	command.AddCommand(newSchedulerFailedCommand(out, configPath))
+	command.AddCommand(newSchedulerProcessFailedCommand(out, configPath))
 	command.AddCommand(newSchedulerDeadLetterCommand(out, configPath))
 	command.AddCommand(newSchedulerRequeueCommand(out, configPath))
 	command.AddCommand(newSchedulerForceCommand(out, configPath))
@@ -109,6 +114,138 @@ func newSchedulerStatusCommand(out io.Writer, configPath *string) *cobra.Command
 	}
 }
 
+func newSchedulerPendingCommand(out io.Writer, configPath *string) *cobra.Command {
+	var limit int
+
+	command := &cobra.Command{
+		Use:   "pending",
+		Short: "Inspect pending analysis jobs without consuming them",
+		RunE: func(command *cobra.Command, _ []string) error {
+			service, closeFn, err := openScheduler(command.Context(), configPath)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			response, err := service.PendingJobs(command.Context(), contracts.DeadLetterRequest{
+				SchemaVersion: contracts.SchemaVersionPhase00,
+				Limit:         limit,
+			})
+			if err != nil {
+				return err
+			}
+
+			encoded, err := json.MarshalIndent(response, "", "  ")
+			if err != nil {
+				return err
+			}
+
+			_, err = fmt.Fprintln(out, string(encoded))
+
+			return err
+		},
+	}
+	command.Flags().IntVar(&limit, "limit", 20, "maximum pending jobs to inspect")
+
+	return command
+}
+
+func newSchedulerReconcilePendingCommand(
+	out io.Writer,
+	configPath *string,
+	use string,
+) *cobra.Command {
+	var (
+		confirmInstance string
+		limit           int
+	)
+
+	command := &cobra.Command{
+		Use:   use,
+		Short: "Reconcile pending analysis jobs by dropping satisfied and duplicate work",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"scheduler "+use,
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+			service, closeFn, err := openSchedulerLoaded(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			response, err := service.ReconcilePending(command.Context(), contracts.RequeueRequest{
+				SchemaVersion: contracts.SchemaVersionPhase00,
+				Limit:         limit,
+			})
+			if err != nil {
+				return err
+			}
+
+			_, err = fmt.Fprintf(
+				out,
+				"scheduler %s: checked=%d dropped_satisfied=%d dropped_duplicate=%d republished=%d kept=%d\n",
+				use,
+				response.Checked,
+				response.DroppedSatisfied,
+				response.DroppedDuplicate,
+				response.Republished,
+				response.Kept,
+			)
+
+			return err
+		},
+	}
+	command.Flags().IntVar(&limit, "limit", 100, "maximum pending jobs to inspect")
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "confirm production-like instance id before pruning pending jobs")
+
+	return command
+}
+
+func newSchedulerFailedCommand(out io.Writer, configPath *string) *cobra.Command {
+	var limit int
+
+	command := &cobra.Command{
+		Use:   "failed",
+		Short: "Inspect failed analysis jobs waiting for retry routing",
+		RunE: func(command *cobra.Command, _ []string) error {
+			service, closeFn, err := openScheduler(command.Context(), configPath)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			response, err := service.FailedJobs(command.Context(), contracts.DeadLetterRequest{
+				SchemaVersion: contracts.SchemaVersionPhase00,
+				Limit:         limit,
+			})
+			if err != nil {
+				return err
+			}
+
+			encoded, err := json.MarshalIndent(response, "", "  ")
+			if err != nil {
+				return err
+			}
+
+			_, err = fmt.Fprintln(out, string(encoded))
+
+			return err
+		},
+	}
+	command.Flags().IntVar(&limit, "limit", 20, "maximum failed jobs to inspect")
+
+	return command
+}
+
 func newSchedulerDeadLetterCommand(out io.Writer, configPath *string) *cobra.Command {
 	var limit int
 
@@ -141,6 +278,57 @@ func newSchedulerDeadLetterCommand(out io.Writer, configPath *string) *cobra.Com
 		},
 	}
 	command.Flags().IntVar(&limit, "limit", 20, "maximum dead-letter jobs to inspect")
+
+	return command
+}
+
+func newSchedulerProcessFailedCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		confirmInstance string
+		limit           int
+	)
+
+	command := &cobra.Command{
+		Use:   "process-failed",
+		Short: "Route failed analysis jobs through scheduler retry handling",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"scheduler process-failed",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+			service, closeFn, err := openSchedulerLoaded(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			response, err := service.ProcessFailures(command.Context(), contracts.RequeueRequest{
+				SchemaVersion: contracts.SchemaVersionPhase00,
+				Limit:         limit,
+			})
+			if err != nil {
+				return err
+			}
+
+			_, err = fmt.Fprintf(
+				out,
+				"scheduler process-failed: processed=%d\n",
+				response.Requeued,
+			)
+
+			return err
+		},
+	}
+	command.Flags().IntVar(&limit, "limit", 20, "maximum failed jobs to process")
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "confirm production-like instance id before processing failed jobs")
 
 	return command
 }
@@ -248,7 +436,7 @@ func newSchedulerRunCommand(
 		Use:   use,
 		Short: "Run the scheduler background loop",
 		RunE: func(command *cobra.Command, _ []string) error {
-			service, closeFn, err := openScheduler(command.Context(), configPath)
+			service, closeFn, err := openSchedulerWithProjector(command.Context(), configPath)
 			if err != nil {
 				return err
 			}
@@ -312,9 +500,41 @@ func openScheduler(
 	return openSchedulerLoaded(ctx, loaded)
 }
 
+func openSchedulerWithProjector(
+	ctx context.Context,
+	configPath *string,
+) (*scheduler.Service, func(), error) {
+	loaded, err := config.Load(config.Options{Path: *configPath})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	queryClient, err := rpc.NewQueryClient(ctx, rpcEndpoint(loaded.Resolved.RPC.Query))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	service, closeFn, err := openSchedulerLoaded(
+		ctx,
+		loaded,
+		scheduler.WithProjector(queryClient),
+	)
+	if err != nil {
+		_ = queryClient.Close()
+
+		return nil, nil, err
+	}
+
+	return service, func() {
+		closeFn()
+		_ = queryClient.Close()
+	}, nil
+}
+
 func openSchedulerLoaded(
 	ctx context.Context,
 	loaded *config.Loaded,
+	options ...scheduler.Option,
 ) (*scheduler.Service, func(), error) {
 	root, err := resolvedFilestoreRoot(loaded)
 	if err != nil {
@@ -343,6 +563,7 @@ func openSchedulerLoaded(
 		broker,
 		scheduler.SpecsFromConfig(loaded.Config.Analysis.Analyzers),
 		schedulerConfig,
+		options...,
 	)
 	if err != nil {
 		broker.Close()

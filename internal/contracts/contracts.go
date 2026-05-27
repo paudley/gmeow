@@ -185,6 +185,7 @@ type AnalyzerJob struct {
 	PriorityClass  string        `json:"priority_class,omitempty"`
 	Reason         string        `json:"reason,omitempty"`
 	TraceID        string        `json:"trace_id,omitempty"`
+	Failure        string        `json:"failure,omitempty"`
 	IdempotencyKey string        `json:"idempotency_key,omitempty"`
 	JobID          string        `json:"job_id"`
 	SchemaVersion  SchemaVersion `json:"schema_version"`
@@ -208,6 +209,16 @@ type SchedulerScanResponse struct {
 	Enqueued      int           `json:"enqueued"`
 	Skipped       int           `json:"skipped"`
 	Failed        int           `json:"failed"`
+}
+
+type ObjectChangeRequest struct {
+	PriorityClass  string         `json:"priority_class,omitempty"`
+	RequestedBy    string         `json:"requested_by,omitempty"`
+	Reason         string         `json:"reason,omitempty"`
+	TraceID        string         `json:"trace_id,omitempty"`
+	SchemaVersion  SchemaVersion  `json:"schema_version"`
+	ObjectDigests  []ObjectDigest `json:"object_digests"`
+	ProjectionOnly bool           `json:"projection_only,omitempty"`
 }
 
 type SchedulerStatus struct {
@@ -236,6 +247,16 @@ type RequeueRequest struct {
 type RequeueResponse struct {
 	SchemaVersion SchemaVersion `json:"schema_version"`
 	Requeued      int           `json:"requeued"`
+}
+
+type ReconcilePendingResponse struct {
+	SchemaVersion    SchemaVersion `json:"schema_version"`
+	Checked          int           `json:"checked"`
+	DroppedSatisfied int           `json:"dropped_satisfied"`
+	DroppedDuplicate int           `json:"dropped_duplicate"`
+	Republished      int           `json:"republished"`
+	Kept             int           `json:"kept"`
+	KeptJobs         []AnalyzerJob `json:"-"`
 }
 
 type Annotation struct {
@@ -347,6 +368,10 @@ type VectorSearchRequest struct {
 type VectorSearchResult struct {
 	ObjectDigest ObjectDigest `json:"object_digest"`
 	Model        string       `json:"model"`
+	EmbeddingID  string       `json:"embedding_id,omitempty"`
+	Kind         string       `json:"kind,omitempty"`
+	SourceDigest ObjectDigest `json:"source_digest,omitempty"`
+	TextPreview  string       `json:"text_preview,omitempty"`
 	Distance     float64      `json:"distance"`
 }
 
@@ -361,6 +386,11 @@ type SourceCursor struct {
 	SourceKind    string         `json:"source_kind"`
 	SourceName    string         `json:"source_name"`
 	SchemaVersion SchemaVersion  `json:"schema_version"`
+}
+
+type SourceCursorRef struct {
+	SourceKind string `json:"source_kind"`
+	SourceName string `json:"source_name"`
 }
 
 type SourceCursorRequest struct {

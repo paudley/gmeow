@@ -1,0 +1,6 @@
+from typing import Protocol
+
+class _Language(Protocol):
+    def __call__(self, text: str) -> object: ...
+
+def load(name: str) -> _Language: ...

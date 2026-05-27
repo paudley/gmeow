@@ -188,9 +188,10 @@ derive work:
 - an interactive request needs a digest indexed now;
 - an operator forced a rebuild or reanalysis.
 
-SCHEDULER publishes jobs to RabbitMQ, which is available in the core-data stack. RabbitMQ is the
-primary broker because durable acknowledgements, worker pools, priority queues, retry routing, and
-dead-letter queues fit the workload well.
+SCHEDULER owns every RabbitMQ conversation. It publishes jobs, provides the worker job source,
+routes failures, handles retries, and manages dead letters. RabbitMQ is the primary broker because
+durable acknowledgements, worker pools, priority queues, retry routing, and dead-letter queues fit
+the workload well, but it remains a scheduler implementation detail.
 Production connections use the RabbitMQ `gmeow` vhost. Integration tests use the separate
 `gmeow-test` vhost.
 
@@ -208,6 +209,11 @@ The stable service interfaces are:
   analysis-status, vector-search, and source-cursor queries.
 - `SchedulerService`: scan, enqueue, force, requeue, dead-letter inspection, status, and
   object-change notification.
+
+Concrete transports follow strict ownership. QUERY is the only component that opens PostgreSQL
+connections or runs SQL. SCHEDULER is the only component that opens RabbitMQ connections or
+coordinates AMQP. Other services communicate through typed gRPC service contracts and narrow Go
+interfaces at process edges.
 
 The protocol must not use a whole-request JSON envelope. Stable domain shapes are first-class
 protobuf messages. JSON is permitted only as `bytes *_json` leaf fields for dynamic maps such as
@@ -720,7 +726,10 @@ authoritative analysis work broker.
 
 ### ANALYSIS
 
-ANALYSIS workers enrich FILESTORE only. QUERY observes the result through projection.
+ANALYSIS workers enrich FILESTORE only. A worker receives scheduler-provided jobs, reads object
+manifests and parts from FILESTORE, and writes FILESTORE annotations. It does not talk to Gmail,
+other SOURCE backends, QUERY, PostgreSQL, or RabbitMQ directly. QUERY observes the result through
+projection.
 
 ANALYSIS works with objects, not facets. An analyzer receives a target digest plus enough object
 context to read bytes, media type, content role, part role, prior analyzer outputs, and declared
@@ -884,7 +893,7 @@ Ownership rules:
 - `filestore` owns object IDs, digest derivation, dedupe, object directory layout, annotation IO,
   recovery sidecars, and compound structure expansion.
 - `query` owns projection rebuild and search APIs. `internal/query/postgres` must not leak upward.
-- `scheduler` owns work derivation, priority, retries, dead letters, and RabbitMQ publishing.
+- `scheduler` owns work derivation, priority, retries, dead letters, and all RabbitMQ coordination.
 - `analysis` owns analyzer specs, worker execution, and Go analyzer implementations.
 - `source/*` owns external systems, source events, live search, hydration, and source actions.
 - `appsvc` owns workflows such as `mail_search`, generic search, forced analysis, and result fusion.
@@ -894,7 +903,7 @@ Ownership rules:
 
 Python package shape:
 
-- `gmeow_intel.worker`: RabbitMQ worker entrypoint;
+- `gmeow_intel.worker`: external analyzer entrypoint invoked by the Go ANALYSIS adapter;
 - `gmeow_intel.analyzers.ner`;
 - `gmeow_intel.analyzers.categories`;
 - optional `gmeow_intel.analyzers.chunking` if semchunk stays Python-side;
@@ -913,7 +922,7 @@ Publish a package such as `gmeow-intel` from `python/`.
 
 Contents:
 
-- Python RabbitMQ worker entrypoint;
+- Python external analyzer entrypoints invoked by the Go ANALYSIS adapter;
 - spaCy NER analyzer;
 - sklearn categorization analyzer;
 - optional semchunk/chunking helper;
@@ -973,7 +982,7 @@ Config rules:
   secret resolution;
 - all Go binaries use the same parser and typed config model;
 - Python ANALYSIS workers do not read `gmeow.toml`;
-- ANALYSIS receives every needed setting through RabbitMQ job payloads, analyzer specs, environment
+- ANALYSIS receives every needed setting through scheduler job payloads, analyzer specs, environment
   variables for process-level concerns, or resolved worker startup payloads;
 - SOPS is a first-class startup dependency, not an optional integration;
 - startup requires a SOPS age identity from `GMEOW_SOPS_UNLOCK_KEY`, falling back to
@@ -1247,7 +1256,7 @@ Deliverables:
   rows;
 - full rebuild command;
 - incremental projection from changed annotation files;
-- text search, vector placeholder paths, graph edge projection, facet filters, compound expansion,
+- text search, vector indexing paths, graph edge projection, facet filters, compound expansion,
   metadata/structure queries, and analyzer status queries;
 - PostgreSQL-backed tests for QUERY behavior and app-service orchestration, with cross-component
   callers using the QUERY gRPC boundary.
@@ -1289,8 +1298,8 @@ Goal: implement extensible analyzers that write results to FILESTORE.
 Deliverables:
 
 - Go worker runtime;
-- Go-owned analyzer registry, RabbitMQ consume/ack, failure routing, spec-version checks, and
-  durable FILESTORE annotation writes before ack through `FilestoreService` gRPC;
+- Go-owned analyzer registry, scheduler-owned job receipt/ack/failure routing, spec-version checks,
+  and durable FILESTORE annotation writes before ack through `FilestoreService` gRPC;
 - external adapter support for Python/model/tool analyzers that cannot yet be replaced in Go without
   quality regression, configured explicitly with command, arguments, timeout, analyzer name, and
   analyzer version;
@@ -1303,14 +1312,15 @@ Deliverables:
 - NER analyzer, either equal-or-better Go-native or Python/model-backed through the external adapter;
 - categorization analyzer, either equal-or-better Go-native or Python/model-backed through the
   external adapter;
-- summary/centroid analyzer placeholder or first pass.
+- model-backed summary analyzer with strict output validation and fail-closed endpoint behavior.
 
 Exit criteria:
 
 - every analyzer is idempotent by digest/spec version;
 - workers ack only after durable FILESTORE writes;
 - QUERY can lag and later catch up from FILESTORE annotations;
-- Go owns scheduling, queue consumption, gRPC FILESTORE writes, and ack/nack decisions;
+- SCHEDULER owns queue consumption and ack/nack decisions; ANALYSIS owns analyzer execution and
+  gRPC FILESTORE annotation writes;
 - ANALYSIS workers do not open FILESTORE directories directly outside tests;
 - Python/model adapters share job and annotation contracts and fail closed when unregistered;
 - Python/model analyzers without an explicit external adapter command fail at worker startup;
@@ -1569,7 +1579,7 @@ Ownership boundaries:
 | QUERY rebuild runs | Rebuilder walks object directories and projects `manifest.json.zst`, `analysis.json.zst`, overlays, and other annotations |
 | Recovery-only blob triage | Operator can identify a blob from `recovery.json` without relying on QUERY or authoritative annotations |
 | PyPI release runs | Only `gmeow-intel` Python ANALYSIS package is built and published, not the Go core or old Python app |
-| Python ANALYSIS worker starts | Worker receives resolved settings/job specs from Go/RabbitMQ and never parses `gmeow.toml` |
+| Python ANALYSIS adapter starts | Adapter receives resolved settings/job specs from Go ANALYSIS and never parses `gmeow.toml` |
 | Invalid config is provided | Shared Go parser rejects it before component startup and reports schema/field errors |
 | SOPS age identity is missing | Startup fails before any component starts and reports the required env/file sources |
 | Config includes a secondary config-file pointer | Shared Go parser rejects it; config source selection is only CLI/env/default startup policy |

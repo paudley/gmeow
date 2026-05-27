@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -59,15 +61,36 @@ func TestRuntimeProcessWritesDurableAnnotationIdempotently(t *testing.T) {
 	if err := runtime.Process(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	if analyzer.calls != 2 {
+	if analyzer.calls != 1 {
 		t.Fatalf(
-			"expected repeated job to remain runnable and idempotent, got %d calls",
+			"expected repeated complete job to skip analyzer, got %d calls",
 			analyzer.calls,
 		)
 	}
 	again := findAnalysisAnnotation(t, ctx, store, digest, analyzer.spec.Name)
 	if again.Data["idempotency_key"] != job.IdempotencyKey {
 		t.Fatalf("expected stable idempotency key after repeat, got %#v", again.Data)
+	}
+
+	nextAnalyzer := &countingAnalyzer{
+		spec: contracts.AnalyzerSpec{
+			Name:    analyzer.spec.Name,
+			Version: "v2",
+		},
+	}
+	nextRegistry, err := NewRegistry(nextAnalyzer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextRuntime, err := NewRuntime(&blockingSource{}, store, nextRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := nextRuntime.Process(ctx, analyzerJob(digest, nextAnalyzer.spec)); err != nil {
+		t.Fatal(err)
+	}
+	if nextAnalyzer.calls != 1 {
+		t.Fatalf("expected changed analyzer version to rerun, got %d calls", nextAnalyzer.calls)
 	}
 }
 
@@ -85,7 +108,7 @@ func TestRuntimeRefusesUnregisteredAnalyzerInsteadOfFallback(t *testing.T) {
 	}
 	err = runtime.Process(ctx, analyzerJob(digest, contracts.AnalyzerSpec{
 		Name:       "ner.spacy",
-		Version:    "python-current",
+		Version:    "python-email-v1",
 		WorkerKind: "python",
 	}))
 	if err == nil {
@@ -152,6 +175,54 @@ func TestRuntimeHandleRoutesAnalyzerFailureWithoutAck(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunProcessesJobsConcurrently(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest := putTextObject(t, ctx, store, "parallel work")
+	analyzer := &slowAnalyzer{
+		spec: contracts.AnalyzerSpec{Name: "slow.checked", Version: "v1"},
+	}
+	registry, err := NewRegistry(analyzer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := make([]contracts.AnalyzerJob, 6)
+	for index := range jobs {
+		jobs[index] = analyzerJob(digest, analyzer.spec)
+	}
+	source := newQueuedSource(jobs)
+	runtime, err := NewRuntime(
+		source,
+		store,
+		registry,
+		WithConcurrency(3),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errs := make(chan error, 1)
+	go func() {
+		errs <- runtime.Run(ctx)
+	}()
+
+	select {
+	case <-source.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for concurrent runtime to ack jobs")
+	}
+	cancel()
+
+	err = <-errs
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled runtime shutdown, got %v", err)
+	}
+	if atomic.LoadInt32(&analyzer.maxActive) < 2 {
+		t.Fatalf("expected concurrent analyzer calls, max active=%d", analyzer.maxActive)
+	}
+}
+
 type countingAnalyzer struct {
 	spec  contracts.AnalyzerSpec
 	err   error
@@ -199,6 +270,95 @@ func (receipt *memoryReceipt) Ack(context.Context) error {
 func (receipt *memoryReceipt) Retry(context.Context, error) error {
 	receipt.retried = true
 	return nil
+}
+
+type slowAnalyzer struct {
+	spec      contracts.AnalyzerSpec
+	active    int32
+	maxActive int32
+}
+
+func (analyzer *slowAnalyzer) Spec() contracts.AnalyzerSpec {
+	return analyzer.spec
+}
+
+func (analyzer *slowAnalyzer) Analyze(
+	context.Context,
+	ObjectStore,
+	contracts.AnalyzerJob,
+) (contracts.Annotation, error) {
+	current := atomic.AddInt32(&analyzer.active, 1)
+	defer atomic.AddInt32(&analyzer.active, -1)
+	for {
+		observed := atomic.LoadInt32(&analyzer.maxActive)
+		if current <= observed || atomic.CompareAndSwapInt32(&analyzer.maxActive, observed, current) {
+			break
+		}
+	}
+	time.Sleep(25 * time.Millisecond)
+
+	return contracts.Annotation{Data: map[string]any{"payload": "ok"}}, nil
+}
+
+type queuedSource struct {
+	done  chan struct{}
+	jobs  []contracts.AnalyzerJob
+	mutex sync.Mutex
+	once  sync.Once
+	acked int
+	next  int
+}
+
+func newQueuedSource(jobs []contracts.AnalyzerJob) *queuedSource {
+	return &queuedSource{
+		done: make(chan struct{}),
+		jobs: jobs,
+	}
+}
+
+func (source *queuedSource) Receive(ctx context.Context) (JobReceipt, error) {
+	source.mutex.Lock()
+	if source.next < len(source.jobs) {
+		job := source.jobs[source.next]
+		source.next++
+		source.mutex.Unlock()
+
+		return &queuedReceipt{job: job, source: source}, nil
+	}
+	source.mutex.Unlock()
+
+	<-ctx.Done()
+
+	return nil, ctx.Err()
+}
+
+func (source *queuedSource) markAck() {
+	source.mutex.Lock()
+	defer source.mutex.Unlock()
+
+	source.acked++
+	if source.acked == len(source.jobs) {
+		source.once.Do(func() { close(source.done) })
+	}
+}
+
+type queuedReceipt struct {
+	job    contracts.AnalyzerJob
+	source *queuedSource
+}
+
+func (receipt *queuedReceipt) Job() contracts.AnalyzerJob {
+	return receipt.job
+}
+
+func (receipt *queuedReceipt) Ack(context.Context) error {
+	receipt.source.markAck()
+
+	return nil
+}
+
+func (receipt *queuedReceipt) Retry(context.Context, error) error {
+	return errors.New("unexpected retry")
 }
 
 func putTextObject(

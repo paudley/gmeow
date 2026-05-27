@@ -22,7 +22,8 @@ const (
 	defaultQueuePrefix   = "gmeow."
 	testQueuePrefix      = "gmeow.test."
 	workSuffix           = "analysis.work"
-	retrySuffix          = "analysis.retry"
+	reconcileSuffix      = "analysis.reconcile"
+	retrySuffix          = "analysis.retry.v2"
 	failedSuffix         = "analysis.failed"
 	deadLetterSuffix     = "analysis.dead"
 	projectionSuffix     = "projection.refresh"
@@ -52,6 +53,7 @@ type topology struct {
 	analysisExchange   string
 	projectionExchange string
 	workQueue          string
+	reconcileQueue     string
 	retryQueue         string
 	failedQueue        string
 	deadLetterQueue    string
@@ -134,6 +136,7 @@ func newTopology(prefix string) topology {
 		analysisExchange:   prefix + analysisSuffix,
 		projectionExchange: prefix + projectionExSuffix,
 		workQueue:          prefix + workSuffix,
+		reconcileQueue:     prefix + reconcileSuffix,
 		retryQueue:         prefix + retrySuffix,
 		failedQueue:        prefix + failedSuffix,
 		deadLetterQueue:    prefix + deadLetterSuffix,
@@ -188,13 +191,23 @@ func (broker *Broker) Declare(ctx context.Context) error {
 	}
 
 	if _, err := channel.QueueDeclare(
+		broker.topology.reconcileQueue,
+		true,
+		false,
+		false,
+		false,
+		amqp.Table{"x-max-priority": int32(100)},
+	); err != nil {
+		return fmt.Errorf("declare reconcile queue: %w", err)
+	}
+
+	if _, err := channel.QueueDeclare(
 		broker.topology.retryQueue,
 		true,
 		false,
 		false,
 		false,
 		amqp.Table{
-			"x-message-ttl":             int32(broker.config.RetryBackoff / time.Millisecond),
 			"x-dead-letter-exchange":    broker.topology.analysisExchange,
 			"x-dead-letter-routing-key": workRoutingKey,
 		},
@@ -372,6 +385,242 @@ func (broker *Broker) DeadLetters(
 	ctx context.Context,
 	limit int,
 ) ([]contracts.AnalyzerJob, error) {
+	return broker.peekJobs(ctx, broker.topology.deadLetterQueue, limit)
+}
+
+func (broker *Broker) FailedJobs(
+	ctx context.Context,
+	limit int,
+) ([]contracts.AnalyzerJob, error) {
+	return broker.peekJobs(ctx, broker.topology.failedQueue, limit)
+}
+
+func (broker *Broker) ActiveJobKeys(
+	ctx context.Context,
+	limit int,
+) (map[string]bool, error) {
+	if limit <= 0 {
+		limit = 100000
+	}
+
+	keys := map[string]bool{}
+	for _, queue := range []string{broker.topology.workQueue, broker.topology.retryQueue} {
+		if err := broker.peekJobKeys(ctx, queue, limit, keys); err != nil {
+			return nil, err
+		}
+	}
+
+	return keys, nil
+}
+
+func (broker *Broker) PendingJobs(
+	ctx context.Context,
+	limit int,
+) ([]contracts.AnalyzerJob, error) {
+	return broker.peekJobs(ctx, broker.topology.workQueue, limit)
+}
+
+func (broker *Broker) ReconcilePending(
+	ctx context.Context,
+	limit int,
+	isSatisfied func(contracts.AnalyzerJob) (bool, error),
+) (contracts.ReconcilePendingResponse, error) {
+	if isSatisfied == nil {
+		return contracts.ReconcilePendingResponse{}, errors.New("reconcile predicate is required")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	channel, err := broker.channel(ctx)
+	if err != nil {
+		return contracts.ReconcilePendingResponse{}, err
+	}
+	defer channel.Close()
+	confirms, err := enablePublishConfirms(channel)
+	if err != nil {
+		return contracts.ReconcilePendingResponse{}, err
+	}
+
+	response := contracts.ReconcilePendingResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+	}
+	if moved, err := broker.republishQueue(
+		ctx,
+		channel,
+		confirms,
+		broker.topology.reconcileQueue,
+		broker.topology.analysisExchange,
+		workRoutingKey,
+		0,
+	); err != nil {
+		return response, err
+	} else {
+		response.Republished += moved
+	}
+
+	seen := map[string]bool{}
+	for response.Checked < limit {
+		delivery, ok, err := channel.Get(broker.topology.workQueue, false)
+		if err != nil {
+			return response, err
+		}
+		if !ok {
+			break
+		}
+
+		var job contracts.AnalyzerJob
+		if err := json.Unmarshal(delivery.Body, &job); err != nil {
+			_ = delivery.Nack(false, true)
+
+			return response, err
+		}
+		response.Checked++
+
+		satisfied, err := isSatisfied(job)
+		if err != nil {
+			_ = delivery.Nack(false, true)
+
+			return response, err
+		}
+		if satisfied {
+			if err := delivery.Ack(false); err != nil {
+				return response, err
+			}
+			response.DroppedSatisfied++
+
+			continue
+		}
+		if seen[job.IdempotencyKey] {
+			if err := delivery.Ack(false); err != nil {
+				return response, err
+			}
+			response.DroppedDuplicate++
+
+			continue
+		}
+		seen[job.IdempotencyKey] = true
+		response.KeptJobs = append(response.KeptJobs, job)
+
+		if err := publishAndWaitConfirmed(
+			ctx,
+			channel,
+			confirms,
+			"",
+			broker.topology.reconcileQueue,
+			publishingFromDelivery(delivery),
+		); err != nil {
+			_ = delivery.Nack(false, true)
+
+			return response, err
+		}
+		if err := delivery.Ack(false); err != nil {
+			return response, err
+		}
+		response.Kept++
+	}
+
+	if moved, err := broker.republishQueue(
+		ctx,
+		channel,
+		confirms,
+		broker.topology.reconcileQueue,
+		broker.topology.analysisExchange,
+		workRoutingKey,
+		0,
+	); err != nil {
+		return response, err
+	} else {
+		response.Republished += moved
+	}
+
+	return response, nil
+}
+
+func (broker *Broker) peekJobKeys(
+	ctx context.Context,
+	queue string,
+	limit int,
+	keys map[string]bool,
+) error {
+	jobs, err := broker.peekJobs(ctx, queue, limit)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if job.IdempotencyKey != "" {
+			keys[job.IdempotencyKey] = true
+		}
+	}
+
+	return nil
+}
+
+func (broker *Broker) republishQueue(
+	ctx context.Context,
+	channel *amqp.Channel,
+	confirms <-chan amqp.Confirmation,
+	sourceQueue string,
+	targetExchange string,
+	targetRoutingKey string,
+	limit int,
+) (int, error) {
+	moved := 0
+	for limit <= 0 || moved < limit {
+		delivery, ok, err := channel.Get(sourceQueue, false)
+		if err != nil {
+			return moved, err
+		}
+		if !ok {
+			break
+		}
+
+		if err := publishAndWaitConfirmed(
+			ctx,
+			channel,
+			confirms,
+			targetExchange,
+			targetRoutingKey,
+			publishingFromDelivery(delivery),
+		); err != nil {
+			_ = delivery.Nack(false, true)
+
+			return moved, err
+		}
+		if err := delivery.Ack(false); err != nil {
+			return moved, err
+		}
+
+		moved++
+	}
+
+	return moved, nil
+}
+
+func publishingFromDelivery(delivery amqp.Delivery) amqp.Publishing {
+	return amqp.Publishing{
+		ContentType:     delivery.ContentType,
+		ContentEncoding: delivery.ContentEncoding,
+		DeliveryMode:    delivery.DeliveryMode,
+		Priority:        delivery.Priority,
+		CorrelationId:   delivery.CorrelationId,
+		ReplyTo:         delivery.ReplyTo,
+		Expiration:      delivery.Expiration,
+		MessageId:       delivery.MessageId,
+		Timestamp:       delivery.Timestamp,
+		Type:            delivery.Type,
+		UserId:          delivery.UserId,
+		AppId:           delivery.AppId,
+		Headers:         delivery.Headers,
+		Body:            delivery.Body,
+	}
+}
+
+func (broker *Broker) peekJobs(
+	ctx context.Context,
+	queue string,
+	limit int,
+) ([]contracts.AnalyzerJob, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -392,7 +641,7 @@ func (broker *Broker) DeadLetters(
 	}()
 
 	for len(jobs) < limit {
-		delivery, ok, err := channel.Get(broker.topology.deadLetterQueue, false)
+		delivery, ok, err := channel.Get(queue, false)
 		if err != nil {
 			return nil, err
 		}
@@ -415,6 +664,57 @@ func (broker *Broker) DeadLetters(
 	return jobs, nil
 }
 
+func (broker *Broker) ProcessProjectionRefreshes(
+	ctx context.Context,
+	projector scheduler.ProjectionRefresher,
+	limit int,
+) (int, error) {
+	if projector == nil {
+		return 0, errors.New("projection refresher is required")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	channel, err := broker.channel(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer channel.Close()
+
+	deliveries := []amqp.Delivery{}
+	for len(deliveries) < limit {
+		delivery, ok, err := channel.Get(broker.topology.projectionQueue, false)
+		if err != nil {
+			return len(deliveries), err
+		}
+		if !ok {
+			break
+		}
+
+		deliveries = append(deliveries, delivery)
+	}
+	if len(deliveries) == 0 {
+		return 0, nil
+	}
+
+	if err := projector.ProjectChanged(ctx, time.Time{}); err != nil {
+		for _, delivery := range deliveries {
+			_ = delivery.Nack(false, true)
+		}
+
+		return 0, err
+	}
+
+	for processed, delivery := range deliveries {
+		if err := delivery.Ack(false); err != nil {
+			return processed, err
+		}
+	}
+
+	return len(deliveries), nil
+}
+
 func (broker *Broker) RequeueDeadLetters(
 	ctx context.Context,
 	limit int,
@@ -428,6 +728,10 @@ func (broker *Broker) RequeueDeadLetters(
 		return 0, err
 	}
 	defer channel.Close()
+	confirms, err := enablePublishConfirms(channel)
+	if err != nil {
+		return 0, err
+	}
 
 	requeued := 0
 	for requeued < limit {
@@ -456,9 +760,10 @@ func (broker *Broker) RequeueDeadLetters(
 			return requeued, err
 		}
 
-		if err := publishConfirmed(
+		if err := publishAndWaitConfirmed(
 			ctx,
 			channel,
+			confirms,
 			broker.topology.analysisExchange,
 			workRoutingKey,
 			amqp.Publishing{
@@ -498,6 +803,10 @@ func (broker *Broker) ProcessFailures(
 		return 0, err
 	}
 	defer channel.Close()
+	confirms, err := enablePublishConfirms(channel)
+	if err != nil {
+		return 0, err
+	}
 
 	processed := 0
 	for processed < limit {
@@ -531,23 +840,14 @@ func (broker *Broker) ProcessFailures(
 			return processed, err
 		}
 
-		if err := publishConfirmed(
+		publishing := broker.retryPublishing(job, body)
+		if err := publishAndWaitConfirmed(
 			ctx,
 			channel,
+			confirms,
 			broker.topology.analysisExchange,
 			routingKey,
-			amqp.Publishing{
-				ContentType:  "application/json",
-				DeliveryMode: amqp.Persistent,
-				MessageId:    job.IdempotencyKey,
-				Timestamp:    time.Now().UTC(),
-				Priority:     uint8(clampPriority(job.Priority)),
-				Headers: amqp.Table{
-					"idempotency_key": job.IdempotencyKey,
-					"attempt":         int32(job.Attempt),
-				},
-				Body: body,
-			},
+			publishing,
 		); err != nil {
 			_ = delivery.Nack(false, true)
 
@@ -591,15 +891,50 @@ func (broker *Broker) RouteFailure(
 		channel,
 		broker.topology.analysisExchange,
 		routingKey,
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			MessageId:    job.IdempotencyKey,
-			Timestamp:    time.Now().UTC(),
-			Priority:     uint8(clampPriority(job.Priority)),
-			Body:         body,
-		},
+		broker.retryPublishing(job, body),
 	)
+}
+
+func (broker *Broker) retryPublishing(
+	job contracts.AnalyzerJob,
+	body []byte,
+) amqp.Publishing {
+	backoff := broker.retryBackoff(job.Attempt)
+	headers := amqp.Table{
+		"idempotency_key": job.IdempotencyKey,
+		"attempt":         int32(job.Attempt),
+	}
+	if backoff > 0 {
+		headers["retry_backoff_ms"] = int64(backoff / time.Millisecond)
+	}
+
+	publishing := amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		MessageId:    job.IdempotencyKey,
+		Timestamp:    time.Now().UTC(),
+		Priority:     uint8(clampPriority(job.Priority)),
+		Headers:      headers,
+		Body:         body,
+	}
+	if backoff > 0 && job.Attempt <= broker.config.RetryLimit {
+		publishing.Expiration = fmt.Sprintf("%d", backoff/time.Millisecond)
+	}
+
+	return publishing
+}
+
+func (broker *Broker) retryBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		return broker.config.RetryBackoff
+	}
+
+	backoff := broker.config.RetryBackoff
+	for range attempt - 1 {
+		backoff *= 2
+	}
+
+	return backoff
 }
 
 func publishConfirmed(
@@ -609,13 +944,31 @@ func publishConfirmed(
 	routingKey string,
 	publishing amqp.Publishing,
 ) error {
-	err := channel.Confirm(false)
+	confirms, err := enablePublishConfirms(channel)
 	if err != nil {
-		return fmt.Errorf("enable publish confirms: %w", err)
+		return err
 	}
 
-	confirms := channel.NotifyPublish(make(chan amqp.Confirmation, 1))
-	err = channel.PublishWithContext(
+	return publishAndWaitConfirmed(ctx, channel, confirms, exchange, routingKey, publishing)
+}
+
+func enablePublishConfirms(channel *amqp.Channel) (<-chan amqp.Confirmation, error) {
+	if err := channel.Confirm(false); err != nil {
+		return nil, fmt.Errorf("enable publish confirms: %w", err)
+	}
+
+	return channel.NotifyPublish(make(chan amqp.Confirmation, 1)), nil
+}
+
+func publishAndWaitConfirmed(
+	ctx context.Context,
+	channel *amqp.Channel,
+	confirms <-chan amqp.Confirmation,
+	exchange string,
+	routingKey string,
+	publishing amqp.Publishing,
+) error {
+	err := channel.PublishWithContext(
 		ctx,
 		exchange,
 		routingKey,

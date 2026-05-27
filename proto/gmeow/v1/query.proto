@@ -132,6 +132,10 @@ message VectorSearchResult {
   string object_digest = 1;
   string model = 2;
   double distance = 3;
+  string embedding_id = 4;
+  string kind = 5;
+  string source_digest = 6;
+  string text_preview = 7;
 }
 
 message VectorSearchResponse {

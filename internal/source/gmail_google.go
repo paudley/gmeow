@@ -8,9 +8,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
+	"golang.org/x/oauth2/google"
 	gmail "google.golang.org/api/gmail/v1"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -25,6 +28,7 @@ func NewGoogleGmailBackend(
 	ctx context.Context,
 	credentialsJSON []byte,
 	userID string,
+	delegatedSubject string,
 ) (*GoogleGmailBackend, error) {
 	if len(credentialsJSON) == 0 {
 		return nil, errors.New("gmail credentials JSON is required")
@@ -33,11 +37,19 @@ func NewGoogleGmailBackend(
 		userID = defaultGmailUserID
 	}
 
-	service, err := gmail.NewService(
-		ctx,
-		option.WithCredentialsJSON(credentialsJSON),
-		option.WithScopes(gmail.GmailModifyScope),
-	)
+	options := []option.ClientOption{option.WithScopes(gmail.GmailModifyScope)}
+	if strings.TrimSpace(delegatedSubject) == "" {
+		options = append(options, option.WithCredentialsJSON(credentialsJSON))
+	} else {
+		config, err := google.JWTConfigFromJSON(credentialsJSON, gmail.GmailModifyScope)
+		if err != nil {
+			return nil, fmt.Errorf("parse delegated gmail credentials: %w", err)
+		}
+		config.Subject = strings.TrimSpace(delegatedSubject)
+		options = append(options, option.WithHTTPClient(config.Client(ctx)))
+	}
+
+	service, err := gmail.NewService(ctx, options...)
 	if err != nil {
 		return nil, fmt.Errorf("create gmail service: %w", err)
 	}
@@ -50,17 +62,36 @@ func (backend *GoogleGmailBackend) Search(
 	query string,
 	limit int,
 ) ([]GmailSearchHit, error) {
+	page, err := backend.ListMessages(ctx, GmailListRequest{
+		Query: query,
+		Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return page.Hits, nil
+}
+
+func (backend *GoogleGmailBackend) ListMessages(
+	ctx context.Context,
+	request GmailListRequest,
+) (GmailListPage, error) {
+	limit := request.Limit
 	if limit <= 0 {
 		limit = 20
 	}
 
-	response, err := backend.service.Users.Messages.List(backend.userID).
-		Q(query).
+	call := backend.service.Users.Messages.List(backend.userID).
+		Q(request.Query).
 		MaxResults(int64(limit)).
-		Context(ctx).
-		Do()
+		Context(ctx)
+	if strings.TrimSpace(request.PageToken) != "" {
+		call.PageToken(request.PageToken)
+	}
+	response, err := call.Do()
 	if err != nil {
-		return nil, fmt.Errorf("gmail search: %w", err)
+		return GmailListPage{}, fmt.Errorf("gmail list messages: %w", err)
 	}
 
 	hits := make([]GmailSearchHit, 0, len(response.Messages))
@@ -71,7 +102,98 @@ func (backend *GoogleGmailBackend) Search(
 		})
 	}
 
-	return hits, nil
+	return GmailListPage{
+		Hits:           hits,
+		NextPageToken:  response.NextPageToken,
+		ResultEstimate: int(response.ResultSizeEstimate),
+	}, nil
+}
+
+func (backend *GoogleGmailBackend) ListHistory(
+	ctx context.Context,
+	request GmailHistoryRequest,
+) (GmailHistoryPage, error) {
+	startHistoryID, err := strconv.ParseUint(
+		strings.TrimSpace(request.StartHistoryID),
+		10,
+		64,
+	)
+	if err != nil {
+		return GmailHistoryPage{}, fmt.Errorf(
+			"parse gmail history anchor %q: %w",
+			request.StartHistoryID,
+			err,
+		)
+	}
+	limit := request.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+
+	call := backend.service.Users.History.List(backend.userID).
+		StartHistoryId(startHistoryID).
+		MaxResults(int64(limit)).
+		Context(ctx)
+	if strings.TrimSpace(request.PageToken) != "" {
+		call.PageToken(request.PageToken)
+	}
+	response, err := call.Do()
+	if err != nil {
+		var apiErr *googleapi.Error
+		if errors.As(err, &apiErr) && apiErr.Code == 404 {
+			return GmailHistoryPage{Expired: true}, nil
+		}
+
+		return GmailHistoryPage{}, fmt.Errorf("gmail list history: %w", err)
+	}
+
+	seen := map[string]bool{}
+	messageIDs := []string{}
+	for _, history := range response.History {
+		for _, changed := range history.MessagesAdded {
+			messageIDs = appendGmailHistoryMessageID(
+				messageIDs,
+				seen,
+				changed.Message,
+			)
+		}
+		for _, changed := range history.LabelsAdded {
+			messageIDs = appendGmailHistoryMessageID(
+				messageIDs,
+				seen,
+				changed.Message,
+			)
+		}
+		for _, changed := range history.LabelsRemoved {
+			messageIDs = appendGmailHistoryMessageID(
+				messageIDs,
+				seen,
+				changed.Message,
+			)
+		}
+		for _, message := range history.Messages {
+			messageIDs = appendGmailHistoryMessageID(messageIDs, seen, message)
+		}
+	}
+
+	return GmailHistoryPage{
+		MessageIDs:      messageIDs,
+		NextPageToken:   response.NextPageToken,
+		LatestHistoryID: fmt.Sprint(response.HistoryId),
+	}, nil
+}
+
+func appendGmailHistoryMessageID(
+	messageIDs []string,
+	seen map[string]bool,
+	message *gmail.Message,
+) []string {
+	if message == nil || strings.TrimSpace(message.Id) == "" || seen[message.Id] {
+		return messageIDs
+	}
+	seen[message.Id] = true
+
+	return append(messageIDs, message.Id)
 }
 
 func (backend *GoogleGmailBackend) GetMessage(

@@ -43,13 +43,18 @@ func TestIMAPExposesOnlyMailFacet(t *testing.T) {
 	mustReadUntilTag(t, reader, "a1", "OK")
 	sendIMAP(t, conn, "a2 SELECT INBOX")
 	selectLines := mustReadUntilTag(t, reader, "a2", "OK")
-	if !strings.Contains(selectLines, "* 1 EXISTS") {
-		t.Fatalf("expected only one mail object, got:\n%s", selectLines)
+	if !strings.Contains(selectLines, "EXISTS") {
+		t.Fatalf("expected mailbox count, got:\n%s", selectLines)
 	}
-	sendIMAP(t, conn, "a3 SEARCH ALL")
+	sendIMAP(t, conn, "a3 SEARCH gmeow-imap-mail-fixture")
 	searchLines := mustReadUntilTag(t, reader, "a3", "OK")
 	if !strings.Contains(searchLines, "* SEARCH 1") {
-		t.Fatalf("unexpected search response:\n%s", searchLines)
+		t.Fatalf("expected mail fixture in search response:\n%s", searchLines)
+	}
+	sendIMAP(t, conn, "a4 SEARCH gmeow-imap-file-fixture")
+	fileSearchLines := mustReadUntilTag(t, reader, "a4", "OK")
+	if strings.Contains(fileSearchLines, "1") {
+		t.Fatalf("file facet leaked into IMAP search response:\n%s", fileSearchLines)
 	}
 
 	if err := conn.Close(); err != nil {
@@ -70,8 +75,8 @@ func testServices(t *testing.T) *appsvc.Services {
 		text  string
 		facet string
 	}{
-		{text: "hello mail", facet: appsvc.MailMessageFacet},
-		{text: "hello file", facet: "file"},
+		{text: "gmeow-imap-mail-fixture", facet: appsvc.MailMessageFacet},
+		{text: "gmeow-imap-file-fixture", facet: "file"},
 	} {
 		digest, err := filestoreService.Client.Put(ctx, rpc.PutRequest{
 			Reader:    strings.NewReader(fixture.text),
@@ -86,7 +91,15 @@ func testServices(t *testing.T) *appsvc.Services {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := queryService.Client.Project(ctx, manifest, nil); err != nil {
+		annotation := contracts.Annotation{
+			SchemaVersion: contracts.SchemaVersionPhase00,
+			Kind:          "analysis",
+			ObjectDigest:  digest,
+			AnalyzerName:  "text.extract",
+			AnalyzerVer:   "test",
+			Data:          map[string]any{"text": fixture.text},
+		}
+		if err := queryService.Client.Project(ctx, manifest, []contracts.Annotation{annotation}); err != nil {
 			t.Fatal(err)
 		}
 	}

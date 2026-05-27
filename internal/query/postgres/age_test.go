@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"blackcat.ca/gmeow/internal/contracts"
 )
@@ -32,6 +33,29 @@ func TestReadOnlyCypherValidation(t *testing.T) {
 		if readOnlyCypher(query) {
 			t.Fatalf("expected query to be rejected: %s", query)
 		}
+	}
+}
+
+func TestSearchTextIsBoundedForPostgresTSVector(t *testing.T) {
+	large := strings.Repeat("searchable ", maxSearchTextBytes/len("searchable ")+100)
+	text := searchText(
+		contracts.Manifest{
+			ObjectID:     "large",
+			MediaType:    "message/rfc822",
+			ObjectDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		[]contracts.Annotation{{
+			Kind:         "analysis",
+			AnalyzerName: "large",
+			AnalyzerVer:  "1",
+			Data:         map[string]any{"body": large + "é"},
+		}},
+	)
+	if len(text) > maxSearchTextBytes {
+		t.Fatalf("search text exceeded bound: %d", len(text))
+	}
+	if !utf8.ValidString(text) {
+		t.Fatal("search text truncation produced invalid UTF-8")
 	}
 }
 

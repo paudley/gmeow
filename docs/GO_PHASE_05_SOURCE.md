@@ -16,12 +16,21 @@ do not own storage identity, dedupe, analysis, or query behavior.
   - hydrate;
   - live search;
   - live retrieve;
-  - cursor/backfill;
+  - cursor/backfill using Gmail `messages.list` pagination, Gmail history
+    cursors, and FILESTORE source cursor persistence;
   - actions;
   - compound `mail_message` object creation with metadata/header/body/MIME-structure/attachment
     subobjects and no raw RFC822 duplicate when decomposed parts are stored.
 - Implement Drive adapter design and the first agreed slice.
 - Store source cursors in FILESTORE source-state annotations and project them into QUERY.
+- Backfill is operator-triggered through `gmeow-admin source backfill
+  <source-name>`. Production-like instances require `--confirm-instance`.
+  `--dry-run` lists and hydrates one page without writing FILESTORE. Normal runs
+  resume from FILESTORE source cursors, write a cursor after each completed page,
+  and rely on FILESTORE source identity lookup/claims for idempotency.
+- Gmail history sync uses the stored `history_anchor`; if Gmail reports the
+  anchor expired, the cursor records `history_expired=true` and the operator must
+  rerun a full backfill.
 - Validate source capabilities at startup for enabled operations.
 - Before streaming payload bytes, perform FILESTORE source identity lookup by
   `(source_kind, source_name, external_id, external_version)`.
@@ -48,6 +57,9 @@ Remove Python source and Gmail-specific ingestion code as Go adapters reach pari
 - Push-only data appears in FILESTORE, schedules analysis, and becomes searchable after projection.
 - Gmail live search returns existing FILESTORE digests without rewriting objects.
 - Gmail live search hydrates missing messages into compound `mail_message` objects.
+- Gmail backfill hydrates paginated mailbox messages into the same compound
+  `mail_message` shape as live hydrate, including headers, body, Gmail metadata,
+  MIME structure, and attachments.
 - Shared attachments dedupe globally through FILESTORE.
 - Repeated source identity/version hits do not transfer payload bytes.
 - Concurrent hydration attempts for the same Gmail message/source version are serialized by a

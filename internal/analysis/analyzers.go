@@ -22,8 +22,8 @@ const (
 	HeadersName     = "rfc822.headers"
 	MetadataName    = "metadata.extract"
 	GraphFactsName  = "graph.facts"
-	SummaryName     = "summary.centroid"
-	Phase04Version  = "phase04"
+	SummaryName     = "summary.model"
+	Phase04Version  = "phase04-email-v2"
 )
 
 type TextExtractAnalyzer struct{}
@@ -54,17 +54,20 @@ func (TextExtractAnalyzer) Analyze(
 	store ObjectStore,
 	job contracts.AnalyzerJob,
 ) (contracts.Annotation, error) {
-	content, manifest, err := readObject(ctx, store, job.ObjectDigest)
+	manifest, err := store.ReadManifest(ctx, job.ObjectDigest)
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
 
-	text := extractText(content, manifest.MediaType)
+	text, byteCount, err := analysisText(ctx, store, job.ObjectDigest, manifest)
+	if err != nil {
+		return contracts.Annotation{}, err
+	}
 
 	return contracts.Annotation{
 		Data: map[string]any{
 			"text":       text,
-			"byte_count": len(content),
+			"byte_count": byteCount,
 			"char_count": len([]rune(text)),
 			"media_type": manifest.MediaType,
 		},
@@ -91,32 +94,58 @@ func (RFC822HeaderAnalyzer) Analyze(
 	store ObjectStore,
 	job contracts.AnalyzerJob,
 ) (contracts.Annotation, error) {
-	content, _, err := readObject(ctx, store, job.ObjectDigest)
+	manifest, err := store.ReadManifest(ctx, job.ObjectDigest)
+	if err != nil {
+		return contracts.Annotation{}, err
+	}
+	if !manifest.Compound.IsCompound && !isRFC822HeaderMediaType(manifest.MediaType) {
+		return contracts.Annotation{Data: map[string]any{
+			"status":     "skipped",
+			"reason":     "not_rfc822_headers",
+			"media_type": manifest.MediaType,
+		}}, nil
+	}
+
+	content, _, err := readHeaderObject(ctx, store, job.ObjectDigest)
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
 
-	message, err := mail.ReadMessage(bytes.NewReader(content))
+	header, err := parseStoredHeaders(content)
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
 
 	data := map[string]any{
-		"message_id":  message.Header.Get("Message-Id"),
-		"subject":     message.Header.Get("Subject"),
-		"from":        message.Header.Get("From"),
-		"to":          message.Header.Get("To"),
-		"cc":          message.Header.Get("Cc"),
-		"date":        message.Header.Get("Date"),
-		"references":  message.Header.Get("References"),
-		"in_reply_to": message.Header.Get("In-Reply-To"),
-		"headers":     normalizedHeaders(message.Header),
+		"message_id":  header.Get("Message-Id"),
+		"subject":     header.Get("Subject"),
+		"from":        header.Get("From"),
+		"to":          header.Get("To"),
+		"cc":          header.Get("Cc"),
+		"date":        header.Get("Date"),
+		"references":  header.Get("References"),
+		"in_reply_to": header.Get("In-Reply-To"),
+		"headers":     normalizedHeaders(header),
 	}
-	if date, err := message.Header.Date(); err == nil {
+	if date, err := header.Date(); err == nil {
 		data["date_rfc3339"] = date.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 
 	return contracts.Annotation{Data: data}, nil
+}
+
+func isRFC822HeaderMediaType(mediaType string) bool {
+	base, _, err := mime.ParseMediaType(mediaType)
+	if err == nil {
+		mediaType = base
+	}
+
+	switch mediaType {
+	case "message/rfc822", "text/rfc822-headers":
+		return true
+	default:
+		return false
+	}
 }
 
 type MetadataAnalyzer struct{}
@@ -211,53 +240,12 @@ func (GraphFactAnalyzer) Analyze(
 	return contracts.Annotation{Data: map[string]any{"facts": facts}}, nil
 }
 
-type SummaryAnalyzer struct{}
-
-func (SummaryAnalyzer) Spec() contracts.AnalyzerSpec {
-	return contracts.AnalyzerSpec{
-		Name:               SummaryName,
-		Version:            Phase04Version,
-		OutputSections:     []string{"summary"},
-		Deterministic:      true,
-		WorkerKind:         "go",
-		RequiredInputs:     []string{"blob"},
-		IdempotencyFormula: "digest+analyzer+version",
-	}
-}
-
-func (SummaryAnalyzer) Analyze(
-	ctx context.Context,
-	store ObjectStore,
-	job contracts.AnalyzerJob,
-) (contracts.Annotation, error) {
-	content, manifest, err := readObject(ctx, store, job.ObjectDigest)
-	if err != nil {
-		return contracts.Annotation{}, err
-	}
-
-	text := extractText(content, manifest.MediaType)
-	summary := firstSentences(text, 2)
-
-	status := "complete"
-	if summary == "" {
-		status = "placeholder"
-	}
-
-	return contracts.Annotation{Data: map[string]any{
-		"status":     status,
-		"summary":    summary,
-		"algorithm":  "extractive_first_sentences",
-		"media_type": manifest.MediaType,
-	}}, nil
-}
-
 func DefaultRegistry() (*Registry, error) {
 	return NewRegistry(
 		TextExtractAnalyzer{},
 		RFC822HeaderAnalyzer{},
 		MetadataAnalyzer{},
 		GraphFactAnalyzer{},
-		SummaryAnalyzer{},
 	)
 }
 
@@ -283,6 +271,98 @@ func readObject(
 	}
 
 	return content, manifest, nil
+}
+
+func readHeaderObject(
+	ctx context.Context,
+	store ObjectStore,
+	digest contracts.ObjectDigest,
+) ([]byte, contracts.Manifest, error) {
+	manifest, err := store.ReadManifest(ctx, digest)
+	if err != nil {
+		return nil, contracts.Manifest{}, err
+	}
+
+	if manifest.Compound.IsCompound {
+		for _, part := range manifest.Compound.Parts {
+			if part.Role != "rfc822_headers" {
+				continue
+			}
+
+			return readObject(ctx, store, part.Digest)
+		}
+	}
+
+	content, manifest, err := readObject(ctx, store, digest)
+	if err != nil {
+		return nil, contracts.Manifest{}, err
+	}
+
+	return content, manifest, nil
+}
+
+func analysisText(
+	ctx context.Context,
+	store ObjectStore,
+	digest contracts.ObjectDigest,
+	manifest contracts.Manifest,
+) (string, int, error) {
+	if !manifest.Compound.IsCompound {
+		content, _, err := readObject(ctx, store, digest)
+		if err != nil {
+			return "", 0, err
+		}
+
+		return extractText(content, manifest.MediaType), len(content), nil
+	}
+
+	parts := []string{manifest.ObjectID}
+	byteCount := 0
+	for _, title := range manifest.Titles {
+		parts = append(parts, title.Value)
+	}
+	for _, facet := range manifest.Facets {
+		if len(facet.Metadata) == 0 {
+			continue
+		}
+		encoded, err := json.Marshal(facet.Metadata)
+		if err == nil {
+			parts = append(parts, string(encoded))
+		}
+	}
+
+	for _, part := range manifest.Compound.Parts {
+		if !analysisTextPartRole(part.Role) {
+			continue
+		}
+
+		content, partManifest, err := readObject(ctx, store, part.Digest)
+		if err != nil {
+			return "", 0, err
+		}
+		byteCount += len(content)
+
+		if part.Role == "rfc822_headers" {
+			header, err := parseStoredHeaders(content)
+			if err == nil {
+				parts = append(parts, headerText(header))
+				continue
+			}
+		}
+
+		parts = append(parts, extractText(content, partManifest.MediaType))
+	}
+
+	return normalizeWhitespace(strings.Join(parts, "\n")), byteCount, nil
+}
+
+func analysisTextPartRole(role string) bool {
+	switch role {
+	case "email_body", "rfc822_headers", "text", "body":
+		return true
+	default:
+		return false
+	}
 }
 
 func extractText(content []byte, mediaType string) string {
@@ -318,9 +398,67 @@ func extractText(content []byte, mediaType string) string {
 		}
 
 		return normalizeWhitespace(string(body))
+	case "text/rfc822-headers":
+		header, err := parseStoredHeaders(content)
+		if err != nil {
+			return normalizeWhitespace(text)
+		}
+
+		return normalizeWhitespace(headerText(header))
 	default:
 		return normalizeWhitespace(text)
 	}
+}
+
+func parseStoredHeaders(content []byte) (mail.Header, error) {
+	var pairs []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(content, &pairs); err == nil && len(pairs) > 0 {
+		header := mail.Header{}
+		for _, pair := range pairs {
+			if strings.TrimSpace(pair.Name) != "" {
+				header[pair.Name] = append(header[pair.Name], pair.Value)
+			}
+		}
+
+		return header, nil
+	}
+
+	values := map[string]string{}
+	if err := json.Unmarshal(content, &values); err == nil && len(values) > 0 {
+		header := mail.Header{}
+		for name, value := range values {
+			header[name] = append(header[name], value)
+		}
+
+		return header, nil
+	}
+
+	raw := append([]byte(nil), content...)
+	raw = append(raw, []byte("\r\n\r\n")...)
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+
+	return message.Header, nil
+}
+
+func headerText(header mail.Header) string {
+	names := make([]string, 0, len(header))
+	for name := range header {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, name+": "+strings.Join(header[name], " "))
+	}
+
+	return strings.Join(parts, "\n")
 }
 
 func normalizedHeaders(header mail.Header) map[string][]string {
@@ -372,25 +510,4 @@ func stripTags(value string) string {
 
 func normalizeWhitespace(value string) string {
 	return strings.TrimSpace(whitespacePattern.ReplaceAllString(value, " "))
-}
-
-func firstSentences(text string, limit int) string {
-	text = normalizeWhitespace(text)
-	if text == "" || limit <= 0 {
-		return ""
-	}
-
-	endCount := 0
-
-	for index, char := range text {
-		switch char {
-		case '.', '!', '?':
-			endCount++
-			if endCount >= limit {
-				return strings.TrimSpace(text[:index+1])
-			}
-		}
-	}
-
-	return text
 }

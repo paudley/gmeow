@@ -13,6 +13,12 @@ import (
 type ObjectStore interface {
 	Open(context.Context, contracts.ObjectDigest) (io.ReadCloser, error)
 	ReadManifest(context.Context, contracts.ObjectDigest) (contracts.Manifest, error)
+	HasAnalysisAnnotation(
+		context.Context,
+		contracts.ObjectDigest,
+		string,
+		string,
+	) (bool, error)
 	WriteAnnotation(context.Context, contracts.Annotation) error
 }
 

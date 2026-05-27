@@ -18,6 +18,14 @@ import (
 
 type GmailBackend interface {
 	Search(ctx context.Context, query string, limit int) ([]GmailSearchHit, error)
+	ListMessages(
+		ctx context.Context,
+		request GmailListRequest,
+	) (GmailListPage, error)
+	ListHistory(
+		ctx context.Context,
+		request GmailHistoryRequest,
+	) (GmailHistoryPage, error)
 	GetMessage(ctx context.Context, messageID string) (GmailMessage, error)
 	ModifyMessage(
 		ctx context.Context,
@@ -34,6 +42,31 @@ type GmailAdapter struct {
 type GmailSearchHit struct {
 	MessageID string
 	Version   string
+}
+
+type GmailListRequest struct {
+	Query     string
+	PageToken string
+	Limit     int
+}
+
+type GmailListPage struct {
+	Hits           []GmailSearchHit
+	NextPageToken  string
+	ResultEstimate int
+}
+
+type GmailHistoryRequest struct {
+	StartHistoryID string
+	PageToken      string
+	Limit          int
+}
+
+type GmailHistoryPage struct {
+	MessageIDs      []string
+	NextPageToken   string
+	LatestHistoryID string
+	Expired         bool
 }
 
 type GmailAttachment struct {
@@ -130,6 +163,182 @@ func (adapter *GmailAdapter) LiveSearch(
 	}
 
 	return results, nil
+}
+
+func (adapter *GmailAdapter) Pull(
+	ctx context.Context,
+	service IngestService,
+	request PullRequest,
+) ([]IngestObject, contracts.SourceCursor, error) {
+	cursor := cloneCursor(request.Cursor)
+	mode := firstNonEmpty(stringValue(cursor["mode"]), "full")
+	limit := request.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+
+	switch mode {
+	case "full", "backfill":
+		return adapter.pullFull(ctx, service, cursor, limit)
+	case "history":
+		return adapter.pullHistory(ctx, service, cursor, limit)
+	default:
+		return nil, contracts.SourceCursor{}, fmt.Errorf(
+			"unsupported gmail backfill mode %q",
+			mode,
+		)
+	}
+}
+
+func (adapter *GmailAdapter) pullFull(
+	ctx context.Context,
+	service IngestService,
+	cursor map[string]any,
+	limit int,
+) ([]IngestObject, contracts.SourceCursor, error) {
+	query := stringValue(cursor["query"])
+	page, err := adapter.backend.ListMessages(ctx, GmailListRequest{
+		Query:     query,
+		PageToken: stringValue(cursor["page_token"]),
+		Limit:     limit,
+	})
+	if err != nil {
+		cursor["last_error"] = err.Error()
+		return nil, adapter.cursor(cursor), err
+	}
+
+	objects, failedID, err := adapter.hydrateHits(ctx, service, page.Hits)
+	if err != nil {
+		cursor["failed_message_ids"] = []string{failedID}
+		cursor["failed_count"] = 1
+		cursor["last_error"] = err.Error()
+		return nil, adapter.cursor(cursor), err
+	}
+
+	cursor["mode"] = "full"
+	cursor["query"] = query
+	cursor["page_token"] = page.NextPageToken
+	cursor["result_estimate"] = page.ResultEstimate
+	cursor["completed"] = page.NextPageToken == ""
+	cursor["last_error"] = ""
+	if len(page.Hits) > 0 {
+		last := page.Hits[len(page.Hits)-1]
+		cursor["last_message_id"] = last.MessageID
+		cursor["latest_history_id"] = last.Version
+	}
+
+	return objects, adapter.cursor(cursor), nil
+}
+
+func (adapter *GmailAdapter) pullHistory(
+	ctx context.Context,
+	service IngestService,
+	cursor map[string]any,
+	limit int,
+) ([]IngestObject, contracts.SourceCursor, error) {
+	anchor := stringValue(cursor["history_anchor"])
+	if anchor == "" {
+		return nil, contracts.SourceCursor{}, errors.New(
+			"gmail history backfill requires history_anchor cursor",
+		)
+	}
+
+	page, err := adapter.backend.ListHistory(ctx, GmailHistoryRequest{
+		StartHistoryID: anchor,
+		PageToken:      stringValue(cursor["page_token"]),
+		Limit:          limit,
+	})
+	if err != nil {
+		cursor["last_error"] = err.Error()
+		return nil, adapter.cursor(cursor), err
+	}
+	if page.Expired {
+		cursor["history_expired"] = true
+		cursor["last_error"] = "gmail history cursor expired"
+		return nil, adapter.cursor(cursor), errors.New(
+			"gmail history cursor expired; run full backfill",
+		)
+	}
+
+	objects, failedID, err := adapter.hydrateMessageIDs(ctx, service, page.MessageIDs)
+	if err != nil {
+		cursor["failed_message_ids"] = []string{failedID}
+		cursor["failed_count"] = 1
+		cursor["last_error"] = err.Error()
+		return nil, adapter.cursor(cursor), err
+	}
+
+	cursor["mode"] = "history"
+	cursor["page_token"] = page.NextPageToken
+	cursor["latest_history_id"] = firstNonEmpty(page.LatestHistoryID, anchor)
+	cursor["history_expired"] = false
+	cursor["completed"] = page.NextPageToken == ""
+	cursor["last_error"] = ""
+	if page.NextPageToken == "" && page.LatestHistoryID != "" {
+		cursor["history_anchor"] = page.LatestHistoryID
+	}
+	if len(page.MessageIDs) > 0 {
+		cursor["last_message_id"] = page.MessageIDs[len(page.MessageIDs)-1]
+	}
+
+	return objects, adapter.cursor(cursor), nil
+}
+
+func (adapter *GmailAdapter) hydrateHits(
+	ctx context.Context,
+	service IngestService,
+	hits []GmailSearchHit,
+) ([]IngestObject, string, error) {
+	objects := make([]IngestObject, 0, len(hits))
+	for _, hit := range hits {
+		message, err := adapter.backend.GetMessage(ctx, hit.MessageID)
+		if err != nil {
+			return nil, hit.MessageID, err
+		}
+		if message.Version == "" {
+			message.Version = hit.Version
+		}
+		object, err := adapter.messageObject(ctx, service, message)
+		if err != nil {
+			return nil, hit.MessageID, err
+		}
+		objects = append(objects, object)
+	}
+
+	return objects, "", nil
+}
+
+func (adapter *GmailAdapter) hydrateMessageIDs(
+	ctx context.Context,
+	service IngestService,
+	messageIDs []string,
+) ([]IngestObject, string, error) {
+	objects := make([]IngestObject, 0, len(messageIDs))
+	for _, messageID := range messageIDs {
+		message, err := adapter.backend.GetMessage(ctx, messageID)
+		if err != nil {
+			return nil, messageID, err
+		}
+		object, err := adapter.messageObject(ctx, service, message)
+		if err != nil {
+			return nil, messageID, err
+		}
+		objects = append(objects, object)
+	}
+
+	return objects, "", nil
+}
+
+func (adapter *GmailAdapter) cursor(cursor map[string]any) contracts.SourceCursor {
+	cursor["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+
+	return contracts.SourceCursor{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		SourceKind:    adapter.Kind(),
+		SourceName:    adapter.name,
+		Cursor:        cursor,
+		UpdatedAt:     time.Now().UTC(),
+	}
 }
 
 func (adapter *GmailAdapter) SearchAndHydrate(

@@ -149,6 +149,22 @@ func TestLoadRejectsSchedulerQueuePrefixOutsideGmeowNamespace(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsNegativeAnalysisWorkerConcurrency(t *testing.T) {
+	configPath := writeConfig(
+		t,
+		minimalConfig()+"\n[analysis]\nworker_concurrency = -1\n",
+	)
+	t.Setenv(unlockEnvName, "test-key")
+
+	_, err := Load(Options{Path: configPath})
+	if err == nil {
+		t.Fatal("expected worker concurrency validation error")
+	}
+	if !strings.Contains(err.Error(), "analysis.worker_concurrency") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLoadRejectsWrongRabbitMQVHost(t *testing.T) {
 	configPath := writeConfig(
 		t,
@@ -256,6 +272,57 @@ func TestSourceCredentialSecretIsReferenced(t *testing.T) {
 	references := secretReferences(parsed)
 	if references["gmail_credentials_json"] != 1 {
 		t.Fatalf("expected gmail credential secret reference, got %#v", references)
+	}
+}
+
+func TestLoadAcceptsGmailDelegatedSubject(t *testing.T) {
+	configPath := writeConfig(
+		t,
+		strings.Replace(
+			minimalConfig(),
+			`rabbitmq_test_password = "test-rabbit-password"`,
+			`rabbitmq_test_password = "test-rabbit-password"
+gmail_credentials_json = "credentials"`,
+			1,
+		)+`
+[[sources]]
+name = "primary"
+kind = "gmail"
+credential_secret = "gmail_credentials_json"
+user_id = "me"
+delegated_subject = "paudley@blackcat.ca"
+capabilities = ["hydrate", "live_search", "live_retrieve", "actions"]
+`,
+	)
+	t.Setenv(unlockEnvName, "test-key")
+
+	_, err := Load(Options{Path: configPath})
+	if err == nil {
+		t.Fatal("expected plaintext secret rejection before dependency checks")
+	}
+	if !strings.Contains(err.Error(), "SOPS-encrypted leaf") {
+		t.Fatalf("expected delegated source config to decode before secret checks, got %v", err)
+	}
+}
+
+func TestLoadRejectsUnknownSourceKey(t *testing.T) {
+	configPath := writeConfig(
+		t,
+		minimalConfig()+`
+[[sources]]
+name = "primary"
+kind = "gmail"
+unexpected = "value"
+`,
+	)
+	t.Setenv(unlockEnvName, "test-key")
+
+	_, err := Load(Options{Path: configPath})
+	if err == nil {
+		t.Fatal("expected unknown source key error")
+	}
+	if !strings.Contains(err.Error(), "sources.unexpected") {
+		t.Fatalf("expected unknown source key detail, got %v", err)
 	}
 }
 
@@ -386,9 +453,15 @@ func TestLoadResolvesReferencedSecrets(t *testing.T) {
 			loaded.SecretReferences["postgres_password"],
 		)
 	}
-	if len(loaded.Resolved.Worker.Analyzers) != 1 {
+	if len(loaded.Resolved.Worker.Analyzers) == 0 {
 		t.Fatalf(
 			"expected resolved worker analyzer payload, got %#v",
+			loaded.Resolved.Worker.Analyzers,
+		)
+	}
+	if loaded.Resolved.Worker.Analyzers[0].Name != "text.extract" {
+		t.Fatalf(
+			"expected production analyzer payload, got %#v",
 			loaded.Resolved.Worker.Analyzers,
 		)
 	}

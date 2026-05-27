@@ -35,7 +35,6 @@ func TestPhaseSevenLoadWorkflowIngestAnalysisProjectionAndSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobSource := analysisJobSource(t, ctx)
-	defer jobSource.Close()
 	runtime, err := analysis.NewRuntime(jobSource, filestoreService.Client, registry)
 	if err != nil {
 		t.Fatal(err)
@@ -238,19 +237,11 @@ func copyFile(sourcePath, targetPath string, mode os.FileMode) error {
 	return target.Close()
 }
 
-func analysisJobSource(t *testing.T, ctx context.Context) *analysis.RabbitMQSource {
+func analysisJobSource(t *testing.T, ctx context.Context) analysis.JobSource {
 	t.Helper()
-	loaded := testsupport.LoadConfig(t)
-	source, err := analysis.NewRabbitMQSource(ctx, analysis.RabbitMQSourceConfig{
-		URL: loaded.Resolved.RabbitMQ.TestURL,
-		QueuePrefix: fmt.Sprintf(
-			"gmeow.test.analysis.%d.",
-			time.Now().UnixNano(),
-		),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return source
+	return testsupport.NewAnalysisJobSource(
+		t,
+		ctx,
+		fmt.Sprintf("gmeow.test.analysis.%d.", time.Now().UnixNano()),
+	)
 }

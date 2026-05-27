@@ -16,9 +16,11 @@ service FilestoreService {
   rpc Open(OpenRequest) returns (stream ObjectChunk);
   rpc ReadManifest(ReadManifestRequest) returns (ReadManifestResponse);
   rpc GetStructure(GetStructureRequest) returns (GetStructureResponse);
+  rpc HasAnalysisAnnotation(HasAnalysisAnnotationRequest) returns (HasAnalysisAnnotationResponse);
   rpc WriteAnnotation(WriteAnnotationRequest) returns (Empty);
   rpc WriteOverlays(WriteOverlaysRequest) returns (Empty);
   rpc WriteSourceCursor(WriteSourceCursorRequest) returns (Empty);
+  rpc ReadSourceCursor(ReadSourceCursorRequest) returns (ReadSourceCursorResponse);
   rpc Verify(VerifyRequest) returns (VerifyResponse);
 }
 
@@ -71,9 +73,23 @@ message ReadManifestRequest { string digest = 1; }
 message ReadManifestResponse { Manifest manifest = 1; }
 message GetStructureRequest { string digest = 1; }
 message GetStructureResponse { Structure structure = 1; }
+message HasAnalysisAnnotationRequest {
+  string digest = 1;
+  string analyzer_name = 2;
+  string analyzer_version = 3;
+}
+message HasAnalysisAnnotationResponse { bool found = 1; }
 message WriteAnnotationRequest { Annotation annotation = 1; }
 message WriteOverlaysRequest { string digest = 1; bytes overlays_json = 2; }
 message WriteSourceCursorRequest { SourceCursor cursor = 1; }
+message ReadSourceCursorRequest {
+  string source_kind = 1;
+  string source_name = 2;
+}
+message ReadSourceCursorResponse {
+  SourceCursor cursor = 1;
+  bool found = 2;
+}
 message VerifyRequest {}
 message VerifyFinding {
   string digest = 1;

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -15,10 +16,11 @@ import (
 )
 
 type Runtime struct {
-	source   JobSource
-	store    ObjectStore
-	registry *Registry
-	now      func() time.Time
+	concurrency int
+	source      JobSource
+	store       ObjectStore
+	registry    *Registry
+	now         func() time.Time
 }
 
 type RuntimeOption func(*Runtime)
@@ -42,16 +44,25 @@ func NewRuntime(
 	}
 
 	runtime := &Runtime{
-		source:   source,
-		store:    store,
-		registry: registry,
-		now:      func() time.Time { return time.Now().UTC() },
+		concurrency: 1,
+		source:      source,
+		store:       store,
+		registry:    registry,
+		now:         func() time.Time { return time.Now().UTC() },
 	}
 	for _, option := range options {
 		option(runtime)
 	}
 
 	return runtime, nil
+}
+
+func WithConcurrency(concurrency int) RuntimeOption {
+	return func(runtime *Runtime) {
+		if concurrency > 0 {
+			runtime.concurrency = concurrency
+		}
+	}
 }
 
 func WithClock(now func() time.Time) RuntimeOption {
@@ -63,6 +74,51 @@ func WithClock(now func() time.Time) RuntimeOption {
 }
 
 func (runtime *Runtime) Run(ctx context.Context) error {
+	if runtime.concurrency <= 1 {
+		return runtime.runLoop(ctx)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errs := make(chan error, 1)
+	var wait sync.WaitGroup
+	for range runtime.concurrency {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if err := runtime.runLoop(ctx); err != nil {
+				select {
+				case errs <- err:
+					cancel()
+				default:
+				}
+			}
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wait.Wait()
+		close(done)
+	}()
+
+	select {
+	case err := <-errs:
+		cancel()
+		<-done
+
+		return err
+	case <-ctx.Done():
+		<-done
+
+		return ctx.Err()
+	case <-done:
+		return ctx.Err()
+	}
+}
+
+func (runtime *Runtime) runLoop(ctx context.Context) error {
 	for {
 		receipt, err := runtime.source.Receive(ctx)
 		if err != nil {
@@ -116,6 +172,21 @@ func (runtime *Runtime) Process(ctx context.Context, job contracts.AnalyzerJob) 
 			job.Analyzer.Name,
 			job.Analyzer.Version,
 		)
+	}
+
+	complete, err := runtime.store.HasAnalysisAnnotation(
+		ctx,
+		job.ObjectDigest,
+		job.Analyzer.Name,
+		job.Analyzer.Version,
+	)
+	if err != nil {
+		observability.DefaultMetrics().AddCounter("gmeow_failed_analyzers", 1)
+		return fmt.Errorf("check existing analysis annotation: %w", err)
+	}
+	if complete && !job.Forced {
+		observability.DefaultMetrics().AddCounter("gmeow_skipped_analyzers", 1)
+		return nil
 	}
 
 	annotation, err := analyzer.Analyze(ctx, runtime.store, job)

@@ -86,7 +86,7 @@ func (analyzer *ExternalCommandAnalyzer) Analyze(
 		Job:           job,
 		Manifest:      manifest,
 	}
-	if text, ok := readTextInput(ctx, store, job.ObjectDigest, manifest.MediaType); ok {
+	if text, ok := readTextInput(ctx, store, job.ObjectDigest, manifest); ok {
 		request.Text = text
 	}
 
@@ -139,8 +139,14 @@ func readTextInput(
 	ctx context.Context,
 	store ObjectStore,
 	digest contracts.ObjectDigest,
-	mediaType string,
+	manifest contracts.Manifest,
 ) (string, bool) {
+	if manifest.Compound.IsCompound {
+		text, _, err := analysisText(ctx, store, digest, manifest)
+		return text, err == nil
+	}
+
+	mediaType := manifest.MediaType
 	if !strings.HasPrefix(mediaType, "text/") && mediaType != "application/json" {
 		return "", false
 	}

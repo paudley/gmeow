@@ -46,6 +46,7 @@ class AnalyzerJob(BaseModel):
     attempt: int = 0
     trace_id: str = ""
     deadline: str = ""
+    created_at: str = ""
     forced: bool = False
     priority: int = 0
 

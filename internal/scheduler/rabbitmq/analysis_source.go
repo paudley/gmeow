@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Blackcat Informatics Inc.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package analysis
+package rabbitmq
 
 import (
 	"context"
@@ -14,36 +14,30 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
+	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/contracts"
 )
 
-const (
-	defaultQueuePrefix = "gmeow."
-	testQueuePrefix    = "gmeow.test."
-	workQueueSuffix    = "analysis.work"
-	failedRoutingKey   = "analysis.failed"
-	analysisExchange   = "analysis"
-)
-
-type RabbitMQSourceConfig struct {
+type AnalysisJobSourceConfig struct {
 	URL         string
 	QueuePrefix string
+	Prefetch    int
 }
 
-type RabbitMQSource struct {
+type AnalysisJobSource struct {
 	connection *amqp.Connection
 	channel    *amqp.Channel
 	deliveries <-chan amqp.Delivery
-	config     RabbitMQSourceConfig
+	config     AnalysisJobSourceConfig
 	mutex      sync.Mutex
 }
 
-func NewRabbitMQSource(
+func NewAnalysisJobSource(
 	ctx context.Context,
-	config RabbitMQSourceConfig,
-) (*RabbitMQSource, error) {
+	config AnalysisJobSourceConfig,
+) (*AnalysisJobSource, error) {
 	if strings.TrimSpace(config.URL) == "" {
-		return nil, errors.New("analysis rabbitmq url is required")
+		return nil, errors.New("scheduler rabbitmq url is required")
 	}
 
 	if strings.TrimSpace(config.QueuePrefix) == "" {
@@ -52,7 +46,7 @@ func NewRabbitMQSource(
 
 	if config.QueuePrefix != defaultQueuePrefix &&
 		!strings.HasPrefix(config.QueuePrefix, testQueuePrefix) {
-		return nil, errors.New("analysis rabbitmq queue prefix must be gmeow. or gmeow.test.")
+		return nil, errors.New("scheduler rabbitmq queue prefix must be gmeow. or gmeow.test.")
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -60,18 +54,18 @@ func NewRabbitMQSource(
 	}
 
 	connection, err := amqp.DialConfig(config.URL, amqp.Config{
-		Properties: amqp.Table{"connection_name": "gmeow.analysis"},
+		Properties: amqp.Table{"connection_name": "gmeow.scheduler.analysis_source"},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("connect analysis rabbitmq: %w", err)
+		return nil, fmt.Errorf("connect scheduler rabbitmq analysis source: %w", err)
 	}
 
-	source := &RabbitMQSource{config: config, connection: connection}
-
-	return source, nil
+	return &AnalysisJobSource{config: config, connection: connection}, nil
 }
 
-func (source *RabbitMQSource) Receive(ctx context.Context) (JobReceipt, error) {
+func (source *AnalysisJobSource) Receive(
+	ctx context.Context,
+) (analysis.JobReceipt, error) {
 	err := source.ensureConsumer(ctx)
 	if err != nil {
 		return nil, err
@@ -82,7 +76,7 @@ func (source *RabbitMQSource) Receive(ctx context.Context) (JobReceipt, error) {
 		return nil, ctx.Err()
 	case delivery, ok := <-source.deliveries:
 		if !ok {
-			return nil, errors.New("analysis rabbitmq delivery channel closed")
+			return nil, errors.New("scheduler rabbitmq analysis delivery channel closed")
 		}
 
 		var job contracts.AnalyzerJob
@@ -93,11 +87,11 @@ func (source *RabbitMQSource) Receive(ctx context.Context) (JobReceipt, error) {
 			return nil, fmt.Errorf("decode analysis job: %w", err)
 		}
 
-		return &rabbitMQReceipt{source: source, delivery: delivery, job: job}, nil
+		return &analysisJobReceipt{source: source, delivery: delivery, job: job}, nil
 	}
 }
 
-func (source *RabbitMQSource) Close() error {
+func (source *AnalysisJobSource) Close() error {
 	source.mutex.Lock()
 	defer source.mutex.Unlock()
 
@@ -118,7 +112,7 @@ func (source *RabbitMQSource) Close() error {
 	return err
 }
 
-func (source *RabbitMQSource) ensureConsumer(ctx context.Context) error {
+func (source *AnalysisJobSource) ensureConsumer(ctx context.Context) error {
 	source.mutex.Lock()
 	defer source.mutex.Unlock()
 
@@ -132,18 +126,22 @@ func (source *RabbitMQSource) ensureConsumer(ctx context.Context) error {
 
 	channel, err := source.connection.Channel()
 	if err != nil {
-		return fmt.Errorf("open analysis rabbitmq channel: %w", err)
+		return fmt.Errorf("open scheduler rabbitmq analysis channel: %w", err)
 	}
 
-	if err := channel.Qos(1, 0, false); err != nil {
+	prefetch := source.config.Prefetch
+	if prefetch <= 0 {
+		prefetch = 1
+	}
+	if err := channel.Qos(prefetch, 0, false); err != nil {
 		_ = channel.Close()
 
-		return fmt.Errorf("set analysis rabbitmq qos: %w", err)
+		return fmt.Errorf("set scheduler rabbitmq analysis qos: %w", err)
 	}
 
 	deliveries, err := channel.ConsumeWithContext(
 		ctx,
-		source.config.QueuePrefix+workQueueSuffix,
+		source.config.QueuePrefix+workSuffix,
 		"",
 		false,
 		false,
@@ -163,11 +161,15 @@ func (source *RabbitMQSource) ensureConsumer(ctx context.Context) error {
 	return nil
 }
 
-func (source *RabbitMQSource) publishFailure(
+func (source *AnalysisJobSource) publishFailure(
 	ctx context.Context,
 	job contracts.AnalyzerJob,
 	cause error,
 ) error {
+	if cause != nil {
+		job.Failure = cause.Error()
+	}
+
 	body, err := json.Marshal(job)
 	if err != nil {
 		return err
@@ -175,12 +177,12 @@ func (source *RabbitMQSource) publishFailure(
 
 	channel, err := source.connection.Channel()
 	if err != nil {
-		return fmt.Errorf("open analysis failure channel: %w", err)
+		return fmt.Errorf("open scheduler rabbitmq analysis failure channel: %w", err)
 	}
 	defer channel.Close()
 
 	if err := channel.Confirm(false); err != nil {
-		return fmt.Errorf("enable analysis failure confirms: %w", err)
+		return fmt.Errorf("enable scheduler rabbitmq analysis failure confirms: %w", err)
 	}
 
 	confirms := channel.NotifyPublish(make(chan amqp.Confirmation, 1))
@@ -192,7 +194,7 @@ func (source *RabbitMQSource) publishFailure(
 
 	if err := channel.PublishWithContext(
 		ctx,
-		source.config.QueuePrefix+analysisExchange,
+		source.config.QueuePrefix+analysisSuffix,
 		failedRoutingKey,
 		false,
 		false,
@@ -221,41 +223,37 @@ func (source *RabbitMQSource) publishFailure(
 	}
 }
 
-type rabbitMQReceipt struct {
+type analysisJobReceipt struct {
 	job      contracts.AnalyzerJob
-	source   *RabbitMQSource
+	source   *AnalysisJobSource
 	delivery amqp.Delivery
 }
 
-func (receipt *rabbitMQReceipt) Job() contracts.AnalyzerJob {
+func (receipt *analysisJobReceipt) Job() contracts.AnalyzerJob {
 	return receipt.job
 }
 
-func (receipt *rabbitMQReceipt) Ack(context.Context) error {
+func (receipt *analysisJobReceipt) Ack(context.Context) error {
+	receipt.source.mutex.Lock()
+	defer receipt.source.mutex.Unlock()
+
 	return receipt.delivery.Ack(false)
 }
 
-func (receipt *rabbitMQReceipt) Retry(ctx context.Context, cause error) error {
+func (receipt *analysisJobReceipt) Retry(ctx context.Context, cause error) error {
 	err := receipt.source.publishFailure(ctx, receipt.job, cause)
 	if err != nil {
+		receipt.source.mutex.Lock()
+		defer receipt.source.mutex.Unlock()
 		_ = receipt.delivery.Nack(false, true)
 
 		return err
 	}
 
+	receipt.source.mutex.Lock()
+	defer receipt.source.mutex.Unlock()
+
 	return receipt.delivery.Ack(false)
 }
 
-func clampPriority(priority int) int {
-	if priority < 0 {
-		return 0
-	}
-
-	if priority > 100 {
-		return 100
-	}
-
-	return priority
-}
-
-var _ JobSource = (*RabbitMQSource)(nil)
+var _ analysis.JobSource = (*AnalysisJobSource)(nil)

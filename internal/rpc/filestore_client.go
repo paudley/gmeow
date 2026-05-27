@@ -273,6 +273,27 @@ func (client *FilestoreClient) GetStructure(
 	return FromPBStructure(response.GetStructure())
 }
 
+func (client *FilestoreClient) HasAnalysisAnnotation(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	analyzerName string,
+	analyzerVersion string,
+) (bool, error) {
+	response, err := client.client.HasAnalysisAnnotation(
+		ctx,
+		&pb.HasAnalysisAnnotationRequest{
+			Digest:          string(digest),
+			AnalyzerName:    analyzerName,
+			AnalyzerVersion: analyzerVersion,
+		},
+	)
+	if err != nil {
+		return false, err
+	}
+
+	return response.GetFound(), nil
+}
+
 func (client *FilestoreClient) WriteSourceCursor(
 	ctx context.Context,
 	cursor contracts.SourceCursor,
@@ -288,6 +309,32 @@ func (client *FilestoreClient) WriteSourceCursor(
 	)
 
 	return err
+}
+
+func (client *FilestoreClient) ReadSourceCursor(
+	ctx context.Context,
+	ref contracts.SourceCursorRef,
+) (contracts.SourceCursor, bool, error) {
+	response, err := client.client.ReadSourceCursor(
+		ctx,
+		&pb.ReadSourceCursorRequest{
+			SourceKind: ref.SourceKind,
+			SourceName: ref.SourceName,
+		},
+	)
+	if err != nil {
+		return contracts.SourceCursor{}, false, err
+	}
+	if !response.GetFound() {
+		return contracts.SourceCursor{}, false, nil
+	}
+
+	cursor, err := FromPBSourceCursor(response.GetCursor())
+	if err != nil {
+		return contracts.SourceCursor{}, false, err
+	}
+
+	return cursor, true, nil
 }
 
 func (client *FilestoreClient) WriteAnnotation(

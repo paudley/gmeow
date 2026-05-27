@@ -17,6 +17,8 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Projects FILESTORE manifests into PostgreSQL QUERY tables, pgvector rows, and Apache AGE graph state.
 - Derives analysis work through SCHEDULER and publishes durable RabbitMQ jobs with retry and dead-letter handling.
 - Runs typed gRPC service endpoints for FILESTORE, QUERY, and SCHEDULER over Unix sockets by default.
+- Keeps concrete backend ownership isolated: QUERY owns PostgreSQL, SCHEDULER owns RabbitMQ,
+  ANALYSIS only reads/writes FILESTORE, and services communicate over typed gRPC boundaries.
 - Provides admin commands for config, FILESTORE verification, QUERY projection, and SCHEDULER operations.
 - Runs Go ANALYSIS workers that consume scheduler jobs, read/write FILESTORE through typed gRPC, and support explicit `gmeow-intel` external analyzer adapters for Python/model behavior.
 - Provides Go SOURCE adapters for local filesystem fixtures, push/ringme records, the Gmail SOURCE adapter for ingest/hydrate/live search/live retrieve/actions, and design-only Drive capability checks.
@@ -96,7 +98,9 @@ rabbitmq_test_password = '''
 
 Do not put `secrets.file`, `secrets.sops_file`, or `config.file` inside `gmeow.toml`. Config source selection belongs to `--config`, `GMEOW_CONFIG`, or the default `gmeow.toml`. Mandatory password leaves must be SOPS-encrypted; plaintext password leaves are rejected.
 
-Gmail SOURCE behavior is implemented by the Go adapter. Gmail actions remain deliberately narrow:
+Gmail SOURCE behavior is implemented by the Go adapter. Service-account credentials that use
+Google Workspace domain-wide delegation set `delegated_subject` on the Gmail source while keeping
+the credential JSON in the referenced `[secrets]` leaf. Gmail actions remain deliberately narrow:
 apply/remove label, archive, mark read, and star. SOURCE actions are gated by adapter capability and
 matching object provenance/facets.
 
@@ -105,9 +109,11 @@ matching object provenance/facets.
 ```bash
 go run ./cmd/gmeow-admin --config gmeow.toml config validate
 go run ./cmd/gmeow --config gmeow.toml status
-go run ./cmd/gmeow --config gmeow.toml filestore-serve
 go run ./cmd/gmeow --config gmeow.toml query-serve
 go run ./cmd/gmeow --config gmeow.toml scheduler-serve
+go run ./cmd/gmeow --config gmeow.toml filestore-serve
+go run ./cmd/gmeow-admin --config gmeow.toml scheduler run
+go run ./cmd/gmeow-worker --config gmeow.toml run
 go run ./cmd/gmeow --config gmeow.toml mcp-serve
 go run ./cmd/gmeow --config gmeow.toml rest-serve
 go run ./cmd/gmeow --config gmeow.toml imap-serve
@@ -117,17 +123,32 @@ Operational commands include `gmeow-admin filestore verify`, `gmeow-admin query 
 and `gmeow-admin query project-changed --since <RFC3339>` for FILESTORE verification and QUERY
 projection work. Broad or destructive production-like operations require explicit instance
 confirmation.
-SCHEDULER provides `gmeow-admin scheduler scan`, `status`, `dead-letter`, `requeue`, and `force`;
-RabbitMQ is mandatory. Production queues use the `gmeow.` prefix on the `gmeow` vhost; integration
+SCHEDULER provides `gmeow-admin scheduler scan`, `status`, `failed`, `dead-letter`, `requeue`, and
+`force`; RabbitMQ is mandatory. FILESTORE notifies SCHEDULER over gRPC after object and annotation
+writes. Object changes schedule missing/stale analyzer work, while analysis annotation writes enqueue
+projection refresh only. Production queues use the `gmeow.` prefix on the `gmeow` vhost; integration
 tests use the `gmeow.test.` prefix on the `gmeow-test` vhost.
 
-ANALYSIS workers are started with `go run ./cmd/gmeow-worker --config gmeow.toml analysis`.
+ANALYSIS workers are started with `go run ./cmd/gmeow-worker --config gmeow.toml run`.
+Workers check FILESTORE for an existing matching analyzer name/version before execution, so
+rescheduled failures or stale RabbitMQ messages skip completed analyzer outputs instead of rerunning
+NER, summaries, embeddings, or categorization.
 Python/model analyzers must be configured as explicit external adapters, for example
 `gmeow-intel analyze ner.spacy` or `gmeow-intel analyze categories.sklearn`; commandless Python
-analyzers fail closed at startup.
+analyzers fail closed at startup. Configured analyzers must produce real FILESTORE annotations:
+spaCy NER uses `en_core_web_sm`, categorization uses the sklearn/main-branch category engine, and
+model-backed summary/embedding endpoints fail closed when dependencies, endpoints, or quality
+checks are missing. Model-backed summary and embedding calls are serialized per worker instance,
+time out after 60s, and failed jobs return through SCHEDULER retry handling with exponential
+backoff.
+
+The email production cutover analyzer versions are `phase04-email-v2` for Go analyzers and
+`python-email-v1` for Python analyzers. Older `phase04` and `python-current` annotations are stale
+by design and must be rescheduled before production validation is considered complete.
 
 The gRPC service protocol is typed protobuf. JSON is limited to dynamic metadata leaf fields, not
-whole request or response envelopes. See `proto/gmeow/v1/` and `docs/systemd.md`.
+whole request or response envelopes. See `proto/gmeow/v1/`, `docs/ARCHITECTURE.md`, and
+`docs/systemd.md`.
 
 ## Distribution
 
@@ -169,6 +190,7 @@ databases or schemas.
 Before publishing, run the checklist in `docs/PUBLIC_RELEASE_CHECKLIST.md`.
 
 FILESTORE backup and restore procedures live in `docs/FILESTORE_BACKUP_RESTORE.md`.
+Component ownership and service boundary rules live in `docs/ARCHITECTURE.md`.
 Testing architecture and mock-minimization rules live in `docs/TESTING.md`.
 
 ## License

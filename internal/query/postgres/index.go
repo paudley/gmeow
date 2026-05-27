@@ -25,7 +25,10 @@ import (
 	"blackcat.ca/gmeow/internal/query"
 )
 
-const defaultLimit = 50
+const (
+	defaultLimit       = 50
+	maxSearchTextBytes = 500000
+)
 
 type Config struct {
 	ConnString     string
@@ -349,17 +352,10 @@ func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 		return RebuildReport{}, fmt.Errorf("begin rebuild transaction: %w", err)
 	}
 
-	for _, table := range []string{
-		"query_projection_state",
-		"query_summaries",
-		"query_source_cursors",
-		"query_objects",
-	} {
-		if _, err := tx.Exec(ctx, truncateProjectionTableSQL(table)); err != nil {
-			tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, truncateProjectionTablesSQL()); err != nil {
+		tx.Rollback(ctx)
 
-			return RebuildReport{}, fmt.Errorf("truncate %s: %w", table, err)
-		}
+		return RebuildReport{}, fmt.Errorf("truncate query projection tables: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -1089,10 +1085,30 @@ func (index *Index) VectorSearch(
 
 	args = append(args, normalizedLimit(request.Limit))
 	sqlText := fmt.Sprintf(
-		`SELECT e.object_digest, e.model, e.embedding <=> $1::vector AS distance
-		   FROM query_object_embeddings e
-		  WHERE %s
-		  ORDER BY e.embedding <=> $1::vector
+		`SELECT object_digest, model, embedding_id, kind, source_digest, text_preview, distance
+		   FROM (
+		         SELECT DISTINCT ON (ranked.object_digest)
+		                ranked.object_digest,
+		                ranked.model,
+		                ranked.embedding_id,
+		                ranked.kind,
+		                ranked.source_digest,
+		                ranked.text_preview,
+		                ranked.distance
+		           FROM (
+		                 SELECT e.object_digest,
+		                        e.model,
+		                        e.embedding_id,
+		                        e.kind,
+		                        e.source_digest,
+		                        e.text_preview,
+		                        e.embedding <=> $1::vector AS distance
+		                   FROM query_object_embeddings e
+		                  WHERE %s
+		                ) ranked
+		          ORDER BY ranked.object_digest, ranked.distance
+		        ) best
+		  ORDER BY distance
 		  LIMIT $%d`,
 		strings.Join(where, " AND "),
 		len(args),
@@ -1111,6 +1127,10 @@ func (index *Index) VectorSearch(
 		err := rows.Scan(
 			&result.ObjectDigest,
 			&result.Model,
+			&result.EmbeddingID,
+			&result.Kind,
+			&result.SourceDigest,
+			&result.TextPreview,
 			&result.Distance,
 		)
 		if err != nil {
@@ -1313,19 +1333,15 @@ func projectObjectTx(
 	return nil
 }
 
-func truncateProjectionTableSQL(table string) string {
-	switch table {
-	case "query_projection_state":
-		return "TRUNCATE query_projection_state CASCADE"
-	case "query_summaries":
-		return "TRUNCATE query_summaries CASCADE"
-	case "query_source_cursors":
-		return "TRUNCATE query_source_cursors CASCADE"
-	case "query_objects":
-		return "TRUNCATE query_objects CASCADE"
-	default:
-		panic("unsupported query projection truncate table: " + table)
-	}
+func truncateProjectionTablesSQL() string {
+	return strings.Join([]string{
+		"TRUNCATE",
+		"query_projection_state,",
+		"query_summaries,",
+		"query_source_cursors,",
+		"query_objects",
+		"CASCADE",
+	}, " ")
 }
 
 func deleteProjectionRowsSQL(table string) string {
@@ -1647,14 +1663,27 @@ func insertEmbeddingRows(
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO query_object_embeddings(
-			   object_digest, model, embedding_object_digest, dimensions, embedding
-			 ) VALUES($1,$2,$3,$4,$5::vector)
+			   object_digest, model, embedding_object_digest, embedding_id, kind,
+			   source_digest, ordinal, text_preview, metadata_json, dimensions, embedding
+			 ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::vector)
 			 ON CONFLICT(object_digest, model, embedding_object_digest) DO UPDATE SET
+			   embedding_id = excluded.embedding_id,
+			   kind = excluded.kind,
+			   source_digest = excluded.source_digest,
+			   ordinal = excluded.ordinal,
+			   text_preview = excluded.text_preview,
+			   metadata_json = excluded.metadata_json,
 			   dimensions = excluded.dimensions,
 			   embedding = excluded.embedding`,
 			manifest.ObjectDigest,
 			row.model,
-			row.digest,
+			firstNonEmpty(row.id, string(manifest.ObjectDigest)),
+			firstNonEmpty(row.id, string(manifest.ObjectDigest)),
+			row.kind,
+			row.source,
+			row.ordinal,
+			row.preview,
+			row.metadata,
 			row.dimensions,
 			row.vector,
 		); err != nil {
@@ -1827,6 +1856,12 @@ func searchText(
 
 	for _, facet := range manifest.Facets {
 		parts = append(parts, facet.Kind, facet.Name)
+		if len(facet.Metadata) > 0 {
+			encoded, err := json.Marshal(facet.Metadata)
+			if err == nil {
+				parts = append(parts, string(encoded))
+			}
+		}
 	}
 
 	for _, provenance := range manifest.Provenance {
@@ -1841,7 +1876,26 @@ func searchText(
 	encoded, _ := json.Marshal(annotations)
 	parts = append(parts, string(encoded))
 
-	return strings.Join(parts, "\n")
+	return truncateSearchText(strings.Join(parts, "\n"))
+}
+
+func truncateSearchText(text string) string {
+	if len(text) <= maxSearchTextBytes {
+		return text
+	}
+
+	limit := 0
+	for offset := range text {
+		if offset > maxSearchTextBytes {
+			break
+		}
+		limit = offset
+	}
+	if limit == 0 {
+		return ""
+	}
+
+	return text[:limit]
 }
 
 func normalizedLimit(limit int) int {

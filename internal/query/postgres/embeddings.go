@@ -22,8 +22,13 @@ type embeddingObjectReader interface {
 type embeddingRow struct {
 	vector     *string
 	model      string
-	digest     contracts.ObjectDigest
+	id         string
+	kind       string
+	source     string
+	preview    string
+	metadata   []byte
 	dimensions int
+	ordinal    int
 }
 
 func embeddingRowsFrom(
@@ -38,7 +43,9 @@ func embeddingRowsFrom(
 		vector := embeddingVectorFromSource(ctx, source, item.ObjectDigest)
 		rows = append(rows, embeddingRow{
 			model:      item.Model,
-			digest:     item.ObjectDigest,
+			id:         string(item.ObjectDigest),
+			source:     string(item.ObjectDigest),
+			metadata:   []byte(`{}`),
 			dimensions: item.Dimensions,
 			vector:     vector,
 		})
@@ -57,9 +64,25 @@ func embeddingRowsFrom(
 			}
 
 			vector := vectorAnyLiteral(item["vector"])
+			id := firstNonEmpty(
+				stringFromAny(item["id"]),
+				stringFromAny(item["embedding_id"]),
+				stringFromAny(item["object_digest"]),
+			)
+			metadata, err := json.Marshal(map[string]any{
+				"truncated": item["truncated"],
+			})
+			if err != nil {
+				metadata = []byte(`{}`)
+			}
 			rows = append(rows, embeddingRow{
 				model:      stringFromAny(item["model"]),
-				digest:     contracts.ObjectDigest(stringFromAny(item["object_digest"])),
+				id:         id,
+				kind:       stringFromAny(item["kind"]),
+				source:     stringFromAny(item["source_digest"]),
+				ordinal:    intFromAny(item["ordinal"]),
+				preview:    stringFromAny(item["text_preview"]),
+				metadata:   metadata,
 				dimensions: intFromAny(item["dimensions"]),
 				vector:     vector,
 			})

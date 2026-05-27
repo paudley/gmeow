@@ -137,6 +137,123 @@ func TestSourceRuntimeUsesRPCFilestoreBoundary(t *testing.T) {
 	}
 }
 
+func TestServiceOwnershipBoundariesStayEnforced(t *testing.T) {
+	root := repoRoot(t)
+	module := "blackcat.ca/gmeow/"
+	rules := []struct {
+		name      string
+		dir       string
+		forbidden []string
+	}{
+		{
+			name: "ANALYSIS only talks to FILESTORE through its ObjectStore contract",
+			dir:  "internal/analysis",
+			forbidden: []string{
+				"github.com/rabbitmq/amqp091-go",
+				module + "internal/scheduler/rabbitmq",
+				module + "internal/query",
+				module + "internal/interface",
+				module + "internal/source",
+				"google.golang.org/api/gmail",
+				"github.com/jackc/pgx",
+				"database/sql",
+			},
+		},
+		{
+			name: "INTERFACE talks through app services instead of owning storage or queue transports",
+			dir:  "internal/interface",
+			forbidden: []string{
+				"github.com/rabbitmq/amqp091-go",
+				module + "internal/scheduler/rabbitmq",
+				module + "internal/filestore",
+				module + "internal/query/postgres",
+				"github.com/jackc/pgx",
+				"database/sql",
+			},
+		},
+		{
+			name: "QUERY owns PostgreSQL and reads FILESTORE, but never talks to backends or RabbitMQ",
+			dir:  "internal/query",
+			forbidden: []string{
+				"github.com/rabbitmq/amqp091-go",
+				module + "internal/scheduler",
+				module + "internal/interface",
+				module + "internal/source",
+				"google.golang.org/api/gmail",
+			},
+		},
+		{
+			name: "BACKENDS talk only to their backend APIs and FILESTORE-facing contracts",
+			dir:  "internal/source",
+			forbidden: []string{
+				"github.com/rabbitmq/amqp091-go",
+				module + "internal/scheduler",
+				module + "internal/query",
+				module + "internal/interface",
+				"github.com/jackc/pgx",
+				"database/sql",
+			},
+		},
+		{
+			name: "RabbitMQ is owned by SCHEDULER",
+			dir:  "internal",
+			forbidden: []string{
+				"github.com/rabbitmq/amqp091-go",
+			},
+		},
+		{
+			name: "PostgreSQL is owned by QUERY",
+			dir:  "internal",
+			forbidden: []string{
+				"github.com/jackc/pgx",
+				"database/sql",
+				"pressly/goose",
+			},
+		},
+	}
+
+	for _, rule := range rules {
+		t.Run(rule.name, func(t *testing.T) {
+			err := filepath.WalkDir(filepath.Join(root, rule.dir), func(
+				path string,
+				entry os.DirEntry,
+				err error,
+			) error {
+				if err != nil {
+					return err
+				}
+				if entry.IsDir() {
+					if shouldSkipArchitectureDir(root, path) {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+					return nil
+				}
+				if architectureRuleAllows(path, rule.forbidden) {
+					return nil
+				}
+				content, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				text := string(content)
+				for _, forbidden := range rule.forbidden {
+					if strings.Contains(text, forbidden) {
+						t.Fatalf("%s violates %s with dependency %q", path, rule.name, forbidden)
+					}
+				}
+
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestPhaseZeroToThreePythonRetiredPathsStayRetired(t *testing.T) {
 	root := repoRoot(t)
 	retired := []string{
@@ -391,6 +508,48 @@ func TestPythonIntelDocsDescribeExternalAnalyzerAdapters(t *testing.T) {
 	}
 }
 
+func TestRuntimeAnalyzersDoNotContainFallbackOrPlaceholderOutputs(t *testing.T) {
+	root := repoRoot(t)
+	paths := []string{
+		filepath.Join(root, "internal", "analysis"),
+		filepath.Join(root, "python", "gmeow_intel"),
+	}
+	for _, scanRoot := range paths {
+		err := filepath.WalkDir(scanRoot, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			switch filepath.Ext(path) {
+			case ".go", ".py":
+			default:
+				return nil
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			text := string(content)
+			for _, forbidden := range []string{
+				"regex_fallback",
+				"keyword_fallback",
+				`"placeholder"`,
+				"status = \"placeholder\"",
+			} {
+				if strings.Contains(text, forbidden) {
+					t.Fatalf("%s contains forbidden runtime analyzer marker %q", path, forbidden)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestPhaseSevenOperationalDocsAndMetricsStayAligned(t *testing.T) {
 	root := repoRoot(t)
 	backupDoc, err := os.ReadFile(
@@ -556,6 +715,38 @@ func TestTestingArchitectureForbidsInternalDoublesAndConcreteSeamBypasses(
 			t.Fatal(err)
 		}
 	}
+}
+
+func shouldSkipArchitectureDir(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	switch relative {
+	case filepath.Join("internal", "testsupport"):
+		return true
+	default:
+		return false
+	}
+}
+
+func architectureRuleAllows(path string, forbidden []string) bool {
+	text := filepath.ToSlash(path)
+	for _, dependency := range forbidden {
+		switch {
+		case dependency == "github.com/rabbitmq/amqp091-go":
+			return strings.Contains(text, "/internal/scheduler/rabbitmq/") ||
+				strings.Contains(text, "/internal/config/")
+		case dependency == "github.com/jackc/pgx",
+			dependency == "database/sql",
+			dependency == "pressly/goose":
+			return strings.Contains(text, "/internal/query/postgres/") ||
+				strings.Contains(text, "/internal/config/")
+		default:
+		}
+	}
+
+	return false
 }
 
 func repoRoot(t *testing.T) string {

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
@@ -22,6 +24,8 @@ import (
 func TestPostgresProjectsFilestore(t *testing.T) {
 	ctx := context.Background()
 	dsn := queryIntegrationDSN(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
 	sourceName := "integration-" + randomHex(t, 8)
 	embeddingModel := "fixture-" + randomHex(t, 4)
 	referencedModel := "fixture-ref-" + randomHex(t, 4)
@@ -209,10 +213,23 @@ func TestPostgresProjectsFilestore(t *testing.T) {
 		AnalyzerName: "embedding",
 		Data: map[string]any{
 			"embeddings": []any{map[string]any{
+				"id":            "chunk-exact",
+				"kind":          "body_chunk",
 				"model":         embeddingModel,
-				"object_digest": string(digest),
+				"source_digest": string(digest),
+				"ordinal":       float64(1),
+				"text_preview":  "apollo integration body",
 				"dimensions":    float64(3),
 				"vector":        []any{float64(0.1), float64(0.2), float64(0.3)},
+			}, map[string]any{
+				"id":            "chunk-far",
+				"kind":          "header",
+				"model":         embeddingModel,
+				"source_digest": string(digest),
+				"ordinal":       float64(0),
+				"text_preview":  "apollo integration header",
+				"dimensions":    float64(3),
+				"vector":        []any{float64(0.9), float64(0.8), float64(0.7)},
 			}},
 		},
 	}}); err != nil {
@@ -230,6 +247,11 @@ func TestPostgresProjectsFilestore(t *testing.T) {
 	}
 	if len(vector.Results) != 1 || vector.Results[0].ObjectDigest != digest {
 		t.Fatalf("unexpected vector response: %#v", vector)
+	}
+	if vector.Results[0].EmbeddingID != "chunk-exact" ||
+		vector.Results[0].Kind != "body_chunk" ||
+		vector.Results[0].TextPreview != "apollo integration body" {
+		t.Fatalf("vector response did not expose best chunk metadata: %#v", vector)
 	}
 	referencedVector, err := index.VectorSearch(ctx, contracts.VectorSearchRequest{
 		Model:  referencedModel,
@@ -403,6 +425,39 @@ func postgresDSN(postgres config.ResolvedPostgres, database string) string {
 	query.Set("sslmode", postgres.SSLMode)
 	dsn.RawQuery = query.Encode()
 	return dsn.String()
+}
+
+func acquireQueryIntegrationLock(
+	t *testing.T,
+	ctx context.Context,
+	dsn string,
+) *pgx.Conn {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect postgres for integration lock: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(0x676d656f775154)); err != nil {
+		_ = conn.Close(ctx)
+		t.Fatalf("acquire postgres integration lock: %v", err)
+	}
+
+	return conn
+}
+
+func releaseQueryIntegrationLock(t *testing.T, conn *pgx.Conn) {
+	t.Helper()
+	if conn == nil {
+		return
+	}
+	ctx := context.Background()
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", int64(0x676d656f775154)); err != nil {
+		_ = conn.Close(ctx)
+		t.Fatalf("release postgres integration lock: %v", err)
+	}
+	if err := conn.Close(ctx); err != nil {
+		t.Fatalf("close postgres integration lock: %v", err)
+	}
 }
 
 func cleanupQueryIntegrationRows(

@@ -128,16 +128,24 @@ type SourceConfig struct {
 	Kind             string   `toml:"kind"`
 	CredentialSecret string   `toml:"credential_secret"`
 	UserID           string   `toml:"user_id"`
+	DelegatedSubject string   `toml:"delegated_subject"`
 	Facets           []string `toml:"facets"`
 	Capabilities     []string `toml:"capabilities"`
 }
 
 type AnalysisConfig struct {
-	Embeddings EmbeddingConfig  `toml:"embeddings"`
-	Analyzers  []AnalyzerConfig `toml:"analyzers"`
+	Embeddings        EmbeddingConfig  `toml:"embeddings"`
+	Summary           SummaryConfig    `toml:"summary"`
+	Analyzers         []AnalyzerConfig `toml:"analyzers"`
+	WorkerConcurrency int              `toml:"worker_concurrency"`
 }
 
 type EmbeddingConfig struct {
+	Endpoint string `toml:"endpoint"`
+	Model    string `toml:"model"`
+}
+
+type SummaryConfig struct {
 	Endpoint string `toml:"endpoint"`
 	Model    string `toml:"model"`
 }
@@ -569,6 +577,10 @@ func validateConfig(parsed Config) error {
 		parsed.Scheduler.QueuePrefix != "gmeow." &&
 		parsed.Scheduler.QueuePrefix != "gmeow.test." {
 		return errors.New("scheduler.queue_prefix must be gmeow. or gmeow.test.")
+	}
+
+	if parsed.Analysis.WorkerConcurrency < 0 {
+		return errors.New("analysis.worker_concurrency must be positive")
 	}
 
 	for _, source := range parsed.Sources {

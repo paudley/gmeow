@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
@@ -76,6 +78,7 @@ func (service *FilestoreService) Close() {
 type QueryService struct {
 	Index  *querypg.Index
 	Client *rpc.QueryClient
+	lock   *pgx.Conn
 	stop   func()
 }
 
@@ -87,6 +90,7 @@ func StartQueryGRPC(
 	t.Helper()
 	loaded := LoadConfig(t)
 	baseDSN := PostgresDSN(loaded.Resolved.Postgres, loaded.Resolved.Postgres.Database)
+	lock := acquireQueryIntegrationLock(t, ctx, baseDSN)
 	schema := createQueryTestSchema(t, ctx, baseDSN)
 	queryConfig := querypg.Config{
 		ConnString:     dsnWithSearchPath(baseDSN, schema),
@@ -113,6 +117,7 @@ func StartQueryGRPC(
 	return &QueryService{
 		Index:  index,
 		Client: client,
+		lock:   lock,
 		stop: func() {
 			_ = client.Close()
 			cancel()
@@ -121,6 +126,7 @@ func StartQueryGRPC(
 			}
 			index.Close()
 			dropQueryTestSchema(t, baseDSN, schema)
+			releaseQueryIntegrationLock(t, lock)
 		},
 	}
 }
@@ -215,6 +221,32 @@ func (service *SchedulerService) Close() {
 	service.stop()
 }
 
+func NewAnalysisJobSource(
+	t *testing.T,
+	ctx context.Context,
+	queuePrefix string,
+) *schedmq.AnalysisJobSource {
+	t.Helper()
+	loaded := LoadConfig(t)
+	source, err := schedmq.NewAnalysisJobSource(
+		ctx,
+		schedmq.AnalysisJobSourceConfig{
+			URL:         loaded.Resolved.RabbitMQ.TestURL,
+			QueuePrefix: queuePrefix,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := source.Close(); err != nil {
+			t.Fatalf("close scheduler analysis job source: %v", err)
+		}
+	})
+
+	return source
+}
+
 func LoadConfig(t *testing.T) *config.Loaded {
 	t.Helper()
 	loaded, err := config.Load(config.Options{
@@ -232,6 +264,39 @@ func QueryIntegrationDSN(t *testing.T) string {
 	loaded := LoadConfig(t)
 
 	return PostgresDSN(loaded.Resolved.Postgres, loaded.Resolved.Postgres.Database)
+}
+
+func acquireQueryIntegrationLock(
+	t *testing.T,
+	ctx context.Context,
+	dsn string,
+) *pgx.Conn {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect postgres for integration lock: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(0x676d656f775154)); err != nil {
+		_ = conn.Close(ctx)
+		t.Fatalf("acquire postgres integration lock: %v", err)
+	}
+
+	return conn
+}
+
+func releaseQueryIntegrationLock(t *testing.T, conn *pgx.Conn) {
+	t.Helper()
+	if conn == nil {
+		return
+	}
+	ctx := context.Background()
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", int64(0x676d656f775154)); err != nil {
+		_ = conn.Close(ctx)
+		t.Fatalf("release postgres integration lock: %v", err)
+	}
+	if err := conn.Close(ctx); err != nil {
+		t.Fatalf("close postgres integration lock: %v", err)
+	}
 }
 
 func PostgresDSN(postgres config.ResolvedPostgres, database string) string {
@@ -329,7 +394,15 @@ func dialFilestore(
 	for attempt := 0; attempt < 50; attempt++ {
 		client, err := rpc.NewFilestoreClient(ctx, endpoint)
 		if err == nil {
-			return client
+			_, _, readyErr := client.LookupSourceObject(ctx, contracts.SourceObjectRef{
+				SourceKind: "test",
+				SourceName: "readiness",
+				ExternalID: "readiness",
+			})
+			if readyErr == nil || status.Code(readyErr) != codes.Unavailable {
+				return client
+			}
+			_ = client.Close()
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -349,7 +422,11 @@ func dialQuery(
 	for attempt := 0; attempt < 50; attempt++ {
 		client, err := rpc.NewQueryClient(ctx, endpoint)
 		if err == nil {
-			return client
+			_, readyErr := client.SourceCursors(ctx, contracts.SourceCursorRequest{})
+			if readyErr == nil || status.Code(readyErr) != codes.Unavailable {
+				return client
+			}
+			_ = client.Close()
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -369,7 +446,11 @@ func dialScheduler(
 	for attempt := 0; attempt < 50; attempt++ {
 		client, err := rpc.NewSchedulerClient(ctx, endpoint)
 		if err == nil {
-			return client
+			_, readyErr := client.Status(ctx)
+			if readyErr == nil || status.Code(readyErr) != codes.Unavailable {
+				return client
+			}
+			_ = client.Close()
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

@@ -28,9 +28,11 @@ const (
 	FilestoreService_Open_FullMethodName                   = "/gmeow.v1.FilestoreService/Open"
 	FilestoreService_ReadManifest_FullMethodName           = "/gmeow.v1.FilestoreService/ReadManifest"
 	FilestoreService_GetStructure_FullMethodName           = "/gmeow.v1.FilestoreService/GetStructure"
+	FilestoreService_HasAnalysisAnnotation_FullMethodName  = "/gmeow.v1.FilestoreService/HasAnalysisAnnotation"
 	FilestoreService_WriteAnnotation_FullMethodName        = "/gmeow.v1.FilestoreService/WriteAnnotation"
 	FilestoreService_WriteOverlays_FullMethodName          = "/gmeow.v1.FilestoreService/WriteOverlays"
 	FilestoreService_WriteSourceCursor_FullMethodName      = "/gmeow.v1.FilestoreService/WriteSourceCursor"
+	FilestoreService_ReadSourceCursor_FullMethodName       = "/gmeow.v1.FilestoreService/ReadSourceCursor"
 	FilestoreService_Verify_FullMethodName                 = "/gmeow.v1.FilestoreService/Verify"
 )
 
@@ -47,9 +49,11 @@ type FilestoreServiceClient interface {
 	Open(ctx context.Context, in *OpenRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ObjectChunk], error)
 	ReadManifest(ctx context.Context, in *ReadManifestRequest, opts ...grpc.CallOption) (*ReadManifestResponse, error)
 	GetStructure(ctx context.Context, in *GetStructureRequest, opts ...grpc.CallOption) (*GetStructureResponse, error)
+	HasAnalysisAnnotation(ctx context.Context, in *HasAnalysisAnnotationRequest, opts ...grpc.CallOption) (*HasAnalysisAnnotationResponse, error)
 	WriteAnnotation(ctx context.Context, in *WriteAnnotationRequest, opts ...grpc.CallOption) (*Empty, error)
 	WriteOverlays(ctx context.Context, in *WriteOverlaysRequest, opts ...grpc.CallOption) (*Empty, error)
 	WriteSourceCursor(ctx context.Context, in *WriteSourceCursorRequest, opts ...grpc.CallOption) (*Empty, error)
+	ReadSourceCursor(ctx context.Context, in *ReadSourceCursorRequest, opts ...grpc.CallOption) (*ReadSourceCursorResponse, error)
 	Verify(ctx context.Context, in *VerifyRequest, opts ...grpc.CallOption) (*VerifyResponse, error)
 }
 
@@ -163,6 +167,16 @@ func (c *filestoreServiceClient) GetStructure(ctx context.Context, in *GetStruct
 	return out, nil
 }
 
+func (c *filestoreServiceClient) HasAnalysisAnnotation(ctx context.Context, in *HasAnalysisAnnotationRequest, opts ...grpc.CallOption) (*HasAnalysisAnnotationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HasAnalysisAnnotationResponse)
+	err := c.cc.Invoke(ctx, FilestoreService_HasAnalysisAnnotation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *filestoreServiceClient) WriteAnnotation(ctx context.Context, in *WriteAnnotationRequest, opts ...grpc.CallOption) (*Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Empty)
@@ -193,6 +207,16 @@ func (c *filestoreServiceClient) WriteSourceCursor(ctx context.Context, in *Writ
 	return out, nil
 }
 
+func (c *filestoreServiceClient) ReadSourceCursor(ctx context.Context, in *ReadSourceCursorRequest, opts ...grpc.CallOption) (*ReadSourceCursorResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadSourceCursorResponse)
+	err := c.cc.Invoke(ctx, FilestoreService_ReadSourceCursor_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *filestoreServiceClient) Verify(ctx context.Context, in *VerifyRequest, opts ...grpc.CallOption) (*VerifyResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VerifyResponse)
@@ -216,9 +240,11 @@ type FilestoreServiceServer interface {
 	Open(*OpenRequest, grpc.ServerStreamingServer[ObjectChunk]) error
 	ReadManifest(context.Context, *ReadManifestRequest) (*ReadManifestResponse, error)
 	GetStructure(context.Context, *GetStructureRequest) (*GetStructureResponse, error)
+	HasAnalysisAnnotation(context.Context, *HasAnalysisAnnotationRequest) (*HasAnalysisAnnotationResponse, error)
 	WriteAnnotation(context.Context, *WriteAnnotationRequest) (*Empty, error)
 	WriteOverlays(context.Context, *WriteOverlaysRequest) (*Empty, error)
 	WriteSourceCursor(context.Context, *WriteSourceCursorRequest) (*Empty, error)
+	ReadSourceCursor(context.Context, *ReadSourceCursorRequest) (*ReadSourceCursorResponse, error)
 	Verify(context.Context, *VerifyRequest) (*VerifyResponse, error)
 	mustEmbedUnimplementedFilestoreServiceServer()
 }
@@ -257,6 +283,9 @@ func (UnimplementedFilestoreServiceServer) ReadManifest(context.Context, *ReadMa
 func (UnimplementedFilestoreServiceServer) GetStructure(context.Context, *GetStructureRequest) (*GetStructureResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetStructure not implemented")
 }
+func (UnimplementedFilestoreServiceServer) HasAnalysisAnnotation(context.Context, *HasAnalysisAnnotationRequest) (*HasAnalysisAnnotationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method HasAnalysisAnnotation not implemented")
+}
 func (UnimplementedFilestoreServiceServer) WriteAnnotation(context.Context, *WriteAnnotationRequest) (*Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method WriteAnnotation not implemented")
 }
@@ -265,6 +294,9 @@ func (UnimplementedFilestoreServiceServer) WriteOverlays(context.Context, *Write
 }
 func (UnimplementedFilestoreServiceServer) WriteSourceCursor(context.Context, *WriteSourceCursorRequest) (*Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method WriteSourceCursor not implemented")
+}
+func (UnimplementedFilestoreServiceServer) ReadSourceCursor(context.Context, *ReadSourceCursorRequest) (*ReadSourceCursorResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadSourceCursor not implemented")
 }
 func (UnimplementedFilestoreServiceServer) Verify(context.Context, *VerifyRequest) (*VerifyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Verify not implemented")
@@ -434,6 +466,24 @@ func _FilestoreService_GetStructure_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FilestoreService_HasAnalysisAnnotation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HasAnalysisAnnotationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilestoreServiceServer).HasAnalysisAnnotation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilestoreService_HasAnalysisAnnotation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilestoreServiceServer).HasAnalysisAnnotation(ctx, req.(*HasAnalysisAnnotationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _FilestoreService_WriteAnnotation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(WriteAnnotationRequest)
 	if err := dec(in); err != nil {
@@ -484,6 +534,24 @@ func _FilestoreService_WriteSourceCursor_Handler(srv interface{}, ctx context.Co
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(FilestoreServiceServer).WriteSourceCursor(ctx, req.(*WriteSourceCursorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilestoreService_ReadSourceCursor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadSourceCursorRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilestoreServiceServer).ReadSourceCursor(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilestoreService_ReadSourceCursor_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilestoreServiceServer).ReadSourceCursor(ctx, req.(*ReadSourceCursorRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -542,6 +610,10 @@ var FilestoreService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _FilestoreService_GetStructure_Handler,
 		},
 		{
+			MethodName: "HasAnalysisAnnotation",
+			Handler:    _FilestoreService_HasAnalysisAnnotation_Handler,
+		},
+		{
 			MethodName: "WriteAnnotation",
 			Handler:    _FilestoreService_WriteAnnotation_Handler,
 		},
@@ -552,6 +624,10 @@ var FilestoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "WriteSourceCursor",
 			Handler:    _FilestoreService_WriteSourceCursor_Handler,
+		},
+		{
+			MethodName: "ReadSourceCursor",
+			Handler:    _FilestoreService_ReadSourceCursor_Handler,
 		},
 		{
 			MethodName: "Verify",

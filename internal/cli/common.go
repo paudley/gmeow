@@ -56,6 +56,7 @@ func NewAdminCommand(out io.Writer, in io.Reader) *cobra.Command {
 	root.AddCommand(newFilestoreCommand(out, &configPath))
 	root.AddCommand(newQueryCommand(out, &configPath))
 	root.AddCommand(newSchedulerCommand(out, &configPath))
+	root.AddCommand(newSourceCommand(out, &configPath))
 
 	return root
 }

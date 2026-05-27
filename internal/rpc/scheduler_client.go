@@ -86,6 +86,33 @@ func (client *SchedulerClient) Force(
 	return fromPBSchedulerScanResponse(response), nil
 }
 
+func (client *SchedulerClient) NotifyObjectsChanged(
+	ctx context.Context,
+	request contracts.ObjectChangeRequest,
+) (contracts.SchedulerScanResponse, error) {
+	digests := make([]string, 0, len(request.ObjectDigests))
+	for _, digest := range request.ObjectDigests {
+		digests = append(digests, string(digest))
+	}
+	reason := request.Reason
+	if request.ProjectionOnly && reason == "" {
+		reason = "projection_refresh"
+	}
+
+	response, err := client.client.NotifyObjectsChanged(ctx, &pb.NotifyObjectsChangedRequest{
+		Digests:       digests,
+		PriorityClass: request.PriorityClass,
+		RequestedBy:   request.RequestedBy,
+		Reason:        reason,
+		TraceId:       request.TraceID,
+	})
+	if err != nil {
+		return contracts.SchedulerScanResponse{}, err
+	}
+
+	return fromPBSchedulerScanResponse(response), nil
+}
+
 func (client *SchedulerClient) Requeue(
 	ctx context.Context,
 	request contracts.RequeueRequest,

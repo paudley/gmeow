@@ -47,6 +47,7 @@ func (*LocalFilesystemAdapter) Capabilities() []string {
 
 func (adapter *LocalFilesystemAdapter) Pull(
 	ctx context.Context,
+	_ IngestService,
 	request PullRequest,
 ) ([]IngestObject, contracts.SourceCursor, error) {
 	limit := request.Limit

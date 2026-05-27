@@ -15,6 +15,7 @@ import (
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/rpc"
+	schedmq "blackcat.ca/gmeow/internal/scheduler/rabbitmq"
 )
 
 func NewWorkerCommand(out io.Writer) *cobra.Command {
@@ -42,11 +43,12 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 				return err
 			}
 
-			source, err := analysis.NewRabbitMQSource(
+			source, err := schedmq.NewAnalysisJobSource(
 				command.Context(),
-				analysis.RabbitMQSourceConfig{
+				schedmq.AnalysisJobSourceConfig{
 					URL:         loaded.Resolved.RabbitMQ.URL,
 					QueuePrefix: loaded.Resolved.Scheduler.QueuePrefix,
+					Prefetch:    analysisWorkerConcurrency(loaded.Config.Analysis),
 				},
 			)
 			if err != nil {
@@ -72,6 +74,7 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 				source,
 				store,
 				registry,
+				analysis.WithConcurrency(analysisWorkerConcurrency(loaded.Config.Analysis)),
 			)
 			if err != nil {
 				return err
@@ -84,6 +87,14 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 			return runtime.Run(command.Context())
 		},
 	}
+}
+
+func analysisWorkerConcurrency(config config.AnalysisConfig) int {
+	if config.WorkerConcurrency > 0 {
+		return config.WorkerConcurrency
+	}
+
+	return 4
 }
 
 func workerRegistryFromConfig(
@@ -144,6 +155,12 @@ func goAnalyzerFromConfig(
 		return analysis.NewEmbeddingAnalyzer(analysis.EmbeddingConfig{
 			Endpoint: analysisConfig.Embeddings.Endpoint,
 			Model:    analysisConfig.Embeddings.Model,
+		})
+	}
+	if spec.Name == analysis.SummaryName {
+		return analysis.NewSummaryAnalyzer(analysis.SummaryConfig{
+			Endpoint: analysisConfig.Summary.Endpoint,
+			Model:    analysisConfig.Summary.Model,
 		})
 	}
 

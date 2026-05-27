@@ -89,7 +89,7 @@ func TestWorkerRegistrySupportsConfiguredExternalAnalyzer(t *testing.T) {
 	registry, err := workerRegistryFromConfig(config.AnalysisConfig{
 		Analyzers: []config.AnalyzerConfig{{
 			Name:       "ner.spacy",
-			Version:    "python-current",
+			Version:    "python-email-v1",
 			WorkerKind: "python",
 			Command:    "gmeow-intel",
 			Args:       []string{"analyze", "ner.spacy"},
@@ -101,7 +101,7 @@ func TestWorkerRegistrySupportsConfiguredExternalAnalyzer(t *testing.T) {
 	}
 	if _, ok := registry.Analyzer(analyzerSpecFromConfig(config.AnalyzerConfig{
 		Name:       "ner.spacy",
-		Version:    "python-current",
+		Version:    "python-email-v1",
 		WorkerKind: "python",
 	})); !ok {
 		t.Fatal("expected configured external analyzer to be registered")
@@ -112,7 +112,7 @@ func TestWorkerRegistryRejectsPythonAnalyzerWithoutExplicitAdapter(t *testing.T)
 	_, err := workerRegistryFromConfig(config.AnalysisConfig{
 		Analyzers: []config.AnalyzerConfig{{
 			Name:       "ner.spacy",
-			Version:    "python-current",
+			Version:    "python-email-v1",
 			WorkerKind: "python",
 		}},
 	})
@@ -130,16 +130,20 @@ func TestWorkerRegistryCoversPhaseFourAnalyzerSet(t *testing.T) {
 			Endpoint: "http://127.0.0.1:8090/v1/embeddings",
 			Model:    "test-embed",
 		},
+		Summary: config.SummaryConfig{
+			Endpoint: "http://127.0.0.1:8091/v1/chat/completions",
+			Model:    "test-summary",
+		},
 		Analyzers: []config.AnalyzerConfig{
-			{Name: "text.extract", Version: "phase04", WorkerKind: "go"},
-			{Name: "rfc822.headers", Version: "phase04", WorkerKind: "go"},
-			{Name: "metadata.extract", Version: "phase04", WorkerKind: "go"},
-			{Name: "graph.facts", Version: "phase04", WorkerKind: "go"},
-			{Name: "embedding.endpoint", Version: "phase04", WorkerKind: "go"},
-			{Name: "summary.centroid", Version: "phase04", WorkerKind: "go"},
+			{Name: "text.extract", Version: "phase04-email-v2", WorkerKind: "go"},
+			{Name: "rfc822.headers", Version: "phase04-email-v2", WorkerKind: "go"},
+			{Name: "metadata.extract", Version: "phase04-email-v2", WorkerKind: "go"},
+			{Name: "graph.facts", Version: "phase04-email-v2", WorkerKind: "go"},
+			{Name: "embedding.endpoint", Version: "phase04-email-v2", WorkerKind: "go"},
+			{Name: "summary.model", Version: "phase04-email-v2", WorkerKind: "go"},
 			{
 				Name:       "ner.spacy",
-				Version:    "python-current",
+				Version:    "python-email-v1",
 				WorkerKind: "python",
 				Command:    "gmeow-intel",
 				Args:       []string{"analyze", "ner.spacy"},
@@ -147,7 +151,7 @@ func TestWorkerRegistryCoversPhaseFourAnalyzerSet(t *testing.T) {
 			},
 			{
 				Name:       "categories.sklearn",
-				Version:    "python-current",
+				Version:    "python-email-v1",
 				WorkerKind: "python",
 				Command:    "gmeow-intel",
 				Args:       []string{"analyze", "categories.sklearn"},
@@ -159,14 +163,14 @@ func TestWorkerRegistryCoversPhaseFourAnalyzerSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, configured := range []config.AnalyzerConfig{
-		{Name: "text.extract", Version: "phase04", WorkerKind: "go"},
-		{Name: "rfc822.headers", Version: "phase04", WorkerKind: "go"},
-		{Name: "metadata.extract", Version: "phase04", WorkerKind: "go"},
-		{Name: "graph.facts", Version: "phase04", WorkerKind: "go"},
-		{Name: "embedding.endpoint", Version: "phase04", WorkerKind: "go"},
-		{Name: "summary.centroid", Version: "phase04", WorkerKind: "go"},
-		{Name: "ner.spacy", Version: "python-current", WorkerKind: "python"},
-		{Name: "categories.sklearn", Version: "python-current", WorkerKind: "python"},
+		{Name: "text.extract", Version: "phase04-email-v2", WorkerKind: "go"},
+		{Name: "rfc822.headers", Version: "phase04-email-v2", WorkerKind: "go"},
+		{Name: "metadata.extract", Version: "phase04-email-v2", WorkerKind: "go"},
+		{Name: "graph.facts", Version: "phase04-email-v2", WorkerKind: "go"},
+		{Name: "embedding.endpoint", Version: "phase04-email-v2", WorkerKind: "go"},
+		{Name: "summary.model", Version: "phase04-email-v2", WorkerKind: "go"},
+		{Name: "ner.spacy", Version: "python-email-v1", WorkerKind: "python"},
+		{Name: "categories.sklearn", Version: "python-email-v1", WorkerKind: "python"},
 	} {
 		if _, ok := registry.Analyzer(analyzerSpecFromConfig(configured)); !ok {
 			t.Fatalf("expected analyzer to be registered: %#v", configured)
@@ -178,7 +182,7 @@ func TestWorkerRegistryRequiresEmbeddingEndpointConfig(t *testing.T) {
 	_, err := workerRegistryFromConfig(config.AnalysisConfig{
 		Analyzers: []config.AnalyzerConfig{{
 			Name:       "embedding.endpoint",
-			Version:    "phase04",
+			Version:    "phase04-email-v2",
 			WorkerKind: "go",
 		}},
 	})
@@ -186,6 +190,22 @@ func TestWorkerRegistryRequiresEmbeddingEndpointConfig(t *testing.T) {
 		t.Fatal("expected missing embedding endpoint config to fail")
 	}
 	if !strings.Contains(err.Error(), "embedding endpoint is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWorkerRegistryRequiresSummaryEndpointConfig(t *testing.T) {
+	_, err := workerRegistryFromConfig(config.AnalysisConfig{
+		Analyzers: []config.AnalyzerConfig{{
+			Name:       "summary.model",
+			Version:    "phase04-email-v2",
+			WorkerKind: "go",
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected missing summary endpoint config to fail")
+	}
+	if !strings.Contains(err.Error(), "summary endpoint is required") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

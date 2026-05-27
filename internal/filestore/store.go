@@ -314,6 +314,39 @@ func (store *FilesystemStore) GetStructure(
 	return structure, nil
 }
 
+func (store *FilesystemStore) HasAnalysisAnnotation(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	analyzerName string,
+	analyzerVersion string,
+) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := validateObjectDigest(digest); err != nil {
+		return false, err
+	}
+
+	name, err := analysisAnnotationFilename(analyzerName)
+	if err != nil {
+		return false, err
+	}
+
+	annotation, err := store.readAnnotation(store.objectPath(digest, name))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	return annotation.Kind == "analysis" &&
+			annotation.AnalyzerName == analyzerName &&
+			annotation.AnalyzerVer == analyzerVersion &&
+			analysisAnnotationSatisfied(annotation),
+		nil
+}
+
 func (store *FilesystemStore) WriteAnnotation(
 	ctx context.Context,
 	annotation contracts.Annotation,
@@ -436,6 +469,37 @@ func (store *FilesystemStore) WriteSourceCursor(
 	}
 
 	return store.writeCompressedJSON(store.sourceCursorPath(cursor), cursor)
+}
+
+func (store *FilesystemStore) ReadSourceCursor(
+	ctx context.Context,
+	ref contracts.SourceCursorRef,
+) (contracts.SourceCursor, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return contracts.SourceCursor{}, false, err
+	}
+	if strings.TrimSpace(ref.SourceKind) == "" {
+		return contracts.SourceCursor{}, false, errors.New("source cursor kind is required")
+	}
+	if strings.TrimSpace(ref.SourceName) == "" {
+		return contracts.SourceCursor{}, false, errors.New("source cursor name is required")
+	}
+
+	cursor := contracts.SourceCursor{
+		SourceKind: ref.SourceKind,
+		SourceName: ref.SourceName,
+	}
+	path := store.sourceCursorPath(cursor)
+	var stored contracts.SourceCursor
+	if err := store.readCompressedJSON(path, &stored); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return contracts.SourceCursor{}, false, nil
+		}
+
+		return contracts.SourceCursor{}, false, err
+	}
+
+	return stored, true, nil
 }
 
 func (store *FilesystemStore) refreshParentsForSubobject(
@@ -1486,6 +1550,17 @@ func mergeAnnotation(
 	return merged
 }
 
+func analysisAnnotationSatisfied(annotation contracts.Annotation) bool {
+	status, _ := annotation.Data["status"].(string)
+
+	switch status {
+	case "complete", "skipped":
+		return true
+	default:
+		return false
+	}
+}
+
 func mergeMaps(existing, incoming map[string]any) map[string]any {
 	merged := map[string]any{}
 	maps.Copy(merged, existing)
@@ -1588,12 +1663,21 @@ func annotationFilename(annotation contracts.Annotation) (string, error) {
 	}
 
 	if trimmed == "analysis" && strings.TrimSpace(annotation.AnalyzerName) != "" {
-		sum := sha256.Sum256([]byte(annotation.AnalyzerName))
-
-		return "analysis-" + hex.EncodeToString(sum[:]) + ".json.zst", nil
+		return analysisAnnotationFilename(annotation.AnalyzerName)
 	}
 
 	return trimmed + ".json.zst", nil
+}
+
+func analysisAnnotationFilename(analyzerName string) (string, error) {
+	trimmed := strings.TrimSpace(analyzerName)
+	if trimmed == "" {
+		return "", errors.New("analysis analyzer name is required")
+	}
+
+	sum := sha256.Sum256([]byte(trimmed))
+
+	return "analysis-" + hex.EncodeToString(sum[:]) + ".json.zst", nil
 }
 
 func isReservedAnnotationKind(kind string) bool {

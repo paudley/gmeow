@@ -473,6 +473,69 @@ func TestWriteAnalysisAnnotationPreservesPerAnalyzerOutputs(t *testing.T) {
 	}
 }
 
+func TestHasAnalysisAnnotationRequiresMatchingAnalyzerVersion(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("annotated"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := store.HasAnalysisAnnotation(ctx, digest, "summary.extractive", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatal("unexpected annotation before write")
+	}
+
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest: digest,
+		Kind:         "analysis",
+		AnalyzerName: "summary.extractive",
+		AnalyzerVer:  "v1",
+		Data:         map[string]any{"status": "complete"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err = store.HasAnalysisAnnotation(ctx, digest, "summary.extractive", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected matching annotation to be found")
+	}
+
+	found, err = store.HasAnalysisAnnotation(ctx, digest, "summary.extractive", "v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatal("stale analyzer version must not be treated as complete")
+	}
+
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest: digest,
+		Kind:         "analysis",
+		AnalyzerName: "summary.extractive",
+		AnalyzerVer:  "v3",
+		Data:         map[string]any{"status": "failed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	found, err = store.HasAnalysisAnnotation(ctx, digest, "summary.extractive", "v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatal("failed annotation must not be treated as complete")
+	}
+}
+
 func TestAnalysisAnnotationRefreshesCompoundParent(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
@@ -637,6 +700,17 @@ func TestWalkSourceCursorsReadsSourceState(t *testing.T) {
 		cursors[0].SourceName != "primary" ||
 		cursors[0].Cursor["history_id"] != "42" {
 		t.Fatalf("unexpected source cursors: %#v", cursors)
+	}
+
+	cursor, found, err := store.ReadSourceCursor(ctx, contracts.SourceCursorRef{
+		SourceKind: "gmail",
+		SourceName: "primary",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || cursor.Cursor["history_id"] != "42" {
+		t.Fatalf("expected direct source cursor read, found=%t cursor=%#v", found, cursor)
 	}
 }
 

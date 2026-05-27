@@ -72,6 +72,9 @@ not internal Gmeow behavior.
 - ANALYSIS tests use the real worker runtime and real FILESTORE gRPC service.
 - SOURCE tests use real SOURCE adapters and the real FILESTORE gRPC service;
   only the remote provider API may be replaced.
+- Gmail backfill tests must use the real Gmail SOURCE adapter and real FILESTORE
+  gRPC service. The Google Gmail API may be replaced by a protocol-faithful fake
+  that supports pagination, message hydrate, and history cursor expiry.
 - INTERFACE tests use real application services underneath protocol handlers,
   and those services must cross component boundaries through gRPC clients.
 - CLI tests execute real command paths and validate real side effects.

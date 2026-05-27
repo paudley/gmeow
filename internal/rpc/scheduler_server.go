@@ -136,26 +136,22 @@ func (server *SchedulerServer) NotifyObjectsChanged(
 	ctx context.Context,
 	request *pb.NotifyObjectsChangedRequest,
 ) (*pb.SchedulerScanResponse, error) {
-	response := contracts.SchedulerScanResponse{
-		SchemaVersion: contracts.SchemaVersionPhase00,
+	digests := make([]contracts.ObjectDigest, 0, len(request.GetDigests()))
+	for _, digest := range request.GetDigests() {
+		digests = append(digests, contracts.ObjectDigest(digest))
 	}
 
-	for _, digest := range request.GetDigests() {
-		scanned, err := server.service.Force(
-			ctx,
-			contracts.ObjectDigest(digest),
-			nil,
-			request.GetRequestedBy(),
-			request.GetTraceId(),
-		)
-		response.Scanned += scanned.Scanned
-		response.Enqueued += scanned.Enqueued
-		response.Skipped += scanned.Skipped
-
-		response.Failed += scanned.Failed
-		if err != nil {
-			response.Failed++
-		}
+	response, err := server.service.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
+		SchemaVersion:  contracts.SchemaVersionPhase00,
+		ObjectDigests:  digests,
+		PriorityClass:  request.GetPriorityClass(),
+		RequestedBy:    request.GetRequestedBy(),
+		Reason:         request.GetReason(),
+		TraceID:        request.GetTraceId(),
+		ProjectionOnly: request.GetReason() == "projection_refresh",
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return toPBSchedulerScanResponse(response), nil

@@ -91,6 +91,12 @@ CREATE TABLE IF NOT EXISTS query_object_embeddings (
   object_digest TEXT NOT NULL REFERENCES query_objects(object_digest) ON DELETE CASCADE,
   model TEXT NOT NULL,
   embedding_object_digest TEXT NOT NULL,
+  embedding_id TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT '',
+  source_digest TEXT NOT NULL DEFAULT '',
+  ordinal INTEGER NOT NULL DEFAULT 0,
+  text_preview TEXT NOT NULL DEFAULT '',
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   dimensions INTEGER NOT NULL DEFAULT 0,
   embedding vector,
   PRIMARY KEY (object_digest, model, embedding_object_digest)

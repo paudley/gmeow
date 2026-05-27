@@ -32,3 +32,17 @@ func TestServiceCommandIncludesAppServiceWorkflows(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminCommandIncludesSourceBackfill(t *testing.T) {
+	var out bytes.Buffer
+	command := NewAdminCommand(&out, strings.NewReader(""))
+	command.SetOut(&out)
+	command.SetArgs([]string{"source", "--help"})
+
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "backfill") {
+		t.Fatalf("help output missing source backfill:\n%s", out.String())
+	}
+}

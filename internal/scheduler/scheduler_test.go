@@ -9,11 +9,28 @@ import (
 	"testing"
 	"time"
 
+	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
 	"blackcat.ca/gmeow/internal/rpc"
 	"blackcat.ca/gmeow/internal/scheduler"
 	"blackcat.ca/gmeow/internal/testsupport"
 )
+
+func TestSpecsFromConfigAppliesKnownAnalyzerConstraints(t *testing.T) {
+	specs := scheduler.SpecsFromConfig([]config.AnalyzerConfig{{
+		Name:    "rfc822.headers",
+		Version: "phase04-email-v2",
+	}})
+	if len(specs) != 1 {
+		t.Fatalf("expected one spec, got %#v", specs)
+	}
+	if len(specs[0].MediaTypes) != 2 ||
+		specs[0].MediaTypes[0] != "message/rfc822" ||
+		specs[0].MediaTypes[1] != "text/rfc822-headers" {
+		t.Fatalf("expected rfc822 media constraints, got %#v", specs[0])
+	}
+}
 
 func TestScanEnqueuesMissingWorkIdempotently(t *testing.T) {
 	ctx := context.Background()
@@ -102,7 +119,186 @@ func TestScanDetectsStaleAndFailedOutputs(t *testing.T) {
 	}
 }
 
-func TestInteractiveScanAddsHigherPriorityWorkForScheduledBackgroundWork(t *testing.T) {
+func TestScanTreatsPreCutoverAnalyzerVersionsAsStale(t *testing.T) {
+	ctx := context.Background()
+	specs := []contracts.AnalyzerSpec{
+		{Name: "text.extract", Version: "phase04-email-v2"},
+		{Name: "embedding.endpoint", Version: "phase04-email-v2"},
+		{Name: "summary.model", Version: "phase04-email-v2"},
+		{Name: "ner.spacy", Version: "python-email-v1"},
+		{Name: "categories.sklearn", Version: "python-email-v1"},
+	}
+	filestoreService, schedulerService := startScheduler(t, ctx, specs)
+	digest := putTextObject(t, ctx, filestoreService, "cutover")
+	for _, stale := range []contracts.Annotation{
+		staleAnalysisAnnotation(digest, "text.extract", "phase04"),
+		staleAnalysisAnnotation(digest, "embedding.endpoint", "phase04"),
+		staleAnalysisAnnotation(digest, "summary.model", "phase04"),
+		staleAnalysisAnnotation(digest, "ner.spacy", "python-current"),
+		staleAnalysisAnnotation(digest, "categories.sklearn", "python-current"),
+	} {
+		if err := filestoreService.Client.WriteAnnotation(ctx, stale); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	response, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Enqueued != len(specs) || status.Pending != len(specs) {
+		t.Fatalf("expected all pre-cutover outputs to be rescheduled, response=%#v status=%#v",
+			response,
+			status,
+		)
+	}
+}
+
+func TestNotifyObjectsChangedProjectionOnlyDoesNotEnqueueAnalyzers(t *testing.T) {
+	ctx := context.Background()
+	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
+		Name:       "text.extract",
+		Version:    "1",
+		MediaTypes: []string{"text/plain"},
+	}})
+	digest := putTextObject(t, ctx, filestoreService, "projection only")
+
+	response, err := schedulerService.Client.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
+		SchemaVersion:  contracts.SchemaVersionPhase00,
+		ObjectDigests:  []contracts.ObjectDigest{digest},
+		RequestedBy:    "filestore",
+		Reason:         "projection_refresh",
+		ProjectionOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Enqueued != 0 || status.Pending != 0 {
+		t.Fatalf("projection refresh must not enqueue analyzers, response=%#v status=%#v",
+			response,
+			status,
+		)
+	}
+}
+
+func TestProjectionNotificationMarksSatisfiedAnalysisComplete(t *testing.T) {
+	ctx := context.Background()
+	spec := contracts.AnalyzerSpec{
+		Name:       "text.extract",
+		Version:    "1",
+		MediaTypes: []string{"text/plain"},
+	}
+	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{spec})
+	digest := putTextObject(t, ctx, filestoreService, "projection complete")
+
+	first, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Enqueued != 1 {
+		t.Fatalf("expected initial work, got %#v", first)
+	}
+	if err := filestoreService.Client.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest:  digest,
+		Kind:          "analysis",
+		AnalyzerName:  spec.Name,
+		AnalyzerVer:   spec.Version,
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Data:          map[string]any{"status": "complete"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := schedulerService.Client.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
+		SchemaVersion:  contracts.SchemaVersionPhase00,
+		ObjectDigests:  []contracts.ObjectDigest{digest},
+		RequestedBy:    "filestore",
+		Reason:         "projection_refresh",
+		ProjectionOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Enqueued != 0 || response.Failed != 0 {
+		t.Fatalf("projection completion must not enqueue analyzers: %#v", response)
+	}
+
+	foundCompleteMarker := false
+	if err := filestoreService.Store.WalkProjection(ctx, func(object filestore.ProjectionObject) error {
+		if object.Manifest.ObjectDigest != digest {
+			return nil
+		}
+		for _, annotation := range object.Annotations {
+			if annotation.Kind != "scheduler" {
+				continue
+			}
+			markers, _ := annotation.Data["scheduled_jobs"].(map[string]any)
+			for _, value := range markers {
+				marker, _ := value.(map[string]any)
+				if marker["analyzer_name"] == spec.Name && marker["status"] == "complete" {
+					foundCompleteMarker = true
+				}
+			}
+		}
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !foundCompleteMarker {
+		t.Fatal("expected scheduler ledger marker to be complete")
+	}
+}
+
+func TestNotifyObjectsChangedSchedulesOnlyMissingAnalyzerWork(t *testing.T) {
+	ctx := context.Background()
+	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
+		Name:       "text.extract",
+		Version:    "1",
+		MediaTypes: []string{"text/plain"},
+	}})
+	digest := putTextObject(t, ctx, filestoreService, "object changed")
+
+	first, err := schedulerService.Client.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigests: []contracts.ObjectDigest{digest},
+		RequestedBy:   "filestore",
+		Reason:        "object_changed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := schedulerService.Client.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigests: []contracts.ObjectDigest{digest},
+		RequestedBy:   "filestore",
+		Reason:        "object_changed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Enqueued != 1 || second.Enqueued != 0 || status.Pending != 1 {
+		t.Fatalf("object change notification was not analyzer-idempotent: first=%#v second=%#v status=%#v",
+			first,
+			second,
+			status,
+		)
+	}
+}
+
+func TestInteractiveScanDoesNotDuplicateScheduledBackgroundWork(t *testing.T) {
 	ctx := context.Background()
 	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
 		Name:       "text.extract",
@@ -129,9 +325,9 @@ func TestInteractiveScanAddsHigherPriorityWorkForScheduledBackgroundWork(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if background.Enqueued != 1 || interactive.Enqueued != 1 || status.Pending != 2 {
+	if background.Enqueued != 1 || interactive.Enqueued != 0 || status.Pending != 1 {
 		t.Fatalf(
-			"expected background work plus higher-priority interactive work, background=%#v interactive=%#v status=%#v",
+			"expected interactive scan to reuse scheduled work, background=%#v interactive=%#v status=%#v",
 			background,
 			interactive,
 			status,
@@ -292,4 +488,20 @@ func putTextObject(
 	}
 
 	return digest
+}
+
+func staleAnalysisAnnotation(
+	digest contracts.ObjectDigest,
+	name string,
+	version string,
+) contracts.Annotation {
+	return contracts.Annotation{
+		ObjectDigest:  digest,
+		Kind:          "analysis",
+		AnalyzerName:  name,
+		AnalyzerVer:   version,
+		GeneratedAt:   time.Now().UTC(),
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Data:          map[string]any{"status": "complete"},
+	}
 }
