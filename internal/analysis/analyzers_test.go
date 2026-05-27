@@ -117,16 +117,18 @@ func TestEmbeddingUsesCompoundMailParts(t *testing.T) {
 	store := filestore.NewFilesystemStore(t.TempDir())
 	digest := putCompoundMailObject(t, ctx, store)
 	endpointInputs := []string{}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		var payload struct {
-			Input string `json:"input"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		endpointInputs = append(endpointInputs, payload.Input)
-		_, _ = writer.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			var payload struct {
+				Input string `json:"input"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			endpointInputs = append(endpointInputs, payload.Input)
+			_, _ = writer.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+		}),
+	)
 	t.Cleanup(server.Close)
 
 	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
@@ -150,7 +152,10 @@ func TestEmbeddingUsesCompoundMailParts(t *testing.T) {
 		t.Fatalf("expected multiple embedding annotation rows, got %#v", annotation.Data)
 	}
 	if _, exists := annotation.Data["embedding"]; exists {
-		t.Fatalf("embedding annotation must use projected embeddings list, got %#v", annotation.Data)
+		t.Fatalf(
+			"embedding annotation must use projected embeddings list, got %#v",
+			annotation.Data,
+		)
 	}
 	if !containsInput(endpointInputs, "Pipeline body mentions Athena") {
 		t.Fatalf("expected embedding input from body part, got %#v", endpointInputs)
@@ -186,7 +191,8 @@ func TestEmbeddingSkipsEmptyText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if annotation.Data["status"] != "skipped" || annotation.Data["reason"] != "empty_text" {
+	if annotation.Data["status"] != "skipped" ||
+		annotation.Data["reason"] != "empty_text" {
 		t.Fatalf("expected skipped empty text annotation, got %#v", annotation.Data)
 	}
 }
@@ -203,16 +209,18 @@ func TestEmbeddingTruncatesLongInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpointInputs := []string{}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		var payload struct {
-			Input string `json:"input"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		endpointInputs = append(endpointInputs, payload.Input)
-		_, _ = writer.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			var payload struct {
+				Input string `json:"input"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			endpointInputs = append(endpointInputs, payload.Input)
+			_, _ = writer.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+		}),
+	)
 	t.Cleanup(server.Close)
 	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
 		Endpoint: server.URL,
@@ -241,18 +249,24 @@ func TestSummaryModelUsesCompoundMailParts(t *testing.T) {
 	store := filestore.NewFilesystemStore(t.TempDir())
 	digest := putCompoundMailObject(t, ctx, store)
 	var endpointInput string
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		var payload struct {
-			Messages []struct {
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		endpointInput = payload.Messages[len(payload.Messages)-1].Content
-		_, _ = writer.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"The email verifies production pipeline analyzer coverage.\",\"bullets\":[\"Mentions Athena\",\"Requests full coverage\"]}"}}]}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			var payload struct {
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			endpointInput = payload.Messages[len(payload.Messages)-1].Content
+			_, _ = writer.Write(
+				[]byte(
+					`{"choices":[{"message":{"content":"{\"summary\":\"The email verifies production pipeline analyzer coverage.\",\"bullets\":[\"Mentions Athena\",\"Requests full coverage\"]}"}}]}`,
+				),
+			)
+		}),
+	)
 	t.Cleanup(server.Close)
 
 	analyzer, err := NewSummaryAnalyzer(SummaryConfig{
@@ -302,7 +316,8 @@ func TestSummarySkipsEmptyText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if annotation.Data["status"] != "skipped" || annotation.Data["reason"] != "empty_text" {
+	if annotation.Data["status"] != "skipped" ||
+		annotation.Data["reason"] != "empty_text" {
 		t.Fatalf("expected skipped empty text annotation, got %#v", annotation.Data)
 	}
 }
@@ -319,20 +334,22 @@ func TestSummaryTruncatesLongInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	var endpointInput string
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		var payload struct {
-			Messages []struct {
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		endpointInput = payload.Messages[len(payload.Messages)-1].Content
-		_, _ = writer.Write([]byte(
-			`{"choices":[{"message":{"content":"{\"summary\":\"short\",\"bullets\":[\"one\"]}"}}]}`,
-		))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			var payload struct {
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			endpointInput = payload.Messages[len(payload.Messages)-1].Content
+			_, _ = writer.Write([]byte(
+				`{"choices":[{"message":{"content":"{\"summary\":\"short\",\"bullets\":[\"one\"]}"}}]}`,
+			))
+		}),
+	)
 	t.Cleanup(server.Close)
 	analyzer, err := NewSummaryAnalyzer(SummaryConfig{
 		Endpoint: server.URL,
@@ -359,9 +376,15 @@ func TestSummaryModelRejectsNonJSONEcho(t *testing.T) {
 	ctx := context.Background()
 	store := filestore.NewFilesystemStore(t.TempDir())
 	digest := putCompoundMailObject(t, ctx, store)
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = writer.Write([]byte(`{"choices":[{"message":{"content":"Subject: Flight booking confirmed.\nBody: Your flight to Edmonton departs Monday."}}]}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write(
+				[]byte(
+					`{"choices":[{"message":{"content":"Subject: Flight booking confirmed.\nBody: Your flight to Edmonton departs Monday."}}]}`,
+				),
+			)
+		}),
+	)
 	t.Cleanup(server.Close)
 
 	analyzer, err := NewSummaryAnalyzer(SummaryConfig{
@@ -382,9 +405,15 @@ func TestSummaryModelAcceptsFencedJSON(t *testing.T) {
 	ctx := context.Background()
 	store := filestore.NewFilesystemStore(t.TempDir())
 	digest := putCompoundMailObject(t, ctx, store)
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = writer.Write([]byte("{\"choices\":[{\"message\":{\"content\":\"```json\\n{\\\"summary\\\":\\\"The email verifies analyzer coverage.\\\",\\\"bullets\\\":[\\\"Coverage requested\\\"]}\\n```\"}}]}"))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write(
+				[]byte(
+					"{\"choices\":[{\"message\":{\"content\":\"```json\\n{\\\"summary\\\":\\\"The email verifies analyzer coverage.\\\",\\\"bullets\\\":[\\\"Coverage requested\\\"]}\\n```\"}}]}",
+				),
+			)
+		}),
+	)
 	t.Cleanup(server.Close)
 
 	analyzer, err := NewSummaryAnalyzer(SummaryConfig{
@@ -410,18 +439,25 @@ func TestSummaryModelSerializesEndpointCalls(t *testing.T) {
 	digest := putCompoundMailObject(t, ctx, store)
 	var active int32
 	var maxActive int32
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		current := atomic.AddInt32(&active, 1)
-		defer atomic.AddInt32(&active, -1)
-		for {
-			observed := atomic.LoadInt32(&maxActive)
-			if current <= observed || atomic.CompareAndSwapInt32(&maxActive, observed, current) {
-				break
+	server := httptest.NewServer(
+		http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			current := atomic.AddInt32(&active, 1)
+			defer atomic.AddInt32(&active, -1)
+			for {
+				observed := atomic.LoadInt32(&maxActive)
+				if current <= observed ||
+					atomic.CompareAndSwapInt32(&maxActive, observed, current) {
+					break
+				}
 			}
-		}
-		time.Sleep(25 * time.Millisecond)
-		_, _ = writer.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"The email verifies analyzer coverage.\",\"bullets\":[\"Coverage requested\"]}"}}]}`))
-	}))
+			time.Sleep(25 * time.Millisecond)
+			_, _ = writer.Write(
+				[]byte(
+					`{"choices":[{"message":{"content":"{\"summary\":\"The email verifies analyzer coverage.\",\"bullets\":[\"Coverage requested\"]}"}}]}`,
+				),
+			)
+		}),
+	)
 	t.Cleanup(server.Close)
 
 	analyzer, err := NewSummaryAnalyzer(SummaryConfig{
@@ -460,18 +496,21 @@ func TestEmbeddingSerializesEndpointCalls(t *testing.T) {
 	digest := putCompoundMailObject(t, ctx, store)
 	var active int32
 	var maxActive int32
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		current := atomic.AddInt32(&active, 1)
-		defer atomic.AddInt32(&active, -1)
-		for {
-			observed := atomic.LoadInt32(&maxActive)
-			if current <= observed || atomic.CompareAndSwapInt32(&maxActive, observed, current) {
-				break
+	server := httptest.NewServer(
+		http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			current := atomic.AddInt32(&active, 1)
+			defer atomic.AddInt32(&active, -1)
+			for {
+				observed := atomic.LoadInt32(&maxActive)
+				if current <= observed ||
+					atomic.CompareAndSwapInt32(&maxActive, observed, current) {
+					break
+				}
 			}
-		}
-		time.Sleep(25 * time.Millisecond)
-		_, _ = writer.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
-	}))
+			time.Sleep(25 * time.Millisecond)
+			_, _ = writer.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+		}),
+	)
 	t.Cleanup(server.Close)
 
 	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
@@ -500,7 +539,10 @@ func TestEmbeddingSerializesEndpointCalls(t *testing.T) {
 		}
 	}
 	if maxActive != 1 {
-		t.Fatalf("expected embedding endpoint calls to be serialized, max active=%d", maxActive)
+		t.Fatalf(
+			"expected embedding endpoint calls to be serialized, max active=%d",
+			maxActive,
+		)
 	}
 }
 
@@ -527,7 +569,9 @@ func putCompoundMailObject(
 	}
 
 	bodyDigest, err := store.Put(ctx, filestore.PutRequest{
-		Reader:       strings.NewReader("Pipeline body mentions Athena and full analyzer coverage."),
+		Reader: strings.NewReader(
+			"Pipeline body mentions Athena and full analyzer coverage.",
+		),
 		MediaType:    "text/plain",
 		ContentRoles: []string{"email_body"},
 		Facets:       []contracts.Facet{{Kind: "email_part"}},

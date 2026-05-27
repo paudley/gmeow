@@ -46,7 +46,9 @@ func NewAnalysisJobSource(
 
 	if config.QueuePrefix != defaultQueuePrefix &&
 		!strings.HasPrefix(config.QueuePrefix, testQueuePrefix) {
-		return nil, errors.New("scheduler rabbitmq queue prefix must be gmeow. or gmeow.test.")
+		return nil, errors.New(
+			"scheduler rabbitmq queue prefix must be gmeow. or gmeow.test.",
+		)
 	}
 
 	if err := ctx.Err(); err != nil {

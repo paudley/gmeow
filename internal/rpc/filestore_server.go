@@ -173,7 +173,11 @@ func (server *FilestoreServer) PutObject(
 		return put.err
 	}
 
-	if err := server.notifyObjectChanged(stream.Context(), put.digest, "object_changed"); err != nil {
+	if err := server.notifyObjectChanged(
+		stream.Context(),
+		put.digest,
+		"object_changed",
+	); err != nil {
 		return err
 	}
 

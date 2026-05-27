@@ -437,7 +437,11 @@ func acquireQueryIntegrationLock(
 	if err != nil {
 		t.Fatalf("connect postgres for integration lock: %v", err)
 	}
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(0x676d656f775154)); err != nil {
+	if _, err := conn.Exec(
+		ctx,
+		"SELECT pg_advisory_lock($1)",
+		int64(0x676d656f775154),
+	); err != nil {
 		_ = conn.Close(ctx)
 		t.Fatalf("acquire postgres integration lock: %v", err)
 	}
@@ -451,7 +455,11 @@ func releaseQueryIntegrationLock(t *testing.T, conn *pgx.Conn) {
 		return
 	}
 	ctx := context.Background()
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", int64(0x676d656f775154)); err != nil {
+	if _, err := conn.Exec(
+		ctx,
+		"SELECT pg_advisory_unlock($1)",
+		int64(0x676d656f775154),
+	); err != nil {
 		_ = conn.Close(ctx)
 		t.Fatalf("release postgres integration lock: %v", err)
 	}

@@ -86,11 +86,17 @@ func TestRuntimeProcessWritesDurableAnnotationIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := nextRuntime.Process(ctx, analyzerJob(digest, nextAnalyzer.spec)); err != nil {
+	if err := nextRuntime.Process(
+		ctx,
+		analyzerJob(digest, nextAnalyzer.spec),
+	); err != nil {
 		t.Fatal(err)
 	}
 	if nextAnalyzer.calls != 1 {
-		t.Fatalf("expected changed analyzer version to rerun, got %d calls", nextAnalyzer.calls)
+		t.Fatalf(
+			"expected changed analyzer version to rerun, got %d calls",
+			nextAnalyzer.calls,
+		)
 	}
 }
 
@@ -291,7 +297,8 @@ func (analyzer *slowAnalyzer) Analyze(
 	defer atomic.AddInt32(&analyzer.active, -1)
 	for {
 		observed := atomic.LoadInt32(&analyzer.maxActive)
-		if current <= observed || atomic.CompareAndSwapInt32(&analyzer.maxActive, observed, current) {
+		if current <= observed ||
+			atomic.CompareAndSwapInt32(&analyzer.maxActive, observed, current) {
 			break
 		}
 	}

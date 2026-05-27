@@ -90,11 +90,15 @@ func (analyzer *SummaryAnalyzer) Analyze(
 	text, truncated := truncateRunes(text, summaryInputRuneLimit)
 
 	var summary summaryPayload
-	err = analyzer.gate.withLock(ctx, modelRequestTimeout, func(callCtx context.Context) error {
-		var summaryErr error
-		summary, summaryErr = analyzer.summarize(callCtx, text)
-		return summaryErr
-	})
+	err = analyzer.gate.withLock(
+		ctx,
+		modelRequestTimeout,
+		func(callCtx context.Context) error {
+			var summaryErr error
+			summary, summaryErr = analyzer.summarize(callCtx, text)
+			return summaryErr
+		},
+	)
 	if err != nil {
 		return contracts.Annotation{}, err
 	}
@@ -173,7 +177,10 @@ func (analyzer *SummaryAnalyzer) summarize(
 	var summary summaryPayload
 	content := strings.TrimSpace(decoded.Choices[0].Message.Content)
 	if err := json.Unmarshal([]byte(stripJSONFence(content)), &summary); err != nil {
-		return summaryPayload{}, fmt.Errorf("summary endpoint returned non-json content: %w", err)
+		return summaryPayload{}, fmt.Errorf(
+			"summary endpoint returned non-json content: %w",
+			err,
+		)
 	}
 	if err := validateSummary(summary, text); err != nil {
 		return summaryPayload{}, err

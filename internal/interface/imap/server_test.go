@@ -99,7 +99,11 @@ func testServices(t *testing.T) *appsvc.Services {
 			AnalyzerVer:   "test",
 			Data:          map[string]any{"text": fixture.text},
 		}
-		if err := queryService.Client.Project(ctx, manifest, []contracts.Annotation{annotation}); err != nil {
+		if err := queryService.Client.Project(
+			ctx,
+			manifest,
+			[]contracts.Annotation{annotation},
+		); err != nil {
 			t.Fatal(err)
 		}
 	}

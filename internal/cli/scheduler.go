@@ -30,8 +30,12 @@ func newSchedulerCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newSchedulerScanCommand(out, configPath))
 	command.AddCommand(newSchedulerStatusCommand(out, configPath))
 	command.AddCommand(newSchedulerPendingCommand(out, configPath))
-	command.AddCommand(newSchedulerReconcilePendingCommand(out, configPath, "reconcile-pending"))
-	command.AddCommand(newSchedulerReconcilePendingCommand(out, configPath, "prune-pending"))
+	command.AddCommand(
+		newSchedulerReconcilePendingCommand(out, configPath, "reconcile-pending"),
+	)
+	command.AddCommand(
+		newSchedulerReconcilePendingCommand(out, configPath, "prune-pending"),
+	)
 	command.AddCommand(newSchedulerFailedCommand(out, configPath))
 	command.AddCommand(newSchedulerProcessFailedCommand(out, configPath))
 	command.AddCommand(newSchedulerDeadLetterCommand(out, configPath))
@@ -181,10 +185,13 @@ func newSchedulerReconcilePendingCommand(
 			}
 			defer closeFn()
 
-			response, err := service.ReconcilePending(command.Context(), contracts.RequeueRequest{
-				SchemaVersion: contracts.SchemaVersionPhase00,
-				Limit:         limit,
-			})
+			response, err := service.ReconcilePending(
+				command.Context(),
+				contracts.RequeueRequest{
+					SchemaVersion: contracts.SchemaVersionPhase00,
+					Limit:         limit,
+				},
+			)
 			if err != nil {
 				return err
 			}
@@ -282,7 +289,10 @@ func newSchedulerDeadLetterCommand(out io.Writer, configPath *string) *cobra.Com
 	return command
 }
 
-func newSchedulerProcessFailedCommand(out io.Writer, configPath *string) *cobra.Command {
+func newSchedulerProcessFailedCommand(
+	out io.Writer,
+	configPath *string,
+) *cobra.Command {
 	var (
 		confirmInstance string
 		limit           int

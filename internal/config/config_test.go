@@ -301,7 +301,10 @@ capabilities = ["hydrate", "live_search", "live_retrieve", "actions"]
 		t.Fatal("expected plaintext secret rejection before dependency checks")
 	}
 	if !strings.Contains(err.Error(), "SOPS-encrypted leaf") {
-		t.Fatalf("expected delegated source config to decode before secret checks, got %v", err)
+		t.Fatalf(
+			"expected delegated source config to decode before secret checks, got %v",
+			err,
+		)
 	}
 }
 

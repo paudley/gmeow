@@ -117,7 +117,11 @@ func TestFilestoreClientUsesServiceForObjectAndAnnotationAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !found || cursor.Cursor["page_token"] != "next" {
-		t.Fatalf("expected cursor round trip through gRPC, found=%t cursor=%#v", found, cursor)
+		t.Fatalf(
+			"expected cursor round trip through gRPC, found=%t cursor=%#v",
+			found,
+			cursor,
+		)
 	}
 }
 
@@ -202,5 +206,7 @@ func (notifier *recordingObjectChangeNotifier) NotifyObjectsChanged(
 ) (contracts.SchedulerScanResponse, error) {
 	notifier.requests = append(notifier.requests, request)
 
-	return contracts.SchedulerScanResponse{SchemaVersion: contracts.SchemaVersionPhase00}, nil
+	return contracts.SchedulerScanResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+	}, nil
 }

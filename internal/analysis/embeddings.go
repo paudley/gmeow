@@ -21,10 +21,12 @@ import (
 	"blackcat.ca/gmeow/internal/contracts"
 )
 
-const EmbeddingName = "embedding.endpoint"
-const embeddingInputRuneLimit = 2000
-const embeddingChunkTargetRunes = 1200
-const embeddingChunkMinLetters = 16
+const (
+	EmbeddingName             = "embedding.endpoint"
+	embeddingInputRuneLimit   = 2000
+	embeddingChunkTargetRunes = 1200
+	embeddingChunkMinLetters  = 16
+)
 
 type EmbeddingConfig struct {
 	Client   *http.Client
@@ -100,11 +102,15 @@ func (analyzer *EmbeddingAnalyzer) Analyze(
 	for _, segment := range segments {
 		text, truncated := truncateRunes(segment.Text, embeddingInputRuneLimit)
 		var vector []float64
-		err = analyzer.gate.withLock(ctx, modelRequestTimeout, func(callCtx context.Context) error {
-			var embedErr error
-			vector, embedErr = analyzer.embed(callCtx, text)
-			return embedErr
-		})
+		err = analyzer.gate.withLock(
+			ctx,
+			modelRequestTimeout,
+			func(callCtx context.Context) error {
+				var embedErr error
+				vector, embedErr = analyzer.embed(callCtx, text)
+				return embedErr
+			},
+		)
 		if err != nil {
 			return contracts.Annotation{}, err
 		}
@@ -366,7 +372,7 @@ func chunkEmbeddingText(
 	return segments
 }
 
-func chunkBoundary(runes []rune, start int, fallback int) int {
+func chunkBoundary(runes []rune, start, fallback int) int {
 	for index := fallback; index > start+embeddingChunkTargetRunes/2; index-- {
 		switch runes[index-1] {
 		case '.', '!', '?', '\n':

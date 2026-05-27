@@ -99,13 +99,16 @@ func (client *SchedulerClient) NotifyObjectsChanged(
 		reason = "projection_refresh"
 	}
 
-	response, err := client.client.NotifyObjectsChanged(ctx, &pb.NotifyObjectsChangedRequest{
-		Digests:       digests,
-		PriorityClass: request.PriorityClass,
-		RequestedBy:   request.RequestedBy,
-		Reason:        reason,
-		TraceId:       request.TraceID,
-	})
+	response, err := client.client.NotifyObjectsChanged(
+		ctx,
+		&pb.NotifyObjectsChangedRequest{
+			Digests:       digests,
+			PriorityClass: request.PriorityClass,
+			RequestedBy:   request.RequestedBy,
+			Reason:        reason,
+			TraceId:       request.TraceID,
+		},
+	)
 	if err != nil {
 		return contracts.SchedulerScanResponse{}, err
 	}

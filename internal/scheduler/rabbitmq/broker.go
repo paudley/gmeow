@@ -426,7 +426,9 @@ func (broker *Broker) ReconcilePending(
 	isSatisfied func(contracts.AnalyzerJob) (bool, error),
 ) (contracts.ReconcilePendingResponse, error) {
 	if isSatisfied == nil {
-		return contracts.ReconcilePendingResponse{}, errors.New("reconcile predicate is required")
+		return contracts.ReconcilePendingResponse{}, errors.New(
+			"reconcile predicate is required",
+		)
 	}
 	if limit <= 0 {
 		limit = 100
@@ -949,7 +951,14 @@ func publishConfirmed(
 		return err
 	}
 
-	return publishAndWaitConfirmed(ctx, channel, confirms, exchange, routingKey, publishing)
+	return publishAndWaitConfirmed(
+		ctx,
+		channel,
+		confirms,
+		exchange,
+		routingKey,
+		publishing,
+	)
 }
 
 func enablePublishConfirms(channel *amqp.Channel) (<-chan amqp.Confirmation, error) {

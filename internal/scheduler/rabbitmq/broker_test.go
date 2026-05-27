@@ -267,9 +267,12 @@ func TestAnalysisJobSourcePersistsFailureCauseInFailedJob(t *testing.T) {
 	}
 	defer broker.Close()
 	purgeQueues(t, broker)
-	source := &AnalysisJobSource{connection: broker.connection, config: AnalysisJobSourceConfig{
-		QueuePrefix: cfg.QueuePrefix,
-	}}
+	source := &AnalysisJobSource{
+		connection: broker.connection,
+		config: AnalysisJobSourceConfig{
+			QueuePrefix: cfg.QueuePrefix,
+		},
+	}
 	job := contracts.AnalyzerJob{
 		SchemaVersion:  contracts.SchemaVersionPhase00,
 		JobID:          "failed-cause-test",
@@ -278,7 +281,11 @@ func TestAnalysisJobSourcePersistsFailureCauseInFailedJob(t *testing.T) {
 		Analyzer:       contracts.AnalyzerSpec{Name: "summary.model", Version: "1"},
 	}
 
-	if err := source.publishFailure(ctx, job, errors.New("model unavailable")); err != nil {
+	if err := source.publishFailure(
+		ctx,
+		job,
+		errors.New("model unavailable"),
+	); err != nil {
 		t.Fatal(err)
 	}
 	failed, err := broker.FailedJobs(ctx, 1)
@@ -325,7 +332,10 @@ func TestProcessProjectionRefreshesProjectsOncePerBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status.Pending != 0 {
-		t.Fatalf("analysis queue should be unaffected by projection refresh, status=%#v", status)
+		t.Fatalf(
+			"analysis queue should be unaffected by projection refresh, status=%#v",
+			status,
+		)
 	}
 }
 
@@ -425,9 +435,18 @@ func TestReconcilePendingDropsSatisfiedAndDuplicateWork(t *testing.T) {
 	defer broker.Close()
 	purgeQueues(t, broker)
 
-	satisfied := testAnalyzerJob("satisfied", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	duplicate := testAnalyzerJob("duplicate", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	unique := testAnalyzerJob("unique", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+	satisfied := testAnalyzerJob(
+		"satisfied",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	)
+	duplicate := testAnalyzerJob(
+		"duplicate",
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	)
+	unique := testAnalyzerJob(
+		"unique",
+		"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+	)
 	for _, job := range []contracts.AnalyzerJob{satisfied, duplicate, duplicate, unique} {
 		if err := broker.Publish(ctx, job); err != nil {
 			t.Fatal(err)
@@ -478,7 +497,10 @@ func TestReconcilePendingRecoversHeldJobsBeforeNextPass(t *testing.T) {
 	defer broker.Close()
 	purgeQueues(t, broker)
 
-	held := testAnalyzerJob("held", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+	held := testAnalyzerJob(
+		"held",
+		"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	)
 	channel, err := broker.channel(ctx)
 	if err != nil {
 		t.Fatal(err)

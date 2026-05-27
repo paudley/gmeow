@@ -122,10 +122,13 @@ func newSourceBackfillCommand(out io.Writer, configPath *string) *cobra.Command 
 	command.Flags().StringVar(&query, "query", "", "Gmail search query for full backfill")
 	command.Flags().StringVar(&mode, "mode", "full", "backfill mode: full or history")
 	command.Flags().IntVar(&pageSize, "page-size", 100, "messages per Gmail page")
-	command.Flags().IntVar(&maxPages, "max-pages", 0, "maximum pages to process; 0 means all")
+	command.Flags().
+		IntVar(&maxPages, "max-pages", 0, "maximum pages to process; 0 means all")
 	command.Flags().IntVar(&concurrency, "concurrency", 4, "FILESTORE ingest workers")
-	command.Flags().BoolVar(&dryRun, "dry-run", false, "list and hydrate one page without writing FILESTORE")
-	command.Flags().BoolVar(&resume, "resume", true, "resume from FILESTORE source cursor when present")
+	command.Flags().
+		BoolVar(&dryRun, "dry-run", false, "list and hydrate one page without writing FILESTORE")
+	command.Flags().
+		BoolVar(&resume, "resume", true, "resume from FILESTORE source cursor when present")
 	command.Flags().StringVar(
 		&confirmInstance,
 		"confirm-instance",

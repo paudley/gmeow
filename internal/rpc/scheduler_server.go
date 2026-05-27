@@ -141,15 +141,18 @@ func (server *SchedulerServer) NotifyObjectsChanged(
 		digests = append(digests, contracts.ObjectDigest(digest))
 	}
 
-	response, err := server.service.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
-		SchemaVersion:  contracts.SchemaVersionPhase00,
-		ObjectDigests:  digests,
-		PriorityClass:  request.GetPriorityClass(),
-		RequestedBy:    request.GetRequestedBy(),
-		Reason:         request.GetReason(),
-		TraceID:        request.GetTraceId(),
-		ProjectionOnly: request.GetReason() == "projection_refresh",
-	})
+	response, err := server.service.NotifyObjectsChanged(
+		ctx,
+		contracts.ObjectChangeRequest{
+			SchemaVersion:  contracts.SchemaVersionPhase00,
+			ObjectDigests:  digests,
+			PriorityClass:  request.GetPriorityClass(),
+			RequestedBy:    request.GetRequestedBy(),
+			Reason:         request.GetReason(),
+			TraceID:        request.GetTraceId(),
+			ProjectionOnly: request.GetReason() == "projection_refresh",
+		},
+	)
 	if err != nil {
 		return nil, err
 	}

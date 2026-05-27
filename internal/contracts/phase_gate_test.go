@@ -515,35 +515,38 @@ func TestRuntimeAnalyzersDoNotContainFallbackOrPlaceholderOutputs(t *testing.T) 
 		filepath.Join(root, "python", "gmeow_intel"),
 	}
 	for _, scanRoot := range paths {
-		err := filepath.WalkDir(scanRoot, func(path string, entry os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() || strings.HasSuffix(path, "_test.go") {
-				return nil
-			}
-			switch filepath.Ext(path) {
-			case ".go", ".py":
-			default:
-				return nil
-			}
-			content, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			text := string(content)
-			for _, forbidden := range []string{
-				"regex_fallback",
-				"keyword_fallback",
-				`"placeholder"`,
-				"status = \"placeholder\"",
-			} {
-				if strings.Contains(text, forbidden) {
-					t.Fatalf("%s contains forbidden runtime analyzer marker %q", path, forbidden)
+		err := filepath.WalkDir(
+			scanRoot,
+			func(path string, entry os.DirEntry, err error) error {
+				if err != nil {
+					return err
 				}
-			}
-			return nil
-		})
+				if entry.IsDir() || strings.HasSuffix(path, "_test.go") {
+					return nil
+				}
+				switch filepath.Ext(path) {
+				case ".go", ".py":
+				default:
+					return nil
+				}
+				content, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				text := string(content)
+				for _, forbidden := range []string{
+					"regex_fallback",
+					"keyword_fallback",
+					`"placeholder"`,
+					"status = \"placeholder\"",
+				} {
+					if strings.Contains(text, forbidden) {
+						t.Fatalf("%s contains forbidden runtime analyzer marker %q", path, forbidden)
+					}
+				}
+				return nil
+			},
+		)
 		if err != nil {
 			t.Fatal(err)
 		}

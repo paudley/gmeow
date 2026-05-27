@@ -489,16 +489,19 @@ func (service *Service) projectionObjectForDigest(
 	var object filestore.ProjectionObject
 	found := false
 	errStop := errors.New("stop projection walk")
-	err := service.store.WalkProjection(ctx, func(candidate filestore.ProjectionObject) error {
-		if candidate.Manifest.ObjectDigest != digest {
-			return nil
-		}
+	err := service.store.WalkProjection(
+		ctx,
+		func(candidate filestore.ProjectionObject) error {
+			if candidate.Manifest.ObjectDigest != digest {
+				return nil
+			}
 
-		object = candidate
-		found = true
+			object = candidate
+			found = true
 
-		return errStop
-	})
+			return errStop
+		},
+	)
 	if err != nil && !errors.Is(err, errStop) {
 		return filestore.ProjectionObject{}, false, err
 	}
