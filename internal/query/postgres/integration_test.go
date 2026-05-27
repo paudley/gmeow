@@ -240,6 +240,19 @@ func TestPostgresProjectsFilestore(t *testing.T) {
 		!containsString(jmapState.Keywords, jmapKeywordFlagged) {
 		t.Fatalf("unexpected JMAP state: %#v", jmapState)
 	}
+	jmapQuery, err := index.JMAPEmailQuery(ctx, contracts.JMAPEmailQueryRequest{
+		Text:       "inbox",
+		InMailbox:  jmapMailboxInbox,
+		HasKeyword: jmapKeywordFlagged,
+		NotKeyword: jmapKeywordSeen,
+		Limit:      5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jmapQuery.Total != 1 || len(jmapQuery.IDs) != 1 || jmapQuery.IDs[0] != mailDigest {
+		t.Fatalf("unexpected filtered JMAP email query: %#v", jmapQuery)
+	}
 	embeddingDigest, err := store.Put(ctx, filestore.PutRequest{
 		Reader:       strings.NewReader(`{"vector":[0.1,0.2,0.3]}`),
 		MediaType:    "application/json",

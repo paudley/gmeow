@@ -89,9 +89,17 @@ type getArguments struct {
 }
 
 type queryArguments struct {
-	AccountID string `json:"accountId"`
-	Limit     int    `json:"limit"`
-	Position  int    `json:"position"`
+	Filter    emailQueryFilter `json:"filter"`
+	AccountID string           `json:"accountId"`
+	Limit     int              `json:"limit"`
+	Position  int              `json:"position"`
+}
+
+type emailQueryFilter struct {
+	Text       string `json:"text"`
+	InMailbox  string `json:"inMailbox"`
+	HasKeyword string `json:"hasKeyword"`
+	NotKeyword string `json:"notKeyword"`
 }
 
 type mailboxGetResponse struct {
@@ -99,6 +107,15 @@ type mailboxGetResponse struct {
 	State     string        `json:"state"`
 	List      []jmapMailbox `json:"list"`
 	NotFound  []string      `json:"notFound,omitempty"`
+}
+
+type mailboxQueryResponse struct {
+	AccountID           string   `json:"accountId"`
+	QueryState          string   `json:"queryState"`
+	CanCalculateChanges bool     `json:"canCalculateChanges"`
+	IDs                 []string `json:"ids"`
+	Position            int      `json:"position"`
+	Total               int      `json:"total"`
 }
 
 type jmapMailbox struct {
@@ -328,6 +345,8 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 		return methodResponse{Name: call.Name, Arguments: arguments, ClientID: call.ClientID}
 	case "Mailbox/get":
 		return handler.handleMailboxGet(ctx, call)
+	case "Mailbox/query":
+		return handler.handleMailboxQuery(ctx, call)
 	case "Email/query":
 		return handler.handleEmailQuery(ctx, call)
 	case "Email/get":
@@ -384,6 +403,44 @@ func (handler handler) handleEmailSet(
 			NewState:   "0",
 			Updated:    emptyMapAsNil(updated),
 			NotUpdated: emptyJMAPErrorMapAsNil(notUpdated),
+		},
+		ClientID: call.ClientID,
+	}
+}
+
+func (handler handler) handleMailboxQuery(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
+	var arguments queryArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+
+	mailboxes, err := handler.services.JMAPMailboxes(ctx)
+	if err != nil {
+		return serverFail(call.ClientID, err.Error())
+	}
+	ids := make([]string, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		ids = append(ids, mailbox.MailboxID)
+	}
+
+	return methodResponse{
+		Name: "Mailbox/query",
+		Arguments: mailboxQueryResponse{
+			AccountID:           "gmeow",
+			QueryState:          "0",
+			CanCalculateChanges: false,
+			IDs:                 ids,
+			Position:            0,
+			Total:               len(ids),
 		},
 		ClientID: call.ClientID,
 	}
@@ -457,8 +514,14 @@ func (handler handler) handleEmailQuery(
 
 	response, err := handler.services.JMAPEmailQuery(
 		ctx,
-		arguments.Position,
-		arguments.Limit,
+		appsvc.JMAPEmailQueryRequest{
+			Text:       arguments.Filter.Text,
+			InMailbox:  arguments.Filter.InMailbox,
+			HasKeyword: arguments.Filter.HasKeyword,
+			NotKeyword: arguments.Filter.NotKeyword,
+			Offset:     arguments.Position,
+			Limit:      arguments.Limit,
+		},
 	)
 	if err != nil {
 		return serverFail(call.ClientID, err.Error())

@@ -1797,6 +1797,158 @@ func (x *JMAPEmailStateResponse) GetStates() []*JMAPEmailState {
 	return nil
 }
 
+type JMAPEmailQueryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	InMailbox     string                 `protobuf:"bytes,2,opt,name=in_mailbox,json=inMailbox,proto3" json:"in_mailbox,omitempty"`
+	HasKeyword    string                 `protobuf:"bytes,3,opt,name=has_keyword,json=hasKeyword,proto3" json:"has_keyword,omitempty"`
+	NotKeyword    string                 `protobuf:"bytes,4,opt,name=not_keyword,json=notKeyword,proto3" json:"not_keyword,omitempty"`
+	Limit         int32                  `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
+	Offset        int32                  `protobuf:"varint,6,opt,name=offset,proto3" json:"offset,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JMAPEmailQueryRequest) Reset() {
+	*x = JMAPEmailQueryRequest{}
+	mi := &file_gmeow_v1_query_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JMAPEmailQueryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JMAPEmailQueryRequest) ProtoMessage() {}
+
+func (x *JMAPEmailQueryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gmeow_v1_query_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JMAPEmailQueryRequest.ProtoReflect.Descriptor instead.
+func (*JMAPEmailQueryRequest) Descriptor() ([]byte, []int) {
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *JMAPEmailQueryRequest) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *JMAPEmailQueryRequest) GetInMailbox() string {
+	if x != nil {
+		return x.InMailbox
+	}
+	return ""
+}
+
+func (x *JMAPEmailQueryRequest) GetHasKeyword() string {
+	if x != nil {
+		return x.HasKeyword
+	}
+	return ""
+}
+
+func (x *JMAPEmailQueryRequest) GetNotKeyword() string {
+	if x != nil {
+		return x.NotKeyword
+	}
+	return ""
+}
+
+func (x *JMAPEmailQueryRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *JMAPEmailQueryRequest) GetOffset() int32 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+type JMAPEmailQueryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ids           []string               `protobuf:"bytes,1,rep,name=ids,proto3" json:"ids,omitempty"`
+	Total         int32                  `protobuf:"varint,2,opt,name=total,proto3" json:"total,omitempty"`
+	Offset        int32                  `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
+	Limit         int32                  `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JMAPEmailQueryResponse) Reset() {
+	*x = JMAPEmailQueryResponse{}
+	mi := &file_gmeow_v1_query_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JMAPEmailQueryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JMAPEmailQueryResponse) ProtoMessage() {}
+
+func (x *JMAPEmailQueryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gmeow_v1_query_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JMAPEmailQueryResponse.ProtoReflect.Descriptor instead.
+func (*JMAPEmailQueryResponse) Descriptor() ([]byte, []int) {
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *JMAPEmailQueryResponse) GetIds() []string {
+	if x != nil {
+		return x.Ids
+	}
+	return nil
+}
+
+func (x *JMAPEmailQueryResponse) GetTotal() int32 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *JMAPEmailQueryResponse) GetOffset() int32 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *JMAPEmailQueryResponse) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
 type UpdateJMAPEmailStateRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ObjectDigest  string                 `protobuf:"bytes,1,opt,name=object_digest,json=objectDigest,proto3" json:"object_digest,omitempty"`
@@ -1808,7 +1960,7 @@ type UpdateJMAPEmailStateRequest struct {
 
 func (x *UpdateJMAPEmailStateRequest) Reset() {
 	*x = UpdateJMAPEmailStateRequest{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[28]
+	mi := &file_gmeow_v1_query_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1820,7 +1972,7 @@ func (x *UpdateJMAPEmailStateRequest) String() string {
 func (*UpdateJMAPEmailStateRequest) ProtoMessage() {}
 
 func (x *UpdateJMAPEmailStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[28]
+	mi := &file_gmeow_v1_query_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1833,7 +1985,7 @@ func (x *UpdateJMAPEmailStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateJMAPEmailStateRequest.ProtoReflect.Descriptor instead.
 func (*UpdateJMAPEmailStateRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{28}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *UpdateJMAPEmailStateRequest) GetObjectDigest() string {
@@ -1870,7 +2022,7 @@ type OperationProgressEvent struct {
 
 func (x *OperationProgressEvent) Reset() {
 	*x = OperationProgressEvent{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[29]
+	mi := &file_gmeow_v1_query_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1882,7 +2034,7 @@ func (x *OperationProgressEvent) String() string {
 func (*OperationProgressEvent) ProtoMessage() {}
 
 func (x *OperationProgressEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[29]
+	mi := &file_gmeow_v1_query_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1895,7 +2047,7 @@ func (x *OperationProgressEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationProgressEvent.ProtoReflect.Descriptor instead.
 func (*OperationProgressEvent) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{29}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *OperationProgressEvent) GetAt() string {
@@ -1952,7 +2104,7 @@ type OperationRecord struct {
 
 func (x *OperationRecord) Reset() {
 	*x = OperationRecord{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[30]
+	mi := &file_gmeow_v1_query_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1964,7 +2116,7 @@ func (x *OperationRecord) String() string {
 func (*OperationRecord) ProtoMessage() {}
 
 func (x *OperationRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[30]
+	mi := &file_gmeow_v1_query_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1977,7 +2129,7 @@ func (x *OperationRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRecord.ProtoReflect.Descriptor instead.
 func (*OperationRecord) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{30}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *OperationRecord) GetOperationId() string {
@@ -2069,7 +2221,7 @@ type CreateOperationRequest struct {
 
 func (x *CreateOperationRequest) Reset() {
 	*x = CreateOperationRequest{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[31]
+	mi := &file_gmeow_v1_query_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2081,7 +2233,7 @@ func (x *CreateOperationRequest) String() string {
 func (*CreateOperationRequest) ProtoMessage() {}
 
 func (x *CreateOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[31]
+	mi := &file_gmeow_v1_query_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2094,7 +2246,7 @@ func (x *CreateOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateOperationRequest.ProtoReflect.Descriptor instead.
 func (*CreateOperationRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{31}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *CreateOperationRequest) GetOperationId() string {
@@ -2135,7 +2287,7 @@ type CreateOrGetOperationResponse struct {
 
 func (x *CreateOrGetOperationResponse) Reset() {
 	*x = CreateOrGetOperationResponse{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[32]
+	mi := &file_gmeow_v1_query_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2147,7 +2299,7 @@ func (x *CreateOrGetOperationResponse) String() string {
 func (*CreateOrGetOperationResponse) ProtoMessage() {}
 
 func (x *CreateOrGetOperationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[32]
+	mi := &file_gmeow_v1_query_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2160,7 +2312,7 @@ func (x *CreateOrGetOperationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateOrGetOperationResponse.ProtoReflect.Descriptor instead.
 func (*CreateOrGetOperationResponse) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{32}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *CreateOrGetOperationResponse) GetOperation() *OperationRecord {
@@ -2187,7 +2339,7 @@ type AppendOperationProgressRequest struct {
 
 func (x *AppendOperationProgressRequest) Reset() {
 	*x = AppendOperationProgressRequest{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[33]
+	mi := &file_gmeow_v1_query_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2199,7 +2351,7 @@ func (x *AppendOperationProgressRequest) String() string {
 func (*AppendOperationProgressRequest) ProtoMessage() {}
 
 func (x *AppendOperationProgressRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[33]
+	mi := &file_gmeow_v1_query_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2212,7 +2364,7 @@ func (x *AppendOperationProgressRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendOperationProgressRequest.ProtoReflect.Descriptor instead.
 func (*AppendOperationProgressRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{33}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *AppendOperationProgressRequest) GetOperationId() string {
@@ -2239,7 +2391,7 @@ type CompleteOperationRequest struct {
 
 func (x *CompleteOperationRequest) Reset() {
 	*x = CompleteOperationRequest{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[34]
+	mi := &file_gmeow_v1_query_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2251,7 +2403,7 @@ func (x *CompleteOperationRequest) String() string {
 func (*CompleteOperationRequest) ProtoMessage() {}
 
 func (x *CompleteOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[34]
+	mi := &file_gmeow_v1_query_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2264,7 +2416,7 @@ func (x *CompleteOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompleteOperationRequest.ProtoReflect.Descriptor instead.
 func (*CompleteOperationRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{34}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *CompleteOperationRequest) GetOperationId() string {
@@ -2291,7 +2443,7 @@ type FailOperationRequest struct {
 
 func (x *FailOperationRequest) Reset() {
 	*x = FailOperationRequest{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[35]
+	mi := &file_gmeow_v1_query_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2303,7 +2455,7 @@ func (x *FailOperationRequest) String() string {
 func (*FailOperationRequest) ProtoMessage() {}
 
 func (x *FailOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[35]
+	mi := &file_gmeow_v1_query_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2316,7 +2468,7 @@ func (x *FailOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FailOperationRequest.ProtoReflect.Descriptor instead.
 func (*FailOperationRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{35}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *FailOperationRequest) GetOperationId() string {
@@ -2342,7 +2494,7 @@ type OperationLookupRequest struct {
 
 func (x *OperationLookupRequest) Reset() {
 	*x = OperationLookupRequest{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[36]
+	mi := &file_gmeow_v1_query_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2354,7 +2506,7 @@ func (x *OperationLookupRequest) String() string {
 func (*OperationLookupRequest) ProtoMessage() {}
 
 func (x *OperationLookupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[36]
+	mi := &file_gmeow_v1_query_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2367,7 +2519,7 @@ func (x *OperationLookupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationLookupRequest.ProtoReflect.Descriptor instead.
 func (*OperationLookupRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{36}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *OperationLookupRequest) GetOperationId() string {
@@ -2386,7 +2538,7 @@ type OperationByRequestHashRequest struct {
 
 func (x *OperationByRequestHashRequest) Reset() {
 	*x = OperationByRequestHashRequest{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[37]
+	mi := &file_gmeow_v1_query_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2398,7 +2550,7 @@ func (x *OperationByRequestHashRequest) String() string {
 func (*OperationByRequestHashRequest) ProtoMessage() {}
 
 func (x *OperationByRequestHashRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[37]
+	mi := &file_gmeow_v1_query_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2411,7 +2563,7 @@ func (x *OperationByRequestHashRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationByRequestHashRequest.ProtoReflect.Descriptor instead.
 func (*OperationByRequestHashRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{37}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *OperationByRequestHashRequest) GetRequestHash() string {
@@ -2431,7 +2583,7 @@ type OperationLookupResponse struct {
 
 func (x *OperationLookupResponse) Reset() {
 	*x = OperationLookupResponse{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[38]
+	mi := &file_gmeow_v1_query_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2443,7 +2595,7 @@ func (x *OperationLookupResponse) String() string {
 func (*OperationLookupResponse) ProtoMessage() {}
 
 func (x *OperationLookupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[38]
+	mi := &file_gmeow_v1_query_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2456,7 +2608,7 @@ func (x *OperationLookupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationLookupResponse.ProtoReflect.Descriptor instead.
 func (*OperationLookupResponse) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{38}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *OperationLookupResponse) GetOperation() *OperationRecord {
@@ -2482,7 +2634,7 @@ type ProjectChangedRequest struct {
 
 func (x *ProjectChangedRequest) Reset() {
 	*x = ProjectChangedRequest{}
-	mi := &file_gmeow_v1_query_proto_msgTypes[39]
+	mi := &file_gmeow_v1_query_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2494,7 +2646,7 @@ func (x *ProjectChangedRequest) String() string {
 func (*ProjectChangedRequest) ProtoMessage() {}
 
 func (x *ProjectChangedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_query_proto_msgTypes[39]
+	mi := &file_gmeow_v1_query_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2507,7 +2659,7 @@ func (x *ProjectChangedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectChangedRequest.ProtoReflect.Descriptor instead.
 func (*ProjectChangedRequest) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{39}
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ProjectChangedRequest) GetSince() string {
@@ -2657,7 +2809,22 @@ const file_gmeow_v1_query_proto_rawDesc = "" +
 	"\vreceived_at\x18\x06 \x01(\tR\n" +
 	"receivedAt\"J\n" +
 	"\x16JMAPEmailStateResponse\x120\n" +
-	"\x06states\x18\x01 \x03(\v2\x18.gmeow.v1.JMAPEmailStateR\x06states\"\x7f\n" +
+	"\x06states\x18\x01 \x03(\v2\x18.gmeow.v1.JMAPEmailStateR\x06states\"\xba\x01\n" +
+	"\x15JMAPEmailQueryRequest\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\x12\x1d\n" +
+	"\n" +
+	"in_mailbox\x18\x02 \x01(\tR\tinMailbox\x12\x1f\n" +
+	"\vhas_keyword\x18\x03 \x01(\tR\n" +
+	"hasKeyword\x12\x1f\n" +
+	"\vnot_keyword\x18\x04 \x01(\tR\n" +
+	"notKeyword\x12\x14\n" +
+	"\x05limit\x18\x05 \x01(\x05R\x05limit\x12\x16\n" +
+	"\x06offset\x18\x06 \x01(\x05R\x06offset\"n\n" +
+	"\x16JMAPEmailQueryResponse\x12\x10\n" +
+	"\x03ids\x18\x01 \x03(\tR\x03ids\x12\x14\n" +
+	"\x05total\x18\x02 \x01(\x05R\x05total\x12\x16\n" +
+	"\x06offset\x18\x03 \x01(\x05R\x06offset\x12\x14\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\"\x7f\n" +
 	"\x1bUpdateJMAPEmailStateRequest\x12#\n" +
 	"\robject_digest\x18\x01 \x01(\tR\fobjectDigest\x12\x1f\n" +
 	"\vmailbox_ids\x18\x02 \x03(\tR\n" +
@@ -2711,7 +2878,7 @@ const file_gmeow_v1_query_proto_rawDesc = "" +
 	"\toperation\x18\x01 \x01(\v2\x19.gmeow.v1.OperationRecordR\toperation\x12\x14\n" +
 	"\x05found\x18\x02 \x01(\bR\x05found\"-\n" +
 	"\x15ProjectChangedRequest\x12\x14\n" +
-	"\x05since\x18\x01 \x01(\tR\x05since2\xc5\f\n" +
+	"\x05since\x18\x01 \x01(\tR\x05since2\x9a\r\n" +
 	"\fQueryService\x124\n" +
 	"\aProject\x12\x18.gmeow.v1.ProjectRequest\x1a\x0f.gmeow.v1.Empty\x12@\n" +
 	"\rProjectObject\x12\x1e.gmeow.v1.ProjectObjectRequest\x1a\x0f.gmeow.v1.Empty\x12L\n" +
@@ -2724,7 +2891,8 @@ const file_gmeow_v1_query_proto_rawDesc = "" +
 	"\fVectorSearch\x12\x1d.gmeow.v1.VectorSearchRequest\x1a\x1e.gmeow.v1.VectorSearchResponse\x12N\n" +
 	"\rSourceCursors\x12\x1d.gmeow.v1.SourceCursorRequest\x1a\x1e.gmeow.v1.SourceCursorResponse\x12L\n" +
 	"\rJMAPMailboxes\x12\x1c.gmeow.v1.JMAPMailboxRequest\x1a\x1d.gmeow.v1.JMAPMailboxResponse\x12T\n" +
-	"\x0fJMAPEmailStates\x12\x1f.gmeow.v1.JMAPEmailStateRequest\x1a .gmeow.v1.JMAPEmailStateResponse\x12W\n" +
+	"\x0fJMAPEmailStates\x12\x1f.gmeow.v1.JMAPEmailStateRequest\x1a .gmeow.v1.JMAPEmailStateResponse\x12S\n" +
+	"\x0eJMAPEmailQuery\x12\x1f.gmeow.v1.JMAPEmailQueryRequest\x1a .gmeow.v1.JMAPEmailQueryResponse\x12W\n" +
 	"\x14UpdateJMAPEmailState\x12%.gmeow.v1.UpdateJMAPEmailStateRequest\x1a\x18.gmeow.v1.JMAPEmailState\x12`\n" +
 	"\x14CreateOrGetOperation\x12 .gmeow.v1.CreateOperationRequest\x1a&.gmeow.v1.CreateOrGetOperationResponse\x12T\n" +
 	"\x17AppendOperationProgress\x12(.gmeow.v1.AppendOperationProgressRequest\x1a\x0f.gmeow.v1.Empty\x12H\n" +
@@ -2747,7 +2915,7 @@ func file_gmeow_v1_query_proto_rawDescGZIP() []byte {
 	return file_gmeow_v1_query_proto_rawDescData
 }
 
-var file_gmeow_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
+var file_gmeow_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
 var file_gmeow_v1_query_proto_goTypes = []any{
 	(*ProjectRequest)(nil),                 // 0: gmeow.v1.ProjectRequest
 	(*ProjectObjectRequest)(nil),           // 1: gmeow.v1.ProjectObjectRequest
@@ -2777,50 +2945,52 @@ var file_gmeow_v1_query_proto_goTypes = []any{
 	(*JMAPEmailStateRequest)(nil),          // 25: gmeow.v1.JMAPEmailStateRequest
 	(*JMAPEmailState)(nil),                 // 26: gmeow.v1.JMAPEmailState
 	(*JMAPEmailStateResponse)(nil),         // 27: gmeow.v1.JMAPEmailStateResponse
-	(*UpdateJMAPEmailStateRequest)(nil),    // 28: gmeow.v1.UpdateJMAPEmailStateRequest
-	(*OperationProgressEvent)(nil),         // 29: gmeow.v1.OperationProgressEvent
-	(*OperationRecord)(nil),                // 30: gmeow.v1.OperationRecord
-	(*CreateOperationRequest)(nil),         // 31: gmeow.v1.CreateOperationRequest
-	(*CreateOrGetOperationResponse)(nil),   // 32: gmeow.v1.CreateOrGetOperationResponse
-	(*AppendOperationProgressRequest)(nil), // 33: gmeow.v1.AppendOperationProgressRequest
-	(*CompleteOperationRequest)(nil),       // 34: gmeow.v1.CompleteOperationRequest
-	(*FailOperationRequest)(nil),           // 35: gmeow.v1.FailOperationRequest
-	(*OperationLookupRequest)(nil),         // 36: gmeow.v1.OperationLookupRequest
-	(*OperationByRequestHashRequest)(nil),  // 37: gmeow.v1.OperationByRequestHashRequest
-	(*OperationLookupResponse)(nil),        // 38: gmeow.v1.OperationLookupResponse
-	(*ProjectChangedRequest)(nil),          // 39: gmeow.v1.ProjectChangedRequest
-	(*Manifest)(nil),                       // 40: gmeow.v1.Manifest
-	(*Annotation)(nil),                     // 41: gmeow.v1.Annotation
-	(*ProjectionObject)(nil),               // 42: gmeow.v1.ProjectionObject
-	(*SourceCursor)(nil),                   // 43: gmeow.v1.SourceCursor
-	(*Structure)(nil),                      // 44: gmeow.v1.Structure
-	(*Relationship)(nil),                   // 45: gmeow.v1.Relationship
-	(*GraphFact)(nil),                      // 46: gmeow.v1.GraphFact
-	(*AnalyzerSpec)(nil),                   // 47: gmeow.v1.AnalyzerSpec
-	(*Empty)(nil),                          // 48: gmeow.v1.Empty
+	(*JMAPEmailQueryRequest)(nil),          // 28: gmeow.v1.JMAPEmailQueryRequest
+	(*JMAPEmailQueryResponse)(nil),         // 29: gmeow.v1.JMAPEmailQueryResponse
+	(*UpdateJMAPEmailStateRequest)(nil),    // 30: gmeow.v1.UpdateJMAPEmailStateRequest
+	(*OperationProgressEvent)(nil),         // 31: gmeow.v1.OperationProgressEvent
+	(*OperationRecord)(nil),                // 32: gmeow.v1.OperationRecord
+	(*CreateOperationRequest)(nil),         // 33: gmeow.v1.CreateOperationRequest
+	(*CreateOrGetOperationResponse)(nil),   // 34: gmeow.v1.CreateOrGetOperationResponse
+	(*AppendOperationProgressRequest)(nil), // 35: gmeow.v1.AppendOperationProgressRequest
+	(*CompleteOperationRequest)(nil),       // 36: gmeow.v1.CompleteOperationRequest
+	(*FailOperationRequest)(nil),           // 37: gmeow.v1.FailOperationRequest
+	(*OperationLookupRequest)(nil),         // 38: gmeow.v1.OperationLookupRequest
+	(*OperationByRequestHashRequest)(nil),  // 39: gmeow.v1.OperationByRequestHashRequest
+	(*OperationLookupResponse)(nil),        // 40: gmeow.v1.OperationLookupResponse
+	(*ProjectChangedRequest)(nil),          // 41: gmeow.v1.ProjectChangedRequest
+	(*Manifest)(nil),                       // 42: gmeow.v1.Manifest
+	(*Annotation)(nil),                     // 43: gmeow.v1.Annotation
+	(*ProjectionObject)(nil),               // 44: gmeow.v1.ProjectionObject
+	(*SourceCursor)(nil),                   // 45: gmeow.v1.SourceCursor
+	(*Structure)(nil),                      // 46: gmeow.v1.Structure
+	(*Relationship)(nil),                   // 47: gmeow.v1.Relationship
+	(*GraphFact)(nil),                      // 48: gmeow.v1.GraphFact
+	(*AnalyzerSpec)(nil),                   // 49: gmeow.v1.AnalyzerSpec
+	(*Empty)(nil),                          // 50: gmeow.v1.Empty
 }
 var file_gmeow_v1_query_proto_depIdxs = []int32{
-	40, // 0: gmeow.v1.ProjectRequest.manifest:type_name -> gmeow.v1.Manifest
-	41, // 1: gmeow.v1.ProjectRequest.annotations:type_name -> gmeow.v1.Annotation
-	42, // 2: gmeow.v1.ProjectObjectRequest.object:type_name -> gmeow.v1.ProjectionObject
-	43, // 3: gmeow.v1.ProjectSourceCursorRequest.cursor:type_name -> gmeow.v1.SourceCursor
+	42, // 0: gmeow.v1.ProjectRequest.manifest:type_name -> gmeow.v1.Manifest
+	43, // 1: gmeow.v1.ProjectRequest.annotations:type_name -> gmeow.v1.Annotation
+	44, // 2: gmeow.v1.ProjectObjectRequest.object:type_name -> gmeow.v1.ProjectionObject
+	45, // 3: gmeow.v1.ProjectSourceCursorRequest.cursor:type_name -> gmeow.v1.SourceCursor
 	3,  // 4: gmeow.v1.SearchRequest.provenance:type_name -> gmeow.v1.ProvenanceFilter
 	4,  // 5: gmeow.v1.SearchRequest.relationships:type_name -> gmeow.v1.RelationshipFilter
 	6,  // 6: gmeow.v1.SearchResponse.results:type_name -> gmeow.v1.SearchResult
-	44, // 7: gmeow.v1.StructureResponse.structure:type_name -> gmeow.v1.Structure
+	46, // 7: gmeow.v1.StructureResponse.structure:type_name -> gmeow.v1.Structure
 	4,  // 8: gmeow.v1.RelationshipRequest.filter:type_name -> gmeow.v1.RelationshipFilter
-	45, // 9: gmeow.v1.RelationshipResponse.relationships:type_name -> gmeow.v1.Relationship
-	46, // 10: gmeow.v1.GraphResponse.facts:type_name -> gmeow.v1.GraphFact
-	47, // 11: gmeow.v1.AnalysisStatusRequest.analyzers:type_name -> gmeow.v1.AnalyzerSpec
+	47, // 9: gmeow.v1.RelationshipResponse.relationships:type_name -> gmeow.v1.Relationship
+	48, // 10: gmeow.v1.GraphResponse.facts:type_name -> gmeow.v1.GraphFact
+	49, // 11: gmeow.v1.AnalysisStatusRequest.analyzers:type_name -> gmeow.v1.AnalyzerSpec
 	15, // 12: gmeow.v1.AnalysisStatusResponse.statuses:type_name -> gmeow.v1.AnalysisStatus
 	18, // 13: gmeow.v1.VectorSearchResponse.results:type_name -> gmeow.v1.VectorSearchResult
-	43, // 14: gmeow.v1.SourceCursorResponse.cursors:type_name -> gmeow.v1.SourceCursor
+	45, // 14: gmeow.v1.SourceCursorResponse.cursors:type_name -> gmeow.v1.SourceCursor
 	23, // 15: gmeow.v1.JMAPMailboxResponse.mailboxes:type_name -> gmeow.v1.JMAPMailbox
 	26, // 16: gmeow.v1.JMAPEmailStateResponse.states:type_name -> gmeow.v1.JMAPEmailState
-	29, // 17: gmeow.v1.OperationRecord.progress:type_name -> gmeow.v1.OperationProgressEvent
-	30, // 18: gmeow.v1.CreateOrGetOperationResponse.operation:type_name -> gmeow.v1.OperationRecord
-	29, // 19: gmeow.v1.AppendOperationProgressRequest.event:type_name -> gmeow.v1.OperationProgressEvent
-	30, // 20: gmeow.v1.OperationLookupResponse.operation:type_name -> gmeow.v1.OperationRecord
+	31, // 17: gmeow.v1.OperationRecord.progress:type_name -> gmeow.v1.OperationProgressEvent
+	32, // 18: gmeow.v1.CreateOrGetOperationResponse.operation:type_name -> gmeow.v1.OperationRecord
+	31, // 19: gmeow.v1.AppendOperationProgressRequest.event:type_name -> gmeow.v1.OperationProgressEvent
+	32, // 20: gmeow.v1.OperationLookupResponse.operation:type_name -> gmeow.v1.OperationRecord
 	0,  // 21: gmeow.v1.QueryService.Project:input_type -> gmeow.v1.ProjectRequest
 	1,  // 22: gmeow.v1.QueryService.ProjectObject:input_type -> gmeow.v1.ProjectObjectRequest
 	2,  // 23: gmeow.v1.QueryService.ProjectSourceCursor:input_type -> gmeow.v1.ProjectSourceCursorRequest
@@ -2833,38 +3003,40 @@ var file_gmeow_v1_query_proto_depIdxs = []int32{
 	20, // 30: gmeow.v1.QueryService.SourceCursors:input_type -> gmeow.v1.SourceCursorRequest
 	22, // 31: gmeow.v1.QueryService.JMAPMailboxes:input_type -> gmeow.v1.JMAPMailboxRequest
 	25, // 32: gmeow.v1.QueryService.JMAPEmailStates:input_type -> gmeow.v1.JMAPEmailStateRequest
-	28, // 33: gmeow.v1.QueryService.UpdateJMAPEmailState:input_type -> gmeow.v1.UpdateJMAPEmailStateRequest
-	31, // 34: gmeow.v1.QueryService.CreateOrGetOperation:input_type -> gmeow.v1.CreateOperationRequest
-	33, // 35: gmeow.v1.QueryService.AppendOperationProgress:input_type -> gmeow.v1.AppendOperationProgressRequest
-	34, // 36: gmeow.v1.QueryService.CompleteOperation:input_type -> gmeow.v1.CompleteOperationRequest
-	35, // 37: gmeow.v1.QueryService.FailOperation:input_type -> gmeow.v1.FailOperationRequest
-	36, // 38: gmeow.v1.QueryService.GetOperation:input_type -> gmeow.v1.OperationLookupRequest
-	37, // 39: gmeow.v1.QueryService.GetOperationByRequestHash:input_type -> gmeow.v1.OperationByRequestHashRequest
-	48, // 40: gmeow.v1.QueryService.Rebuild:input_type -> gmeow.v1.Empty
-	39, // 41: gmeow.v1.QueryService.ProjectChanged:input_type -> gmeow.v1.ProjectChangedRequest
-	48, // 42: gmeow.v1.QueryService.Project:output_type -> gmeow.v1.Empty
-	48, // 43: gmeow.v1.QueryService.ProjectObject:output_type -> gmeow.v1.Empty
-	48, // 44: gmeow.v1.QueryService.ProjectSourceCursor:output_type -> gmeow.v1.Empty
-	7,  // 45: gmeow.v1.QueryService.Search:output_type -> gmeow.v1.SearchResponse
-	9,  // 46: gmeow.v1.QueryService.Structure:output_type -> gmeow.v1.StructureResponse
-	11, // 47: gmeow.v1.QueryService.Relationships:output_type -> gmeow.v1.RelationshipResponse
-	13, // 48: gmeow.v1.QueryService.Graph:output_type -> gmeow.v1.GraphResponse
-	16, // 49: gmeow.v1.QueryService.AnalysisStatus:output_type -> gmeow.v1.AnalysisStatusResponse
-	19, // 50: gmeow.v1.QueryService.VectorSearch:output_type -> gmeow.v1.VectorSearchResponse
-	21, // 51: gmeow.v1.QueryService.SourceCursors:output_type -> gmeow.v1.SourceCursorResponse
-	24, // 52: gmeow.v1.QueryService.JMAPMailboxes:output_type -> gmeow.v1.JMAPMailboxResponse
-	27, // 53: gmeow.v1.QueryService.JMAPEmailStates:output_type -> gmeow.v1.JMAPEmailStateResponse
-	26, // 54: gmeow.v1.QueryService.UpdateJMAPEmailState:output_type -> gmeow.v1.JMAPEmailState
-	32, // 55: gmeow.v1.QueryService.CreateOrGetOperation:output_type -> gmeow.v1.CreateOrGetOperationResponse
-	48, // 56: gmeow.v1.QueryService.AppendOperationProgress:output_type -> gmeow.v1.Empty
-	48, // 57: gmeow.v1.QueryService.CompleteOperation:output_type -> gmeow.v1.Empty
-	48, // 58: gmeow.v1.QueryService.FailOperation:output_type -> gmeow.v1.Empty
-	38, // 59: gmeow.v1.QueryService.GetOperation:output_type -> gmeow.v1.OperationLookupResponse
-	38, // 60: gmeow.v1.QueryService.GetOperationByRequestHash:output_type -> gmeow.v1.OperationLookupResponse
-	48, // 61: gmeow.v1.QueryService.Rebuild:output_type -> gmeow.v1.Empty
-	48, // 62: gmeow.v1.QueryService.ProjectChanged:output_type -> gmeow.v1.Empty
-	42, // [42:63] is the sub-list for method output_type
-	21, // [21:42] is the sub-list for method input_type
+	28, // 33: gmeow.v1.QueryService.JMAPEmailQuery:input_type -> gmeow.v1.JMAPEmailQueryRequest
+	30, // 34: gmeow.v1.QueryService.UpdateJMAPEmailState:input_type -> gmeow.v1.UpdateJMAPEmailStateRequest
+	33, // 35: gmeow.v1.QueryService.CreateOrGetOperation:input_type -> gmeow.v1.CreateOperationRequest
+	35, // 36: gmeow.v1.QueryService.AppendOperationProgress:input_type -> gmeow.v1.AppendOperationProgressRequest
+	36, // 37: gmeow.v1.QueryService.CompleteOperation:input_type -> gmeow.v1.CompleteOperationRequest
+	37, // 38: gmeow.v1.QueryService.FailOperation:input_type -> gmeow.v1.FailOperationRequest
+	38, // 39: gmeow.v1.QueryService.GetOperation:input_type -> gmeow.v1.OperationLookupRequest
+	39, // 40: gmeow.v1.QueryService.GetOperationByRequestHash:input_type -> gmeow.v1.OperationByRequestHashRequest
+	50, // 41: gmeow.v1.QueryService.Rebuild:input_type -> gmeow.v1.Empty
+	41, // 42: gmeow.v1.QueryService.ProjectChanged:input_type -> gmeow.v1.ProjectChangedRequest
+	50, // 43: gmeow.v1.QueryService.Project:output_type -> gmeow.v1.Empty
+	50, // 44: gmeow.v1.QueryService.ProjectObject:output_type -> gmeow.v1.Empty
+	50, // 45: gmeow.v1.QueryService.ProjectSourceCursor:output_type -> gmeow.v1.Empty
+	7,  // 46: gmeow.v1.QueryService.Search:output_type -> gmeow.v1.SearchResponse
+	9,  // 47: gmeow.v1.QueryService.Structure:output_type -> gmeow.v1.StructureResponse
+	11, // 48: gmeow.v1.QueryService.Relationships:output_type -> gmeow.v1.RelationshipResponse
+	13, // 49: gmeow.v1.QueryService.Graph:output_type -> gmeow.v1.GraphResponse
+	16, // 50: gmeow.v1.QueryService.AnalysisStatus:output_type -> gmeow.v1.AnalysisStatusResponse
+	19, // 51: gmeow.v1.QueryService.VectorSearch:output_type -> gmeow.v1.VectorSearchResponse
+	21, // 52: gmeow.v1.QueryService.SourceCursors:output_type -> gmeow.v1.SourceCursorResponse
+	24, // 53: gmeow.v1.QueryService.JMAPMailboxes:output_type -> gmeow.v1.JMAPMailboxResponse
+	27, // 54: gmeow.v1.QueryService.JMAPEmailStates:output_type -> gmeow.v1.JMAPEmailStateResponse
+	29, // 55: gmeow.v1.QueryService.JMAPEmailQuery:output_type -> gmeow.v1.JMAPEmailQueryResponse
+	26, // 56: gmeow.v1.QueryService.UpdateJMAPEmailState:output_type -> gmeow.v1.JMAPEmailState
+	34, // 57: gmeow.v1.QueryService.CreateOrGetOperation:output_type -> gmeow.v1.CreateOrGetOperationResponse
+	50, // 58: gmeow.v1.QueryService.AppendOperationProgress:output_type -> gmeow.v1.Empty
+	50, // 59: gmeow.v1.QueryService.CompleteOperation:output_type -> gmeow.v1.Empty
+	50, // 60: gmeow.v1.QueryService.FailOperation:output_type -> gmeow.v1.Empty
+	40, // 61: gmeow.v1.QueryService.GetOperation:output_type -> gmeow.v1.OperationLookupResponse
+	40, // 62: gmeow.v1.QueryService.GetOperationByRequestHash:output_type -> gmeow.v1.OperationLookupResponse
+	50, // 63: gmeow.v1.QueryService.Rebuild:output_type -> gmeow.v1.Empty
+	50, // 64: gmeow.v1.QueryService.ProjectChanged:output_type -> gmeow.v1.Empty
+	43, // [43:65] is the sub-list for method output_type
+	21, // [21:43] is the sub-list for method input_type
 	21, // [21:21] is the sub-list for extension type_name
 	21, // [21:21] is the sub-list for extension extendee
 	0,  // [0:21] is the sub-list for field type_name
@@ -2882,7 +3054,7 @@ func file_gmeow_v1_query_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gmeow_v1_query_proto_rawDesc), len(file_gmeow_v1_query_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   40,
+			NumMessages:   42,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

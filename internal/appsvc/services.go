@@ -183,6 +183,15 @@ type JMAPEmailQueryResponse struct {
 	Limit  int                      `json:"limit"`
 }
 
+type JMAPEmailQueryRequest struct {
+	Text       string `json:"text,omitempty"`
+	InMailbox  string `json:"in_mailbox,omitempty"`
+	HasKeyword string `json:"has_keyword,omitempty"`
+	NotKeyword string `json:"not_keyword,omitempty"`
+	Offset     int    `json:"offset"`
+	Limit      int    `json:"limit"`
+}
+
 type JMAPEmailMutation struct {
 	ObjectDigest     contracts.ObjectDigest `json:"object_digest"`
 	MailboxIDs       map[string]bool        `json:"mailbox_ids,omitempty"`
@@ -685,31 +694,35 @@ func (services *Services) JMAPEmailStates(
 
 func (services *Services) JMAPEmailQuery(
 	ctx context.Context,
-	offset, limit int,
+	request JMAPEmailQueryRequest,
 ) (JMAPEmailQueryResponse, error) {
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return JMAPEmailQueryResponse{}, errors.New(
+			"JMAP query reader is not configured",
+		)
+	}
+	limit := request.Limit
 	if limit <= 0 {
 		limit = jmapDefaultLimit
 	}
-	response, err := services.query.Search(ctx, contracts.SearchRequest{
-		SchemaVersion: contracts.SchemaVersionPhase00,
-		Facets:        []string{MailMessageFacet},
-		Limit:         limit,
-		Offset:        offset,
+	response, err := reader.JMAPEmailQuery(ctx, contracts.JMAPEmailQueryRequest{
+		Text:       request.Text,
+		InMailbox:  request.InMailbox,
+		HasKeyword: request.HasKeyword,
+		NotKeyword: request.NotKeyword,
+		Limit:      limit,
+		Offset:     request.Offset,
 	})
 	if err != nil {
 		return JMAPEmailQueryResponse{}, err
 	}
 
-	ids := make([]contracts.ObjectDigest, 0, len(response.Results))
-	for _, result := range response.Results {
-		ids = append(ids, result.ObjectDigest)
-	}
-
 	return JMAPEmailQueryResponse{
-		IDs:    ids,
+		IDs:    append([]contracts.ObjectDigest{}, response.IDs...),
 		Total:  response.Total,
-		Offset: offset,
-		Limit:  limit,
+		Offset: response.Offset,
+		Limit:  response.Limit,
 	}, nil
 }
 

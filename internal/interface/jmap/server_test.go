@@ -191,10 +191,10 @@ func TestJMAPMailboxGetAndEmailQueryUseAppServices(t *testing.T) {
 				SortOrder: 10,
 				IsSystem:  true,
 			}},
-			search: contracts.SearchResponse{
-				Results: []contracts.SearchResult{{
-					ObjectDigest: contracts.ObjectDigest("digest-1"),
-				}},
+			emailQuery: contracts.JMAPEmailQueryResponse{
+				IDs: []contracts.ObjectDigest{
+					contracts.ObjectDigest("digest-1"),
+				},
 				Total: 1,
 			},
 		},
@@ -208,6 +208,7 @@ func TestJMAPMailboxGetAndEmailQueryUseAppServices(t *testing.T) {
 	body := bytes.NewBufferString(`{
 		"using":["urn:ietf:params:jmap:mail"],
 		"methodCalls":[
+			["Mailbox/query",{"accountId":"gmeow"},"q1"],
 			["Mailbox/get",{"accountId":"gmeow"},"m1"],
 			["Email/query",{"accountId":"gmeow","limit":5},"e1"]
 		]
@@ -230,11 +231,32 @@ func TestJMAPMailboxGetAndEmailQueryUseAppServices(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.MethodResponses) != 2 {
+	if len(decoded.MethodResponses) != 3 {
 		t.Fatalf("method response count = %d", len(decoded.MethodResponses))
 	}
+	var mailboxQueryTuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &mailboxQueryTuple); err != nil {
+		t.Fatal(err)
+	}
+	var mailboxQueryName string
+	var mailboxQuery mailboxQueryResponse
+	if err := json.Unmarshal(mailboxQueryTuple[0], &mailboxQueryName); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(mailboxQueryTuple[1], &mailboxQuery); err != nil {
+		t.Fatal(err)
+	}
+	if mailboxQueryName != "Mailbox/query" || len(mailboxQuery.IDs) != 1 ||
+		mailboxQuery.IDs[0] != "inbox" {
+		t.Fatalf(
+			"unexpected mailbox query response name=%q args=%#v",
+			mailboxQueryName,
+			mailboxQuery,
+		)
+	}
+
 	var mailboxTuple []json.RawMessage
-	if err := json.Unmarshal(decoded.MethodResponses[0], &mailboxTuple); err != nil {
+	if err := json.Unmarshal(decoded.MethodResponses[1], &mailboxTuple); err != nil {
 		t.Fatal(err)
 	}
 	var mailboxName string
@@ -251,7 +273,7 @@ func TestJMAPMailboxGetAndEmailQueryUseAppServices(t *testing.T) {
 	}
 
 	var emailTuple []json.RawMessage
-	if err := json.Unmarshal(decoded.MethodResponses[1], &emailTuple); err != nil {
+	if err := json.Unmarshal(decoded.MethodResponses[2], &emailTuple); err != nil {
 		t.Fatal(err)
 	}
 	var emailName string
@@ -331,10 +353,71 @@ func TestJMAPEmailSetUpdatesKeywordsAndMailboxes(t *testing.T) {
 	}
 }
 
+func TestJMAPEmailQueryPassesFilterToAppServices(t *testing.T) {
+	var captured contracts.JMAPEmailQueryRequest
+	services, err := appsvc.New(appsvc.Options{
+		Query: jmapQueryFixture{
+			emailQuery: contracts.JMAPEmailQueryResponse{
+				IDs: []contracts.ObjectDigest{contracts.ObjectDigest("digest-2")},
+			},
+			requested: &captured,
+		},
+		Objects: objectReaderFixture{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:mail"],
+		"methodCalls":[["Email/query",{"accountId":"gmeow","position":2,"limit":7,"filter":{"text":"apollo","inMailbox":"inbox","hasKeyword":"$flagged","notKeyword":"$seen"}},"e1"]]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &tuple); err != nil {
+		t.Fatal(err)
+	}
+	var output emailQueryResponse
+	if err := json.Unmarshal(tuple[1], &output); err != nil {
+		t.Fatal(err)
+	}
+	if len(output.IDs) != 1 || output.IDs[0] != "digest-2" {
+		t.Fatalf("unexpected email query output: %#v", output)
+	}
+	if captured.Text != "apollo" ||
+		captured.InMailbox != "inbox" ||
+		captured.HasKeyword != "$flagged" ||
+		captured.NotKeyword != "$seen" ||
+		captured.Offset != 2 ||
+		captured.Limit != 7 {
+		t.Fatalf("unexpected captured query: %#v", captured)
+	}
+}
+
 type jmapQueryFixture struct {
-	mailboxes []contracts.JMAPMailbox
-	states    map[contracts.ObjectDigest]contracts.JMAPEmailState
-	search    contracts.SearchResponse
+	mailboxes  []contracts.JMAPMailbox
+	states     map[contracts.ObjectDigest]contracts.JMAPEmailState
+	search     contracts.SearchResponse
+	emailQuery contracts.JMAPEmailQueryResponse
+	requested  *contracts.JMAPEmailQueryRequest
 }
 
 func (query jmapQueryFixture) Search(
@@ -355,6 +438,16 @@ func (query jmapQueryFixture) JMAPEmailStates(
 	[]contracts.ObjectDigest,
 ) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error) {
 	return query.states, nil
+}
+
+func (query jmapQueryFixture) JMAPEmailQuery(
+	_ context.Context,
+	request contracts.JMAPEmailQueryRequest,
+) (contracts.JMAPEmailQueryResponse, error) {
+	if query.requested != nil {
+		*query.requested = request
+	}
+	return query.emailQuery, nil
 }
 
 func (query jmapQueryFixture) UpdateJMAPEmailState(

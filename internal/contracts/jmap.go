@@ -31,3 +31,19 @@ type JMAPEmailStateUpdate struct {
 	MailboxIDs   []string     `json:"mailbox_ids"`
 	Keywords     []string     `json:"keywords"`
 }
+
+type JMAPEmailQueryRequest struct {
+	Text       string `json:"text,omitempty"`
+	InMailbox  string `json:"in_mailbox,omitempty"`
+	HasKeyword string `json:"has_keyword,omitempty"`
+	NotKeyword string `json:"not_keyword,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	Offset     int    `json:"offset,omitempty"`
+}
+
+type JMAPEmailQueryResponse struct {
+	IDs    []ObjectDigest `json:"ids"`
+	Total  int            `json:"total"`
+	Offset int            `json:"offset"`
+	Limit  int            `json:"limit"`
+}

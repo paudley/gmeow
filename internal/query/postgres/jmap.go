@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -121,6 +122,90 @@ func (index *Index) JMAPEmailStates(
 	}
 
 	return states, nil
+}
+
+func (index *Index) JMAPEmailQuery(
+	ctx context.Context,
+	request contracts.JMAPEmailQueryRequest,
+) (contracts.JMAPEmailQueryResponse, error) {
+	args := []any{}
+	where := []string{"true"}
+	if request.Text != "" {
+		args = append(args, request.Text)
+		where = append(
+			where,
+			fmt.Sprintf("o.search_tsv @@ websearch_to_tsquery('simple', $%d)", len(args)),
+		)
+	}
+	if request.InMailbox != "" {
+		args = append(args, request.InMailbox)
+		where = append(where, fmt.Sprintf(`
+			EXISTS (
+				SELECT 1 FROM jmap_email_mailboxes m
+				 WHERE m.object_digest = s.object_digest
+				   AND m.mailbox_id = $%d
+			)`, len(args)))
+	}
+	if request.HasKeyword != "" {
+		args = append(args, request.HasKeyword)
+		where = append(where, fmt.Sprintf(`
+			EXISTS (
+				SELECT 1 FROM jmap_email_keywords k
+				 WHERE k.object_digest = s.object_digest
+				   AND k.keyword = $%d
+			)`, len(args)))
+	}
+	if request.NotKeyword != "" {
+		args = append(args, request.NotKeyword)
+		where = append(where, fmt.Sprintf(`
+			NOT EXISTS (
+				SELECT 1 FROM jmap_email_keywords k
+				 WHERE k.object_digest = s.object_digest
+				   AND k.keyword = $%d
+			)`, len(args)))
+	}
+
+	limit := normalizedLimit(request.Limit)
+	offset := request.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	args = append(args, limit, offset)
+	rows, err := index.pool.Query(ctx, fmt.Sprintf(`
+		SELECT s.object_digest, COUNT(*) OVER() AS total
+		  FROM jmap_email_state s
+		  JOIN query_objects o ON o.object_digest = s.object_digest
+		 WHERE %s
+		 ORDER BY s.received_at DESC NULLS LAST, o.updated_at DESC, s.object_digest
+		 LIMIT $%d OFFSET $%d`,
+		strings.Join(where, " AND "),
+		len(args)-1,
+		len(args),
+	), args...)
+	if err != nil {
+		return contracts.JMAPEmailQueryResponse{}, fmt.Errorf("query JMAP emails: %w", err)
+	}
+	defer rows.Close()
+
+	ids := []contracts.ObjectDigest{}
+	total := 0
+	for rows.Next() {
+		var id contracts.ObjectDigest
+		if err := rows.Scan(&id, &total); err != nil {
+			return contracts.JMAPEmailQueryResponse{}, fmt.Errorf("scan JMAP email: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return contracts.JMAPEmailQueryResponse{}, fmt.Errorf("iterate JMAP emails: %w", err)
+	}
+
+	return contracts.JMAPEmailQueryResponse{
+		IDs:    ids,
+		Total:  total,
+		Offset: offset,
+		Limit:  limit,
+	}, nil
 }
 
 func (index *Index) UpdateJMAPEmailState(

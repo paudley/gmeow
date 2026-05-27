@@ -343,6 +343,35 @@ func (server *QueryServer) JMAPEmailStates(
 	return &pb.JMAPEmailStateResponse{States: converted}, nil
 }
 
+func (server *QueryServer) JMAPEmailQuery(
+	ctx context.Context,
+	request *pb.JMAPEmailQueryRequest,
+) (*pb.JMAPEmailQueryResponse, error) {
+	response, err := server.index.JMAPEmailQuery(ctx, contracts.JMAPEmailQueryRequest{
+		Text:       request.GetText(),
+		InMailbox:  request.GetInMailbox(),
+		HasKeyword: request.GetHasKeyword(),
+		NotKeyword: request.GetNotKeyword(),
+		Limit:      int(request.GetLimit()),
+		Offset:     int(request.GetOffset()),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	ids := make([]string, 0, len(response.IDs))
+	for _, id := range response.IDs {
+		ids = append(ids, string(id))
+	}
+
+	return &pb.JMAPEmailQueryResponse{
+		Ids:    ids,
+		Total:  int32(response.Total),
+		Offset: int32(response.Offset),
+		Limit:  int32(response.Limit),
+	}, nil
+}
+
 func (server *QueryServer) UpdateJMAPEmailState(
 	ctx context.Context,
 	request *pb.UpdateJMAPEmailStateRequest,

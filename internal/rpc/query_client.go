@@ -375,6 +375,35 @@ func (client *QueryClient) JMAPEmailStates(
 	return states, nil
 }
 
+func (client *QueryClient) JMAPEmailQuery(
+	ctx context.Context,
+	request contracts.JMAPEmailQueryRequest,
+) (contracts.JMAPEmailQueryResponse, error) {
+	response, err := client.client.JMAPEmailQuery(ctx, &pb.JMAPEmailQueryRequest{
+		Text:       request.Text,
+		InMailbox:  request.InMailbox,
+		HasKeyword: request.HasKeyword,
+		NotKeyword: request.NotKeyword,
+		Limit:      int32(request.Limit),
+		Offset:     int32(request.Offset),
+	})
+	if err != nil {
+		return contracts.JMAPEmailQueryResponse{}, err
+	}
+
+	ids := make([]contracts.ObjectDigest, 0, len(response.GetIds()))
+	for _, id := range response.GetIds() {
+		ids = append(ids, contracts.ObjectDigest(id))
+	}
+
+	return contracts.JMAPEmailQueryResponse{
+		IDs:    ids,
+		Total:  int(response.GetTotal()),
+		Offset: int(response.GetOffset()),
+		Limit:  int(response.GetLimit()),
+	}, nil
+}
+
 func (client *QueryClient) UpdateJMAPEmailState(
 	ctx context.Context,
 	update contracts.JMAPEmailStateUpdate,
