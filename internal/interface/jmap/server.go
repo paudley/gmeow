@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"mime"
 	"net"
@@ -97,6 +98,12 @@ type queryArguments struct {
 	Position  int              `json:"position"`
 }
 
+type searchSnippetArguments struct {
+	Filter    json.RawMessage `json:"filter"`
+	AccountID string          `json:"accountId"`
+	EmailIDs  []string        `json:"emailIds"`
+}
+
 type emailQueryFilter struct {
 	Text       string `json:"text"`
 	InMailbox  string `json:"inMailbox"`
@@ -158,9 +165,21 @@ type blobGetResponse struct {
 	NotFound  []string   `json:"notFound,omitempty"`
 }
 
+type searchSnippetGetResponse struct {
+	AccountID string              `json:"accountId"`
+	List      []jmapSearchSnippet `json:"list"`
+	NotFound  []string            `json:"notFound,omitempty"`
+}
+
 type jmapThread struct {
 	ID       string   `json:"id"`
 	EmailIDs []string `json:"emailIds"`
+}
+
+type jmapSearchSnippet struct {
+	EmailID string  `json:"emailId"`
+	Subject *string `json:"subject"`
+	Preview *string `json:"preview"`
 }
 
 type jmapBlob struct {
@@ -430,6 +449,8 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 		return handler.handleEmailQuery(ctx, call)
 	case "Email/get":
 		return handler.handleEmailGet(ctx, call)
+	case "SearchSnippet/get":
+		return handler.handleSearchSnippetGet(ctx, call)
 	case "Email/set":
 		return handler.handleEmailSet(ctx, call)
 	case "Thread/get":
@@ -479,6 +500,48 @@ func (handler handler) handleBlobGet(
 		Arguments: blobGetResponse{
 			AccountID: "gmeow",
 			State:     "0",
+			List:      list,
+			NotFound:  notFound,
+		},
+		ClientID: call.ClientID,
+	}
+}
+
+func (handler handler) handleSearchSnippetGet(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
+	var arguments searchSnippetArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+
+	filterText := searchSnippetFilterText(arguments.Filter)
+	list := make([]jmapSearchSnippet, 0, len(arguments.EmailIDs))
+	notFound := []string{}
+	for _, id := range arguments.EmailIDs {
+		digest := contracts.ObjectDigest(strings.TrimSpace(id))
+		if digest == "" {
+			continue
+		}
+		retrieved, err := handler.services.Retrieve(ctx, digest, false)
+		if err != nil || retrieved.Message == nil {
+			notFound = append(notFound, id)
+			continue
+		}
+		list = append(list, toJMAPSearchSnippet(id, *retrieved.Message, filterText))
+	}
+
+	return methodResponse{
+		Name: "SearchSnippet/get",
+		Arguments: searchSnippetGetResponse{
+			AccountID: "gmeow",
 			List:      list,
 			NotFound:  notFound,
 		},
@@ -809,6 +872,24 @@ func toJMAPMailbox(mailbox contracts.JMAPMailbox) jmapMailbox {
 	}
 }
 
+func toJMAPSearchSnippet(
+	emailID string,
+	message appsvc.CanonicalMessage,
+	filterText string,
+) jmapSearchSnippet {
+	subject := markedSnippet(message.SelectedHeaders.Subject, filterText, 255)
+	preview := markedSnippet(message.Body, filterText, 255)
+	if preview == nil {
+		preview = markedSnippet(message.Summary, filterText, 255)
+	}
+
+	return jmapSearchSnippet{
+		EmailID: emailID,
+		Subject: subject,
+		Preview: preview,
+	}
+}
+
 func toJMAPBlob(blob appsvc.JMAPBlob) jmapBlob {
 	return jmapBlob{
 		ID:   blob.ID,
@@ -972,6 +1053,100 @@ func downloadFilename(value string) string {
 	filename = strings.ReplaceAll(filename, "\\", "_")
 
 	return filename
+}
+
+func searchSnippetFilterText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+
+	var node any
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return ""
+	}
+
+	return firstFilterText(node)
+}
+
+func firstFilterText(node any) string {
+	switch value := node.(type) {
+	case map[string]any:
+		if text, ok := value["text"].(string); ok {
+			return strings.TrimSpace(text)
+		}
+		if conditions, ok := value["conditions"].([]any); ok {
+			for _, condition := range conditions {
+				if text := firstFilterText(condition); text != "" {
+					return text
+				}
+			}
+		}
+	case []any:
+		for _, item := range value {
+			if text := firstFilterText(item); text != "" {
+				return text
+			}
+		}
+	}
+
+	return ""
+}
+
+func markedSnippet(value, filterText string, limit int) *string {
+	collapsed := collapseWhitespace(value)
+	if collapsed == "" {
+		return nil
+	}
+	if filterText == "" {
+		snippet := trimOctets(html.EscapeString(collapsed), limit)
+
+		return &snippet
+	}
+
+	location := strings.Index(
+		strings.ToLower(collapsed),
+		strings.ToLower(filterText),
+	)
+	if location < 0 {
+		return nil
+	}
+	start := max(0, location-80)
+	end := min(len(collapsed), location+len(filterText)+120)
+	prefix := ""
+	suffix := ""
+	if start > 0 {
+		prefix = "..."
+	}
+	if end < len(collapsed) {
+		suffix = "..."
+	}
+	window := collapsed[start:end]
+	relative := location - start
+	marked := prefix +
+		html.EscapeString(window[:relative]) +
+		"<mark>" +
+		html.EscapeString(window[relative:relative+len(filterText)]) +
+		"</mark>" +
+		html.EscapeString(window[relative+len(filterText):]) +
+		suffix
+	snippet := trimOctets(marked, limit)
+
+	return &snippet
+}
+
+func trimOctets(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return value[:limit]
+	}
+
+	return value[:limit-3] + "..."
+}
+
+func collapseWhitespace(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func (handler handler) session(request *http.Request) sessionResource {

@@ -601,6 +601,91 @@ func TestJMAPDownloadStreamsBlob(t *testing.T) {
 	}
 }
 
+func TestJMAPSearchSnippetGetMarksMatchingText(t *testing.T) {
+	messageDigest := contracts.ObjectDigest("digest-message")
+	headerDigest := contracts.ObjectDigest("digest-headers")
+	bodyDigest := contracts.ObjectDigest("digest-body")
+	services, err := appsvc.New(appsvc.Options{
+		Query: jmapQueryFixture{},
+		Objects: objectReaderFixture{
+			manifests: map[contracts.ObjectDigest]contracts.Manifest{
+				messageDigest: {
+					ObjectDigest: messageDigest,
+					Facets: []contracts.Facet{{
+						Kind: appsvc.MailMessageFacet,
+					}},
+					Compound: contracts.Compound{
+						IsCompound: true,
+						Parts: []contracts.CompoundPart{{
+							Digest: headerDigest,
+							Role:   "rfc822_headers",
+						}, {
+							Digest: bodyDigest,
+							Role:   "email_body",
+						}},
+					},
+				},
+				headerDigest: {ObjectDigest: headerDigest, MediaType: "application/json"},
+				bodyDigest:   {ObjectDigest: bodyDigest, MediaType: "text/plain"},
+			},
+			content: map[contracts.ObjectDigest]string{
+				headerDigest: `[{"name":"Subject","value":"Quarterly Apollo update"}]`,
+				bodyDigest:   `The Apollo program has a launch window next month.`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:mail"],
+		"methodCalls":[["SearchSnippet/get",{"accountId":"gmeow","emailIds":["digest-message","missing"],"filter":{"text":"Apollo"}},"sn1"]]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &tuple); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	var snippets searchSnippetGetResponse
+	if err := json.Unmarshal(tuple[0], &name); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tuple[1], &snippets); err != nil {
+		t.Fatal(err)
+	}
+	if name != "SearchSnippet/get" ||
+		len(snippets.List) != 1 ||
+		snippets.List[0].EmailID != "digest-message" ||
+		snippets.List[0].Subject == nil ||
+		!strings.Contains(*snippets.List[0].Subject, "<mark>Apollo</mark>") ||
+		snippets.List[0].Preview == nil ||
+		!strings.Contains(*snippets.List[0].Preview, "<mark>Apollo</mark>") ||
+		len(snippets.NotFound) != 1 ||
+		snippets.NotFound[0] != "missing" {
+		t.Fatalf("unexpected snippet response name=%q args=%#v", name, snippets)
+	}
+}
+
 type jmapQueryFixture struct {
 	mailboxes  []contracts.JMAPMailbox
 	states     map[contracts.ObjectDigest]contracts.JMAPEmailState
