@@ -419,3 +419,7 @@ func dial(ctx context.Context, endpoint Endpoint) (*grpc.ClientConn, error) {
 
 	return connection, nil
 }
+
+func DialForSource(ctx context.Context, endpoint Endpoint) (*grpc.ClientConn, error) {
+	return dial(ctx, endpoint)
+}

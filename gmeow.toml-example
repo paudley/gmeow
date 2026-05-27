@@ -148,5 +148,22 @@ facets = ["*"]
 # credential_secret = "gmail_credentials_json"
 # user_id = "me"
 # delegated_subject = "user@example.com"
+# [sources.rpc]
+# network = "unix"
+# address = "/run/gmeow/source-primary.sock"
+# [sources.backfill]
+# enabled = true
+# query = "newer_than:365d"
+# mode = "full"
+# cursor_key = "backfill"
+# page_size = 100
+# concurrency = 4
+# resume = true
+# [sources.inbox_refresh]
+# enabled = true
+# query = "in:inbox newer_than:30d"
+# interval = "5m"
+# page_size = 100
+# concurrency = 4
 # facets = ["mail_message"]
-# capabilities = ["hydrate", "live_search", "live_retrieve", "actions"]
+# capabilities = ["hydrate", "live_search", "live_retrieve", "actions", "backfill"]

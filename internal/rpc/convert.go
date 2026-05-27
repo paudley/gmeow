@@ -22,6 +22,14 @@ func ToPBSourceObjectRef(ref contracts.SourceObjectRef) *pb.SourceObjectRef {
 	}
 }
 
+func EncodeMapForSource(value map[string]any) ([]byte, error) {
+	return encodeMap(value)
+}
+
+func DecodeMapForSource(value []byte) (map[string]any, error) {
+	return decodeMap(value)
+}
+
 func FromPBSourceObjectRef(ref *pb.SourceObjectRef) contracts.SourceObjectRef {
 	if ref == nil {
 		return contracts.SourceObjectRef{}

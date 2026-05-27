@@ -28,6 +28,15 @@ do not own storage identity, dedupe, analysis, or query behavior.
   `--dry-run` lists and hydrates one page without writing FILESTORE. Normal runs
   resume from FILESTORE source cursors, write a cursor after each completed page,
   and rely on FILESTORE source identity lookup/claims for idempotency.
+- Gmail is also a first-class BACKEND service through `gmeow source-serve
+  <source-name>`. INTERFACE talks to that gRPC service for live mail search and
+  source actions; it does not construct Gmail adapters or call Gmail APIs
+  directly.
+- `[[sources]].backfill.enabled` runs the configured Gmail backfill workflow in
+  the Gmail source service. `[[sources]].inbox_refresh.enabled` refreshes the
+  rolling inbox query, defaulting to `in:inbox newer_than:30d`, on the configured
+  interval. These workflows store separate namespaced cursors under the
+  FILESTORE source cursor for the Gmail source.
 - Gmail history sync uses the stored `history_anchor`; if Gmail reports the
   anchor expired, the cursor records `history_expired=true` and the operator must
   rerun a full backfill.

@@ -124,13 +124,36 @@ type InterfaceConfig struct {
 }
 
 type SourceConfig struct {
-	Name             string   `toml:"name"`
-	Kind             string   `toml:"kind"`
-	CredentialSecret string   `toml:"credential_secret"`
-	UserID           string   `toml:"user_id"`
-	DelegatedSubject string   `toml:"delegated_subject"`
-	Facets           []string `toml:"facets"`
-	Capabilities     []string `toml:"capabilities"`
+	Name             string                   `toml:"name"`
+	Kind             string                   `toml:"kind"`
+	CredentialSecret string                   `toml:"credential_secret"`
+	UserID           string                   `toml:"user_id"`
+	DelegatedSubject string                   `toml:"delegated_subject"`
+	RPC              RPCEndpointConfig        `toml:"rpc"`
+	Backfill         SourceBackfillConfig     `toml:"backfill"`
+	InboxRefresh     SourceInboxRefreshConfig `toml:"inbox_refresh"`
+	Facets           []string                 `toml:"facets"`
+	Capabilities     []string                 `toml:"capabilities"`
+}
+
+type SourceBackfillConfig struct {
+	Enabled     bool   `toml:"enabled"`
+	Query       string `toml:"query"`
+	Mode        string `toml:"mode"`
+	CursorKey   string `toml:"cursor_key"`
+	PageSize    int    `toml:"page_size"`
+	MaxPages    int    `toml:"max_pages"`
+	Concurrency int    `toml:"concurrency"`
+	Resume      bool   `toml:"resume"`
+}
+
+type SourceInboxRefreshConfig struct {
+	Enabled     bool   `toml:"enabled"`
+	Query       string `toml:"query"`
+	Interval    string `toml:"interval"`
+	PageSize    int    `toml:"page_size"`
+	MaxPages    int    `toml:"max_pages"`
+	Concurrency int    `toml:"concurrency"`
 }
 
 type AnalysisConfig struct {
@@ -215,8 +238,9 @@ type ResolvedScheduler struct {
 }
 
 type ResolvedSource struct {
-	Name string
-	Kind string
+	Name     string
+	Kind     string
+	Endpoint ResolvedRPCEndpoint
 }
 
 type ResolvedWorker struct {
@@ -595,6 +619,12 @@ func validateConfig(parsed Config) error {
 		if err := validateSourceCapabilities(source); err != nil {
 			return err
 		}
+		if err := validateRPCEndpoint("sources."+source.Name+".rpc", source.RPC); err != nil {
+			return err
+		}
+		if err := validateSourceRuntime(source); err != nil {
+			return err
+		}
 	}
 
 	for _, iface := range parsed.Interfaces {
@@ -604,6 +634,62 @@ func validateConfig(parsed Config) error {
 	}
 
 	return nil
+}
+
+func validateSourceRuntime(source SourceConfig) error {
+	if source.Backfill.Enabled {
+		if !sourceHasCapability(source, "backfill") {
+			return fmt.Errorf(
+				"source %q backfill.enabled requires backfill capability",
+				source.Name,
+			)
+		}
+		if source.Backfill.PageSize < 0 ||
+			source.Backfill.MaxPages < 0 ||
+			source.Backfill.Concurrency < 0 {
+			return fmt.Errorf("source %q backfill numeric values must be positive", source.Name)
+		}
+	}
+	if source.InboxRefresh.Enabled {
+		if source.Kind != "gmail" {
+			return fmt.Errorf("source %q inbox_refresh is only supported for gmail", source.Name)
+		}
+		if !sourceHasCapability(source, "backfill") {
+			return fmt.Errorf(
+				"source %q inbox_refresh.enabled requires backfill capability",
+				source.Name,
+			)
+		}
+		if strings.TrimSpace(source.InboxRefresh.Interval) != "" {
+			if _, err := time.ParseDuration(source.InboxRefresh.Interval); err != nil {
+				return fmt.Errorf(
+					"source %q inbox_refresh.interval: %w",
+					source.Name,
+					err,
+				)
+			}
+		}
+		if source.InboxRefresh.PageSize < 0 ||
+			source.InboxRefresh.MaxPages < 0 ||
+			source.InboxRefresh.Concurrency < 0 {
+			return fmt.Errorf(
+				"source %q inbox_refresh numeric values must be positive",
+				source.Name,
+			)
+		}
+	}
+
+	return nil
+}
+
+func sourceHasCapability(source SourceConfig, capability string) bool {
+	for _, candidate := range source.Capabilities {
+		if strings.TrimSpace(candidate) == capability {
+			return true
+		}
+	}
+
+	return false
 }
 
 func validateInterface(iface InterfaceConfig) error {
@@ -807,10 +893,21 @@ func resolveSecrets(parsed Config, references map[string]int) (Resolved, error) 
 		resolved.Sources = append(resolved.Sources, ResolvedSource{
 			Name: source.Name,
 			Kind: source.Kind,
+			Endpoint: resolvedRPCEndpoint(
+				source.RPC,
+				"unix",
+				"/run/gmeow/source-"+safeEndpointName(source.Name)+".sock",
+			),
 		})
 	}
 
 	return resolved, nil
+}
+
+func safeEndpointName(name string) string {
+	replacer := strings.NewReplacer("/", "-", "\\", "-", " ", "-")
+
+	return replacer.Replace(strings.TrimSpace(name))
 }
 
 func resolvedRPC(raw RPCConfig) ResolvedRPC {

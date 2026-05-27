@@ -213,6 +213,63 @@ func TestValidateSourceCapabilitiesByKind(t *testing.T) {
 	}
 }
 
+func TestValidateGmailBackfillAndInboxRefreshFlags(t *testing.T) {
+	valid := validConfig()
+	valid.Sources = []SourceConfig{{
+		Name:         "primary",
+		Kind:         "gmail",
+		Capabilities: []string{"backfill", "hydrate", "live_search", "actions"},
+		Backfill: SourceBackfillConfig{
+			Enabled: true,
+			Query:   "newer_than:30d",
+			Resume:  true,
+		},
+		InboxRefresh: SourceInboxRefreshConfig{
+			Enabled:  true,
+			Query:    "in:inbox newer_than:30d",
+			Interval: "5m",
+		},
+	}}
+	if err := validateConfig(valid); err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := valid
+	invalid.Sources = []SourceConfig{{
+		Name:         "primary",
+		Kind:         "gmail",
+		Capabilities: []string{"hydrate", "live_search"},
+		Backfill:     SourceBackfillConfig{Enabled: true},
+	}}
+	err := validateConfig(invalid)
+	if err == nil || !strings.Contains(err.Error(), "requires backfill capability") {
+		t.Fatalf("expected backfill capability validation, got %v", err)
+	}
+}
+
+func TestResolvedSourceDefaultsToUnixEndpoint(t *testing.T) {
+	parsed := validConfig()
+	parsed.Secrets = map[string]string{
+		postgresPasswordName: "postgres",
+		rabbitPasswordName:   "rabbit",
+		testRabbitPassName:   "test-rabbit",
+	}
+	parsed.Sources = []SourceConfig{{
+		Name:         "primary",
+		Kind:         "gmail",
+		Capabilities: []string{"backfill"},
+	}}
+	resolved, err := resolveSecrets(parsed, secretReferences(parsed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Sources) != 1 ||
+		resolved.Sources[0].Endpoint.Network != "unix" ||
+		resolved.Sources[0].Endpoint.Address != "/run/gmeow/source-primary.sock" {
+		t.Fatalf("unexpected source endpoint: %#v", resolved.Sources)
+	}
+}
+
 func TestValidateInterfaceConfig(t *testing.T) {
 	valid := validConfig()
 	valid.Interfaces = []InterfaceConfig{

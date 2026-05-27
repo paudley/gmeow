@@ -31,6 +31,10 @@ interface service and are translated into internal service calls.
 - BACKENDS talk to their backend APIs and FILESTORE-facing ingest contracts.
   Gmail, local, and push sources hydrate data into FILESTORE; they do not run
   analysis, query PostgreSQL, or coordinate RabbitMQ.
+- BACKENDS are services. Gmail runs as a source gRPC server and exposes typed
+  live search, hydrate-backed search, action, backfill, and refresh operations
+  to INTERFACE and admin clients. INTERFACE must not instantiate Gmail adapters
+  or call Gmail APIs in-process.
 - Gmail backfill is a BACKEND/SOURCE workflow. It pages Gmail, hydrates
   messages, writes Gmail compound objects and source cursors to FILESTORE, and
   stops there. FILESTORE notification then lets SCHEDULER derive analysis and

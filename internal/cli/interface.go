@@ -18,6 +18,7 @@ import (
 	"blackcat.ca/gmeow/internal/interface/rest"
 	"blackcat.ca/gmeow/internal/rpc"
 	"blackcat.ca/gmeow/internal/source"
+	"blackcat.ca/gmeow/internal/source/sourcegrpc"
 )
 
 func newMCPServeCommand(out io.Writer, configPath *string) *cobra.Command {
@@ -157,7 +158,7 @@ func openInterfaceServicesLoaded(
 
 		return nil, nil, err
 	}
-	sourceRegistry, err := buildSourceRegistry(commandContext(ctx), loaded)
+	sourceRegistry, closeSources, err := buildSourceRegistry(commandContext(ctx), loaded)
 	if err != nil {
 		_ = schedulerClient.Close()
 		_ = queryClient.Close()
@@ -174,6 +175,7 @@ func openInterfaceServicesLoaded(
 		Ingest:    sourceService,
 	})
 	if err != nil {
+		closeSources()
 		_ = schedulerClient.Close()
 		_ = queryClient.Close()
 		_ = filestoreClient.Close()
@@ -182,6 +184,7 @@ func openInterfaceServicesLoaded(
 	}
 
 	return services, func() {
+		closeSources()
 		_ = schedulerClient.Close()
 		_ = queryClient.Close()
 		_ = filestoreClient.Close()
@@ -208,13 +211,36 @@ func interfaceAddress(iface config.InterfaceConfig) string {
 func buildSourceRegistry(
 	ctx context.Context,
 	loaded *config.Loaded,
-) (*appsvc.StaticSourceRegistry, error) {
-	adapters, err := buildSourceAdapters(ctx, loaded)
-	if err != nil {
-		return nil, err
+) (*appsvc.StaticSourceRegistry, func(), error) {
+	adapters := []source.Adapter{}
+	clients := []*sourcegrpc.Client{}
+	for index, sourceConfig := range loaded.Config.Sources {
+		if sourceConfig.Kind != "gmail" {
+			continue
+		}
+		client, err := sourcegrpc.NewClient(
+			ctx,
+			rpcEndpoint(loaded.Resolved.Sources[index].Endpoint),
+			sourceConfig.Kind,
+			sourceConfig.Name,
+			sourceConfig.Capabilities,
+		)
+		if err != nil {
+			for _, existing := range clients {
+				_ = existing.Close()
+			}
+
+			return nil, nil, err
+		}
+		clients = append(clients, client)
+		adapters = append(adapters, client)
 	}
 
-	return appsvc.NewStaticSourceRegistry(adapters...), nil
+	return appsvc.NewStaticSourceRegistry(adapters...), func() {
+		for _, client := range clients {
+			_ = client.Close()
+		}
+	}, nil
 }
 
 func buildSourceAdapters(

@@ -1,0 +1,11 @@
+[Unit]
+Description=Gmeow service resource slice
+Documentation=man:systemd.resource-control(5)
+
+[Slice]
+IOAccounting=yes
+MemoryAccounting=yes
+TasksAccounting=yes
+CPUWeight=100
+IOWeight=100
+TasksMax=4096

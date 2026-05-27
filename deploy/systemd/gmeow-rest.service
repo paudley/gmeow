@@ -1,9 +1,10 @@
 [Unit]
-Description=Gmeow QUERY gRPC service
+Description=Gmeow REST interface service
 Documentation=man:systemd.service(5) man:systemd.exec(5)
-PartOf=gmeow.target
-Requires=gmeow-filestore.service
-After=network-online.target postgresql.service gmeow-filestore.service
+PartOf=gmeow.target gmeow-interfaces.target
+Requires=gmeow-filestore.service gmeow-query.service gmeow-scheduler.service
+Wants=gmeow-backends.target
+After=network-online.target gmeow-filestore.service gmeow-query.service gmeow-scheduler.service gmeow-backends.target
 StartLimitIntervalSec=5min
 StartLimitBurst=5
 
@@ -23,7 +24,7 @@ ConfigurationDirectory=gmeow
 ConfigurationDirectoryMode=0750
 EnvironmentFile=-/etc/gmeow/gmeow.env
 ExecStartPre=/usr/local/bin/gmeow --config /etc/gmeow/gmeow.toml status
-ExecStart=/usr/local/bin/gmeow --config /etc/gmeow/gmeow.toml query-serve
+ExecStart=/usr/local/bin/gmeow --config /etc/gmeow/gmeow.toml rest-serve
 Restart=on-failure
 RestartSec=5s
 RestartSteps=5
@@ -58,4 +59,4 @@ SystemCallFilter=~@privileged @resources @mount
 LockPersonality=yes
 
 [Install]
-WantedBy=gmeow-core.target
+WantedBy=gmeow-interfaces.target

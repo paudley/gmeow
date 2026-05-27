@@ -100,9 +100,11 @@ type PullRequest struct {
 
 type BackfillRequest struct {
 	Cursor      map[string]any
+	CursorKey   string
 	PageSize    int
 	MaxPages    int
 	Concurrency int
+	Resume      bool
 }
 
 type BackfillReport struct {
@@ -331,6 +333,22 @@ func (service *Service) RunBackfill(
 	}
 
 	cursor := cloneCursor(request.Cursor)
+	storedCursor := contracts.SourceCursor{}
+	if request.CursorKey != "" {
+		stored, found, err := service.ReadCursor(ctx, adapter)
+		if err != nil {
+			return BackfillReport{}, err
+		}
+		if found {
+			storedCursor = stored
+		}
+		if found && request.Resume {
+			nested := mapCursorValue(stored.Cursor, request.CursorKey)
+			if nested != nil {
+				cursor = nested
+			}
+		}
+	}
 	report := BackfillReport{}
 	if boolCursorValue(cursor, "completed") {
 		report.Completed = true
@@ -340,6 +358,13 @@ func (service *Service) RunBackfill(
 			SourceName:    adapter.Name(),
 			Cursor:        cursor,
 			UpdatedAt:     time.Now().UTC(),
+		}
+		if request.CursorKey != "" {
+			report.FinalCursor = namespacedCursor(
+				storedCursor,
+				report.FinalCursor,
+				request.CursorKey,
+			)
 		}
 
 		return report, nil
@@ -353,7 +378,13 @@ func (service *Service) RunBackfill(
 		if err != nil {
 			report.FinalCursor = nextCursor
 			if nextCursor.SourceKind != "" && nextCursor.SourceName != "" {
-				_ = service.WriteCursor(ctx, adapter, nextCursor)
+				_ = service.writeBackfillCursor(
+					ctx,
+					adapter,
+					storedCursor,
+					nextCursor,
+					request.CursorKey,
+				)
 			}
 
 			return report, err
@@ -361,7 +392,13 @@ func (service *Service) RunBackfill(
 		if len(objects) == 0 && boolCursorValue(nextCursor.Cursor, "completed") {
 			report.Completed = true
 			report.FinalCursor = nextCursor
-			if err := service.WriteCursor(ctx, adapter, nextCursor); err != nil {
+			if err := service.writeBackfillCursor(
+				ctx,
+				adapter,
+				storedCursor,
+				nextCursor,
+				request.CursorKey,
+			); err != nil {
 				return report, err
 			}
 
@@ -382,7 +419,13 @@ func (service *Service) RunBackfill(
 		nextCursor.Cursor = mergeBackfillCounts(nextCursor.Cursor, report)
 		report.Completed = boolCursorValue(nextCursor.Cursor, "completed")
 		report.FinalCursor = nextCursor
-		if err := service.WriteCursor(ctx, adapter, nextCursor); err != nil {
+		if err := service.writeBackfillCursor(
+			ctx,
+			adapter,
+			storedCursor,
+			nextCursor,
+			request.CursorKey,
+		); err != nil {
 			return report, err
 		}
 		if pageReport.Failed > 0 {
@@ -399,6 +442,20 @@ func (service *Service) RunBackfill(
 	}
 
 	return report, nil
+}
+
+func (service *Service) writeBackfillCursor(
+	ctx context.Context,
+	adapter Adapter,
+	stored contracts.SourceCursor,
+	next contracts.SourceCursor,
+	key string,
+) error {
+	if key == "" {
+		return service.WriteCursor(ctx, adapter, next)
+	}
+
+	return service.WriteCursor(ctx, adapter, namespacedCursor(stored, next, key))
 }
 
 func (report BackfillReport) MaxPagesNotReached(maxPages int) bool {
@@ -479,6 +536,39 @@ func cloneCursor(cursor map[string]any) map[string]any {
 	}
 
 	return cloned
+}
+
+func namespacedCursor(
+	stored contracts.SourceCursor,
+	next contracts.SourceCursor,
+	key string,
+) contracts.SourceCursor {
+	wrapped := cloneCursor(stored.Cursor)
+	wrapped[key] = cloneCursor(next.Cursor)
+	wrapped[key+"_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	next.Cursor = wrapped
+
+	return next
+}
+
+func mapCursorValue(cursor map[string]any, key string) map[string]any {
+	value, ok := cursor[key]
+	if !ok {
+		return nil
+	}
+	if typed, ok := value.(map[string]any); ok {
+		return cloneCursor(typed)
+	}
+	typed, ok := value.(map[string]string)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]any, len(typed))
+	for mapKey, mapValue := range typed {
+		out[mapKey] = mapValue
+	}
+
+	return out
 }
 
 func mergeBackfillCounts(

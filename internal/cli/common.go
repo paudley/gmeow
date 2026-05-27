@@ -30,6 +30,7 @@ func NewServiceCommand(name, summary string, out io.Writer) *cobra.Command {
 	root.AddCommand(newFilestoreServeCommand(out, &configPath, "filestore-serve"))
 	root.AddCommand(newSchedulerServeCommand(out, &configPath, "scheduler-serve"))
 	root.AddCommand(newQueryServeCommand(out, &configPath, "query-serve"))
+	root.AddCommand(newSourceServeCommand(out, &configPath, "source-serve"))
 	root.AddCommand(newMCPServeCommand(out, &configPath))
 	root.AddCommand(newRESTServeCommand(out, &configPath))
 	root.AddCommand(newIMAPServeCommand(out, &configPath))
