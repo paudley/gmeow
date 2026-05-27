@@ -1,0 +1,61 @@
+[Unit]
+Description=Gmeow QUERY gRPC service
+Documentation=man:systemd.service(5) man:systemd.exec(5)
+PartOf=gmeow.target
+Requires=gmeow-filestore.service
+After=network-online.target postgresql.service gmeow-filestore.service
+StartLimitIntervalSec=5min
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=gmeow
+Group=gmeow
+Slice=gmeow.slice
+UMask=0077
+RuntimeDirectory=gmeow
+RuntimeDirectoryMode=0750
+StateDirectory=gmeow
+StateDirectoryMode=0750
+LogsDirectory=gmeow
+LogsDirectoryMode=0750
+ConfigurationDirectory=gmeow
+ConfigurationDirectoryMode=0750
+EnvironmentFile=-/etc/gmeow/gmeow.env
+ExecStartPre=/usr/local/bin/gmeow --config /etc/gmeow/gmeow.toml status
+ExecStart=/usr/local/bin/gmeow --config /etc/gmeow/gmeow.toml query-serve
+Restart=on-failure
+RestartSec=5s
+RestartSteps=5
+RestartMaxDelaySec=1min
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+KillMode=mixed
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/gmeow /var/lib/gmeow /var/log/gmeow
+ReadOnlyPaths=/etc/gmeow
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount
+LockPersonality=yes
+
+[Install]
+WantedBy=gmeow-core.target

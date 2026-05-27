@@ -1,0 +1,7 @@
+[Unit]
+Description=Gmeow analysis workers
+PartOf=gmeow.target
+After=gmeow-core.target
+
+[Install]
+WantedBy=gmeow.target

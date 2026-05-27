@@ -13,12 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v7
-      - run: uv sync --extra test
-      - run: uv run python -m compileall main.py src migrations tests
-      - run: uv run pytest
-      - run: uv build
-      - run: uv run python scripts/public_release_check.py
+      - run: make check

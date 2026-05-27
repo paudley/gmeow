@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -34,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -70,7 +70,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -79,7 +79,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -88,7 +88,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -97,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -106,7 +106,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -115,7 +115,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -124,7 +124,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -133,7 +133,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       }
@@ -143,7 +143,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       }
@@ -154,7 +154,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -163,7 +163,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -172,7 +172,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -181,7 +181,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -190,7 +190,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -199,7 +199,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -208,7 +208,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -217,7 +217,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -226,7 +226,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -235,7 +235,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -244,7 +244,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -253,7 +253,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -262,7 +262,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       },
@@ -271,7 +271,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       }
@@ -281,7 +281,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       }
@@ -291,7 +291,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       }
@@ -301,7 +301,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       }
@@ -311,7 +311,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       }
@@ -321,7 +321,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       }
@@ -331,10 +331,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/paudley/Active.running/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
+            "command": "/home/paudley/Active/gmeow/coding-ethos/bin/coding-ethos-run agent-hook"
           }
         ]
       }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(go test *)"
     ]
   }
 }

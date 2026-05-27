@@ -9,8 +9,26 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build distributions
+  go:
+    name: Build Go binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go build -o dist/gmeow ./cmd/gmeow
+      - run: go build -o dist/gmeow-admin ./cmd/gmeow-admin
+      - run: go build -o dist/gmeow-worker ./cmd/gmeow-worker
+      - uses: actions/upload-artifact@v7
+        with:
+          name: go-binaries
+          path: dist/gmeow*
+
+  python-intel:
+    name: Build gmeow-intel
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -18,20 +36,18 @@ jobs:
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v7
-      - run: uv sync --extra test
-      - run: uv run python -m compileall main.py src migrations tests scripts
-      - run: uv run pytest
-      - run: uv run python scripts/public_release_check.py
-      - run: uv build
+      - run: make release-check
+      - run: cd python && uv run pytest
+      - run: cd python && uv build
       - uses: actions/upload-artifact@v7
         with:
-          name: dist
-          path: dist/
+          name: gmeow-intel-dist
+          path: python/dist/
 
   pypi:
-    name: Publish to PyPI
+    name: Publish gmeow-intel to PyPI
     runs-on: ubuntu-latest
-    needs: build
+    needs: python-intel
     environment: pypi
     permissions:
       contents: read
@@ -39,6 +55,6 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: dist
+          name: gmeow-intel-dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1

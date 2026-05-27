@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package gmeow.v1;
+
+option go_package = "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1;gmeowv1";
+
+import "gmeow/v1/common.proto";
+
+service FilestoreService {
+  rpc LookupSourceObject(LookupSourceObjectRequest) returns (LookupSourceObjectResponse);
+  rpc TryAcquireSourceIngest(TryAcquireSourceIngestRequest) returns (TryAcquireSourceIngestResponse);
+  rpc ReleaseSourceIngest(ReleaseSourceIngestRequest) returns (Empty);
+  rpc PutObject(stream PutObjectFrame) returns (PutObjectResponse);
+  rpc AttachProvenance(AttachProvenanceRequest) returns (Empty);
+  rpc PutCompound(PutCompoundRequest) returns (PutCompoundResponse);
+  rpc Open(OpenRequest) returns (stream ObjectChunk);
+  rpc ReadManifest(ReadManifestRequest) returns (ReadManifestResponse);
+  rpc GetStructure(GetStructureRequest) returns (GetStructureResponse);
+  rpc HasAnalysisAnnotation(HasAnalysisAnnotationRequest) returns (HasAnalysisAnnotationResponse);
+  rpc WriteAnnotation(WriteAnnotationRequest) returns (Empty);
+  rpc WriteOverlays(WriteOverlaysRequest) returns (Empty);
+  rpc WriteSourceCursor(WriteSourceCursorRequest) returns (Empty);
+  rpc ReadSourceCursor(ReadSourceCursorRequest) returns (ReadSourceCursorResponse);
+  rpc Verify(VerifyRequest) returns (VerifyResponse);
+}
+
+message LookupSourceObjectRequest { SourceObjectRef ref = 1; }
+message LookupSourceObjectResponse { string digest = 1; bool found = 2; }
+message TryAcquireSourceIngestRequest { SourceObjectRef ref = 1; }
+message TryAcquireSourceIngestResponse { SourceIngestClaim claim = 1; bool acquired = 2; }
+message ReleaseSourceIngestRequest { SourceIngestClaim claim = 1; }
+
+message PutObjectFrame {
+  oneof frame {
+    PutObjectStart start = 1;
+    bytes data = 2;
+    PutObjectFinish finish = 3;
+  }
+}
+
+message PutObjectStart {
+  string media_type = 1;
+  string source_hint = 2;
+  repeated string content_roles = 3;
+  repeated Facet facets = 4;
+  repeated Provenance provenance = 5;
+  repeated Relationship relationships = 6;
+}
+
+message PutObjectFinish {}
+message PutObjectResponse { string digest = 1; }
+
+message AttachProvenanceRequest {
+  string digest = 1;
+  repeated Provenance provenance = 2;
+}
+
+message PutCompoundRequest {
+  string object_id = 1;
+  string media_type = 2;
+  string source_hint = 3;
+  repeated string content_roles = 4;
+  repeated Facet facets = 5;
+  repeated Provenance provenance = 6;
+  repeated Relationship relationships = 7;
+  repeated CompoundPart parts = 8;
+}
+
+message PutCompoundResponse { string digest = 1; }
+message OpenRequest { string digest = 1; }
+message ObjectChunk { bytes data = 1; }
+message ReadManifestRequest { string digest = 1; }
+message ReadManifestResponse { Manifest manifest = 1; }
+message GetStructureRequest { string digest = 1; }
+message GetStructureResponse { Structure structure = 1; }
+message HasAnalysisAnnotationRequest {
+  string digest = 1;
+  string analyzer_name = 2;
+  string analyzer_version = 3;
+}
+message HasAnalysisAnnotationResponse { bool found = 1; }
+message WriteAnnotationRequest { Annotation annotation = 1; }
+message WriteOverlaysRequest { string digest = 1; bytes overlays_json = 2; }
+message WriteSourceCursorRequest { SourceCursor cursor = 1; }
+message ReadSourceCursorRequest {
+  string source_kind = 1;
+  string source_name = 2;
+}
+message ReadSourceCursorResponse {
+  SourceCursor cursor = 1;
+  bool found = 2;
+}
+message VerifyRequest {}
+message VerifyFinding {
+  string digest = 1;
+  string path = 2;
+  string code = 3;
+  string message = 4;
+}
+message VerifyResponse {
+  string status = 1;
+  int32 checked = 2;
+  repeated VerifyFinding findings = 3;
+}

@@ -1,16 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Blackcat Informatics® Inc.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 
 style:
   line_length: 140
 
+go:
+  worktree: .
+
 repo:
-  kind: python-service
+  kind: go-service
   profiles: []
   protected_branch_work:
     enabled: true
   license:
-    spdx_identifier: MIT
+    spdx_identifier: AGPL-3.0-only
     copyright: 2026 Blackcat Informatics® Inc.
     license_file: LICENSE
     extensions:
@@ -71,7 +74,6 @@ filesystem:
   required_ignores:
     enabled: true
     paths:
-      - .code-ethos/cache/
       - .coding-ethos/cache/
       - .coding-ethos/code-intel.db
       - .coding-ethos/hook-runs/
@@ -98,23 +100,10 @@ filesystem:
       - .coding-ethos/
 
 git:
-  signed_operations:
-    enabled: false
-  hook_bypass:
-    enabled: true
-  history_rewrite_prevention:
-    enabled: true
-  stash_blocked:
-    enabled: true
-  protected_submodule_update:
-    enabled: true
-    paths:
-      - coding-ethos
   staged_admin_files:
     enabled: true
     basenames:
       - Makefile
-      - pyproject.toml
       - repo_config.yaml
       - repo_ethos.yml
     dirs:
@@ -124,22 +113,28 @@ python:
   uv_exclude_newer:
     enabled: false
   source_paths:
-    - src/gmeow
+    - python/gmeow_intel
     - scripts
-    - migrations
-    - main.py
   test_paths:
-    - tests
+    - python/tests
   stub_paths:
-    - typings
-    - src
+    - python/typings
   extra_paths:
-    - src
+    - python/gmeow_intel
   venv_path: .
   venv: .venv
   module_docs:
     source_docs_path: docs/SOURCE_DOCS.md
     banned_doc_filenames: []
+  pytest_gate:
+    enabled: true
+    test_command:
+      - uv
+      - run
+      - --frozen
+      - pytest
+      - python/tests
+      - --strict-markers
   catch_and_silence:
     enabled: true
   security_patterns:

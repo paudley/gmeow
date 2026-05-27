@@ -1,0 +1,158 @@
+syntax = "proto3";
+
+package gmeow.v1;
+
+option go_package = "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1;gmeowv1";
+
+import "gmeow/v1/common.proto";
+
+service QueryService {
+  rpc Project(ProjectRequest) returns (Empty);
+  rpc ProjectObject(ProjectObjectRequest) returns (Empty);
+  rpc ProjectSourceCursor(ProjectSourceCursorRequest) returns (Empty);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc Structure(StructureRequest) returns (StructureResponse);
+  rpc Relationships(RelationshipRequest) returns (RelationshipResponse);
+  rpc Graph(GraphRequest) returns (GraphResponse);
+  rpc AnalysisStatus(AnalysisStatusRequest) returns (AnalysisStatusResponse);
+  rpc VectorSearch(VectorSearchRequest) returns (VectorSearchResponse);
+  rpc SourceCursors(SourceCursorRequest) returns (SourceCursorResponse);
+  rpc Rebuild(Empty) returns (Empty);
+  rpc ProjectChanged(ProjectChangedRequest) returns (Empty);
+}
+
+message ProjectRequest {
+  Manifest manifest = 1;
+  repeated Annotation annotations = 2;
+}
+
+message ProjectObjectRequest { ProjectionObject object = 1; }
+message ProjectSourceCursorRequest { SourceCursor cursor = 1; }
+
+message ProvenanceFilter {
+  repeated string source_kinds = 1;
+  repeated string source_names = 2;
+  repeated string external_ids = 3;
+}
+
+message RelationshipFilter {
+  repeated string types = 1;
+  string from = 2;
+  string to = 3;
+  repeated string roles = 4;
+  string any = 5;
+}
+
+message SearchRequest {
+  int32 schema_version = 1;
+  string query = 2;
+  repeated string facets = 3;
+  ProvenanceFilter provenance = 4;
+  RelationshipFilter relationships = 5;
+  repeated string compound_roles = 6;
+  repeated string analyzer_names = 7;
+  repeated string media_types = 8;
+  int32 limit = 9;
+  int32 offset = 10;
+}
+
+message SearchResult {
+  string object_digest = 1;
+  double score = 2;
+  string title = 3;
+  string snippet = 4;
+  repeated string facets = 5;
+  bytes attributes_json = 6;
+}
+
+message SearchResponse {
+  int32 schema_version = 1;
+  repeated SearchResult results = 2;
+  int32 total = 3;
+}
+
+message StructureRequest { string digest = 1; }
+message StructureResponse { Structure structure = 1; }
+
+message RelationshipRequest {
+  int32 schema_version = 1;
+  RelationshipFilter filter = 2;
+  int32 limit = 3;
+}
+
+message RelationshipResponse {
+  int32 schema_version = 1;
+  repeated Relationship relationships = 2;
+}
+
+message GraphRequest {
+  int32 schema_version = 1;
+  string node = 2;
+  string predicate = 3;
+  int32 limit = 4;
+}
+
+message GraphResponse {
+  int32 schema_version = 1;
+  repeated GraphFact facts = 2;
+}
+
+message AnalysisStatusRequest {
+  int32 schema_version = 1;
+  repeated string object_digests = 2;
+  repeated string analyzer_names = 3;
+  repeated AnalyzerSpec analyzers = 4;
+  int32 limit = 5;
+}
+
+message AnalysisStatus {
+  string object_digest = 1;
+  string analyzer_name = 2;
+  string analyzer_version = 3;
+  string status = 4;
+  string generated_at = 5;
+  bytes data_json = 6;
+}
+
+message AnalysisStatusResponse {
+  int32 schema_version = 1;
+  repeated AnalysisStatus statuses = 2;
+}
+
+message VectorSearchRequest {
+  int32 schema_version = 1;
+  string model = 2;
+  int32 dimensions = 3;
+  repeated float vector = 4;
+  repeated string facets = 5;
+  int32 limit = 6;
+}
+
+message VectorSearchResult {
+  string object_digest = 1;
+  string model = 2;
+  double distance = 3;
+  string embedding_id = 4;
+  string kind = 5;
+  string source_digest = 6;
+  string text_preview = 7;
+}
+
+message VectorSearchResponse {
+  int32 schema_version = 1;
+  repeated VectorSearchResult results = 2;
+}
+
+message SourceCursorRequest {
+  int32 schema_version = 1;
+  repeated string source_kinds = 2;
+  repeated string source_names = 3;
+  int32 limit = 4;
+}
+
+message SourceCursorResponse {
+  int32 schema_version = 1;
+  repeated SourceCursor cursors = 2;
+}
+
+message ProjectChangedRequest { string since = 1; }

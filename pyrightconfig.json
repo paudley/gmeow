@@ -1,10 +1,8 @@
 {
     "typeCheckingMode": "strict",
     "include": [
-        "src/gmeow",
-        "scripts",
-        "migrations",
-        "main.py"
+        "python/gmeow_intel",
+        "scripts"
     ],
     "exclude": [
         "**/tests/**",
@@ -13,10 +11,10 @@
         "**/.venv/**"
     ],
     "extraPaths": [
-        "src"
+        "python/gmeow_intel"
     ],
     "venvPath": ".",
     "venv": ".venv",
     "pythonVersion": "3.13",
-    "stubPath": "typings"
+    "stubPath": "python/typings"
 }

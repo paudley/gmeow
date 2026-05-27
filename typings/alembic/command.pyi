@@ -1,3 +1,0 @@
-from _typeshed import Incomplete
-
-def upgrade(config: Incomplete, revision: str) -> None: ...

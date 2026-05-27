@@ -1,3 +1,0 @@
-from _typeshed import Incomplete
-
-def cosine_similarity(a: Incomplete, b: Incomplete = ...) -> Incomplete: ...

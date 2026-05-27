@@ -37,3 +37,8 @@ htmlcov/
 .coding-ethos/code-intel.duckdb
 .coding-ethos/code-intel.duckdb.wal
 .coding-ethos/events/
+.coding-ethos/tool-config-hashes.json
+.coding-ethos/gemini
+gmeow.toml
+.coding-ethos/*.lock
+.claude/settings.local.json

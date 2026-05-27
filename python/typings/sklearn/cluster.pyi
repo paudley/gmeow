@@ -1,0 +1,9 @@
+from typing import Protocol
+
+class _ClusterMatrix(Protocol): ...
+
+class DBSCAN:
+    labels_: object
+
+    def __init__(self, *, eps: float, min_samples: int, metric: str) -> None: ...
+    def fit(self, X: _ClusterMatrix) -> "DBSCAN": ...

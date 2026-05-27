@@ -1,0 +1,196 @@
+syntax = "proto3";
+
+package gmeow.v1;
+
+option go_package = "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1;gmeowv1";
+
+message Empty {}
+
+message SourceObjectRef {
+  string source_kind = 1;
+  string source_name = 2;
+  string external_id = 3;
+  string external_version = 4;
+}
+
+message SourceIngestClaim {
+  SourceObjectRef source_object = 1;
+  string claim_id = 2;
+  string acquired_at = 3;
+}
+
+message Facet {
+  string kind = 1;
+  string name = 2;
+  string version = 3;
+  bytes metadata_json = 4;
+  bytes attributes_json = 5;
+}
+
+message Title {
+  string value = 1;
+  string source = 2;
+  double confidence = 3;
+}
+
+message Timestamps {
+  string created = 1;
+  string modified = 2;
+  string observed = 3;
+}
+
+message Provenance {
+  string source_name = 1;
+  string source_kind = 2;
+  string external_id = 3;
+  string external_version = 4;
+  string observed_at = 5;
+  repeated string capabilities_seen = 6;
+  bytes metadata_json = 7;
+  bytes attributes_json = 8;
+}
+
+message Relationship {
+  string type = 1;
+  string from = 2;
+  string to = 3;
+  string role = 4;
+  int32 order = 5;
+  string source = 6;
+}
+
+message CompoundPart {
+  string digest = 1;
+  string role = 2;
+  int32 order = 3;
+  bool required = 4;
+  bytes metadata_json = 5;
+}
+
+message Compound {
+  bool is_compound = 1;
+  repeated CompoundPart parts = 2;
+}
+
+message GraphFact {
+  string subject = 1;
+  string predicate = 2;
+  string object = 3;
+  bytes metadata_json = 4;
+}
+
+message EmbeddingRef {
+  string model = 1;
+  string object_digest = 2;
+  int32 dimensions = 3;
+}
+
+message Manifest {
+  int32 schema_version = 1;
+  string digest = 2;
+  string object_id = 3;
+  string identity_strategy = 4;
+  string media_type = 5;
+  int64 size = 6;
+  string compression = 7;
+  repeated string content_roles = 8;
+  repeated Facet facets = 9;
+  repeated Title titles = 10;
+  Timestamps timestamps = 11;
+  repeated Provenance provenance = 12;
+  repeated Relationship relationships = 13;
+  Compound compound = 14;
+  bytes analysis_json = 15;
+  repeated GraphFact graph = 16;
+  repeated string keywords = 17;
+  repeated EmbeddingRef embeddings = 18;
+  bytes overlays_json = 19;
+  string created_at = 20;
+  string updated_at = 21;
+}
+
+message Annotation {
+  int32 schema_version = 1;
+  string object_digest = 2;
+  string analyzer_name = 3;
+  string analyzer_version = 4;
+  string kind = 5;
+  string generated_at = 6;
+  bytes data_json = 7;
+}
+
+message ProjectionFinding {
+  string digest = 1;
+  string path = 2;
+  string code = 3;
+  string message = 4;
+}
+
+message ProjectionObject {
+  string digest = 1;
+  string path = 2;
+  Manifest manifest = 3;
+  repeated Annotation annotations = 4;
+  repeated ProjectionFinding findings = 5;
+}
+
+message StructurePart {
+  string digest = 1;
+  string role = 2;
+  int32 order = 3;
+  bool required = 4;
+  repeated string facets = 5;
+  bytes metadata_json = 6;
+}
+
+message StructureRoleParts {
+  string role = 1;
+  repeated StructurePart parts = 2;
+}
+
+message Structure {
+  int32 schema_version = 1;
+  string digest = 2;
+  string object_id = 3;
+  repeated string facets = 4;
+  repeated StructureRoleParts parts_by_role = 5;
+}
+
+message AnalyzerSpec {
+  string name = 1;
+  string version = 2;
+  repeated string media_types = 3;
+  repeated string content_roles = 4;
+  repeated string required_inputs = 5;
+  repeated string output_sections = 6;
+  repeated string dependencies = 7;
+  int32 priority = 8;
+  string idempotency_key_formula = 9;
+  bool deterministic = 10;
+  string worker_kind = 11;
+}
+
+message AnalyzerJob {
+  int32 schema_version = 1;
+  string job_id = 2;
+  string idempotency_key = 3;
+  AnalyzerSpec analyzer = 4;
+  string object_digest = 5;
+  string priority_class = 6;
+  string requested_by = 7;
+  string reason = 8;
+  int32 attempt = 9;
+  string trace_id = 10;
+  string deadline = 11;
+  bool forced = 12;
+  int32 priority = 13;
+  string created_at = 14;
+}
+
+message SourceCursor {
+  int32 schema_version = 1;
+  string source_kind = 2;
+  string source_name = 3;
+  bytes cursor_json = 4;
+  string updated_at = 5;
+}

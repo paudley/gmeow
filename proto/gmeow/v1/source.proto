@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package gmeow.v1;
+
+option go_package = "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1;gmeowv1";
+
+import "gmeow/v1/common.proto";
+
+service SourceService {
+  rpc LiveSearch(SourceSearchRequest) returns (SourceSearchResponse);
+  rpc SearchAndHydrate(SourceSearchRequest) returns (SourceSearchResponse);
+  rpc ApplyAction(SourceActionRequest) returns (SourceActionResponse);
+  rpc Backfill(SourceBackfillRequest) returns (SourceBackfillResponse);
+  rpc RefreshInbox(SourceRefreshRequest) returns (SourceBackfillResponse);
+  rpc Status(Empty) returns (SourceStatus);
+}
+
+message SourceSearchRequest {
+  string query = 1;
+  int32 limit = 2;
+}
+
+message SourceSearchHit {
+  string object_digest = 1;
+  string external_id = 2;
+  string external_version = 3;
+  bool hydrated = 4;
+}
+
+message SourceSearchResponse {
+  repeated SourceSearchHit hits = 1;
+}
+
+message SourceActionRequest {
+  string object_digest = 1;
+  string action = 2;
+  bytes parameters_json = 3;
+}
+
+message SourceActionResponse {
+  bool applied = 1;
+  string action = 2;
+  bytes attributes_json = 3;
+}
+
+message SourceBackfillRequest {
+  map<string, string> cursor = 1;
+  string query = 2;
+  string mode = 3;
+  string cursor_namespace = 4;
+  int32 page_size = 5;
+  int32 max_pages = 6;
+  int32 concurrency = 7;
+  bool resume = 8;
+}
+
+message SourceBackfillResponse {
+  SourceCursor final_cursor = 1;
+  repeated string failed_message_ids = 2;
+  int32 processed = 3;
+  int32 created = 4;
+  int32 skipped = 5;
+  int32 failed = 6;
+  int32 pages = 7;
+  bool completed = 8;
+}
+
+message SourceRefreshRequest {
+  string query = 1;
+  int32 page_size = 2;
+  int32 max_pages = 3;
+  int32 concurrency = 4;
+}
+
+message SourceStatus {
+  string kind = 1;
+  string name = 2;
+  repeated string capabilities = 3;
+  SourceCursor cursor = 4;
+  bool cursor_found = 5;
+}

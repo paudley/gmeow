@@ -1,0 +1,212 @@
+// SPDX-FileCopyrightText: 2026 Blackcat Informatics Inc.
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package rpc
+
+import (
+	"context"
+	"io"
+	"net"
+	"strings"
+	"testing"
+
+	"google.golang.org/grpc"
+
+	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
+	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
+)
+
+func TestFilestoreClientUsesServiceForObjectAndAnnotationAccess(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("grpc object access"),
+		MediaType: "text/plain",
+		Facets:    []contracts.Facet{{Kind: "file", Version: "1"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, cleanup := serveTestFilestore(t, store)
+	defer cleanup()
+	client, err := NewFilestoreClient(ctx, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	manifest, err := client.ReadManifest(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ObjectDigest != digest {
+		t.Fatalf("expected manifest digest %s, got %s", digest, manifest.ObjectDigest)
+	}
+	reader, err := client.Open(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "grpc object access" {
+		t.Fatalf("unexpected object content %q", string(content))
+	}
+	if err := client.WriteAnnotation(ctx, contracts.Annotation{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigest:  digest,
+		Kind:          "analysis",
+		AnalyzerName:  "grpc.checked",
+		AnalyzerVer:   "v1",
+		Data:          map[string]any{"status": "complete"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	if err := store.WalkProjection(ctx, func(object filestore.ProjectionObject) error {
+		for _, annotation := range object.Annotations {
+			if annotation.AnalyzerName == "grpc.checked" {
+				found = true
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hasAnnotation, err := client.HasAnalysisAnnotation(
+		ctx,
+		digest,
+		"grpc.checked",
+		"v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasAnnotation {
+		t.Fatal("expected matching analysis annotation through gRPC client")
+	}
+	hasAnnotation, err = client.HasAnalysisAnnotation(
+		ctx,
+		digest,
+		"grpc.checked",
+		"v2",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasAnnotation {
+		t.Fatal("stale analysis annotation version must not match")
+	}
+	if !found {
+		t.Fatal("expected annotation written through gRPC client")
+	}
+	if err := client.WriteSourceCursor(ctx, contracts.SourceCursor{
+		SourceKind: "gmail",
+		SourceName: "primary",
+		Cursor:     map[string]any{"page_token": "next"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cursor, found, err := client.ReadSourceCursor(ctx, contracts.SourceCursorRef{
+		SourceKind: "gmail",
+		SourceName: "primary",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || cursor.Cursor["page_token"] != "next" {
+		t.Fatalf(
+			"expected cursor round trip through gRPC, found=%t cursor=%#v",
+			found,
+			cursor,
+		)
+	}
+}
+
+func TestFilestoreServerNotifiesSchedulerOnObjectAndAnnotationChanges(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	notifier := &recordingObjectChangeNotifier{}
+	endpoint, cleanup := serveTestFilestore(
+		t,
+		store,
+		WithObjectChangeNotifier(notifier),
+	)
+	defer cleanup()
+	client, err := NewFilestoreClient(ctx, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	digest, err := client.Put(ctx, PutRequest{
+		Reader:    strings.NewReader("notify object"),
+		MediaType: "text/plain",
+		Facets:    []contracts.Facet{{Kind: "file", Version: "1"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.WriteAnnotation(ctx, contracts.Annotation{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigest:  digest,
+		Kind:          "analysis",
+		AnalyzerName:  "notify.checked",
+		AnalyzerVer:   "v1",
+		Data:          map[string]any{"status": "complete"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := notifier.requests
+	if len(requests) != 2 {
+		t.Fatalf("expected object and projection notifications, got %#v", requests)
+	}
+	if requests[0].ProjectionOnly || requests[0].Reason != "object_changed" {
+		t.Fatalf("expected object change notification, got %#v", requests[0])
+	}
+	if !requests[1].ProjectionOnly || requests[1].Reason != "projection_refresh" {
+		t.Fatalf("expected projection-only notification, got %#v", requests[1])
+	}
+}
+
+func serveTestFilestore(
+	t *testing.T,
+	store filestore.Store,
+	options ...FilestoreServerOption,
+) (Endpoint, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	pb.RegisterFilestoreServiceServer(server, NewFilestoreServer(store, options...))
+	done := make(chan struct{})
+	go func() {
+		_ = server.Serve(listener)
+		close(done)
+	}()
+	return Endpoint{Network: "tcp", Address: listener.Addr().String()}, func() {
+		server.Stop()
+		_ = listener.Close()
+		<-done
+	}
+}
+
+type recordingObjectChangeNotifier struct {
+	requests []contracts.ObjectChangeRequest
+}
+
+func (notifier *recordingObjectChangeNotifier) NotifyObjectsChanged(
+	_ context.Context,
+	request contracts.ObjectChangeRequest,
+) (contracts.SchedulerScanResponse, error) {
+	notifier.requests = append(notifier.requests, request)
+
+	return contracts.SchedulerScanResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+	}, nil
+}

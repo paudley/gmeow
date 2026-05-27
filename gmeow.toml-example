@@ -1,0 +1,172 @@
+[system]
+config_version = 1
+instance_id = "local"
+data_dir = "data"
+
+[filestore]
+root = "data/filestore"
+
+[rpc.filestore]
+network = "unix"
+address = "/run/gmeow/filestore.sock"
+
+[rpc.scheduler]
+network = "unix"
+address = "/run/gmeow/scheduler.sock"
+
+[rpc.query]
+network = "unix"
+address = "/run/gmeow/query.sock"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "gmeow"
+user = "gmeow"
+ssl_mode = "require"
+
+[rabbitmq]
+host = "127.0.0.1"
+port = 5672
+user = "gmeow"
+vhost = "gmeow"
+test_user = "gmeow-test"
+test_vhost = "gmeow-test"
+
+[scheduler]
+scan_interval = "30s"
+retry_limit = 3
+retry_backoff = "30s"
+queue_prefix = "gmeow."
+dead_letter_inspect_max = 20
+
+[scheduler.priorities]
+interactive = 100
+forced = 90
+fresh_ingest = 70
+repair = 50
+background = 10
+
+[secrets]
+# PostgreSQL and RabbitMQ are mandatory. Store only passwords as SOPS JSON leaf envelopes.
+postgres_password = '''
+{"data":"ENC[AES256_GCM,data:...leaf ciphertext...,type:str]","sops":{"age":[{"recipient":"age1...","enc":"-----BEGIN AGE ENCRYPTED FILE-----\n...\n-----END AGE ENCRYPTED FILE-----\n"}],"version":"3.13.1"}}
+'''
+rabbitmq_password = '''
+{"data":"ENC[AES256_GCM,data:...leaf ciphertext...,type:str]","sops":{"age":[{"recipient":"age1...","enc":"-----BEGIN AGE ENCRYPTED FILE-----\n...\n-----END AGE ENCRYPTED FILE-----\n"}],"version":"3.13.1"}}
+'''
+rabbitmq_test_password = '''
+{"data":"ENC[AES256_GCM,data:...leaf ciphertext...,type:str]","sops":{"age":[{"recipient":"age1...","enc":"-----BEGIN AGE ENCRYPTED FILE-----\n...\n-----END AGE ENCRYPTED FILE-----\n"}],"version":"3.13.1"}}
+'''
+
+[[interfaces]]
+name = "rest"
+kind = "rest"
+host = "127.0.0.1"
+port = 8765
+
+[[interfaces]]
+name = "mcp"
+kind = "mcp"
+host = "127.0.0.1"
+port = 9876
+session_timeout = "30m"
+
+[[interfaces]]
+name = "imap"
+kind = "imap"
+host = "127.0.0.1"
+port = 1143
+username = "gmeow"
+facets = ["mail_message"]
+
+[analysis]
+worker_concurrency = 4
+
+[analysis.embeddings]
+endpoint = "http://127.0.0.1:8090/v1/embeddings"
+model = "nomic-embed-text-v1.5"
+
+[analysis.summary]
+endpoint = "http://127.0.0.1:8082/v1/chat/completions"
+model = "gemma-4-E4B-it-uncensored-Q4_K_M.gguf"
+
+[[analysis.analyzers]]
+name = "text.extract"
+version = "phase04-email-v2"
+worker_kind = "go"
+
+[[analysis.analyzers]]
+name = "rfc822.headers"
+version = "phase04-email-v2"
+worker_kind = "go"
+
+[[analysis.analyzers]]
+name = "metadata.extract"
+version = "phase04-email-v2"
+worker_kind = "go"
+
+[[analysis.analyzers]]
+name = "graph.facts"
+version = "phase04-email-v2"
+worker_kind = "go"
+
+[[analysis.analyzers]]
+name = "embedding.endpoint"
+version = "phase04-email-v2"
+worker_kind = "go"
+
+[[analysis.analyzers]]
+name = "summary.model"
+version = "phase04-email-v2"
+worker_kind = "go"
+
+# Quality-critical Python/model analyzers must be explicit external adapters.
+# They are managed by the Go worker, which owns scheduler-delivered jobs,
+# gRPC FILESTORE access, and ack/nack.
+[[analysis.analyzers]]
+name = "ner.spacy"
+version = "python-email-v1"
+worker_kind = "python"
+command = "gmeow-intel"
+args = ["analyze", "ner.spacy"]
+timeout = "2m"
+
+[[analysis.analyzers]]
+name = "categories.sklearn"
+version = "python-email-v1"
+worker_kind = "python"
+command = "gmeow-intel"
+args = ["analyze", "categories.sklearn"]
+timeout = "2m"
+
+[[search.backends]]
+name = "query"
+kind = "query"
+facets = ["*"]
+
+# [[sources]]
+# name = "primary"
+# kind = "gmail"
+# credential_secret = "gmail_credentials_json"
+# user_id = "me"
+# delegated_subject = "user@example.com"
+# [sources.rpc]
+# network = "unix"
+# address = "/run/gmeow/source-primary.sock"
+# [sources.backfill]
+# enabled = true
+# query = "newer_than:365d"
+# mode = "full"
+# cursor_key = "backfill"
+# page_size = 100
+# concurrency = 4
+# resume = true
+# [sources.inbox_refresh]
+# enabled = true
+# query = "in:inbox newer_than:30d"
+# interval = "5m"
+# page_size = 100
+# concurrency = 4
+# facets = ["mail_message"]
+# capabilities = ["hydrate", "live_search", "live_retrieve", "actions", "backfill"]
