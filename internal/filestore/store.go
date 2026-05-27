@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -40,7 +41,14 @@ const (
 var errStopWalk = errors.New("stop filestore walk")
 
 type FilesystemStore struct {
-	root string
+	root     string
+	locksMu  sync.Mutex
+	keyLocks map[string]*filesystemKeyLock
+}
+
+type filesystemKeyLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 func NewFilesystemStore(root string) *FilesystemStore {

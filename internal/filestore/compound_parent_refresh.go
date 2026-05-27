@@ -95,6 +95,9 @@ func (store *FilesystemStore) refreshIndexedParentForSubobject(
 	childDigest contracts.ObjectDigest,
 	summaries []map[string]any,
 ) error {
+	unlock := store.lockKey("manifest:" + string(parentDigest))
+	defer unlock()
+
 	manifest, err := store.ReadManifest(ctx, parentDigest)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

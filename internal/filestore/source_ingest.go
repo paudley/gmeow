@@ -343,6 +343,9 @@ func (store *FilesystemStore) mergeCompoundParentIndex(
 		return err
 	}
 
+	unlock := store.lockKey("compound-parent-index:" + string(childDigest))
+	defer unlock()
+
 	path := store.compoundParentIndexPath(childDigest)
 	record := compoundParentIndexRecord{
 		SchemaVersion: int(contracts.SchemaVersionPhase00),

@@ -397,6 +397,9 @@ func runConfiguredInboxRefresh(
 			Resume:      false,
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			fmt.Printf(
 				"source inbox refresh: failed source=%s/%s error=%v\n",
 				pull.Kind(),

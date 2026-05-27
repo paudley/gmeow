@@ -6,10 +6,12 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"blackcat.ca/gmeow/internal/contracts"
 )
@@ -37,12 +39,19 @@ func (index *Index) CreateOrGet(
 	ctx context.Context,
 	request contracts.CreateOperationRequest,
 ) (contracts.OperationRecord, bool, error) {
+	record, found, err := index.runningOperationByRequestHash(ctx, request.RequestHash)
+	if err != nil {
+		return contracts.OperationRecord{}, false, err
+	}
+	if found {
+		return record, false, nil
+	}
+
 	row := index.pool.QueryRow(ctx, `
 		INSERT INTO `+operationTable+` (
 			operation_id, request_hash, name, request_json, status
 		)
 		VALUES ($1, $2, $3, $4::jsonb, $5)
-		ON CONFLICT (request_hash) DO NOTHING
 		RETURNING `+operationColumns,
 		request.OperationID,
 		request.RequestHash,
@@ -51,24 +60,54 @@ func (index *Index) CreateOrGet(
 		string(contracts.OperationStatusRunning),
 	)
 
-	record, err := scanOperation(row)
+	record, err = scanOperation(row)
 	if err == nil {
 		return record, true, nil
 	}
-	if err != pgx.ErrNoRows {
-		return contracts.OperationRecord{}, false, err
+	if uniqueViolation(err) {
+		record, found, err = index.runningOperationByRequestHash(ctx, request.RequestHash)
+		if err != nil {
+			return contracts.OperationRecord{}, false, err
+		}
+		if !found {
+			return contracts.OperationRecord{}, false,
+				fmt.Errorf(
+					"running operation request hash %s not found after conflict",
+					request.RequestHash,
+				)
+		}
+
+		return record, false, nil
 	}
 
-	record, found, err := index.GetByRequestHash(ctx, request.RequestHash)
-	if err != nil {
-		return contracts.OperationRecord{}, false, err
-	}
-	if !found {
-		return contracts.OperationRecord{}, false,
-			fmt.Errorf("operation request hash %s not found after conflict", request.RequestHash)
+	return contracts.OperationRecord{}, false, err
+}
+
+func (index *Index) runningOperationByRequestHash(
+	ctx context.Context,
+	requestHash string,
+) (contracts.OperationRecord, bool, error) {
+	row := index.pool.QueryRow(ctx, `
+		SELECT `+operationColumns+`
+		FROM `+operationTable+`
+		WHERE request_hash = $1
+		  AND status = $2
+		ORDER BY created_at
+		LIMIT 1`,
+		requestHash,
+		string(contracts.OperationStatusRunning),
+	)
+
+	return scanOptionalOperation(row)
+}
+
+func uniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
 	}
 
-	return record, false, nil
+	return pgErr.Code == "23505"
 }
 
 func (index *Index) AppendProgress(
@@ -183,7 +222,7 @@ func scanOptionalOperation(
 	if err == nil {
 		return record, true, nil
 	}
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.OperationRecord{}, false, nil
 	}
 

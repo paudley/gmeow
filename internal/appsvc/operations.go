@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -63,7 +64,11 @@ func (store *MemoryOperationStore) CreateOrGet(
 	defer store.mu.Unlock()
 
 	if existingID := store.byRequestHash[request.RequestHash]; existingID != "" {
-		return cloneOperationRecord(store.records[existingID]), false, nil
+		existing := store.records[existingID]
+		if existing.Status == contracts.OperationStatusRunning {
+			return cloneOperationRecord(existing), false, nil
+		}
+		delete(store.byRequestHash, request.RequestHash)
 	}
 
 	now := time.Now().UTC()
@@ -119,6 +124,7 @@ func (store *MemoryOperationStore) Complete(
 	record.UpdatedAt = now
 	record.CompletedAt = now
 	store.records[operationID] = record
+	delete(store.byRequestHash, record.RequestHash)
 
 	return nil
 }
@@ -141,6 +147,7 @@ func (store *MemoryOperationStore) Fail(
 	record.UpdatedAt = now
 	record.CompletedAt = now
 	store.records[operationID] = record
+	delete(store.byRequestHash, record.RequestHash)
 
 	return nil
 }
@@ -200,8 +207,10 @@ func (services *Services) runOperation(
 	if record.Status == contracts.OperationStatusRunning {
 		var waiterCreated bool
 		waiter, waiterCreated = services.operationWaiter(record.OperationID)
-		if created || waiterCreated {
+		if created {
 			go services.executeOperation(record.OperationID, progressObserver, work)
+		} else if waiterCreated {
+			services.finishOperationWaiter(record.OperationID)
 		}
 	}
 
@@ -219,7 +228,19 @@ func (services *Services) executeOperation(
 		if event.At.IsZero() {
 			event.At = time.Now().UTC()
 		}
-		_ = services.operations.AppendProgress(context.Background(), operationID, event)
+		if err := services.operations.AppendProgress(
+			context.Background(),
+			operationID,
+			event,
+		); err != nil {
+			slog.Warn(
+				"append operation progress failed",
+				"operation_id",
+				operationID,
+				"error",
+				err,
+			)
+		}
 		if progressObserver != nil {
 			progressObserver(event)
 		}
@@ -230,13 +251,13 @@ func (services *Services) executeOperation(
 
 	result, err := work(context.Background(), sink)
 	if err != nil {
-		_ = services.operations.Fail(context.Background(), operationID, err.Error())
+		services.failOperation(operationID, err.Error())
 
 		return
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
-		_ = services.operations.Fail(context.Background(), operationID, err.Error())
+		services.failOperation(operationID, err.Error())
 
 		return
 	}
@@ -246,7 +267,25 @@ func (services *Services) executeOperation(
 			Message: "persisting result",
 		},
 	)
-	_ = services.operations.Complete(context.Background(), operationID, encoded)
+	if err := services.operations.Complete(
+		context.Background(),
+		operationID,
+		encoded,
+	); err != nil {
+		message := "persist operation result: " + err.Error()
+		slog.Error("complete operation failed", "operation_id", operationID, "error", err)
+		services.failOperation(operationID, message)
+	}
+}
+
+func (services *Services) failOperation(operationID, message string) {
+	if err := services.operations.Fail(
+		context.Background(),
+		operationID,
+		message,
+	); err != nil {
+		slog.Error("fail operation failed", "operation_id", operationID, "error", err)
+	}
 }
 
 func (services *Services) waitForOperation(
@@ -259,6 +298,7 @@ func (services *Services) waitForOperation(
 	defer ticker.Stop()
 
 	seenProgress := 0
+	waiterDone := waiter.done
 	for {
 		record, found, err := services.operations.Get(ctx, operationID)
 		if err != nil {
@@ -289,7 +329,8 @@ func (services *Services) waitForOperation(
 			return contracts.OperationResultResponse{
 				Operation: operationStatusResponse(record),
 			}, ctx.Err()
-		case <-waiter.done:
+		case <-waiterDone:
+			waiterDone = nil
 		case <-ticker.C:
 		}
 	}

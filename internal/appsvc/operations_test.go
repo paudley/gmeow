@@ -7,13 +7,16 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"blackcat.ca/gmeow/internal/appsvc"
 	"blackcat.ca/gmeow/internal/contracts"
 )
 
-func TestMailSearchOperationPersistsProgressAndDeduplicatesRequest(t *testing.T) {
+func TestMailSearchOperationPersistsProgressAndRefreshesTerminalRequest(t *testing.T) {
 	ctx := context.Background()
 	services, err := appsvc.New(appsvc.Options{
 		Query:   operationQuery{},
@@ -36,9 +39,9 @@ func TestMailSearchOperationPersistsProgressAndDeduplicatesRequest(t *testing.T)
 	if first.Operation.OperationID == "" {
 		t.Fatal("operation id should be returned")
 	}
-	if first.Operation.OperationID != second.Operation.OperationID {
+	if first.Operation.OperationID == second.Operation.OperationID {
 		t.Fatalf(
-			"operation id = %q, want existing %q",
+			"operation id = %q, want a new operation after terminal %q",
 			second.Operation.OperationID,
 			first.Operation.OperationID,
 		)
@@ -49,6 +52,81 @@ func TestMailSearchOperationPersistsProgressAndDeduplicatesRequest(t *testing.T)
 	if len(first.Operation.Progress) == 0 {
 		t.Fatal("operation progress should be recorded")
 	}
+}
+
+func TestMailSearchOperationDeduplicatesRunningRequest(t *testing.T) {
+	ctx := context.Background()
+	query := &blockingOperationQuery{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	services, err := appsvc.New(appsvc.Options{
+		Query:   query,
+		Objects: operationObjects{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := appsvc.SearchOptions{Query: "needle", Limit: 5}
+	firstDone := make(chan operationResult, 1)
+	go func() {
+		response, err := services.MailSearchOperation(ctx, request, nil)
+		firstDone <- operationResult{response: response, err: err}
+	}()
+
+	select {
+	case <-query.started:
+	case <-time.After(time.Second):
+		t.Fatal("first operation did not start")
+	}
+
+	secondObserved := make(chan struct{})
+	var observed atomic.Bool
+	secondDone := make(chan operationResult, 1)
+	go func() {
+		response, err := services.MailSearchOperation(
+			ctx,
+			request,
+			func(contracts.OperationProgressEvent) {
+				if observed.CompareAndSwap(false, true) {
+					close(secondObserved)
+				}
+			},
+		)
+		secondDone <- operationResult{response: response, err: err}
+	}()
+
+	select {
+	case <-secondObserved:
+	case <-time.After(time.Second):
+		t.Fatal("second operation did not attach to running operation")
+	}
+	close(query.release)
+
+	first := <-firstDone
+	second := <-secondDone
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	if second.err != nil {
+		t.Fatal(second.err)
+	}
+	if first.response.Operation.OperationID != second.response.Operation.OperationID {
+		t.Fatalf(
+			"operation id = %q, want running operation %q",
+			second.response.Operation.OperationID,
+			first.response.Operation.OperationID,
+		)
+	}
+	if query.calls.Load() != 1 {
+		t.Fatalf("search calls = %d, want 1", query.calls.Load())
+	}
+}
+
+type operationResult struct {
+	response contracts.OperationResultResponse
+	err      error
 }
 
 type operationQuery struct{}
@@ -100,6 +178,63 @@ func (operationQuery) SourceCursors(
 	contracts.SourceCursorRequest,
 ) (contracts.SourceCursorResponse, error) {
 	return contracts.SourceCursorResponse{}, nil
+}
+
+type blockingOperationQuery struct {
+	calls   atomic.Int32
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (query *blockingOperationQuery) Search(
+	ctx context.Context,
+	request contracts.SearchRequest,
+) (contracts.SearchResponse, error) {
+	query.calls.Add(1)
+	query.once.Do(func() { close(query.started) })
+	select {
+	case <-ctx.Done():
+		return contracts.SearchResponse{}, ctx.Err()
+	case <-query.release:
+	}
+
+	return operationQuery{}.Search(ctx, request)
+}
+
+func (query *blockingOperationQuery) Structure(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) (contracts.Structure, error) {
+	return operationQuery{}.Structure(ctx, digest)
+}
+
+func (query *blockingOperationQuery) Relationships(
+	ctx context.Context,
+	request contracts.RelationshipRequest,
+) (contracts.RelationshipResponse, error) {
+	return operationQuery{}.Relationships(ctx, request)
+}
+
+func (query *blockingOperationQuery) Graph(
+	ctx context.Context,
+	request contracts.GraphRequest,
+) (contracts.GraphResponse, error) {
+	return operationQuery{}.Graph(ctx, request)
+}
+
+func (query *blockingOperationQuery) AnalysisStatus(
+	ctx context.Context,
+	request contracts.AnalysisStatusRequest,
+) (contracts.AnalysisStatusResponse, error) {
+	return operationQuery{}.AnalysisStatus(ctx, request)
+}
+
+func (query *blockingOperationQuery) SourceCursors(
+	ctx context.Context,
+	request contracts.SourceCursorRequest,
+) (contracts.SourceCursorResponse, error) {
+	return operationQuery{}.SourceCursors(ctx, request)
 }
 
 type operationObjects struct{}
