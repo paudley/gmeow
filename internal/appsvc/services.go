@@ -24,6 +24,17 @@ import (
 
 const MailMessageFacet = "mail_message"
 
+var (
+	emailAddressExpression = regexp.MustCompile(`<([^<>@\s]+@[^<>@\s]+)>`)
+	firstURLExpression     = regexp.MustCompile(`https://[^\s<>"]+`)
+	githubPRReviewURL      = regexp.MustCompile(
+		`github\.com[:/]+([^/\s]+)/([^/\s]+)/pull/([0-9]+)(?:/(?:review/)?([0-9]+))?`,
+	)
+	githubPRReviewMessageID = regexp.MustCompile(
+		`<?([^/\s<>]+)/([^/\s<>]+)/pull/([0-9]+)/(?:review/)?([0-9]+)@github\.com`,
+	)
+)
+
 type Services struct {
 	query            QueryReader
 	objects          ObjectReader
@@ -1079,82 +1090,9 @@ func canonicalGraph(
 	}
 
 	return CanonicalMessageGraph{
-		Source:  source,
-		Topics:  graphTopics(subject, body),
-		Actions: graphActions(body),
-		Links:   links,
+		Source: source,
+		Links:  links,
 	}
-}
-
-func graphTopics(subject, body string) []string {
-	candidates := []string{
-		"git enforcement optionality",
-		"invariant Git policies",
-		"protected branch work",
-		"hook bypass prevention",
-		"history rewrite prevention",
-		"repo_config.yaml",
-		"profiles",
-		"repo.kind",
-	}
-
-	return containedPhrases(subject+" "+body, candidates)
-}
-
-func graphActions(body string) []string {
-	candidates := []string{
-		"removes ability to disable invariant Git policies",
-		"removes enabled toggles from configuration",
-		"enforces policies unconditionally",
-		"adds validation tests for disable attempts",
-		"adds profiles configuration support",
-		"adds repo.kind configuration support",
-	}
-	text := strings.ToLower(body)
-	actions := []string{}
-	for _, candidate := range candidates {
-		switch candidate {
-		case "removes ability to disable invariant Git policies":
-			if strings.Contains(text, "removes the ability") &&
-				strings.Contains(text, "disable invariant git policies") {
-				actions = append(actions, candidate)
-			}
-		case "removes enabled toggles from configuration":
-			if strings.Contains(text, "enabled") && strings.Contains(text, "toggles") {
-				actions = append(actions, candidate)
-			}
-		case "enforces policies unconditionally":
-			if strings.Contains(text, "enforce") && strings.Contains(text, "unconditionally") {
-				actions = append(actions, candidate)
-			}
-		case "adds validation tests for disable attempts":
-			if strings.Contains(text, "validation tests") && strings.Contains(text, "disable") {
-				actions = append(actions, candidate)
-			}
-		case "adds profiles configuration support":
-			if strings.Contains(text, "profiles") {
-				actions = append(actions, candidate)
-			}
-		case "adds repo.kind configuration support":
-			if strings.Contains(text, "repo.kind") {
-				actions = append(actions, candidate)
-			}
-		}
-	}
-
-	return actions
-}
-
-func containedPhrases(text string, candidates []string) []string {
-	lowered := strings.ToLower(text)
-	values := []string{}
-	for _, candidate := range candidates {
-		if strings.Contains(lowered, strings.ToLower(candidate)) {
-			values = append(values, candidate)
-		}
-	}
-
-	return values
 }
 
 func githubPRReview(rawURL, messageID string) (string, int, string) {
@@ -1162,15 +1100,9 @@ func githubPRReview(rawURL, messageID string) (string, int, string) {
 	if text == "" {
 		text = messageID
 	}
-	expression := regexp.MustCompile(
-		`github\.com[:/]+([^/\s]+)/([^/\s]+)/pull/([0-9]+)(?:/(?:review/)?([0-9]+))?`,
-	)
-	matches := expression.FindStringSubmatch(text)
+	matches := githubPRReviewURL.FindStringSubmatch(text)
 	if len(matches) == 0 {
-		expression = regexp.MustCompile(
-			`<?([^/\s<>]+)/([^/\s<>]+)/pull/([0-9]+)/(?:review/)?([0-9]+)@github\.com`,
-		)
-		matches = expression.FindStringSubmatch(text)
+		matches = githubPRReviewMessageID.FindStringSubmatch(text)
 	}
 	if len(matches) == 0 {
 		return "", 0, ""
@@ -1202,8 +1134,7 @@ func githubActor(from, body string) string {
 }
 
 func firstURL(text string) string {
-	expression := regexp.MustCompile(`https://[^\s<>"]+`)
-	raw := expression.FindString(text)
+	raw := firstURLExpression.FindString(text)
 	if raw == "" {
 		return ""
 	}
@@ -1259,8 +1190,7 @@ func firstEmailAddress(value string) string {
 	if value == "" {
 		return ""
 	}
-	expression := regexp.MustCompile(`<([^<>@\s]+@[^<>@\s]+)>`)
-	if matches := expression.FindStringSubmatch(value); len(matches) > 1 {
+	if matches := emailAddressExpression.FindStringSubmatch(value); len(matches) > 1 {
 		return matches[1]
 	}
 	first := strings.Split(value, ",")[0]

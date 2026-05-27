@@ -199,11 +199,11 @@ func (adapter *GmailAdapter) pullFull(
 ) ([]IngestObject, contracts.SourceCursor, error) {
 	query := stringValue(cursor["query"])
 	log.Printf(
-		"source gmail list: started source=%s/%s mode=full query=%q page_token=%q limit=%d",
+		"source gmail list: started source=%s/%s mode=full query_set=%t page_token_set=%t limit=%d",
 		adapter.Kind(),
 		adapter.name,
-		query,
-		stringValue(cursor["page_token"]),
+		query != "",
+		stringValue(cursor["page_token"]) != "",
 		limit,
 	)
 	page, err := adapter.backend.ListMessages(ctx, GmailListRequest{

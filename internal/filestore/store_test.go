@@ -278,6 +278,48 @@ func TestSourceIngestClaimReclaimsExpiredLock(t *testing.T) {
 	}
 }
 
+func TestSourceIngestClaimReclaimsZeroTimestampLockByModTime(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	ref := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1:body",
+		ExternalVersion: "history-1",
+	}
+	claim, acquired, err := store.TryAcquireSourceIngest(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acquired {
+		t.Fatal("expected first claim to acquire")
+	}
+	lockPath := store.sourceObjectLockPath(ref)
+	claim.AcquiredAt = time.Time{}
+	encoded, err := canonicalJSON(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, encoded, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Now().Add(-(sourceIngestClaimTTL + time.Minute))
+	if err := os.Chtimes(lockPath, expired, expired); err != nil {
+		t.Fatal(err)
+	}
+
+	nextClaim, acquired, err := store.TryAcquireSourceIngest(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acquired {
+		t.Fatal("expected zero timestamp claim to be reclaimed by mtime")
+	}
+	if nextClaim.ClaimID == claim.ClaimID {
+		t.Fatal("expected replacement claim")
+	}
+}
+
 func TestPutRejectsObjectWithoutFacet(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 

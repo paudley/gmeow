@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -369,8 +370,11 @@ func (service *Service) notifyChanged(
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		ObjectDigests: []contracts.ObjectDigest{digest},
 	})
+	if err != nil {
+		log.Printf("source notification failed digest=%s error=%v", digest, err)
+	}
 
-	return err
+	return nil
 }
 
 func (service *Service) LookupSourceObject(

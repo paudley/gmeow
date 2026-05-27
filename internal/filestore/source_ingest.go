@@ -177,8 +177,19 @@ func (store *FilesystemStore) removeExpiredSourceIngestClaim(
 	if !sourceObjectRefsEqual(existing.SourceObject, ref) {
 		return false, errors.New("source ingest claim references a different source object")
 	}
-	if existing.AcquiredAt.IsZero() ||
-		now.Sub(existing.AcquiredAt) <= sourceIngestClaimTTL {
+	acquiredAt := existing.AcquiredAt
+	if acquiredAt.IsZero() {
+		info, statErr := os.Stat(lockPath)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return true, nil
+			}
+
+			return false, statErr
+		}
+		acquiredAt = info.ModTime()
+	}
+	if now.Sub(acquiredAt) <= sourceIngestClaimTTL {
 		return false, nil
 	}
 	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {

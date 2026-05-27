@@ -429,8 +429,8 @@ func (server *FilestoreServer) notifyObjectChangedAsync(
 		return
 	}
 
+	server.acquireNotifySlot()
 	go func() {
-		server.acquireNotifySlot()
 		defer server.releaseNotifySlot()
 		err := server.notifyObjectChanged(context.WithoutCancel(ctx), digest, reason)
 		if err != nil {
@@ -452,8 +452,8 @@ func (server *FilestoreServer) notifyProjectionRefreshAsync(
 		return
 	}
 
+	server.acquireNotifySlot()
 	go func() {
-		server.acquireNotifySlot()
 		defer server.releaseNotifySlot()
 		err := server.notifyProjectionRefresh(context.WithoutCancel(ctx), digest)
 		if err != nil {
