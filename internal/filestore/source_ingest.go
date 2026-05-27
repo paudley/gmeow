@@ -17,6 +17,8 @@ import (
 	"blackcat.ca/gmeow/internal/contracts"
 )
 
+const sourceIngestClaimTTL = 15 * time.Minute
+
 func (store *FilesystemStore) LookupSourceObject(
 	ctx context.Context,
 	ref contracts.SourceObjectRef,
@@ -86,6 +88,18 @@ func (store *FilesystemStore) TryAcquireSourceIngest(
 
 	file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
 	if errors.Is(err, os.ErrExist) {
+		removed, removeErr := store.removeExpiredSourceIngestClaim(lockPath, ref, acquiredAt)
+		if removeErr != nil {
+			return contracts.SourceIngestClaim{}, false, removeErr
+		}
+		if removed {
+			file, err = os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+			if errors.Is(err, os.ErrExist) {
+				return contracts.SourceIngestClaim{}, false, nil
+			}
+		}
+	}
+	if errors.Is(err, os.ErrExist) {
 		return contracts.SourceIngestClaim{}, false, nil
 	}
 
@@ -128,6 +142,53 @@ func (store *FilesystemStore) TryAcquireSourceIngest(
 	}
 
 	return claim, true, nil
+}
+
+func (store *FilesystemStore) removeExpiredSourceIngestClaim(
+	lockPath string,
+	ref contracts.SourceObjectRef,
+	now time.Time,
+) (bool, error) {
+	var existing contracts.SourceIngestClaim
+	if err := readJSON(lockPath, &existing); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		info, statErr := os.Stat(lockPath)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return true, nil
+			}
+
+			return false, statErr
+		}
+		if now.Sub(info.ModTime()) <= sourceIngestClaimTTL {
+			return false, nil
+		}
+		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+		if err := fsyncDir(filepath.Dir(lockPath)); err != nil {
+			return false, err
+		}
+
+		return true, nil
+	}
+	if !sourceObjectRefsEqual(existing.SourceObject, ref) {
+		return false, errors.New("source ingest claim references a different source object")
+	}
+	if existing.AcquiredAt.IsZero() ||
+		now.Sub(existing.AcquiredAt) <= sourceIngestClaimTTL {
+		return false, nil
+	}
+	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err := fsyncDir(filepath.Dir(lockPath)); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 func (store *FilesystemStore) ReleaseSourceIngest(

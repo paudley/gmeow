@@ -262,15 +262,15 @@ root = "data/filestore"
 [postgres]
 host = "127.0.0.1"
 port = 5432
-database = "gmeow"
-user = "gmeow"
+database = "gmeow-test"
+user = "gmeow-test"
 ssl_mode = "require"
 
 [rabbitmq]
 host = "127.0.0.1"
 port = 5672
-user = "gmeow"
-vhost = "gmeow"
+user = "gmeow-test"
+vhost = "gmeow-test"
 test_user = "gmeow-test"
 test_vhost = "gmeow-test"
 
@@ -292,15 +292,42 @@ func tomlLiteralForCLIConfig(value string) string {
 func localSecretLeaf(t *testing.T, name string) string {
 	t.Helper()
 	var parsed struct {
+		Postgres struct {
+			Database string `toml:"database"`
+			User     string `toml:"user"`
+		} `toml:"postgres"`
+		RabbitMQ struct {
+			User  string `toml:"user"`
+			VHost string `toml:"vhost"`
+		} `toml:"rabbitmq"`
 		Secrets map[string]string `toml:"secrets"`
 	}
-	path := filepath.Clean(filepath.Join("..", "..", "gmeow.toml"))
+	path := strings.TrimSpace(os.Getenv("GMEOW_TEST_CONFIG"))
+	if path == "" {
+		t.Skip("GMEOW_TEST_CONFIG is required for live CLI config tests")
+	}
 	if _, err := toml.DecodeFile(path, &parsed); err != nil {
-		t.Fatalf("decode local config for encrypted secret leaf: %v", err)
+		t.Fatalf("decode test config for encrypted secret leaf: %v", err)
+	}
+	if !strings.Contains(parsed.Postgres.Database, "test") ||
+		!strings.Contains(parsed.Postgres.User, "test") {
+		t.Fatalf(
+			"refusing CLI test against non-test postgres target database=%q user=%q",
+			parsed.Postgres.Database,
+			parsed.Postgres.User,
+		)
+	}
+	if !strings.Contains(parsed.RabbitMQ.VHost, "test") ||
+		!strings.Contains(parsed.RabbitMQ.User, "test") {
+		t.Fatalf(
+			"refusing CLI test against non-test rabbitmq target vhost=%q user=%q",
+			parsed.RabbitMQ.VHost,
+			parsed.RabbitMQ.User,
+		)
 	}
 	value := strings.TrimSpace(parsed.Secrets[name])
 	if value == "" {
-		t.Fatalf("local config missing encrypted secret leaf %q", name)
+		t.Fatalf("test config missing encrypted secret leaf %q", name)
 	}
 	return value
 }

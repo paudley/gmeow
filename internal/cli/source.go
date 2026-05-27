@@ -67,7 +67,18 @@ func newSourceServeCommand(
 				return err
 			}
 			defer filestoreClient.Close()
-			sourceService, err := source.NewService(filestoreClient)
+			schedulerClient, err := rpc.NewSchedulerClient(
+				ctx,
+				rpcEndpoint(loaded.Resolved.RPC.Scheduler),
+			)
+			if err != nil {
+				return err
+			}
+			defer schedulerClient.Close()
+			sourceService, err := source.NewServiceWithNotifier(
+				filestoreClient,
+				schedulerClient,
+			)
 			if err != nil {
 				return err
 			}
@@ -171,7 +182,18 @@ func newSourceBackfillCommand(out io.Writer, configPath *string) *cobra.Command 
 				return err
 			}
 			defer filestoreClient.Close()
-			sourceService, err := source.NewService(filestoreClient)
+			schedulerClient, err := rpc.NewSchedulerClient(
+				ctx,
+				rpcEndpoint(loaded.Resolved.RPC.Scheduler),
+			)
+			if err != nil {
+				return err
+			}
+			defer schedulerClient.Close()
+			sourceService, err := source.NewServiceWithNotifier(
+				filestoreClient,
+				schedulerClient,
+			)
 			if err != nil {
 				return err
 			}
