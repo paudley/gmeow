@@ -6,7 +6,7 @@
 
 FILESTORE-first local knowledge services for agents.
 
-Gmeow is in a Go rewrite. Phases 0-6 provide the greenfield runtime: shared contracts, SOPS-backed config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, Go ANALYSIS worker runtime, Go SOURCE adapters, shared application services, and MCP/REST/read-only IMAP interfaces. Phase 7 adds operational hardening.
+Gmeow is the Go runtime for FILESTORE-first local knowledge services. This branch replaces the old Python application with typed Go services for config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, ANALYSIS workers, SOURCE/BACKEND services, and MCP/REST/read-only IMAP interfaces.
 
 Gmeow is designed for trusted single-user local systems. By default it binds to `127.0.0.1` and does not add application-level authentication. Do not expose it directly to an untrusted network.
 
@@ -32,7 +32,7 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Read-only Apache AGE graph inspection over projected graph facts.
 - Go SCHEDULER work derivation with RabbitMQ priority, retry, and dead-letter queues.
 - Go SOURCE adapters submit normalized content to FILESTORE and use source lookup/ingest claims before payload streaming.
-- Transitional Python runtime code is retired. The remaining `python/` package is the explicit ANALYSIS external adapter package.
+- The old Python runtime code is retired. The remaining `python/` package is the explicit ANALYSIS external adapter package.
 
 ## Install
 
@@ -43,7 +43,7 @@ age-keygen -o ~/.config/gmeow/key.txt
 chmod 600 ~/.config/gmeow/key.txt
 ```
 
-Edit `gmeow.toml`. Phase 00 uses the Go config parser for all binaries. Startup requires a SOPS age identity from `GMEOW_SOPS_UNLOCK_KEY` or `~/.config/gmeow/key.txt`; config validation cannot be disabled. Keep operational TOML fields readable and store referenced `[secrets]` values as SOPS JSON leaf envelopes.
+Edit `gmeow.toml`. All binaries use the shared Go config parser. Startup requires a SOPS age identity from `GMEOW_SOPS_UNLOCK_KEY` or `~/.config/gmeow/key.txt`; config validation cannot be disabled. Keep operational TOML fields readable and store referenced `[secrets]` values as SOPS JSON leaf envelopes.
 
 ```toml
 [system]
@@ -148,8 +148,8 @@ The email production cutover analyzer versions are `phase04-email-v2` for Go ana
 by design and must be rescheduled before production validation is considered complete.
 
 The gRPC service protocol is typed protobuf. JSON is limited to dynamic metadata leaf fields, not
-whole request or response envelopes. See `proto/gmeow/v1/`, `docs/ARCHITECTURE.md`, and
-`docs/systemd.md`.
+whole request or response envelopes. See `proto/gmeow/v1/`, `docs/RUNTIME_ARCHITECTURE.md`,
+`docs/ARCHITECTURE.md`, and `docs/systemd.md`.
 
 ## Distribution
 
@@ -190,6 +190,8 @@ databases or schemas.
 
 Before publishing, run the checklist in `docs/PUBLIC_RELEASE_CHECKLIST.md`.
 
+The detailed runtime architecture lives in `docs/RUNTIME_ARCHITECTURE.md`.
+Subsystem architecture docs live under `docs/architecture/`.
 FILESTORE backup and restore procedures live in `docs/FILESTORE_BACKUP_RESTORE.md`.
 Component ownership and service boundary rules live in `docs/ARCHITECTURE.md`.
 Testing architecture and mock-minimization rules live in `docs/TESTING.md`.

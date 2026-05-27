@@ -105,7 +105,8 @@ Workflow tests should prove operator-visible behavior:
 - force analysis through application services and observe real scheduler work;
 - restore a FILESTORE root, verify it, rebuild QUERY, and retrieve content;
 - route failed analysis jobs to retry/dead-letter and requeue them;
-- serve through MCP, REST, and IMAP while using real application services.
+- serve through MCP stdio, MCP Streamable HTTP, REST, and IMAP while using real
+  application services.
 
 ## Enforcement
 

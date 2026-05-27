@@ -1,10 +1,11 @@
-# Phase 00 Core Data Assumptions
+# Runtime Core Data Assumptions
 
-Phase 00 does not start PostgreSQL, RabbitMQ, FILESTORE, QUERY, SOURCE, INTERFACE, or ANALYSIS
-runtime components. It only establishes the config, contract, package, and quality-gate surfaces
-that later phases use.
+Gmeow runtime components assume PostgreSQL and RabbitMQ are external services,
+FILESTORE owns durable object state, and config validation runs before service
+startup. These assumptions are shared by local development, tests, and systemd
+production operation.
 
-Development assumptions for later core-data phases:
+Core data assumptions:
 
 - PostgreSQL and RabbitMQ are external services, preferably started through a local container stack.
 - FILESTORE state lives under the resolved `system.data_dir` and `filestore.root`.
@@ -12,4 +13,4 @@ Development assumptions for later core-data phases:
   or filesystem storage.
 - Secrets are named encrypted leaves in the selected SOPS-protected config; components receive
   resolved values only.
-- Python ANALYSIS workers receive resolved job/spec payloads and never read `gmeow.toml` directly.
+- External ANALYSIS adapters receive resolved job/spec payloads and never read `gmeow.toml` directly.

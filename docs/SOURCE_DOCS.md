@@ -3,6 +3,9 @@
 This index lists the colocated `MODULE.md` files that document the contracts and integration
 requirements of the Gmeow source and test packages.
 
+Runtime architecture documents live under `docs/architecture/`; the detailed
+current runtime guide is `docs/RUNTIME_ARCHITECTURE.md`.
+
 ## Python Analysis Package
 
 - [python/gmeow_intel/MODULE.md](../python/gmeow_intel/MODULE.md) — Python ANALYSIS external

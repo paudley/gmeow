@@ -10,6 +10,9 @@ Production MCP is served as Streamable HTTP with server-sent event streams,
 stateful sessions, and client-driven session termination; stdio MCP remains
 available for local MCP hosts.
 
+The detailed runtime architecture lives in `docs/RUNTIME_ARCHITECTURE.md`; this file is
+the concise ownership contract.
+
 ## Ownership Rules
 
 - FILESTORE owns object bytes, manifests, compound parts, annotations, overlays,

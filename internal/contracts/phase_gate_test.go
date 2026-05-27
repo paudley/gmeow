@@ -375,7 +375,7 @@ func TestPhaseSixInterfacesDependOnAppServices(t *testing.T) {
 	}
 }
 
-func TestTransitionalPythonSyncDoesNotOwnAnalysisScheduling(t *testing.T) {
+func TestRetiredPythonSyncDoesNotOwnAnalysisScheduling(t *testing.T) {
 	path := filepath.Join(repoRoot(t), "src", "gmeow", "sync.py")
 	content, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -389,15 +389,15 @@ func TestTransitionalPythonSyncDoesNotOwnAnalysisScheduling(t *testing.T) {
 		"maintenance_scheduler",
 	} {
 		if strings.Contains(string(content), forbidden) {
-			t.Fatalf("transitional Python sync still contains scheduler path %q", forbidden)
+			t.Fatalf("retired Python sync still contains scheduler path %q", forbidden)
 		}
 	}
 }
 
 func TestDocsDoNotReintroduceGmailRawPayloadDuplication(t *testing.T) {
 	for _, relative := range []string{
-		"docs/GO_MIGRATION.md",
-		"docs/GO_PHASE_05_SOURCE.md",
+		"docs/RUNTIME_ARCHITECTURE.md",
+		"docs/architecture/SOURCES.md",
 	} {
 		content, err := os.ReadFile(filepath.Join(repoRoot(t), relative))
 		if err != nil {
@@ -422,9 +422,9 @@ func TestDocsDoNotPrescribeFakingInRepoPhaseSixCode(t *testing.T) {
 	root := repoRoot(t)
 	for _, relative := range []string{
 		"README.md",
-		"docs/GO_MIGRATION.md",
-		"docs/GO_PHASE_02_QUERY.md",
-		"docs/GO_PHASE_06_INTERFACE.md",
+		"docs/RUNTIME_ARCHITECTURE.md",
+		"docs/architecture/QUERY.md",
+		"docs/architecture/INTERFACES.md",
 	} {
 		content, err := os.ReadFile(filepath.Join(root, relative))
 		if err != nil {
@@ -442,7 +442,7 @@ func TestDocsDoNotPrescribeFakingInRepoPhaseSixCode(t *testing.T) {
 	}
 }
 
-func TestPublicDocsDescribePhaseZeroThroughSixRuntime(t *testing.T) {
+func TestPublicDocsDescribeCurrentGoRuntime(t *testing.T) {
 	root := repoRoot(t)
 	readme, err := os.ReadFile(filepath.Join(root, "README.md"))
 	if err != nil {
@@ -450,28 +450,32 @@ func TestPublicDocsDescribePhaseZeroThroughSixRuntime(t *testing.T) {
 	}
 	text := string(readme)
 	for _, required := range []string{
-		"Phases 0-6",
-		"Go ANALYSIS worker runtime",
-		"Go SOURCE adapters",
+		"replaces the old Python application",
+		"ANALYSIS workers",
+		"SOURCE/BACKEND services",
 		"Gmail SOURCE adapter",
 		"gmeow mcp-serve",
+		"gmeow mcp-http-serve",
 		"gmeow rest-serve",
 		"read-only `gmeow imap-serve`",
 		"gmeow-intel",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf(
-				"README.md does not describe completed phase 0-6 runtime surface %q",
+				"README.md does not describe current Go runtime surface %q",
 				required,
 			)
 		}
 	}
 	for _, stale := range []string{
+		"Go rewrite",
+		"Phases 0-6",
+		"Phase 00 uses",
 		"Phases 0-3 provide",
 		"MCP returns in the Go INTERFACE phase",
 		"Archive and IMAP behavior return in the Go INTERFACE phase",
-		"Gmail SOURCE adapters, and ANALYSIS workers return in later Go migration phases",
-		"Gmail provisioning and source runtime behavior move in later Go migration phases",
+		"Gmail SOURCE adapters, and ANALYSIS workers return in later Go",
+		"Gmail provisioning and source runtime behavior move in later Go",
 	} {
 		if strings.Contains(text, stale) {
 			t.Fatalf("README.md still contains stale phase wording %q", stale)
