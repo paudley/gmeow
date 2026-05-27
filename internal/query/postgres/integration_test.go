@@ -9,7 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
-	"path/filepath"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -405,11 +405,23 @@ func TestPostgresProjectsFilestore(t *testing.T) {
 
 func queryIntegrationDSN(t *testing.T) string {
 	t.Helper()
+	path := os.Getenv("GMEOW_TEST_CONFIG")
+	if path == "" {
+		t.Skip("GMEOW_TEST_CONFIG is required for postgres integration tests")
+	}
 	loaded, err := config.Load(config.Options{
-		Path: filepath.Join("..", "..", "..", "gmeow.toml"),
+		Path: path,
 	})
 	if err != nil {
 		t.Fatalf("load integration config: %v", err)
+	}
+	if !strings.Contains(loaded.Resolved.Postgres.Database, "test") ||
+		!strings.Contains(loaded.Resolved.Postgres.User, "test") {
+		t.Fatalf(
+			"refusing to run postgres integration test against non-test target database=%q user=%q",
+			loaded.Resolved.Postgres.Database,
+			loaded.Resolved.Postgres.User,
+		)
 	}
 	return postgresDSN(loaded.Resolved.Postgres, loaded.Resolved.Postgres.Database)
 }

@@ -1399,11 +1399,63 @@ func mergeProvenance(existing, incoming []contracts.Provenance) []contracts.Prov
 func mergeRelationships(
 	existing, incoming []contracts.Relationship,
 ) []contracts.Relationship {
-	seen := map[string]bool{}
+	incomingKeys := map[string]bool{}
+	for _, item := range incoming {
+		incomingKeys[relationshipMergeKey(item)] = true
+	}
 
 	result := make([]contracts.Relationship, 0, len(existing)+len(incoming))
-	for _, item := range append(existing, incoming...) {
-		key := fmt.Sprintf(
+	for _, item := range existing {
+		if incomingKeys[relationshipMergeKey(item)] {
+			continue
+		}
+
+		result = append(result, item)
+	}
+	result = append(result, incoming...)
+
+	return normalizedRelationships(result)
+}
+
+func mergeParts(existing, incoming []contracts.CompoundPart) []contracts.CompoundPart {
+	incomingSlots := map[string]bool{}
+	for _, item := range incoming {
+		incomingSlots[compoundPartSlotKey(item)] = true
+	}
+
+	result := make([]contracts.CompoundPart, 0, len(existing)+len(incoming))
+	for _, item := range existing {
+		if incomingSlots[compoundPartSlotKey(item)] {
+			continue
+		}
+
+		result = append(result, item)
+	}
+	result = append(result, incoming...)
+
+	return normalizedParts(result)
+}
+
+func relationshipMergeKey(item contracts.Relationship) string {
+	switch item.Type {
+	case "contains":
+		return fmt.Sprintf(
+			"%s\x00%s\x00%s\x00%d",
+			item.Type,
+			item.From,
+			item.Role,
+			item.Order,
+		)
+	case "part_of":
+		return fmt.Sprintf(
+			"%s\x00%s\x00%s\x00%d",
+			item.Type,
+			item.To,
+			item.Role,
+			item.Order,
+		)
+	default:
+		return fmt.Sprintf(
 			"%s\x00%s\x00%s\x00%s\x00%d",
 			item.Type,
 			item.From,
@@ -1411,34 +1463,11 @@ func mergeRelationships(
 			item.Role,
 			item.Order,
 		)
-		if seen[key] {
-			continue
-		}
-
-		seen[key] = true
-
-		result = append(result, item)
 	}
-
-	return normalizedRelationships(result)
 }
 
-func mergeParts(existing, incoming []contracts.CompoundPart) []contracts.CompoundPart {
-	seen := map[string]bool{}
-
-	result := make([]contracts.CompoundPart, 0, len(existing)+len(incoming))
-	for _, item := range append(existing, incoming...) {
-		key := fmt.Sprintf("%s\x00%s\x00%d", item.Digest, item.Role, item.Order)
-		if seen[key] {
-			continue
-		}
-
-		seen[key] = true
-
-		result = append(result, item)
-	}
-
-	return normalizedParts(result)
+func compoundPartSlotKey(item contracts.CompoundPart) string {
+	return fmt.Sprintf("%s\x00%d", item.Role, item.Order)
 }
 
 func annotationFilename(annotation contracts.Annotation) (string, error) {

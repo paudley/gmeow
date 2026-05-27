@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestLoadFailsWithoutUnlockKey(t *testing.T) {
@@ -557,11 +559,42 @@ func validConfig() Config {
 
 func repoConfigPath(t *testing.T) string {
 	t.Helper()
-	path := filepath.Clean(filepath.Join("..", "..", "gmeow.toml"))
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("repo config is required for live config tests: %v", err)
+	path := strings.TrimSpace(os.Getenv("GMEOW_TEST_CONFIG"))
+	if path == "" {
+		t.Skip("GMEOW_TEST_CONFIG is required for live config tests")
 	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("test config is required for live config tests: %v", err)
+	}
+	requireTestConfigFile(t, path)
 	return path
+}
+
+func requireTestConfigFile(t *testing.T, path string) {
+	t.Helper()
+	var parsed struct {
+		Postgres PostgresConfig `toml:"postgres"`
+		RabbitMQ RabbitMQConfig `toml:"rabbitmq"`
+	}
+	if _, err := toml.DecodeFile(path, &parsed); err != nil {
+		t.Fatalf("decode test config guard: %v", err)
+	}
+	if !strings.Contains(parsed.Postgres.Database, "test") ||
+		!strings.Contains(parsed.Postgres.User, "test") {
+		t.Fatalf(
+			"refusing live config test against non-test postgres target database=%q user=%q",
+			parsed.Postgres.Database,
+			parsed.Postgres.User,
+		)
+	}
+	if !strings.Contains(parsed.RabbitMQ.VHost, "test") ||
+		!strings.Contains(parsed.RabbitMQ.User, "test") {
+		t.Fatalf(
+			"refusing live config test against non-test rabbitmq target vhost=%q user=%q",
+			parsed.RabbitMQ.VHost,
+			parsed.RabbitMQ.User,
+		)
+	}
 }
 
 func minimalConfig() string {

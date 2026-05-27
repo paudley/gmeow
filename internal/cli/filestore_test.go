@@ -88,15 +88,15 @@ root = "` + filestoreRoot + `"
 [postgres]
 host = "127.0.0.1"
 port = 5432
-database = "gmeow"
-user = "gmeow"
+database = "gmeow-test"
+user = "gmeow-test"
 ssl_mode = "require"
 
 [rabbitmq]
 host = "127.0.0.1"
 port = 5672
-user = "gmeow"
-vhost = "gmeow"
+user = "gmeow-test"
+vhost = "gmeow-test"
 test_user = "gmeow-test"
 test_vhost = "gmeow-test"
 

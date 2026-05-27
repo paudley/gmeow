@@ -45,6 +45,10 @@ type retrieveInput struct {
 	IncludeContent bool                   `json:"include_content,omitempty" jsonschema:"include up to 1MiB of object content"`
 }
 
+type messageSummaryInput struct {
+	MessageID string `json:"message_id" jsonschema:"RFC Message-ID value"`
+}
+
 func New(services *appsvc.Services) (*Server, error) {
 	if services == nil {
 		return nil, errors.New("MCP app services are required")
@@ -80,6 +84,34 @@ func New(services *appsvc.Services) (*Server, error) {
 			}
 
 			return toonOperationForTool("mail_search", response), nil
+		},
+	)
+	addToonTool(
+		server,
+		"message_summary",
+		"display the canonical message-list view for an RFC Message-ID",
+		func(ctx context.Context, input messageSummaryInput) (any, error) {
+			response, err := services.MessageSummary(ctx, appsvc.MessageSummaryRequest{
+				MessageID: input.MessageID,
+			})
+			if err != nil {
+				return nil, err
+			}
+
+			return toonMessageSummary(response), nil
+		},
+	)
+	addToonTool(
+		server,
+		"summary_search",
+		"search mail and return a compact three-line summary per message",
+		func(ctx context.Context, input appsvc.SearchOptions) (any, error) {
+			response, err := services.SummarySearch(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonSummarySearch(response), nil
 		},
 	)
 	addToonToolWithRequest(

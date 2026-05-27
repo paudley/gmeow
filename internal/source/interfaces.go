@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,13 @@ type FilestoreClient interface {
 		context.Context,
 		contracts.SourceCursorRef,
 	) (contracts.SourceCursor, bool, error)
+}
+
+type ChangeNotifier interface {
+	NotifyObjectsChanged(
+		context.Context,
+		contracts.ObjectChangeRequest,
+	) (contracts.SchedulerScanResponse, error)
 }
 
 type Adapter interface {
@@ -173,7 +181,8 @@ type CompoundObject struct {
 }
 
 type Service struct {
-	store FilestoreClient
+	store    FilestoreClient
+	notifier ChangeNotifier
 }
 
 type IngestService interface {
@@ -185,11 +194,18 @@ type IngestService interface {
 }
 
 func NewService(store FilestoreClient) (*Service, error) {
+	return NewServiceWithNotifier(store, nil)
+}
+
+func NewServiceWithNotifier(
+	store FilestoreClient,
+	notifier ChangeNotifier,
+) (*Service, error) {
 	if store == nil {
 		return nil, errors.New("source filestore client is required")
 	}
 
-	return &Service{store: store}, nil
+	return &Service{store: store, notifier: notifier}, nil
 }
 
 func (service *Service) Ingest(
@@ -210,6 +226,9 @@ func (service *Service) Ingest(
 				if err := service.store.AttachProvenance(ctx, digest, provenance); err != nil {
 					return "", false, err
 				}
+				if err := service.notifyChanged(ctx, digest); err != nil {
+					return "", false, err
+				}
 			}
 
 			return digest, false, nil
@@ -217,6 +236,7 @@ func (service *Service) Ingest(
 	}
 
 	var claim contracts.SourceIngestClaim
+	claimAcquired := false
 	if hasRef {
 		var acquired bool
 		claim, acquired, err = service.store.TryAcquireSourceIngest(ctx, ref)
@@ -234,15 +254,57 @@ func (service *Service) Ingest(
 			)
 		}
 
-		defer service.releaseClaim(ctx, claim)
+		claimAcquired = true
+		defer func() {
+			if claimAcquired {
+				service.releaseClaim(ctx, claim)
+			}
+		}()
+		if digest, found, err := service.store.LookupSourceObject(ctx, ref); err != nil {
+			return "", false, err
+		} else if found {
+			if err := service.store.ReleaseSourceIngest(ctx, claim); err != nil {
+				return "", false, err
+			}
+			claimAcquired = false
+			if len(provenance) > 0 {
+				if err := service.store.AttachProvenance(ctx, digest, provenance); err != nil {
+					return "", false, err
+				}
+				if err := service.notifyChanged(ctx, digest); err != nil {
+					return "", false, err
+				}
+			}
+
+			return digest, false, nil
+		}
 	}
 
 	if object.Compound != nil {
 		compound := *object.Compound
 		compound.Provenance = mergeProvenance(compound.Provenance, provenance)
 		digest, err := service.store.PutCompound(ctx, rpc.CompoundPutRequest(compound))
+		if err != nil {
+			if digest, found, lookupErr := service.lookupAfterWriteError(
+				ctx,
+				ref,
+				hasRef,
+			); lookupErr != nil {
+				return "", false, lookupErr
+			} else if found {
+				return digest, false, nil
+			}
 
-		return digest, true, err
+			return "", false, err
+		}
+		if claimAcquired {
+			if err := service.store.ReleaseSourceIngest(ctx, claim); err != nil {
+				return "", false, err
+			}
+			claimAcquired = false
+		}
+
+		return digest, true, service.notifyChanged(ctx, digest)
 	}
 
 	if object.Reader == nil {
@@ -261,8 +323,58 @@ func (service *Service) Ingest(
 		Provenance:    mergeProvenance(object.Provenance, provenance),
 		Relationships: append([]contracts.Relationship{}, object.Relationships...),
 	})
+	if err != nil {
+		if digest, found, lookupErr := service.lookupAfterWriteError(
+			ctx,
+			ref,
+			hasRef,
+		); lookupErr != nil {
+			return "", false, lookupErr
+		} else if found {
+			return digest, false, nil
+		}
 
-	return digest, true, err
+		return "", false, err
+	}
+	if claimAcquired {
+		if err := service.store.ReleaseSourceIngest(ctx, claim); err != nil {
+			return "", false, err
+		}
+		claimAcquired = false
+	}
+
+	return digest, true, service.notifyChanged(ctx, digest)
+}
+
+func (service *Service) lookupAfterWriteError(
+	ctx context.Context,
+	ref contracts.SourceObjectRef,
+	hasRef bool,
+) (contracts.ObjectDigest, bool, error) {
+	if !hasRef {
+		return "", false, nil
+	}
+
+	return service.store.LookupSourceObject(ctx, ref)
+}
+
+func (service *Service) notifyChanged(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) error {
+	if service.notifier == nil {
+		return nil
+	}
+
+	_, err := service.notifier.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigests: []contracts.ObjectDigest{digest},
+	})
+	if err != nil {
+		log.Printf("source notification failed digest=%s error=%v", digest, err)
+	}
+
+	return nil
 }
 
 func (service *Service) LookupSourceObject(

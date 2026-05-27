@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/mail"
+	"net/url"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -20,6 +23,17 @@ import (
 )
 
 const MailMessageFacet = "mail_message"
+
+var (
+	emailAddressExpression = regexp.MustCompile(`<([^<>@\s]+@[^<>@\s]+)>`)
+	firstURLExpression     = regexp.MustCompile(`https://[^\s<>"]+`)
+	githubPRReviewURL      = regexp.MustCompile(
+		`github\.com[:/]+([^/\s]+)/([^/\s]+)/pull/([0-9]+)(?:/(?:review/)?([0-9]+))?`,
+	)
+	githubPRReviewMessageID = regexp.MustCompile(
+		`<?([^/\s<>]+)/([^/\s<>]+)/pull/([0-9]+)/(?:review/)?([0-9]+)@github\.com`,
+	)
+)
 
 type Services struct {
 	query            QueryReader
@@ -51,6 +65,27 @@ type SearchOptions struct {
 	FullMessage   bool     `json:"full_msg,omitempty"`
 }
 
+type MessageSummaryRequest struct {
+	MessageID string `json:"message_id"`
+}
+
+type SummarySearchResponse struct {
+	Messages []MessageSummaryListItem `json:"messages"`
+	Query    string                   `json:"query,omitempty"`
+	Total    int                      `json:"total"`
+	Returned int                      `json:"returned"`
+}
+
+type MessageSummaryListItem struct {
+	MessageID string `json:"message_id,omitempty"`
+	Date      string `json:"date,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	To        string `json:"to,omitempty"`
+	From      string `json:"from,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+	Digest    string `json:"digest,omitempty"`
+}
+
 type ObjectSearchResponse struct {
 	Results []ObjectSearchResult `json:"results"`
 	Total   int                  `json:"total"`
@@ -59,6 +94,7 @@ type ObjectSearchResponse struct {
 type ObjectSearchResult struct {
 	Attributes        map[string]any         `json:"attributes,omitempty"`
 	Structure         *contracts.Structure   `json:"structure,omitempty"`
+	Message           *CanonicalMessage      `json:"message,omitempty"`
 	Provenance        []contracts.Provenance `json:"provenance,omitempty"`
 	ObjectDigest      contracts.ObjectDigest `json:"object_digest"`
 	Title             string                 `json:"title,omitempty"`
@@ -71,7 +107,49 @@ type ObjectSearchResult struct {
 
 type RetrieveResponse struct {
 	Manifest contracts.Manifest `json:"manifest"`
+	Message  *CanonicalMessage  `json:"message,omitempty"`
 	Content  string             `json:"content,omitempty"`
+}
+
+type CanonicalMessage struct {
+	Graph           CanonicalMessageGraph        `json:"graph,omitempty"`
+	SelectedHeaders CanonicalSelectedHeaders     `json:"selected_headers"`
+	MessageID       string                       `json:"message_id,omitempty"`
+	Digest          string                       `json:"digest"`
+	ObjectID        string                       `json:"object_id,omitempty"`
+	ThreadID        string                       `json:"thread_id,omitempty"`
+	Summary         string                       `json:"summary,omitempty"`
+	Bullets         []string                     `json:"bullets,omitempty"`
+	Categories      []string                     `json:"categories,omitempty"`
+	Body            string                       `json:"body,omitempty"`
+	Attachments     []CanonicalMessageAttachment `json:"attachments"`
+}
+
+type CanonicalSelectedHeaders struct {
+	Date    string `json:"date,omitempty"`
+	From    string `json:"from,omitempty"`
+	To      string `json:"to,omitempty"`
+	Cc      string `json:"cc,omitempty"`
+	Subject string `json:"subject,omitempty"`
+}
+
+type CanonicalMessageGraph struct {
+	Source  map[string]any         `json:"source,omitempty"`
+	Topics  []string               `json:"topics,omitempty"`
+	Actions []string               `json:"actions,omitempty"`
+	Links   []CanonicalMessageLink `json:"links,omitempty"`
+}
+
+type CanonicalMessageLink struct {
+	Rel string `json:"rel"`
+	URL string `json:"url"`
+}
+
+type CanonicalMessageAttachment struct {
+	RetrievalID string `json:"retrieval_id"`
+	Filename    string `json:"filename,omitempty"`
+	MediaType   string `json:"media_type,omitempty"`
+	Summary     string `json:"summary,omitempty"`
 }
 
 type ForceAnalysisRequest struct {
@@ -260,6 +338,13 @@ func (services *Services) MailSearch(
 	if options.Limit > 0 && len(results) > options.Limit {
 		results = results[:options.Limit]
 	}
+	for index := range results {
+		message, err := services.canonicalMessage(ctx, results[index].ObjectDigest)
+		if err != nil {
+			continue
+		}
+		results[index].Message = &message
+	}
 
 	return ObjectSearchResponse{Results: results, Total: len(results)}, nil
 }
@@ -275,6 +360,12 @@ func (services *Services) Retrieve(
 	}
 
 	response := RetrieveResponse{Manifest: manifest}
+	if manifestHasFacet(manifest, MailMessageFacet) {
+		message, err := services.canonicalMessage(ctx, digest)
+		if err == nil {
+			response.Message = &message
+		}
+	}
 	if includeContent {
 		content, err := readObjectContent(ctx, services.objects, digest)
 		if err != nil {
@@ -284,6 +375,209 @@ func (services *Services) Retrieve(
 	}
 
 	return response, nil
+}
+
+func (services *Services) MessageSummary(
+	ctx context.Context,
+	request MessageSummaryRequest,
+) (CanonicalMessage, error) {
+	messageID := strings.TrimSpace(request.MessageID)
+	if messageID == "" {
+		return CanonicalMessage{}, errors.New("message_id is required")
+	}
+
+	response, err := services.MailSearch(ctx, SearchOptions{
+		Query: messageIDSearchQuery(messageID),
+		Limit: 25,
+	})
+	if err != nil {
+		return CanonicalMessage{}, err
+	}
+	normalized := normalizeMessageID(messageID)
+	for _, result := range response.Results {
+		if result.Message == nil {
+			continue
+		}
+		if normalizeMessageID(result.Message.MessageID) == normalized {
+			return *result.Message, nil
+		}
+	}
+
+	return CanonicalMessage{}, fmt.Errorf("message_id %q not found", messageID)
+}
+
+func (services *Services) SummarySearch(
+	ctx context.Context,
+	options SearchOptions,
+) (SummarySearchResponse, error) {
+	response, err := services.MailSearch(ctx, options)
+	if err != nil {
+		return SummarySearchResponse{}, err
+	}
+
+	messages := make([]MessageSummaryListItem, 0, len(response.Results))
+	for _, result := range response.Results {
+		if result.Message == nil {
+			continue
+		}
+		messages = append(messages, summaryListItem(*result.Message))
+	}
+
+	return SummarySearchResponse{
+		Query:    options.Query,
+		Total:    response.Total,
+		Returned: len(messages),
+		Messages: messages,
+	}, nil
+}
+
+func (services *Services) canonicalMessage(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) (CanonicalMessage, error) {
+	manifest, err := services.objects.ReadManifest(ctx, digest)
+	if err != nil {
+		return CanonicalMessage{}, err
+	}
+	if !manifestHasFacet(manifest, MailMessageFacet) {
+		return CanonicalMessage{}, fmt.Errorf("object %s is not a mail message", digest)
+	}
+
+	headers := map[string]string{}
+	body := ""
+	attachments := []CanonicalMessageAttachment{}
+	for _, part := range manifest.Compound.Parts {
+		switch part.Role {
+		case "rfc822_headers":
+			headers = mergeHeaderMaps(headers, services.messageHeaders(ctx, part.Digest))
+		case "email_body":
+			if body == "" {
+				body = canonicalBodyText(services.partContent(ctx, part.Digest))
+			}
+		case "attachment":
+			attachment, ok := services.canonicalAttachment(ctx, part)
+			if ok {
+				attachments = append(attachments, attachment)
+			}
+		}
+	}
+
+	metadata := mailFacetMetadata(manifest)
+	analysis := services.messageAnalysis(ctx, manifest, digest)
+	summary, bullets := canonicalSummary(analysis, digest)
+	categories := canonicalCategories(analysis)
+	messageID := firstNonEmpty(
+		headers["message-id"],
+		stringFromAny(metadata["rfc_message_id"]),
+	)
+	subject := firstNonEmpty(headers["subject"], stringFromAny(metadata["subject"]))
+	threadID := stringFromAny(metadata["thread_id"])
+
+	return CanonicalMessage{
+		MessageID: messageID,
+		Digest:    string(digest),
+		ObjectID:  manifest.ObjectID,
+		ThreadID:  threadID,
+		SelectedHeaders: CanonicalSelectedHeaders{
+			Date:    headers["date"],
+			From:    headers["from"],
+			To:      headers["to"],
+			Cc:      headers["cc"],
+			Subject: subject,
+		},
+		Summary:     collapseWhitespace(summary),
+		Bullets:     collapseStringList(bullets),
+		Categories:  categories,
+		Graph:       canonicalGraph(headers, subject, body),
+		Body:        body,
+		Attachments: attachments,
+	}, nil
+}
+
+func (services *Services) partContent(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) string {
+	content, err := readObjectContent(ctx, services.objects, digest)
+	if err != nil {
+		return ""
+	}
+
+	return content
+}
+
+func (services *Services) messageHeaders(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) map[string]string {
+	content := services.partContent(ctx, digest)
+	if strings.TrimSpace(content) == "" {
+		return map[string]string{}
+	}
+
+	var rows []map[string]string
+	if err := json.Unmarshal([]byte(content), &rows); err != nil {
+		return map[string]string{}
+	}
+	headers := map[string]string{}
+	for _, row := range rows {
+		name := strings.ToLower(strings.TrimSpace(row["name"]))
+		value := collapseWhitespace(row["value"])
+		if name == "" || value == "" {
+			continue
+		}
+		headers[name] = value
+	}
+
+	return headers
+}
+
+func (services *Services) canonicalAttachment(
+	ctx context.Context,
+	part contracts.CompoundPart,
+) (CanonicalMessageAttachment, bool) {
+	manifest, err := services.objects.ReadManifest(ctx, part.Digest)
+	if err != nil {
+		return CanonicalMessageAttachment{}, false
+	}
+	filename := stringFromAny(part.Metadata["filename"])
+	if filename == "" {
+		filename = attachmentFilename(manifest)
+	}
+	if filename == "" && strings.EqualFold(manifest.MediaType, "text/html") {
+		return CanonicalMessageAttachment{}, false
+	}
+
+	return CanonicalMessageAttachment{
+		RetrievalID: string(part.Digest),
+		Filename:    filename,
+		MediaType:   manifest.MediaType,
+		Summary:     attachmentSummary(manifest, filename),
+	}, true
+}
+
+func (services *Services) messageAnalysis(
+	ctx context.Context,
+	manifest contracts.Manifest,
+	digest contracts.ObjectDigest,
+) []contracts.AnalysisStatus {
+	digests := []contracts.ObjectDigest{digest}
+	for _, part := range manifest.Compound.Parts {
+		if part.Role == "email_body" {
+			digests = append(digests, part.Digest)
+		}
+	}
+	response, err := services.query.AnalysisStatus(ctx, contracts.AnalysisStatusRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigests: digests,
+		AnalyzerNames: []string{"summary.model", "categories.sklearn"},
+		Limit:         20,
+	})
+	if err != nil {
+		return nil
+	}
+
+	return response.Statuses
 }
 
 func (services *Services) Structure(
@@ -663,6 +957,352 @@ func readObjectContent(
 	}
 
 	return string(content), nil
+}
+
+func mergeHeaderMaps(
+	left map[string]string,
+	right map[string]string,
+) map[string]string {
+	merged := map[string]string{}
+	for key, value := range left {
+		merged[key] = value
+	}
+	for key, value := range right {
+		merged[key] = value
+	}
+
+	return merged
+}
+
+func mailFacetMetadata(manifest contracts.Manifest) map[string]any {
+	for _, facet := range manifest.Facets {
+		if facet.FacetKind() == MailMessageFacet {
+			return copyMap(facet.Metadata)
+		}
+	}
+
+	return map[string]any{}
+}
+
+func canonicalBodyText(content string) string {
+	text := collapseWhitespace(content)
+	for _, marker := range []string{
+		" -- Reply to this email",
+		" Reply to this email directly",
+		" You are receiving this because",
+		" Message ID: <",
+	} {
+		if index := strings.Index(text, marker); index >= 0 {
+			text = strings.TrimSpace(text[:index])
+		}
+	}
+
+	return text
+}
+
+func canonicalSummary(
+	statuses []contracts.AnalysisStatus,
+	parentDigest contracts.ObjectDigest,
+) (string, []string) {
+	bodySummary := ""
+	bodyBullets := []string{}
+	parentSummary := ""
+	parentBullets := []string{}
+
+	for _, status := range statuses {
+		if status.AnalyzerName != "summary.model" || status.Status != "complete" {
+			continue
+		}
+		summary := stringFromAny(status.Data["summary"])
+		bullets := stringSliceFromAny(status.Data["bullets"])
+		if status.ObjectDigest != "" &&
+			status.ObjectDigest != parentDigest &&
+			bodySummary == "" {
+			bodySummary = summary
+			bodyBullets = bullets
+		}
+		if parentSummary == "" {
+			parentSummary = summary
+			parentBullets = bullets
+		}
+	}
+	if bodySummary != "" || len(bodyBullets) > 0 {
+		return bodySummary, bodyBullets
+	}
+
+	return parentSummary, parentBullets
+}
+
+func canonicalCategories(statuses []contracts.AnalysisStatus) []string {
+	seen := map[string]bool{}
+	categories := []string{}
+	for _, status := range statuses {
+		if status.AnalyzerName != "categories.sklearn" || status.Status != "complete" {
+			continue
+		}
+		for _, category := range stringSliceFromAny(status.Data["category_ids"]) {
+			if category != "" && !seen[category] {
+				seen[category] = true
+				categories = append(categories, category)
+			}
+		}
+		for _, raw := range anySlice(status.Data["categories"]) {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			category := stringFromAny(item["category"])
+			if category != "" && !seen[category] {
+				seen[category] = true
+				categories = append(categories, category)
+			}
+		}
+	}
+	sort.Strings(categories)
+
+	return categories
+}
+
+func canonicalGraph(
+	headers map[string]string,
+	subject string,
+	body string,
+) CanonicalMessageGraph {
+	link := firstURL(body)
+	repository, pullRequest, reviewID := githubPRReview(link, headers["message-id"])
+	source := map[string]any{}
+	if repository != "" {
+		source["kind"] = "pull_request_review"
+		source["service"] = "github"
+		source["repository"] = repository
+		source["pull_request"] = pullRequest
+		if reviewID != "" {
+			source["review_id"] = reviewID
+		}
+		if actor := githubActor(headers["from"], body); actor != "" {
+			source["actor"] = actor
+		}
+	}
+
+	links := []CanonicalMessageLink{}
+	if link != "" {
+		links = append(links, CanonicalMessageLink{Rel: "canonical", URL: link})
+	}
+
+	return CanonicalMessageGraph{
+		Source: source,
+		Links:  links,
+	}
+}
+
+func githubPRReview(rawURL, messageID string) (string, int, string) {
+	text := rawURL
+	if text == "" {
+		text = messageID
+	}
+	matches := githubPRReviewURL.FindStringSubmatch(text)
+	if len(matches) == 0 {
+		matches = githubPRReviewMessageID.FindStringSubmatch(text)
+	}
+	if len(matches) == 0 {
+		return "", 0, ""
+	}
+	pullRequest := intFromString(matches[3])
+	reviewID := ""
+	if len(matches) > 4 {
+		reviewID = matches[4]
+	}
+
+	return matches[1] + "/" + matches[2], pullRequest, reviewID
+}
+
+func githubActor(from, body string) string {
+	if from != "" {
+		if index := strings.Index(from, " <"); index > 0 {
+			return strings.Trim(from[:index], `"`)
+		}
+
+		return from
+	}
+	if strings.HasPrefix(body, "@") {
+		if index := strings.Index(body, " "); index > 1 {
+			return strings.TrimPrefix(body[:index], "@")
+		}
+	}
+
+	return ""
+}
+
+func firstURL(text string) string {
+	raw := firstURLExpression.FindString(text)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if parsed.Fragment != "" {
+		return raw
+	}
+
+	return parsed.String()
+}
+
+func attachmentFilename(manifest contracts.Manifest) string {
+	for _, facet := range manifest.Facets {
+		if value := stringFromAny(facet.Metadata["display_name"]); value != "" {
+			return value
+		}
+		if value := stringFromAny(facet.Attributes["display_name"]); value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func attachmentSummary(manifest contracts.Manifest, filename string) string {
+	if filename != "" {
+		return collapseWhitespace(filename)
+	}
+	if manifest.MediaType != "" {
+		return "Attachment with media type " + manifest.MediaType + "."
+	}
+
+	return ""
+}
+
+func summaryListItem(message CanonicalMessage) MessageSummaryListItem {
+	return MessageSummaryListItem{
+		MessageID: message.MessageID,
+		Date:      abbreviatedMailDate(message.SelectedHeaders.Date),
+		Subject:   message.SelectedHeaders.Subject,
+		To:        firstEmailAddress(message.SelectedHeaders.To),
+		From:      firstEmailAddress(message.SelectedHeaders.From),
+		Summary:   message.Summary,
+		Digest:    message.Digest,
+	}
+}
+
+func firstEmailAddress(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if matches := emailAddressExpression.FindStringSubmatch(value); len(matches) > 1 {
+		return matches[1]
+	}
+	first := strings.Split(value, ",")[0]
+	fields := strings.Fields(first)
+	for _, field := range fields {
+		candidate := strings.Trim(field, "<>()\"'")
+		if strings.Contains(candidate, "@") {
+			return candidate
+		}
+	}
+
+	return strings.TrimSpace(first)
+}
+
+func normalizeMessageID(value string) string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(value), "<>"))
+}
+
+func messageIDSearchQuery(value string) string {
+	normalized := normalizeMessageID(value)
+	replacer := strings.NewReplacer(
+		"@", " ",
+		".", " ",
+		"/", " ",
+		"_", " ",
+		"-", " ",
+		"+", " ",
+	)
+	return collapseWhitespace(replacer.Replace(normalized))
+}
+
+func abbreviatedMailDate(value string) string {
+	parsed, err := mail.ParseDate(value)
+	if err != nil {
+		return ""
+	}
+
+	return parsed.Format("02/01/06")
+}
+
+func collapseStringList(values []string) []string {
+	out := []string{}
+	for _, value := range values {
+		collapsed := collapseWhitespace(value)
+		if collapsed != "" {
+			out = append(out, collapsed)
+		}
+	}
+
+	return out
+}
+
+func collapseWhitespace(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(typed)
+	}
+}
+
+func stringSliceFromAny(value any) []string {
+	values := []string{}
+	for _, item := range anySlice(value) {
+		text := stringFromAny(item)
+		if text != "" {
+			values = append(values, text)
+		}
+	}
+
+	return values
+}
+
+func anySlice(value any) []any {
+	switch typed := value.(type) {
+	case []any:
+		return typed
+	case []string:
+		values := make([]any, 0, len(typed))
+		for _, item := range typed {
+			values = append(values, item)
+		}
+
+		return values
+	default:
+		return nil
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func intFromString(value string) int {
+	var parsed int
+	_, _ = fmt.Sscanf(value, "%d", &parsed)
+
+	return parsed
 }
 
 func JSONText(value any) (string, error) {

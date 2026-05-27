@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,7 +162,7 @@ func TestFilestoreServerNotifiesSchedulerOnObjectAndAnnotationChanges(t *testing
 		t.Fatal(err)
 	}
 
-	requests := notifier.requests
+	requests := notifier.waitForRequests(t, 2)
 	if len(requests) != 2 {
 		t.Fatalf("expected object and projection notifications, got %#v", requests)
 	}
@@ -170,6 +171,42 @@ func TestFilestoreServerNotifiesSchedulerOnObjectAndAnnotationChanges(t *testing
 	}
 	if !requests[1].ProjectionOnly || requests[1].Reason != "projection_refresh" {
 		t.Fatalf("expected projection-only notification, got %#v", requests[1])
+	}
+}
+
+func TestFilestorePutDoesNotBlockOnSchedulerNotification(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	notifier := newBlockingObjectChangeNotifier()
+	defer notifier.release()
+	endpoint, cleanup := serveTestFilestore(
+		t,
+		store,
+		WithObjectChangeNotifier(notifier),
+	)
+	defer cleanup()
+	client, err := NewFilestoreClient(ctx, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, putErr := client.Put(ctx, PutRequest{
+			Reader: strings.NewReader("notify object"),
+			Facets: []contracts.Facet{{Kind: "file", Version: "1"}},
+		})
+		done <- putErr
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Put blocked on scheduler notification")
 	}
 }
 
@@ -227,6 +264,7 @@ func serveTestFilestore(
 }
 
 type recordingObjectChangeNotifier struct {
+	mu       sync.Mutex
 	requests []contracts.ObjectChangeRequest
 }
 
@@ -234,11 +272,69 @@ func (notifier *recordingObjectChangeNotifier) NotifyObjectsChanged(
 	_ context.Context,
 	request contracts.ObjectChangeRequest,
 ) (contracts.SchedulerScanResponse, error) {
+	notifier.mu.Lock()
+	defer notifier.mu.Unlock()
 	notifier.requests = append(notifier.requests, request)
 
 	return contracts.SchedulerScanResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 	}, nil
+}
+
+func (notifier *recordingObjectChangeNotifier) waitForRequests(
+	t *testing.T,
+	count int,
+) []contracts.ObjectChangeRequest {
+	t.Helper()
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		notifier.mu.Lock()
+		if len(notifier.requests) >= count {
+			requests := append([]contracts.ObjectChangeRequest{}, notifier.requests...)
+			notifier.mu.Unlock()
+
+			return requests
+		}
+		notifier.mu.Unlock()
+
+		select {
+		case <-deadline:
+			notifier.mu.Lock()
+			requests := append([]contracts.ObjectChangeRequest{}, notifier.requests...)
+			notifier.mu.Unlock()
+			t.Fatalf("expected %d notifications, got %#v", count, requests)
+		case <-ticker.C:
+		}
+	}
+}
+
+type blockingObjectChangeNotifier struct {
+	releaseCh chan struct{}
+	once      sync.Once
+}
+
+func newBlockingObjectChangeNotifier() *blockingObjectChangeNotifier {
+	return &blockingObjectChangeNotifier{releaseCh: make(chan struct{})}
+}
+
+func (notifier *blockingObjectChangeNotifier) NotifyObjectsChanged(
+	_ context.Context,
+	_ contracts.ObjectChangeRequest,
+) (contracts.SchedulerScanResponse, error) {
+	<-notifier.releaseCh
+
+	return contracts.SchedulerScanResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+	}, nil
+}
+
+func (notifier *blockingObjectChangeNotifier) release() {
+	notifier.once.Do(func() {
+		close(notifier.releaseCh)
+	})
 }
 
 type blockingObjectStream struct {

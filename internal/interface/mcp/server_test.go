@@ -237,6 +237,104 @@ func TestMCPStreamableHTTPMailSearchUsesAppServices(t *testing.T) {
 	}
 }
 
+func TestMCPMailSearchReturnsCanonicalMessageView(t *testing.T) {
+	message := testCanonicalMessage()
+	result, err := toonToolResult(toonSearch(
+		"mail_search",
+		appsvc.SearchOptions{Query: "repo.kind profiles invariant Git policies", Limit: 5},
+		appsvc.ObjectSearchResponse{
+			Total: 1,
+			Results: []appsvc.ObjectSearchResult{{
+				ObjectDigest: contracts.ObjectDigest(message.Digest),
+				Message:      &message,
+				Facets:       []string{appsvc.MailMessageFacet},
+				Score:        1,
+			}},
+		},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchText := toonText(t, result)
+	for _, snippet := range []string{
+		"message:",
+		"message_id: <paudley/coding-ethos/pull/217/review/4369413606@github.com>",
+		"selected_headers:",
+		"This update enforces critical Git policies unconditionally",
+		"categories[1]: primary",
+		"kind: pull_request_review",
+		"repository: paudley/coding-ethos",
+		"pull_request: 217",
+		"body: \"@gemini-code-assist[bot] commented on this pull request.",
+		"attachments[0]:",
+	} {
+		if !strings.Contains(searchText, snippet) {
+			t.Fatalf("mail_search missing %q in:\n%s", snippet, searchText)
+		}
+	}
+	for _, forbidden := range []string{
+		"ner.spacy",
+		"contains",
+		"part_of",
+		"Reply to this email",
+		"text/html",
+	} {
+		if strings.Contains(searchText, forbidden) {
+			t.Fatalf("mail_search included forbidden %q in:\n%s", forbidden, searchText)
+		}
+	}
+
+	retrieve, err := toonToolResult(toonRetrieve(appsvc.RetrieveResponse{
+		Manifest: contracts.Manifest{
+			ObjectDigest: contracts.ObjectDigest(message.Digest),
+			ObjectID:     message.ObjectID,
+			MediaType:    "application/vnd.gmeow.gmail-message+json",
+		},
+		Message: &message,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retrieveText := toonText(t, retrieve)
+	if !strings.Contains(retrieveText, "message:") ||
+		!strings.Contains(retrieveText, "selected_headers:") ||
+		!strings.Contains(retrieveText, "repo.kind") {
+		t.Fatalf("object_retrieve missing canonical message in:\n%s", retrieveText)
+	}
+
+	summary, err := toonToolResult(toonSummarySearch(appsvc.SummarySearchResponse{
+		Query:    "repo.kind profiles",
+		Total:    1,
+		Returned: 1,
+		Messages: []appsvc.MessageSummaryListItem{{
+			MessageID: message.MessageID,
+			Date:      "27/05/26",
+			Subject:   message.SelectedHeaders.Subject,
+			To:        "coding-ethos@noreply.github.com",
+			From:      "notifications@github.com",
+			Summary:   message.Summary,
+		}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaryText := toonText(t, summary)
+	for _, snippet := range []string{
+		"tool: summary_search",
+		"msgid_subject",
+		"27/05/26",
+		"coding-ethos@noreply.github.com / notifications@github.com",
+		"This update enforces critical Git policies unconditionally",
+	} {
+		if !strings.Contains(summaryText, snippet) {
+			t.Fatalf("summary_search missing %q in:\n%s", snippet, summaryText)
+		}
+	}
+	if strings.Contains(summaryText, "bullets") || strings.Contains(summaryText, "body:") {
+		t.Fatalf("summary_search should stay compact:\n%s", summaryText)
+	}
+}
+
 func TestMCPStreamableHTTPObjectRetrieveIncludesContent(t *testing.T) {
 	ctx := context.Background()
 	services, digest := testServicesWithDigest(t, "hello streamable retrieve")
@@ -674,4 +772,62 @@ func testServicesWithDigest(
 	}
 
 	return services, digest
+}
+
+func testCanonicalMessage() appsvc.CanonicalMessage {
+	return appsvc.CanonicalMessage{
+		MessageID: "<paudley/coding-ethos/pull/217/review/4369413606@github.com>",
+		Digest:    "ffaf47c75c3539857dd3a70f9a21f8f128bd116884207a92338797dd3effc0ef",
+		ObjectID:  "gmail:primary:19e67b267f02ded5",
+		ThreadID:  "19e67b11bf0ccbf4",
+		SelectedHeaders: appsvc.CanonicalSelectedHeaders{
+			Date:    "Tue, 26 May 2026 21:30:05 -0700",
+			From:    "gemini-code-assist[bot] <notifications@github.com>",
+			To:      "paudley/coding-ethos <coding-ethos@noreply.github.com>",
+			Subject: "Re: [paudley/coding-ethos] Remove git enforcement optionality (PR #217)",
+		},
+		Summary: "This update enforces critical Git policies unconditionally while introducing new configuration sections for profiles and repository kinds.",
+		Bullets: []string{
+			"Invariant Git policies such as protected branches can no longer be disabled via configuration.",
+			"Support was added for profiles and repo.kind in repository settings.",
+			"The review is complete and no further feedback is needed.",
+		},
+		Categories: []string{"primary"},
+		Graph: appsvc.CanonicalMessageGraph{
+			Source: map[string]any{
+				"kind":         "pull_request_review",
+				"service":      "github",
+				"repository":   "paudley/coding-ethos",
+				"pull_request": 217,
+				"review_id":    "4369413606",
+				"actor":        "gemini-code-assist[bot]",
+			},
+			Topics: []string{
+				"git enforcement optionality",
+				"invariant Git policies",
+				"protected branch work",
+				"hook bypass prevention",
+				"history rewrite prevention",
+				"repo_config.yaml",
+				"profiles",
+				"repo.kind",
+			},
+			Actions: []string{
+				"removes ability to disable invariant Git policies",
+				"removes enabled toggles from configuration",
+				"enforces policies unconditionally",
+				"adds validation tests for disable attempts",
+				"adds profiles configuration support",
+				"adds repo.kind configuration support",
+			},
+			Links: []appsvc.CanonicalMessageLink{
+				{
+					Rel: "canonical",
+					URL: "https://github.com/paudley/coding-ethos/pull/217#pullrequestreview-4369413606",
+				},
+			},
+		},
+		Body:        "@" + "gemini-code-assist[bot] commented on this pull request. Code Review This pull request removes the ability for consumer repositories to disable invariant Git policies such as protected branch work, hook bypass prevention, and history rewrite prevention via their repo_config.yaml configuration. It cleans up the corresponding enabled toggles from the configuration files, updates the policy compiler to enforce these policies unconditionally, and adds validation tests to reject any attempts to disable them. Additionally, it introduces support for a profiles section and a repo.kind setting in the repository configuration. There are no review comments to address, and I have no further feedback to provide.",
+		Attachments: []appsvc.CanonicalMessageAttachment{},
+	}
 }

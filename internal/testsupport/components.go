@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,8 @@ import (
 	"blackcat.ca/gmeow/internal/scheduler"
 	schedmq "blackcat.ca/gmeow/internal/scheduler/rabbitmq"
 )
+
+const TestConfigEnvName = "GMEOW_TEST_CONFIG"
 
 type FilestoreService struct {
 	Store  *filestore.FilesystemStore
@@ -249,14 +252,44 @@ func NewAnalysisJobSource(
 
 func LoadConfig(t *testing.T) *config.Loaded {
 	t.Helper()
+	path := os.Getenv(TestConfigEnvName)
+	if path == "" {
+		t.Skipf("%s is required for integration tests", TestConfigEnvName)
+	}
 	loaded, err := config.Load(config.Options{
-		Path: filepath.Join(RepoRoot(t), "gmeow.toml"),
+		Path: path,
 	})
 	if err != nil {
 		t.Fatalf("load integration config: %v", err)
 	}
+	RequireTestConfig(t, loaded)
 
 	return loaded
+}
+
+func RequireTestConfig(t *testing.T, loaded *config.Loaded) {
+	t.Helper()
+	if loaded == nil {
+		t.Fatal("test config is nil")
+	}
+	postgres := loaded.Resolved.Postgres
+	if !strings.Contains(postgres.Database, "test") ||
+		!strings.Contains(postgres.User, "test") {
+		t.Fatalf(
+			"refusing to run integration test against non-test postgres target database=%q user=%q",
+			postgres.Database,
+			postgres.User,
+		)
+	}
+	rabbit := loaded.Config.RabbitMQ
+	if !strings.Contains(rabbit.VHost, "test") ||
+		!strings.Contains(rabbit.User, "test") {
+		t.Fatalf(
+			"refusing to run integration test against non-test rabbitmq target vhost=%q user=%q",
+			rabbit.VHost,
+			rabbit.User,
+		)
+	}
 }
 
 func QueryIntegrationDSN(t *testing.T) string {
