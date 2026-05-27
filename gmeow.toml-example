@@ -80,6 +80,14 @@ port = 1143
 username = "gmeow"
 facets = ["mail_message"]
 
+[[interfaces]]
+name = "jmap"
+kind = "jmap"
+host = "127.0.0.1"
+port = 8780
+password = "change-me"
+facets = ["mail_message"]
+
 [analysis]
 worker_concurrency = 4
 

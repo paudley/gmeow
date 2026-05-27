@@ -26,6 +26,7 @@ func TestServiceCommandIncludesAppServiceWorkflows(t *testing.T) {
 		"retrieve",
 		"ops-status",
 		"force-analysis",
+		"jmap-serve",
 	} {
 		if !strings.Contains(output, commandName) {
 			t.Fatalf("help output missing %s:\n%s", commandName, output)

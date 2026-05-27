@@ -23,6 +23,7 @@ adapters inside INTERFACE.
   HTTP with stateful sessions and server-sent event streams.
 - `gmeow rest-serve` exposes REST endpoints over the same application services.
 - `gmeow imap-serve` exposes read-only IMAP over `mail_message` objects.
+- `gmeow jmap-serve` exposes JMAP Core/Mail/Blob/Quota over HTTP.
 - CLI workflows use the same app-service layer where they overlap interface
   behavior.
 
