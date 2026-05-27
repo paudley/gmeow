@@ -44,6 +44,10 @@ type JMAPQueryReader interface {
 		ctx context.Context,
 		digests []contracts.ObjectDigest,
 	) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error)
+	UpdateJMAPEmailState(
+		ctx context.Context,
+		update contracts.JMAPEmailStateUpdate,
+	) (contracts.JMAPEmailState, error)
 }
 
 type ObjectReader interface {
@@ -56,6 +60,14 @@ type ObjectReader interface {
 		digest contracts.ObjectDigest,
 	) (contracts.Structure, error)
 	Open(ctx context.Context, digest contracts.ObjectDigest) (io.ReadCloser, error)
+}
+
+type ObjectWriter interface {
+	WriteOverlays(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+		overlays map[string]any,
+	) error
 }
 
 type SchedulerClient interface {

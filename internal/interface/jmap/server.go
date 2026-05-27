@@ -125,6 +125,19 @@ type emailGetResponse struct {
 	NotFound  []string    `json:"notFound,omitempty"`
 }
 
+type setArguments struct {
+	Update    map[string]map[string]json.RawMessage `json:"update,omitempty"`
+	AccountID string                                `json:"accountId"`
+}
+
+type emailSetResponse struct {
+	AccountID  string               `json:"accountId"`
+	OldState   string               `json:"oldState"`
+	NewState   string               `json:"newState"`
+	Updated    map[string]any       `json:"updated,omitempty"`
+	NotUpdated map[string]jmapError `json:"notUpdated,omitempty"`
+}
+
 type jmapEmail struct {
 	MailboxIDs map[string]bool `json:"mailboxIds"`
 	Keywords   map[string]bool `json:"keywords"`
@@ -319,6 +332,8 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 		return handler.handleEmailQuery(ctx, call)
 	case "Email/get":
 		return handler.handleEmailGet(ctx, call)
+	case "Email/set":
+		return handler.handleEmailSet(ctx, call)
 	default:
 		return methodResponse{
 			Name: "error",
@@ -328,6 +343,49 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 			},
 			ClientID: call.ClientID,
 		}
+	}
+}
+
+func (handler handler) handleEmailSet(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
+	var arguments setArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+
+	updated := map[string]any{}
+	notUpdated := map[string]jmapError{}
+	for id, patches := range arguments.Update {
+		mutation, err := mutationFromJMAPPatch(id, patches)
+		if err != nil {
+			notUpdated[id] = jmapError{Type: "invalidPatch", Description: err.Error()}
+			continue
+		}
+		if _, err := handler.services.UpdateJMAPEmailState(ctx, mutation); err != nil {
+			notUpdated[id] = jmapError{Type: "serverFail", Description: err.Error()}
+			continue
+		}
+		updated[id] = nil
+	}
+
+	return methodResponse{
+		Name: "Email/set",
+		Arguments: emailSetResponse{
+			AccountID:  "gmeow",
+			OldState:   "0",
+			NewState:   "0",
+			Updated:    emptyMapAsNil(updated),
+			NotUpdated: emptyJMAPErrorMapAsNil(notUpdated),
+		},
+		ClientID: call.ClientID,
 	}
 }
 
@@ -582,6 +640,92 @@ func addressList(value string) []emailAddress {
 	}
 
 	return []emailAddress{{Name: parsed.Name, Email: parsed.Address}}
+}
+
+func mutationFromJMAPPatch(
+	id string,
+	patches map[string]json.RawMessage,
+) (appsvc.JMAPEmailMutation, error) {
+	mutation := appsvc.JMAPEmailMutation{
+		ObjectDigest: contracts.ObjectDigest(id),
+		MailboxIDs:   map[string]bool{},
+		Keywords:     map[string]bool{},
+	}
+	for path, raw := range patches {
+		switch {
+		case path == "mailboxIds":
+			values, err := boolMapFromRaw(raw)
+			if err != nil {
+				return appsvc.JMAPEmailMutation{}, fmt.Errorf("mailboxIds: %w", err)
+			}
+			mutation.ReplaceMailboxes = true
+			for key, value := range values {
+				mutation.MailboxIDs[key] = value
+			}
+		case strings.HasPrefix(path, "mailboxIds/"):
+			value, err := boolPatchValue(raw)
+			if err != nil {
+				return appsvc.JMAPEmailMutation{}, fmt.Errorf("%s: %w", path, err)
+			}
+			mutation.MailboxIDs[strings.TrimPrefix(path, "mailboxIds/")] = value
+		case path == "keywords":
+			values, err := boolMapFromRaw(raw)
+			if err != nil {
+				return appsvc.JMAPEmailMutation{}, fmt.Errorf("keywords: %w", err)
+			}
+			mutation.ReplaceKeywords = true
+			for key, value := range values {
+				mutation.Keywords[key] = value
+			}
+		case strings.HasPrefix(path, "keywords/"):
+			value, err := boolPatchValue(raw)
+			if err != nil {
+				return appsvc.JMAPEmailMutation{}, fmt.Errorf("%s: %w", path, err)
+			}
+			mutation.Keywords[strings.TrimPrefix(path, "keywords/")] = value
+		default:
+			return appsvc.JMAPEmailMutation{}, fmt.Errorf("unsupported patch %q", path)
+		}
+	}
+
+	return mutation, nil
+}
+
+func boolMapFromRaw(raw json.RawMessage) (map[string]bool, error) {
+	var values map[string]bool
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, err
+	}
+
+	return values, nil
+}
+
+func boolPatchValue(raw json.RawMessage) (bool, error) {
+	if string(raw) == "null" {
+		return false, nil
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false, err
+	}
+
+	return value, nil
+}
+
+func emptyMapAsNil(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+
+	return values
+}
+
+func emptyJMAPErrorMapAsNil(values map[string]jmapError) map[string]jmapError {
+	if len(values) == 0 {
+		return nil
+	}
+
+	return values
 }
 
 func (handler handler) session(request *http.Request) sessionResource {

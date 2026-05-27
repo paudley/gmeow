@@ -268,6 +268,69 @@ func TestJMAPMailboxGetAndEmailQueryUseAppServices(t *testing.T) {
 	}
 }
 
+func TestJMAPEmailSetUpdatesKeywordsAndMailboxes(t *testing.T) {
+	digest := contracts.ObjectDigest("digest-1")
+	services, err := appsvc.New(appsvc.Options{
+		Query: jmapQueryFixture{
+			states: map[contracts.ObjectDigest]contracts.JMAPEmailState{
+				digest: {
+					ObjectDigest: digest,
+					MailboxIDs:   []string{"all", "inbox"},
+					Keywords:     []string{"$seen"},
+				},
+			},
+		},
+		Objects: objectReaderFixture{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:mail"],
+		"methodCalls":[
+			["Email/set",{"accountId":"gmeow","update":{
+				"digest-1":{"keywords/$seen":null,"keywords/$flagged":true,"mailboxIds/archive":true}
+			}},"s1"]
+		]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &tuple); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	var setResponse emailSetResponse
+	if err := json.Unmarshal(tuple[0], &name); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tuple[1], &setResponse); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Email/set" || len(setResponse.Updated) != 1 ||
+		len(setResponse.NotUpdated) != 0 {
+		t.Fatalf("unexpected Email/set response name=%q args=%#v", name, setResponse)
+	}
+}
+
 type jmapQueryFixture struct {
 	mailboxes []contracts.JMAPMailbox
 	states    map[contracts.ObjectDigest]contracts.JMAPEmailState
@@ -292,6 +355,17 @@ func (query jmapQueryFixture) JMAPEmailStates(
 	[]contracts.ObjectDigest,
 ) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error) {
 	return query.states, nil
+}
+
+func (query jmapQueryFixture) UpdateJMAPEmailState(
+	_ context.Context,
+	update contracts.JMAPEmailStateUpdate,
+) (contracts.JMAPEmailState, error) {
+	return contracts.JMAPEmailState{
+		ObjectDigest: update.ObjectDigest,
+		MailboxIDs:   append([]string{}, update.MailboxIDs...),
+		Keywords:     append([]string{}, update.Keywords...),
+	}, nil
 }
 
 func (jmapQueryFixture) Structure(
@@ -350,4 +424,12 @@ func (objectReaderFixture) Open(
 	contracts.ObjectDigest,
 ) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func (objectReaderFixture) WriteOverlays(
+	context.Context,
+	contracts.ObjectDigest,
+	map[string]any,
+) error {
+	return nil
 }

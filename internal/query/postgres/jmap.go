@@ -6,6 +6,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,8 @@ const (
 	jmapKeywordFlagged = "$flagged"
 	jmapKeywordSeen    = "$seen"
 )
+
+const jmapOverlayKey = "jmap"
 
 func (index *Index) JMAPMailboxes(
 	ctx context.Context,
@@ -120,10 +123,111 @@ func (index *Index) JMAPEmailStates(
 	return states, nil
 }
 
+func (index *Index) UpdateJMAPEmailState(
+	ctx context.Context,
+	update contracts.JMAPEmailStateUpdate,
+) (contracts.JMAPEmailState, error) {
+	tx, err := index.pool.Begin(ctx)
+	if err != nil {
+		return contracts.JMAPEmailState{}, fmt.Errorf("begin JMAP email update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	state, err := applyJMAPEmailStateTx(ctx, tx, update, true)
+	if err != nil {
+		return contracts.JMAPEmailState{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.JMAPEmailState{}, fmt.Errorf("commit JMAP email update: %w", err)
+	}
+
+	return state, nil
+}
+
+func applyJMAPEmailStateTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	update contracts.JMAPEmailStateUpdate,
+	incrementSequence bool,
+) (contracts.JMAPEmailState, error) {
+	mailboxIDs := uniqueSortedNonEmpty(update.MailboxIDs)
+	keywords := uniqueSortedNonEmpty(update.Keywords)
+	if len(mailboxIDs) == 0 {
+		return contracts.JMAPEmailState{}, fmt.Errorf(
+			"JMAP email %s must have at least one mailbox",
+			update.ObjectDigest,
+		)
+	}
+
+	var (
+		threadID string
+		sequence int64
+	)
+	sequenceSQL := "state_seq"
+	if incrementSequence {
+		sequenceSQL = "state_seq + 1"
+	}
+	if err := tx.QueryRow(ctx, fmt.Sprintf(`
+		UPDATE jmap_email_state
+		   SET state_seq = %s,
+		       updated_at = now()
+		 WHERE object_digest = $1
+		 RETURNING thread_id, state_seq`, sequenceSQL),
+		update.ObjectDigest,
+	).Scan(&threadID, &sequence); err != nil {
+		return contracts.JMAPEmailState{}, fmt.Errorf("update JMAP email state: %w", err)
+	}
+
+	if _, err := tx.Exec(
+		ctx,
+		"DELETE FROM jmap_email_mailboxes WHERE object_digest = $1",
+		update.ObjectDigest,
+	); err != nil {
+		return contracts.JMAPEmailState{}, fmt.Errorf("clear JMAP mailboxes: %w", err)
+	}
+	for _, mailboxID := range mailboxIDs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO jmap_email_mailboxes(object_digest, mailbox_id)
+			VALUES($1, $2)`,
+			update.ObjectDigest,
+			mailboxID,
+		); err != nil {
+			return contracts.JMAPEmailState{}, fmt.Errorf("insert JMAP mailbox: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(
+		ctx,
+		"DELETE FROM jmap_email_keywords WHERE object_digest = $1",
+		update.ObjectDigest,
+	); err != nil {
+		return contracts.JMAPEmailState{}, fmt.Errorf("clear JMAP keywords: %w", err)
+	}
+	for _, keyword := range keywords {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO jmap_email_keywords(object_digest, keyword)
+			VALUES($1, $2)`,
+			update.ObjectDigest,
+			keyword,
+		); err != nil {
+			return contracts.JMAPEmailState{}, fmt.Errorf("insert JMAP keyword: %w", err)
+		}
+	}
+
+	return contracts.JMAPEmailState{
+		ObjectDigest:  update.ObjectDigest,
+		ThreadID:      threadID,
+		MailboxIDs:    mailboxIDs,
+		Keywords:      keywords,
+		StateSequence: sequence,
+	}, nil
+}
+
 func seedJMAPEmailStateTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	manifest contracts.Manifest,
+	annotations []contracts.Annotation,
 ) error {
 	metadata, ok := mailMessageFacetMetadata(manifest)
 	if !ok {
@@ -143,6 +247,15 @@ func seedJMAPEmailStateTx(
 	}
 
 	labelIDs := labelIDsFromMetadata(metadata)
+	if overlay, ok := jmapOverlayState(manifest, annotations); ok {
+		_, err := applyJMAPEmailStateTx(ctx, tx, contracts.JMAPEmailStateUpdate{
+			ObjectDigest: manifest.ObjectDigest,
+			MailboxIDs:   overlay.MailboxIDs,
+			Keywords:     overlay.Keywords,
+		}, false)
+		return err
+	}
+
 	if err := seedJMAPEmailMailboxesTx(
 		ctx,
 		tx,
@@ -286,4 +399,74 @@ func labelIDsFromMetadata(metadata map[string]any) []string {
 	default:
 		return nil
 	}
+}
+
+func jmapOverlayState(
+	manifest contracts.Manifest,
+	annotations []contracts.Annotation,
+) (contracts.JMAPEmailStateUpdate, bool) {
+	for _, annotation := range annotations {
+		if annotation.Kind == "overlays" {
+			if state, ok := jmapOverlayStateFromMap(
+				annotation.Data,
+				manifest.ObjectDigest,
+			); ok {
+				return state, true
+			}
+		}
+	}
+
+	return jmapOverlayStateFromMap(manifest.Overlays, manifest.ObjectDigest)
+}
+
+func jmapOverlayStateFromMap(
+	overlays map[string]any,
+	digest contracts.ObjectDigest,
+) (contracts.JMAPEmailStateUpdate, bool) {
+	raw, ok := overlays[jmapOverlayKey]
+	if !ok {
+		return contracts.JMAPEmailStateUpdate{}, false
+	}
+	overlay, ok := raw.(map[string]any)
+	if !ok {
+		return contracts.JMAPEmailStateUpdate{}, false
+	}
+
+	return contracts.JMAPEmailStateUpdate{
+		ObjectDigest: digest,
+		MailboxIDs:   stringListFromAny(overlay["mailbox_ids"]),
+		Keywords:     stringListFromAny(overlay["keywords"]),
+	}, true
+}
+
+func stringListFromAny(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string{}, typed...)
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := stringFromAny(item); text != "" {
+				values = append(values, text)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
+}
+
+func uniqueSortedNonEmpty(values []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+
+	return out
 }

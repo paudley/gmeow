@@ -337,17 +337,26 @@ func (server *QueryServer) JMAPEmailStates(
 		if !ok {
 			continue
 		}
-		converted = append(converted, &pb.JMAPEmailState{
-			ObjectDigest:  string(state.ObjectDigest),
-			ThreadId:      state.ThreadID,
-			MailboxIds:    append([]string{}, state.MailboxIDs...),
-			Keywords:      append([]string{}, state.Keywords...),
-			StateSequence: state.StateSequence,
-			ReceivedAt:    formatTime(state.ReceivedAt),
-		})
+		converted = append(converted, toPBJMAPEmailState(state))
 	}
 
 	return &pb.JMAPEmailStateResponse{States: converted}, nil
+}
+
+func (server *QueryServer) UpdateJMAPEmailState(
+	ctx context.Context,
+	request *pb.UpdateJMAPEmailStateRequest,
+) (*pb.JMAPEmailState, error) {
+	state, err := server.index.UpdateJMAPEmailState(ctx, contracts.JMAPEmailStateUpdate{
+		ObjectDigest: contracts.ObjectDigest(request.GetObjectDigest()),
+		MailboxIDs:   append([]string{}, request.GetMailboxIds()...),
+		Keywords:     append([]string{}, request.GetKeywords()...),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return toPBJMAPEmailState(state), nil
 }
 
 func (server *QueryServer) Rebuild(
@@ -355,6 +364,17 @@ func (server *QueryServer) Rebuild(
 	_ *pb.Empty,
 ) (*pb.Empty, error) {
 	return &pb.Empty{}, server.index.Rebuild(ctx)
+}
+
+func toPBJMAPEmailState(state contracts.JMAPEmailState) *pb.JMAPEmailState {
+	return &pb.JMAPEmailState{
+		ObjectDigest:  string(state.ObjectDigest),
+		ThreadId:      state.ThreadID,
+		MailboxIds:    append([]string{}, state.MailboxIDs...),
+		Keywords:      append([]string{}, state.Keywords...),
+		StateSequence: state.StateSequence,
+		ReceivedAt:    formatTime(state.ReceivedAt),
+	}
 }
 
 func (server *QueryServer) ProjectChanged(

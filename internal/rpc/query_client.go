@@ -364,29 +364,60 @@ func (client *QueryClient) JMAPEmailStates(
 	}
 
 	states := make(map[contracts.ObjectDigest]contracts.JMAPEmailState)
-	for _, state := range response.GetStates() {
-		receivedAt, err := parseTime(state.GetReceivedAt())
+	for _, item := range response.GetStates() {
+		state, err := fromPBJMAPEmailState(item)
 		if err != nil {
 			return nil, err
 		}
-		digest := contracts.ObjectDigest(state.GetObjectDigest())
-		states[digest] = contracts.JMAPEmailState{
-			ReceivedAt:    receivedAt,
-			ObjectDigest:  digest,
-			ThreadID:      state.GetThreadId(),
-			MailboxIDs:    append([]string{}, state.GetMailboxIds()...),
-			Keywords:      append([]string{}, state.GetKeywords()...),
-			StateSequence: state.GetStateSequence(),
-		}
+		states[state.ObjectDigest] = state
 	}
 
 	return states, nil
+}
+
+func (client *QueryClient) UpdateJMAPEmailState(
+	ctx context.Context,
+	update contracts.JMAPEmailStateUpdate,
+) (contracts.JMAPEmailState, error) {
+	response, err := client.client.UpdateJMAPEmailState(
+		ctx,
+		&pb.UpdateJMAPEmailStateRequest{
+			ObjectDigest: string(update.ObjectDigest),
+			MailboxIds:   append([]string{}, update.MailboxIDs...),
+			Keywords:     append([]string{}, update.Keywords...),
+		},
+	)
+	if err != nil {
+		return contracts.JMAPEmailState{}, err
+	}
+
+	return fromPBJMAPEmailState(response)
 }
 
 func (client *QueryClient) Rebuild(ctx context.Context) error {
 	_, err := client.client.Rebuild(ctx, &pb.Empty{})
 
 	return err
+}
+
+func fromPBJMAPEmailState(state *pb.JMAPEmailState) (contracts.JMAPEmailState, error) {
+	if state == nil {
+		return contracts.JMAPEmailState{}, nil
+	}
+	receivedAt, err := parseTime(state.GetReceivedAt())
+	if err != nil {
+		return contracts.JMAPEmailState{}, err
+	}
+	digest := contracts.ObjectDigest(state.GetObjectDigest())
+
+	return contracts.JMAPEmailState{
+		ReceivedAt:    receivedAt,
+		ObjectDigest:  digest,
+		ThreadID:      state.GetThreadId(),
+		MailboxIDs:    append([]string{}, state.GetMailboxIds()...),
+		Keywords:      append([]string{}, state.GetKeywords()...),
+		StateSequence: state.GetStateSequence(),
+	}, nil
 }
 
 func (client *QueryClient) ProjectChanged(ctx context.Context, since time.Time) error {

@@ -6,6 +6,8 @@ package postgres
 import (
 	"slices"
 	"testing"
+
+	"blackcat.ca/gmeow/internal/contracts"
 )
 
 func TestDefaultJMAPMailboxesFromGmailLabels(t *testing.T) {
@@ -86,5 +88,36 @@ func TestLabelIDsFromMetadataAcceptsJSONShape(t *testing.T) {
 	expected := []string{"INBOX", "UNREAD"}
 	if !slices.Equal(labels, expected) {
 		t.Fatalf("expected %#v, got %#v", expected, labels)
+	}
+}
+
+func TestJMAPOverlayStatePrefersProjectionAnnotation(t *testing.T) {
+	digest := contracts.ObjectDigest(
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	)
+	state, ok := jmapOverlayState(
+		contracts.Manifest{
+			ObjectDigest: digest,
+			Overlays: map[string]any{
+				"jmap": map[string]any{
+					"mailbox_ids": []any{"all", "archive"},
+					"keywords":    []any{"$seen"},
+				},
+			},
+		},
+		[]contracts.Annotation{{
+			Kind: "overlays",
+			Data: map[string]any{
+				"jmap": map[string]any{
+					"mailbox_ids": []any{"all", "inbox"},
+					"keywords":    []any{"$flagged"},
+				},
+			},
+		}},
+	)
+	if !ok ||
+		!slices.Equal(state.MailboxIDs, []string{"all", "inbox"}) ||
+		!slices.Equal(state.Keywords, []string{"$flagged"}) {
+		t.Fatalf("unexpected JMAP overlay state ok=%t state=%#v", ok, state)
 	}
 }

@@ -183,6 +183,14 @@ type JMAPEmailQueryResponse struct {
 	Limit  int                      `json:"limit"`
 }
 
+type JMAPEmailMutation struct {
+	ObjectDigest     contracts.ObjectDigest `json:"object_digest"`
+	MailboxIDs       map[string]bool        `json:"mailbox_ids,omitempty"`
+	Keywords         map[string]bool        `json:"keywords,omitempty"`
+	ReplaceMailboxes bool                   `json:"replace_mailboxes,omitempty"`
+	ReplaceKeywords  bool                   `json:"replace_keywords,omitempty"`
+}
+
 type StaticSourceRegistry struct {
 	adapters []source.Adapter
 }
@@ -705,6 +713,69 @@ func (services *Services) JMAPEmailQuery(
 	}, nil
 }
 
+func (services *Services) UpdateJMAPEmailState(
+	ctx context.Context,
+	mutation JMAPEmailMutation,
+) (contracts.JMAPEmailState, error) {
+	writer, ok := services.objects.(ObjectWriter)
+	if !ok {
+		return contracts.JMAPEmailState{}, errors.New(
+			"JMAP object writer is not configured",
+		)
+	}
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return contracts.JMAPEmailState{}, errors.New(
+			"JMAP query reader is not configured",
+		)
+	}
+
+	states, err := reader.JMAPEmailStates(
+		ctx,
+		[]contracts.ObjectDigest{mutation.ObjectDigest},
+	)
+	if err != nil {
+		return contracts.JMAPEmailState{}, err
+	}
+	current, ok := states[mutation.ObjectDigest]
+	if !ok {
+		return contracts.JMAPEmailState{}, fmt.Errorf(
+			"JMAP email state for %s not found",
+			mutation.ObjectDigest,
+		)
+	}
+
+	update := contracts.JMAPEmailStateUpdate{
+		ObjectDigest: mutation.ObjectDigest,
+		MailboxIDs: applyJMAPBoolMap(
+			current.MailboxIDs,
+			mutation.MailboxIDs,
+			mutation.ReplaceMailboxes,
+		),
+		Keywords: applyJMAPBoolMap(
+			current.Keywords,
+			mutation.Keywords,
+			mutation.ReplaceKeywords,
+		),
+	}
+	if len(update.MailboxIDs) == 0 {
+		return contracts.JMAPEmailState{}, errors.New(
+			"JMAP email must remain in at least one mailbox",
+		)
+	}
+
+	if err := writer.WriteOverlays(ctx, mutation.ObjectDigest, map[string]any{
+		"jmap": map[string]any{
+			"mailbox_ids": update.MailboxIDs,
+			"keywords":    update.Keywords,
+		},
+	}); err != nil {
+		return contracts.JMAPEmailState{}, err
+	}
+
+	return reader.UpdateJMAPEmailState(ctx, update)
+}
+
 func (services *Services) ForceAnalysis(
 	ctx context.Context,
 	request ForceAnalysisRequest,
@@ -979,6 +1050,35 @@ func unionStrings(left, right []string) []string {
 	sort.Strings(values)
 
 	return values
+}
+
+func applyJMAPBoolMap(existing []string, patch map[string]bool, replace bool) []string {
+	values := map[string]bool{}
+	if !replace {
+		for _, value := range existing {
+			if value != "" {
+				values[value] = true
+			}
+		}
+	}
+	for key, enabled := range patch {
+		if key == "" {
+			continue
+		}
+		if enabled {
+			values[key] = true
+		} else {
+			delete(values, key)
+		}
+	}
+
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+
+	return out
 }
 
 func copyMap(value map[string]any) map[string]any {

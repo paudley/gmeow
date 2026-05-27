@@ -25,3 +25,9 @@ type JMAPEmailState struct {
 	Keywords      []string     `json:"keywords,omitempty"`
 	StateSequence int64        `json:"state_sequence,omitempty"`
 }
+
+type JMAPEmailStateUpdate struct {
+	ObjectDigest ObjectDigest `json:"object_digest"`
+	MailboxIDs   []string     `json:"mailbox_ids"`
+	Keywords     []string     `json:"keywords"`
+}

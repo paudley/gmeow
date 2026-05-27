@@ -1330,7 +1330,12 @@ func projectObjectTx(
 		return err
 	}
 
-	if err := seedJMAPEmailStateTx(ctx, tx, object.Manifest); err != nil {
+	if err := seedJMAPEmailStateTx(
+		ctx,
+		tx,
+		object.Manifest,
+		object.Annotations,
+	); err != nil {
 		return err
 	}
 

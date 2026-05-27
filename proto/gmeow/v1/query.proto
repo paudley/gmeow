@@ -19,6 +19,7 @@ service QueryService {
   rpc SourceCursors(SourceCursorRequest) returns (SourceCursorResponse);
   rpc JMAPMailboxes(JMAPMailboxRequest) returns (JMAPMailboxResponse);
   rpc JMAPEmailStates(JMAPEmailStateRequest) returns (JMAPEmailStateResponse);
+  rpc UpdateJMAPEmailState(UpdateJMAPEmailStateRequest) returns (JMAPEmailState);
   rpc CreateOrGetOperation(CreateOperationRequest) returns (CreateOrGetOperationResponse);
   rpc AppendOperationProgress(AppendOperationProgressRequest) returns (Empty);
   rpc CompleteOperation(CompleteOperationRequest) returns (Empty);
@@ -196,6 +197,12 @@ message JMAPEmailState {
 
 message JMAPEmailStateResponse {
   repeated JMAPEmailState states = 1;
+}
+
+message UpdateJMAPEmailStateRequest {
+  string object_digest = 1;
+  repeated string mailbox_ids = 2;
+  repeated string keywords = 3;
 }
 
 message OperationProgressEvent {

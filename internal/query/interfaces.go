@@ -69,6 +69,10 @@ type Index interface {
 		ctx context.Context,
 		digests []contracts.ObjectDigest,
 	) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error)
+	UpdateJMAPEmailState(
+		ctx context.Context,
+		update contracts.JMAPEmailStateUpdate,
+	) (contracts.JMAPEmailState, error)
 	CreateOrGet(
 		ctx context.Context,
 		request contracts.CreateOperationRequest,
