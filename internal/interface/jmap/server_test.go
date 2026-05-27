@@ -686,6 +686,107 @@ func TestJMAPSearchSnippetGetMarksMatchingText(t *testing.T) {
 	}
 }
 
+func TestJMAPQuotaReadMethodsReturnEmptyState(t *testing.T) {
+	services, err := appsvc.New(appsvc.Options{
+		Query:   jmapQueryFixture{},
+		Objects: objectReaderFixture{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:quota"],
+		"methodCalls":[
+			["Quota/get",{"accountId":"gmeow","ids":null},"qg"],
+			["Quota/query",{"accountId":"gmeow","position":3},"qq"],
+			["Quota/changes",{"accountId":"gmeow","sinceState":"0"},"qc"],
+			["Quota/queryChanges",{"accountId":"gmeow","sinceQueryState":"0"},"qqc"]
+		]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.MethodResponses) != 4 {
+		t.Fatalf("method response count = %d", len(decoded.MethodResponses))
+	}
+
+	var getTuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &getTuple); err != nil {
+		t.Fatal(err)
+	}
+	var getName string
+	var getResponse quotaGetResponse
+	if err := json.Unmarshal(getTuple[0], &getName); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(getTuple[1], &getResponse); err != nil {
+		t.Fatal(err)
+	}
+	if getName != "Quota/get" || len(getResponse.List) != 0 ||
+		len(getResponse.NotFound) != 0 {
+		t.Fatalf("unexpected quota get response name=%q args=%#v", getName, getResponse)
+	}
+
+	var queryTuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[1], &queryTuple); err != nil {
+		t.Fatal(err)
+	}
+	var queryResponse quotaQueryResponse
+	if err := json.Unmarshal(queryTuple[1], &queryResponse); err != nil {
+		t.Fatal(err)
+	}
+	if queryResponse.Position != 3 || queryResponse.Total != 0 ||
+		len(queryResponse.IDs) != 0 {
+		t.Fatalf("unexpected quota query response: %#v", queryResponse)
+	}
+
+	var changesTuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[2], &changesTuple); err != nil {
+		t.Fatal(err)
+	}
+	var changes quotaChangesResponse
+	if err := json.Unmarshal(changesTuple[1], &changes); err != nil {
+		t.Fatal(err)
+	}
+	if changes.NewState != "0" || changes.HasMoreChanges ||
+		len(changes.Created) != 0 ||
+		len(changes.Updated) != 0 ||
+		len(changes.Destroyed) != 0 {
+		t.Fatalf("unexpected quota changes response: %#v", changes)
+	}
+
+	var queryChangesTuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[3], &queryChangesTuple); err != nil {
+		t.Fatal(err)
+	}
+	var queryChanges quotaQueryChangesResponse
+	if err := json.Unmarshal(queryChangesTuple[1], &queryChanges); err != nil {
+		t.Fatal(err)
+	}
+	if queryChanges.NewQueryState != "0" || queryChanges.Total != 0 ||
+		len(queryChanges.Removed) != 0 ||
+		len(queryChanges.Added) != 0 {
+		t.Fatalf("unexpected quota query changes response: %#v", queryChanges)
+	}
+}
+
 type jmapQueryFixture struct {
 	mailboxes  []contracts.JMAPMailbox
 	states     map[contracts.ObjectDigest]contracts.JMAPEmailState

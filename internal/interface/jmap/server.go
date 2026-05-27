@@ -165,6 +165,66 @@ type blobGetResponse struct {
 	NotFound  []string   `json:"notFound,omitempty"`
 }
 
+type quotaGetResponse struct {
+	AccountID string      `json:"accountId"`
+	State     string      `json:"state"`
+	List      []jmapQuota `json:"list"`
+	NotFound  []string    `json:"notFound,omitempty"`
+}
+
+type quotaQueryResponse struct {
+	AccountID           string   `json:"accountId"`
+	QueryState          string   `json:"queryState"`
+	CanCalculateChanges bool     `json:"canCalculateChanges"`
+	IDs                 []string `json:"ids"`
+	Position            int      `json:"position"`
+	Total               int      `json:"total"`
+}
+
+type quotaChangesArguments struct {
+	AccountID  string `json:"accountId"`
+	SinceState string `json:"sinceState"`
+}
+
+type quotaChangesResponse struct {
+	AccountID      string   `json:"accountId"`
+	OldState       string   `json:"oldState"`
+	NewState       string   `json:"newState"`
+	HasMoreChanges bool     `json:"hasMoreChanges"`
+	Created        []string `json:"created"`
+	Updated        []string `json:"updated"`
+	Destroyed      []string `json:"destroyed"`
+}
+
+type quotaQueryChangesArguments struct {
+	AccountID       string `json:"accountId"`
+	SinceQueryState string `json:"sinceQueryState"`
+}
+
+type quotaQueryChangesResponse struct {
+	AccountID     string                `json:"accountId"`
+	OldQueryState string                `json:"oldQueryState"`
+	NewQueryState string                `json:"newQueryState"`
+	Removed       []string              `json:"removed"`
+	Added         []quotaQueryAddedItem `json:"added"`
+	Total         int                   `json:"total"`
+}
+
+type quotaQueryAddedItem struct {
+	ID    string `json:"id"`
+	Index int    `json:"index"`
+}
+
+type jmapQuota struct {
+	ID           string   `json:"id"`
+	ResourceType string   `json:"resourceType"`
+	Scope        string   `json:"scope"`
+	Name         string   `json:"name"`
+	Types        []string `json:"types"`
+	Used         uint64   `json:"used"`
+	HardLimit    uint64   `json:"hardLimit"`
+}
+
 type searchSnippetGetResponse struct {
 	AccountID string              `json:"accountId"`
 	List      []jmapSearchSnippet `json:"list"`
@@ -441,6 +501,14 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 		return methodResponse{Name: call.Name, Arguments: arguments, ClientID: call.ClientID}
 	case "Blob/get":
 		return handler.handleBlobGet(ctx, call)
+	case "Quota/get":
+		return handler.handleQuotaGet(call)
+	case "Quota/query":
+		return handler.handleQuotaQuery(call)
+	case "Quota/changes":
+		return handler.handleQuotaChanges(call)
+	case "Quota/queryChanges":
+		return handler.handleQuotaQueryChanges(call)
 	case "Mailbox/get":
 		return handler.handleMailboxGet(ctx, call)
 	case "Mailbox/query":
@@ -464,6 +532,104 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 			},
 			ClientID: call.ClientID,
 		}
+	}
+}
+
+func (handler handler) handleQuotaGet(call methodCall) methodResponse {
+	var arguments getArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+
+	notFound := []string{}
+	for _, id := range arguments.IDs {
+		if strings.TrimSpace(id) != "" {
+			notFound = append(notFound, id)
+		}
+	}
+
+	return methodResponse{
+		Name: "Quota/get",
+		Arguments: quotaGetResponse{
+			AccountID: "gmeow",
+			State:     "0",
+			List:      []jmapQuota{},
+			NotFound:  notFound,
+		},
+		ClientID: call.ClientID,
+	}
+}
+
+func (handler handler) handleQuotaQuery(call methodCall) methodResponse {
+	var arguments queryArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+
+	return methodResponse{
+		Name: "Quota/query",
+		Arguments: quotaQueryResponse{
+			AccountID:           "gmeow",
+			QueryState:          "0",
+			CanCalculateChanges: false,
+			IDs:                 []string{},
+			Position:            arguments.Position,
+			Total:               0,
+		},
+		ClientID: call.ClientID,
+	}
+}
+
+func (handler handler) handleQuotaChanges(call methodCall) methodResponse {
+	var arguments quotaChangesArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+
+	return methodResponse{
+		Name: "Quota/changes",
+		Arguments: quotaChangesResponse{
+			AccountID:      "gmeow",
+			OldState:       arguments.SinceState,
+			NewState:       "0",
+			HasMoreChanges: false,
+			Created:        []string{},
+			Updated:        []string{},
+			Destroyed:      []string{},
+		},
+		ClientID: call.ClientID,
+	}
+}
+
+func (handler handler) handleQuotaQueryChanges(call methodCall) methodResponse {
+	var arguments quotaQueryChangesArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+
+	return methodResponse{
+		Name: "Quota/queryChanges",
+		Arguments: quotaQueryChangesResponse{
+			AccountID:     "gmeow",
+			OldQueryState: arguments.SinceQueryState,
+			NewQueryState: "0",
+			Removed:       []string{},
+			Added:         []quotaQueryAddedItem{},
+			Total:         0,
+		},
+		ClientID: call.ClientID,
 	}
 }
 
