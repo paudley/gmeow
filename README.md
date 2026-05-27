@@ -175,6 +175,10 @@ MCP tools, REST endpoints, CLI workflows, and read-only IMAP all call the shared
 services. Protocol packages parse requests and shape responses; they do not import concrete
 FILESTORE, QUERY, SOURCE, or SCHEDULER implementations.
 
+MCP tool result content is TOON-only for agent-facing output. Gmeow does not keep
+JSON text or `structuredContent` compatibility for MCP tools; REST and gRPC keep
+their existing JSON/protobuf contracts.
+
 ## Local Data
 
 By default, local data is ignored by git and stored under `data/`:

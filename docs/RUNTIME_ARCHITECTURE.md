@@ -163,6 +163,8 @@ MCP Streamable HTTP is the production MCP server. It supports stateful sessions,
 server-sent event streams, `Mcp-Session-Id`, `Last-Event-ID` replay with an
 in-process event store, client-driven session termination, health, and metrics.
 The stdio MCP command remains for local MCP hosts that own stdin and stdout.
+MCP tool result content is TOON-only for agent consumption; tools do not expose
+JSON text or `structuredContent`.
 
 Protocol packages parse requests and shape responses. They do not import
 concrete FILESTORE, QUERY, SOURCE, SCHEDULER, or ANALYSIS implementations.
