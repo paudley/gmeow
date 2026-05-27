@@ -295,51 +295,90 @@ func runConfiguredSourceWork(
 	sourceConfig config.SourceConfig,
 ) error {
 	pull, ok := adapter.(source.PullAdapter)
-	if sourceConfig.Backfill.Enabled {
+	if sourceConfig.Backfill.Enabled || sourceConfig.InboxRefresh.Enabled {
 		if !ok {
 			return fmt.Errorf(
-				"source %s/%s does not support backfill",
+				"source %s/%s does not support configured pull work",
 				adapter.Kind(),
 				adapter.Name(),
 			)
 		}
-		_, err := service.RunBackfill(ctx, pull, source.BackfillRequest{
-			Cursor: map[string]any{
-				"mode":  firstNonEmpty(sourceConfig.Backfill.Mode, "full"),
-				"query": sourceConfig.Backfill.Query,
-			},
-			CursorKey:   firstNonEmpty(sourceConfig.Backfill.CursorKey, "backfill"),
-			PageSize:    sourceConfig.Backfill.PageSize,
-			MaxPages:    sourceConfig.Backfill.MaxPages,
-			Concurrency: sourceConfig.Backfill.Concurrency,
-			Resume:      sourceConfig.Backfill.Resume,
-		})
-		if err != nil {
-			return err
-		}
 	}
-	if !sourceConfig.InboxRefresh.Enabled {
-		<-ctx.Done()
 
+	errs := make(chan error, 2)
+	if sourceConfig.Backfill.Enabled {
+		go func() {
+			fmt.Printf("source backfill: started source=%s/%s\n", adapter.Kind(), adapter.Name())
+			_, err := service.RunBackfill(ctx, pull, source.BackfillRequest{
+				Cursor: map[string]any{
+					"mode":  firstNonEmpty(sourceConfig.Backfill.Mode, "full"),
+					"query": sourceConfig.Backfill.Query,
+				},
+				CursorKey:   firstNonEmpty(sourceConfig.Backfill.CursorKey, "backfill"),
+				PageSize:    sourceConfig.Backfill.PageSize,
+				MaxPages:    sourceConfig.Backfill.MaxPages,
+				Concurrency: sourceConfig.Backfill.Concurrency,
+				Resume:      sourceConfig.Backfill.Resume,
+			})
+			if err != nil && ctx.Err() == nil {
+				fmt.Printf(
+					"source backfill: failed source=%s/%s error=%v\n",
+					adapter.Kind(),
+					adapter.Name(),
+					err,
+				)
+				errs <- err
+
+				return
+			}
+			if ctx.Err() == nil {
+				fmt.Printf(
+					"source backfill: completed source=%s/%s\n",
+					adapter.Kind(),
+					adapter.Name(),
+				)
+			}
+		}()
+	}
+	if sourceConfig.InboxRefresh.Enabled {
+		go func() {
+			err := runConfiguredInboxRefresh(ctx, service, pull, sourceConfig)
+			if err != nil && ctx.Err() == nil {
+				errs <- err
+			}
+		}()
+	}
+
+	select {
+	case <-ctx.Done():
 		return nil
+	case err := <-errs:
+		return err
 	}
-	if !ok {
-		return fmt.Errorf(
-			"source %s/%s does not support inbox refresh",
-			adapter.Kind(),
-			adapter.Name(),
-		)
-	}
+}
 
+func runConfiguredInboxRefresh(
+	ctx context.Context,
+	service *source.Service,
+	pull source.PullAdapter,
+	sourceConfig config.SourceConfig,
+) error {
 	interval := sourceRefreshInterval(sourceConfig.InboxRefresh.Interval)
 	for {
-		_, err := service.RunBackfill(ctx, pull, source.BackfillRequest{
+		query := firstNonEmpty(
+			sourceConfig.InboxRefresh.Query,
+			"in:inbox newer_than:30d",
+		)
+		fmt.Printf(
+			"source inbox refresh: started source=%s/%s query=%q\n",
+			pull.Kind(),
+			pull.Name(),
+			query,
+		)
+		report, err := service.RunBackfill(ctx, pull, source.BackfillRequest{
 			Cursor: map[string]any{
-				"mode": "full",
-				"query": firstNonEmpty(
-					sourceConfig.InboxRefresh.Query,
-					"in:inbox newer_than:30d",
-				),
+				"mode":  "full",
+				"query": query,
 			},
 			CursorKey:   "inbox_refresh",
 			PageSize:    sourceConfig.InboxRefresh.PageSize,
@@ -348,8 +387,24 @@ func runConfiguredSourceWork(
 			Resume:      false,
 		})
 		if err != nil {
+			fmt.Printf(
+				"source inbox refresh: failed source=%s/%s error=%v\n",
+				pull.Kind(),
+				pull.Name(),
+				err,
+			)
+
 			return err
 		}
+		fmt.Printf(
+			"source inbox refresh: completed source=%s/%s processed=%d created=%d skipped=%d completed=%t\n",
+			pull.Kind(),
+			pull.Name(),
+			report.Processed,
+			report.Created,
+			report.Skipped,
+			report.Completed,
+		)
 
 		timer := time.NewTimer(interval)
 		select {

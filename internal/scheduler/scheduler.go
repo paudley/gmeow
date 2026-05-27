@@ -319,27 +319,15 @@ func (service *Service) Force(
 	requestedBy string,
 	traceID string,
 ) (contracts.SchedulerScanResponse, error) {
-	manifest, err := service.store.ReadManifest(ctx, digest)
+	object, found, err := service.store.ProjectionObject(ctx, digest)
 	if err != nil {
 		return contracts.SchedulerScanResponse{}, err
 	}
-
-	object := filestore.ProjectionObject{
-		Digest:   digest,
-		Manifest: manifest,
-	}
-
-	if err := service.store.WalkProjection(
-		ctx,
-		func(candidate filestore.ProjectionObject) error {
-			if candidate.Manifest.ObjectDigest == digest {
-				object = candidate
-			}
-
-			return nil
-		},
-	); err != nil {
-		return contracts.SchedulerScanResponse{}, err
+	if !found {
+		return contracts.SchedulerScanResponse{}, fmt.Errorf(
+			"object %s not found",
+			digest,
+		)
 	}
 
 	filter := map[string]bool{}
@@ -486,27 +474,7 @@ func (service *Service) projectionObjectForDigest(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 ) (filestore.ProjectionObject, bool, error) {
-	var object filestore.ProjectionObject
-	found := false
-	errStop := errors.New("stop projection walk")
-	err := service.store.WalkProjection(
-		ctx,
-		func(candidate filestore.ProjectionObject) error {
-			if candidate.Manifest.ObjectDigest != digest {
-				return nil
-			}
-
-			object = candidate
-			found = true
-
-			return errStop
-		},
-	)
-	if err != nil && !errors.Is(err, errStop) {
-		return filestore.ProjectionObject{}, false, err
-	}
-
-	return object, found, nil
+	return service.store.ProjectionObject(ctx, digest)
 }
 
 func (service *Service) markSatisfiedAnalysis(
@@ -704,20 +672,11 @@ func (service *Service) Run(ctx context.Context) error {
 		if service.projector != nil {
 			if _, err := service.broker.ProcessProjectionRefreshes(
 				ctx,
-				service.projector,
 				100,
+				service.refreshProjectionDigests,
 			); err != nil {
 				return err
 			}
-		}
-
-		if _, err := service.Scan(ctx, contracts.SchedulerScanRequest{
-			SchemaVersion: contracts.SchemaVersionPhase00,
-			PriorityClass: contracts.PriorityBackground,
-			RequestedBy:   "scheduler",
-			Reason:        "background_scan",
-		}); err != nil {
-			return err
 		}
 
 		select {
@@ -726,6 +685,32 @@ func (service *Service) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (service *Service) refreshProjectionDigests(
+	ctx context.Context,
+	digests []contracts.ObjectDigest,
+) error {
+	seen := map[contracts.ObjectDigest]bool{}
+	for _, digest := range digests {
+		if digest == "" || seen[digest] {
+			continue
+		}
+		seen[digest] = true
+
+		object, found, err := service.projectionObjectForDigest(ctx, digest)
+		if err != nil {
+			return err
+		}
+		if !found || len(object.Findings) > 0 {
+			continue
+		}
+		if err := service.projector.ProjectObject(ctx, object); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func schedulerAnnotationFor(object filestore.ProjectionObject) *contracts.Annotation {

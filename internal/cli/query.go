@@ -211,25 +211,15 @@ func newQueryProjectCommand(out io.Writer, configPath *string) *cobra.Command {
 			}
 
 			digest := contracts.ObjectDigest(args[0])
-			projected := false
-
-			if err := store.WalkProjection(
-				command.Context(),
-				func(object filestore.ProjectionObject) error {
-					if object.Digest != digest {
-						return nil
-					}
-
-					projected = true
-
-					return index.ProjectObject(command.Context(), object)
-				},
-			); err != nil {
+			object, found, err := store.ProjectionObject(command.Context(), digest)
+			if err != nil {
 				return err
 			}
-
-			if !projected {
+			if !found {
 				return fmt.Errorf("object %s was not found in FILESTORE", digest)
+			}
+			if err := index.ProjectObject(command.Context(), object); err != nil {
+				return err
 			}
 
 			_, err = fmt.Fprintf(out, "query project: digest=%s\n", digest)

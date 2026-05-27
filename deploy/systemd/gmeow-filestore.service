@@ -14,6 +14,7 @@ Slice=gmeow.slice
 UMask=0077
 RuntimeDirectory=gmeow
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 StateDirectory=gmeow
 StateDirectoryMode=0750
 LogsDirectory=gmeow

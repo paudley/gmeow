@@ -29,6 +29,12 @@ Source identity lookup uses stable source kind/name/external ID/version fields.
 Ingest claims serialize concurrent hydration attempts for the same source
 object.
 
+Source identity lookups are served by FILESTORE source-index records under the
+configured filestore root. Runtime hydrate and search paths read that index and
+verify the pointed manifest; they do not recover by walking object directories.
+Missing historical index records are treated as misses and are recreated by
+normal ingest.
+
 ## Annotations And Notifications
 
 Analyzer outputs, overlays, and source cursors are written atomically as
@@ -38,6 +44,10 @@ projection refresh, or both.
 
 Normal reads and projection use manifests and annotations. Recovery sidecars are
 for operator triage and verification, not runtime authority.
+
+Compound child-to-parent relationships are also indexed in FILESTORE. Analysis
+annotation writes use the reverse parent index to refresh affected compound
+parents without scanning the object tree.
 
 ## Operations
 

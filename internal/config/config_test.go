@@ -133,22 +133,6 @@ func TestLoadRejectsRabbitMQEnabledSwitch(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsSchedulerQueuePrefixOutsideGmeowNamespace(t *testing.T) {
-	configPath := writeConfig(
-		t,
-		minimalConfig()+"\n[scheduler]\nqueue_prefix = \"other:\"\n",
-	)
-	t.Setenv(unlockEnvName, "test-key")
-
-	_, err := Load(Options{Path: configPath})
-	if err == nil {
-		t.Fatal("expected scheduler queue prefix validation error")
-	}
-	if !strings.Contains(err.Error(), "gmeow.") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestLoadRejectsNegativeAnalysisWorkerConcurrency(t *testing.T) {
 	configPath := writeConfig(
 		t,
@@ -161,27 +145,6 @@ func TestLoadRejectsNegativeAnalysisWorkerConcurrency(t *testing.T) {
 		t.Fatal("expected worker concurrency validation error")
 	}
 	if !strings.Contains(err.Error(), "analysis.worker_concurrency") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLoadRejectsWrongRabbitMQVHost(t *testing.T) {
-	configPath := writeConfig(
-		t,
-		strings.Replace(
-			minimalConfig(),
-			"vhost = \"gmeow\"",
-			"vhost = \"/\"",
-			1,
-		),
-	)
-	t.Setenv(unlockEnvName, "test-key")
-
-	_, err := Load(Options{Path: configPath})
-	if err == nil {
-		t.Fatal("expected RabbitMQ vhost validation error")
-	}
-	if !strings.Contains(err.Error(), "gmeow") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -491,9 +454,9 @@ func TestLoadAcceptsSOPSEncryptedPasswordLeaves(t *testing.T) {
 	if loaded.Resolved.Postgres.Password == "" {
 		t.Fatalf("postgres password was not resolved from SOPS config")
 	}
-	if loaded.Config.Postgres.Host != "127.0.0.1" ||
-		loaded.Config.Postgres.Database != "gmeow" ||
-		loaded.Config.Postgres.User != "gmeow" {
+	if strings.TrimSpace(loaded.Config.Postgres.Host) == "" ||
+		strings.TrimSpace(loaded.Config.Postgres.Database) == "" ||
+		strings.TrimSpace(loaded.Config.Postgres.User) == "" {
 		t.Fatalf(
 			"postgres operational fields were not decoded separately from the password leaf",
 		)

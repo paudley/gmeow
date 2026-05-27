@@ -69,11 +69,6 @@ func New(ctx context.Context, cfg Config) (*Broker, error) {
 		cfg.QueuePrefix = defaultQueuePrefix
 	}
 
-	if cfg.QueuePrefix != defaultQueuePrefix &&
-		!strings.HasPrefix(cfg.QueuePrefix, testQueuePrefix) {
-		return nil, errors.New("rabbitmq queue prefix must be gmeow. or gmeow.test.")
-	}
-
 	if cfg.RetryLimit <= 0 {
 		cfg.RetryLimit = 3
 	}
@@ -668,11 +663,11 @@ func (broker *Broker) peekJobs(
 
 func (broker *Broker) ProcessProjectionRefreshes(
 	ctx context.Context,
-	projector scheduler.ProjectionRefresher,
 	limit int,
+	refresh scheduler.ProjectionRefreshFunc,
 ) (int, error) {
-	if projector == nil {
-		return 0, errors.New("projection refresher is required")
+	if refresh == nil {
+		return 0, errors.New("projection refresh function is required")
 	}
 	if limit <= 0 {
 		limit = 100
@@ -700,7 +695,18 @@ func (broker *Broker) ProcessProjectionRefreshes(
 		return 0, nil
 	}
 
-	if err := projector.ProjectChanged(ctx, time.Time{}); err != nil {
+	digests := make([]contracts.ObjectDigest, 0, len(deliveries))
+	for _, delivery := range deliveries {
+		digest, err := projectionRefreshDigest(delivery.Body)
+		if err != nil {
+			_ = delivery.Nack(false, false)
+
+			return 0, err
+		}
+		digests = append(digests, digest)
+	}
+
+	if err := refresh(ctx, digests); err != nil {
 		for _, delivery := range deliveries {
 			_ = delivery.Nack(false, true)
 		}
@@ -715,6 +721,21 @@ func (broker *Broker) ProcessProjectionRefreshes(
 	}
 
 	return len(deliveries), nil
+}
+
+func projectionRefreshDigest(body []byte) (contracts.ObjectDigest, error) {
+	var message struct {
+		Digest string `json:"digest"`
+	}
+	if err := json.Unmarshal(body, &message); err != nil {
+		return "", err
+	}
+	digest := contracts.ObjectDigest(strings.TrimSpace(message.Digest))
+	if digest == "" {
+		return "", errors.New("projection refresh digest is required")
+	}
+
+	return digest, nil
 }
 
 func (broker *Broker) RequeueDeadLetters(

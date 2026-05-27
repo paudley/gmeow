@@ -58,6 +58,14 @@ headers, body, Gmail metadata, MIME structure, and attachment subobjects.
 SOURCE adapters never compute dedupe locally. They look up source identity,
 acquire FILESTORE ingest claims for misses, stream payloads through
 `FilestoreService`, and let FILESTORE own identity and reuse decisions.
+Source identity lookups use FILESTORE source-index records and validate the
+target manifest. Runtime SOURCE paths must not walk the object tree to recover
+missing source indexes; a missing index is a lookup miss and normal ingest will
+write the index.
+
+FILESTORE also maintains a reverse parent index for compound parts. Annotation
+refresh uses that index to update affected compound parents directly instead of
+walking all compound objects.
 
 ## QUERY
 
@@ -67,7 +75,9 @@ facts, keywords, embeddings, overlays, analysis status, and source cursors.
 
 PostgreSQL can be wiped and rebuilt from FILESTORE. QUERY rebuild and changed
 projection read authoritative manifests and annotations; recovery sidecars are
-for emergency operator triage and are not projection authority.
+for emergency operator triage and are not projection authority. These are
+explicit operator workflows. Normal runtime projection refresh is digest-scoped
+and does not walk the filestore.
 
 QUERY exposes typed gRPC search, object projection, structure, graph, analysis
 status, source cursor, and operational surfaces. SQL is parameterized through
@@ -75,14 +85,20 @@ the Go implementation and remains inside QUERY ownership.
 
 ## SCHEDULER
 
-SCHEDULER owns RabbitMQ coordination. Production queues use the `gmeow.` prefix
-on the `gmeow` vhost; integration tests use the `gmeow.test.` prefix on the
-`gmeow-test` vhost.
+SCHEDULER owns RabbitMQ coordination. Production RabbitMQ vhost and queue prefix
+are deployment configuration. The production example uses the `gmeow-prod`
+vhost and `gmeow.` queue prefix; integration tests use the `gmeow-test` vhost
+and `gmeow.test.` queue prefix.
 
 SCHEDULER derives deterministic analysis and projection jobs from FILESTORE
 state, analyzer specs, forced interface requests, and repair workflows. It owns
 priorities, retries, exponential backoff, dead-letter inspection, requeue, and
 projection refresh scheduling.
+
+Runtime projection refresh queue messages carry object digests. SCHEDULER loads
+those objects from FILESTORE and calls QUERY projection per object. The
+background scheduler loop processes failures and digest-scoped projection
+refreshes; broad scans remain explicit admin commands.
 
 Analyzer jobs are granular by object, analyzer name, and analyzer version. If a
 summary job fails, SCHEDULER retries that summary job; completed NER,
@@ -126,7 +142,9 @@ normal scheduler-owned RabbitMQ path.
 
 Inbox refresh is also source-owned. When enabled, it refreshes the configured
 rolling inbox query, defaulting to recent inbox mail, and stores a separate
-namespaced cursor under the Gmail source state.
+namespaced cursor under the Gmail source state. When both backfill and inbox
+refresh are enabled, the source service runs both concurrently; inbox refresh
+does not wait for historical backfill.
 
 Drive is intentionally design-only on this email-focused branch. Unsupported
 Drive operations fail at capability boundaries rather than degrading silently.
@@ -163,6 +181,9 @@ concrete FILESTORE, QUERY, SOURCE, SCHEDULER, or ANALYSIS implementations.
    SCHEDULER.
 5. SCHEDULER schedules missing/stale analysis and QUERY projection refresh.
 6. QUERY projects the resulting manifests and annotations into PostgreSQL.
+
+Backfill and inbox refresh use separate cursor keys. Operators can run rolling
+inbox refresh while a long historical backfill is still in progress.
 
 ### Search
 

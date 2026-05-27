@@ -24,6 +24,8 @@ subobjects. Shared attachments dedupe globally through FILESTORE.
 Before any payload transfer, Gmail checks FILESTORE source identity. On a miss,
 it acquires a FILESTORE ingest claim so concurrent hydration attempts for the
 same Gmail message/source version serialize at the storage authority.
+The lookup is served by FILESTORE's source index; Gmail runtime paths must not
+walk the filestore to rediscover historical source provenance.
 
 ## Backfill And Inbox Refresh
 
@@ -33,8 +35,9 @@ SCHEDULER derive analysis and projection through the normal path.
 
 When enabled, inbox refresh runs the configured rolling inbox query, defaulting
 to recent inbox mail, and stores a separate namespaced cursor under Gmail source
-state. Gmail history anchor expiry is recorded in source state so operators can
-rerun a full backfill.
+state. It runs independently from historical backfill, so a long backfill does
+not block rolling inbox population. Gmail history anchor expiry is recorded in
+source state so operators can rerun a full backfill.
 
 ## Actions And Capabilities
 

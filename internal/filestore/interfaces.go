@@ -39,6 +39,10 @@ type Store interface {
 		ctx context.Context,
 		digest contracts.ObjectDigest,
 	) (contracts.Manifest, error)
+	ProjectionObject(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+	) (ProjectionObject, bool, error)
 	GetStructure(
 		ctx context.Context,
 		digest contracts.ObjectDigest,

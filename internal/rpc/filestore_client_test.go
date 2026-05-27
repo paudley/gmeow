@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -172,6 +173,35 @@ func TestFilestoreServerNotifiesSchedulerOnObjectAndAnnotationChanges(t *testing
 	}
 }
 
+func TestObjectStreamReaderDoesNotDrainStreamBeforeReturning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &objectStreamReader{
+		stream: &blockingObjectStream{
+			ctx:    ctx,
+			chunks: [][]byte{[]byte("0123456789")},
+		},
+		cancel: cancel,
+	}
+
+	buffer := make([]byte, 4)
+	n, err := reader.Read(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(buffer) || string(buffer) != "0123" {
+		t.Fatalf("unexpected partial read n=%d content=%q", n, string(buffer))
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected reader close to cancel stream context")
+	}
+}
+
 func serveTestFilestore(
 	t *testing.T,
 	store filestore.Store,
@@ -209,4 +239,23 @@ func (notifier *recordingObjectChangeNotifier) NotifyObjectsChanged(
 	return contracts.SchedulerScanResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 	}, nil
+}
+
+type blockingObjectStream struct {
+	grpc.ClientStream
+	ctx    context.Context
+	chunks [][]byte
+}
+
+func (stream *blockingObjectStream) Recv() (*pb.ObjectChunk, error) {
+	if len(stream.chunks) > 0 {
+		chunk := stream.chunks[0]
+		stream.chunks = stream.chunks[1:]
+
+		return &pb.ObjectChunk{Data: chunk}, nil
+	}
+
+	<-stream.ctx.Done()
+
+	return nil, stream.ctx.Err()
 }

@@ -455,6 +455,14 @@ func (service *Service) writeBackfillCursor(
 		return service.WriteCursor(ctx, adapter, next)
 	}
 
+	latest, found, err := service.ReadCursor(ctx, adapter)
+	if err != nil {
+		return err
+	}
+	if found {
+		stored = latest
+	}
+
 	return service.WriteCursor(ctx, adapter, namespacedCursor(stored, next, key))
 }
 

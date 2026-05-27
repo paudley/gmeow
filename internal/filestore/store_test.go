@@ -122,6 +122,45 @@ func TestLookupSourceObjectFindsExactSourceVersion(t *testing.T) {
 	}
 }
 
+func TestLookupSourceObjectDoesNotWalkUnindexedFilestore(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	ref := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1",
+		ExternalVersion: "history-1",
+	}
+	_, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+		Provenance: []contracts.Provenance{{
+			SourceKind:      ref.SourceKind,
+			SourceName:      ref.SourceName,
+			ExternalID:      ref.ExternalID,
+			ExternalVersion: ref.ExternalVersion,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(store.sourceObjectIndexPath(ref)); err != nil {
+		t.Fatal(err)
+	}
+
+	found, ok, err := store.LookupSourceObject(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok || found != "" {
+		t.Fatalf(
+			"unindexed source lookup must not walk filestore, ok=%t digest=%s",
+			ok,
+			found,
+		)
+	}
+}
+
 func TestAttachProvenanceEnablesZeroPayloadLookup(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()

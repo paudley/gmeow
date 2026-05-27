@@ -582,10 +582,6 @@ func validateConfig(parsed Config) error {
 		return errors.New("rabbitmq.vhost is required")
 	}
 
-	if parsed.RabbitMQ.VHost != "gmeow" {
-		return errors.New("rabbitmq.vhost must be gmeow")
-	}
-
 	if strings.TrimSpace(parsed.RabbitMQ.TestUser) == "" {
 		return errors.New("rabbitmq.test_user is required")
 	}
@@ -596,12 +592,6 @@ func validateConfig(parsed Config) error {
 
 	if parsed.RabbitMQ.TestVHost != "gmeow-test" {
 		return errors.New("rabbitmq.test_vhost must be gmeow-test")
-	}
-
-	if strings.TrimSpace(parsed.Scheduler.QueuePrefix) != "" &&
-		parsed.Scheduler.QueuePrefix != "gmeow." &&
-		parsed.Scheduler.QueuePrefix != "gmeow.test." {
-		return errors.New("scheduler.queue_prefix must be gmeow. or gmeow.test.")
 	}
 
 	if parsed.Analysis.WorkerConcurrency < 0 {
