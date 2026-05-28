@@ -403,6 +403,46 @@ func (server *QueryServer) JMAPThreads(
 	return &pb.JMAPThreadResponse{Threads: converted}, nil
 }
 
+func (server *QueryServer) JMAPBlobLookup(
+	ctx context.Context,
+	request *pb.JMAPBlobLookupRequest,
+) (*pb.JMAPBlobLookupResponse, error) {
+	blobIDs := make([]contracts.ObjectDigest, 0, len(request.GetBlobIds()))
+	for _, blobID := range request.GetBlobIds() {
+		blobIDs = append(blobIDs, contracts.ObjectDigest(blobID))
+	}
+	response, err := server.index.JMAPBlobLookup(
+		ctx,
+		contracts.JMAPBlobLookupRequest{
+			TypeNames: append([]string{}, request.GetTypeNames()...),
+			BlobIDs:   blobIDs,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	converted := make([]*pb.JMAPBlobReferences, 0, len(blobIDs))
+	for _, blobID := range blobIDs {
+		references, ok := response.Blobs[blobID]
+		if !ok {
+			continue
+		}
+		emailIDs := make([]string, 0, len(references.EmailIDs))
+		for _, emailID := range references.EmailIDs {
+			emailIDs = append(emailIDs, string(emailID))
+		}
+		converted = append(converted, &pb.JMAPBlobReferences{
+			BlobId:     string(blobID),
+			EmailIds:   emailIDs,
+			ThreadIds:  append([]string{}, references.ThreadIDs...),
+			MailboxIds: append([]string{}, references.MailboxIDs...),
+		})
+	}
+
+	return &pb.JMAPBlobLookupResponse{Blobs: converted}, nil
+}
+
 func (server *QueryServer) UpdateJMAPEmailState(
 	ctx context.Context,
 	request *pb.UpdateJMAPEmailStateRequest,

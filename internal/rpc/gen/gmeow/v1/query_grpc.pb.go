@@ -33,6 +33,7 @@ const (
 	QueryService_JMAPEmailStates_FullMethodName           = "/gmeow.v1.QueryService/JMAPEmailStates"
 	QueryService_JMAPEmailQuery_FullMethodName            = "/gmeow.v1.QueryService/JMAPEmailQuery"
 	QueryService_JMAPThreads_FullMethodName               = "/gmeow.v1.QueryService/JMAPThreads"
+	QueryService_JMAPBlobLookup_FullMethodName            = "/gmeow.v1.QueryService/JMAPBlobLookup"
 	QueryService_UpdateJMAPEmailState_FullMethodName      = "/gmeow.v1.QueryService/UpdateJMAPEmailState"
 	QueryService_CreateOrGetOperation_FullMethodName      = "/gmeow.v1.QueryService/CreateOrGetOperation"
 	QueryService_AppendOperationProgress_FullMethodName   = "/gmeow.v1.QueryService/AppendOperationProgress"
@@ -62,6 +63,7 @@ type QueryServiceClient interface {
 	JMAPEmailStates(ctx context.Context, in *JMAPEmailStateRequest, opts ...grpc.CallOption) (*JMAPEmailStateResponse, error)
 	JMAPEmailQuery(ctx context.Context, in *JMAPEmailQueryRequest, opts ...grpc.CallOption) (*JMAPEmailQueryResponse, error)
 	JMAPThreads(ctx context.Context, in *JMAPThreadRequest, opts ...grpc.CallOption) (*JMAPThreadResponse, error)
+	JMAPBlobLookup(ctx context.Context, in *JMAPBlobLookupRequest, opts ...grpc.CallOption) (*JMAPBlobLookupResponse, error)
 	UpdateJMAPEmailState(ctx context.Context, in *UpdateJMAPEmailStateRequest, opts ...grpc.CallOption) (*JMAPEmailState, error)
 	CreateOrGetOperation(ctx context.Context, in *CreateOperationRequest, opts ...grpc.CallOption) (*CreateOrGetOperationResponse, error)
 	AppendOperationProgress(ctx context.Context, in *AppendOperationProgressRequest, opts ...grpc.CallOption) (*Empty, error)
@@ -221,6 +223,16 @@ func (c *queryServiceClient) JMAPThreads(ctx context.Context, in *JMAPThreadRequ
 	return out, nil
 }
 
+func (c *queryServiceClient) JMAPBlobLookup(ctx context.Context, in *JMAPBlobLookupRequest, opts ...grpc.CallOption) (*JMAPBlobLookupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JMAPBlobLookupResponse)
+	err := c.cc.Invoke(ctx, QueryService_JMAPBlobLookup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *queryServiceClient) UpdateJMAPEmailState(ctx context.Context, in *UpdateJMAPEmailStateRequest, opts ...grpc.CallOption) (*JMAPEmailState, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(JMAPEmailState)
@@ -329,6 +341,7 @@ type QueryServiceServer interface {
 	JMAPEmailStates(context.Context, *JMAPEmailStateRequest) (*JMAPEmailStateResponse, error)
 	JMAPEmailQuery(context.Context, *JMAPEmailQueryRequest) (*JMAPEmailQueryResponse, error)
 	JMAPThreads(context.Context, *JMAPThreadRequest) (*JMAPThreadResponse, error)
+	JMAPBlobLookup(context.Context, *JMAPBlobLookupRequest) (*JMAPBlobLookupResponse, error)
 	UpdateJMAPEmailState(context.Context, *UpdateJMAPEmailStateRequest) (*JMAPEmailState, error)
 	CreateOrGetOperation(context.Context, *CreateOperationRequest) (*CreateOrGetOperationResponse, error)
 	AppendOperationProgress(context.Context, *AppendOperationProgressRequest) (*Empty, error)
@@ -389,6 +402,9 @@ func (UnimplementedQueryServiceServer) JMAPEmailQuery(context.Context, *JMAPEmai
 }
 func (UnimplementedQueryServiceServer) JMAPThreads(context.Context, *JMAPThreadRequest) (*JMAPThreadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method JMAPThreads not implemented")
+}
+func (UnimplementedQueryServiceServer) JMAPBlobLookup(context.Context, *JMAPBlobLookupRequest) (*JMAPBlobLookupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method JMAPBlobLookup not implemented")
 }
 func (UnimplementedQueryServiceServer) UpdateJMAPEmailState(context.Context, *UpdateJMAPEmailStateRequest) (*JMAPEmailState, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateJMAPEmailState not implemented")
@@ -690,6 +706,24 @@ func _QueryService_JMAPThreads_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _QueryService_JMAPBlobLookup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JMAPBlobLookupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).JMAPBlobLookup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_JMAPBlobLookup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).JMAPBlobLookup(ctx, req.(*JMAPBlobLookupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _QueryService_UpdateJMAPEmailState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UpdateJMAPEmailStateRequest)
 	if err := dec(in); err != nil {
@@ -914,6 +948,10 @@ var QueryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "JMAPThreads",
 			Handler:    _QueryService_JMAPThreads_Handler,
+		},
+		{
+			MethodName: "JMAPBlobLookup",
+			Handler:    _QueryService_JMAPBlobLookup_Handler,
 		},
 		{
 			MethodName: "UpdateJMAPEmailState",

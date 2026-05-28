@@ -52,3 +52,18 @@ type JMAPThread struct {
 	ID       string         `json:"id"`
 	EmailIDs []ObjectDigest `json:"email_ids"`
 }
+
+type JMAPBlobLookupRequest struct {
+	TypeNames []string       `json:"type_names"`
+	BlobIDs   []ObjectDigest `json:"blob_ids"`
+}
+
+type JMAPBlobLookupResponse struct {
+	Blobs map[ObjectDigest]JMAPBlobReferences `json:"blobs"`
+}
+
+type JMAPBlobReferences struct {
+	EmailIDs   []ObjectDigest `json:"email_ids,omitempty"`
+	ThreadIDs  []string       `json:"thread_ids,omitempty"`
+	MailboxIDs []string       `json:"mailbox_ids,omitempty"`
+}

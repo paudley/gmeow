@@ -744,6 +744,20 @@ func (services *Services) JMAPThreads(
 	return reader.JMAPThreads(ctx, ids)
 }
 
+func (services *Services) JMAPBlobLookup(
+	ctx context.Context,
+	request contracts.JMAPBlobLookupRequest,
+) (contracts.JMAPBlobLookupResponse, error) {
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return contracts.JMAPBlobLookupResponse{}, errors.New(
+			"JMAP query reader is not configured",
+		)
+	}
+
+	return reader.JMAPBlobLookup(ctx, request)
+}
+
 func (services *Services) JMAPBlobGet(
 	ctx context.Context,
 	ids []string,

@@ -251,6 +251,84 @@ func (index *Index) JMAPThreads(
 	return threads, nil
 }
 
+func (index *Index) JMAPBlobLookup(
+	ctx context.Context,
+	request contracts.JMAPBlobLookupRequest,
+) (contracts.JMAPBlobLookupResponse, error) {
+	blobIDs := uniqueSortedObjectDigests(request.BlobIDs)
+	blobs := make(map[contracts.ObjectDigest]contracts.JMAPBlobReferences, len(blobIDs))
+	for _, blobID := range blobIDs {
+		blobs[blobID] = contracts.JMAPBlobReferences{}
+	}
+	if len(blobIDs) == 0 {
+		return contracts.JMAPBlobLookupResponse{Blobs: blobs}, nil
+	}
+
+	values := make([]string, 0, len(blobIDs))
+	for _, blobID := range blobIDs {
+		values = append(values, string(blobID))
+	}
+	rows, err := index.pool.Query(ctx, `
+		WITH RECURSIVE input(blob_id) AS (
+			SELECT unnest($1::text[])
+		), walk(blob_id, current_digest) AS (
+			SELECT blob_id, blob_id FROM input
+			UNION
+			SELECT walk.blob_id, c.object_digest
+			  FROM walk
+			  JOIN query_object_compound_parts c
+			    ON c.part_digest = walk.current_digest
+		), emails AS (
+			SELECT DISTINCT walk.blob_id, s.object_digest AS email_id, s.thread_id
+			  FROM walk
+			  JOIN jmap_email_state s ON s.object_digest = walk.current_digest
+		)
+		SELECT e.blob_id, e.email_id, e.thread_id,
+		       COALESCE(array_agg(DISTINCT m.mailbox_id) FILTER (WHERE m.mailbox_id IS NOT NULL), '{}') AS mailbox_ids
+		  FROM emails e
+		  LEFT JOIN jmap_email_mailboxes m ON m.object_digest = e.email_id
+		 GROUP BY e.blob_id, e.email_id, e.thread_id
+		 ORDER BY e.blob_id, e.email_id`,
+		values)
+	if err != nil {
+		return contracts.JMAPBlobLookupResponse{}, fmt.Errorf(
+			"query JMAP blob lookup: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			blobID     contracts.ObjectDigest
+			emailID    contracts.ObjectDigest
+			threadID   string
+			mailboxIDs []string
+		)
+		if err := rows.Scan(&blobID, &emailID, &threadID, &mailboxIDs); err != nil {
+			return contracts.JMAPBlobLookupResponse{}, fmt.Errorf(
+				"scan JMAP blob lookup: %w",
+				err,
+			)
+		}
+		references := blobs[blobID]
+		references.EmailIDs = appendUniqueObjectDigest(references.EmailIDs, emailID)
+		references.ThreadIDs = appendUniqueString(references.ThreadIDs, threadID)
+		for _, mailboxID := range mailboxIDs {
+			references.MailboxIDs = appendUniqueString(references.MailboxIDs, mailboxID)
+		}
+		blobs[blobID] = references
+	}
+	if err := rows.Err(); err != nil {
+		return contracts.JMAPBlobLookupResponse{}, fmt.Errorf(
+			"iterate JMAP blob lookup: %w",
+			err,
+		)
+	}
+
+	return contracts.JMAPBlobLookupResponse{Blobs: blobs}, nil
+}
+
 func (index *Index) UpdateJMAPEmailState(
 	ctx context.Context,
 	update contracts.JMAPEmailStateUpdate,
@@ -597,4 +675,52 @@ func uniqueSortedNonEmpty(values []string) []string {
 	sort.Strings(out)
 
 	return out
+}
+
+func uniqueSortedObjectDigests(
+	values []contracts.ObjectDigest,
+) []contracts.ObjectDigest {
+	seen := map[contracts.ObjectDigest]bool{}
+	out := []contracts.ObjectDigest{}
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Slice(out, func(left, right int) bool {
+		return out[left] < out[right]
+	})
+
+	return out
+}
+
+func appendUniqueObjectDigest(
+	values []contracts.ObjectDigest,
+	value contracts.ObjectDigest,
+) []contracts.ObjectDigest {
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+
+	return append(values, value)
+}
+
+func appendUniqueString(values []string, value string) []string {
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+
+	return append(values, value)
 }

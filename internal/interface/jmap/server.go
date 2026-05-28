@@ -91,6 +91,12 @@ type getArguments struct {
 	IDs       []string `json:"ids"`
 }
 
+type blobLookupArguments struct {
+	AccountID string   `json:"accountId"`
+	TypeNames []string `json:"typeNames"`
+	IDs       []string `json:"ids"`
+}
+
 type queryArguments struct {
 	Filter    emailQueryFilter `json:"filter"`
 	AccountID string           `json:"accountId"`
@@ -163,6 +169,12 @@ type blobGetResponse struct {
 	State     string     `json:"state"`
 	List      []jmapBlob `json:"list"`
 	NotFound  []string   `json:"notFound,omitempty"`
+}
+
+type blobLookupResponse struct {
+	AccountID string         `json:"accountId"`
+	List      []jmapBlobInfo `json:"list"`
+	NotFound  []string       `json:"notFound,omitempty"`
 }
 
 type quotaGetResponse struct {
@@ -246,6 +258,11 @@ type jmapBlob struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
 	Size int64  `json:"size"`
+}
+
+type jmapBlobInfo struct {
+	MatchedIDs map[string][]string `json:"matchedIds"`
+	ID         string              `json:"id"`
 }
 
 type setArguments struct {
@@ -501,6 +518,8 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 		return methodResponse{Name: call.Name, Arguments: arguments, ClientID: call.ClientID}
 	case "Blob/get":
 		return handler.handleBlobGet(ctx, call)
+	case "Blob/lookup":
+		return handler.handleBlobLookup(ctx, call)
 	case "Quota/get":
 		return handler.handleQuotaGet(call)
 	case "Quota/query":
@@ -532,6 +551,66 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 			},
 			ClientID: call.ClientID,
 		}
+	}
+}
+
+func (handler handler) handleBlobLookup(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
+	var arguments blobLookupArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateBlobLookupTypeNames(arguments.TypeNames); err != nil {
+		return methodResponse{
+			Name:      "error",
+			Arguments: jmapError{Type: "unknownDataType", Description: err.Error()},
+			ClientID:  call.ClientID,
+		}
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+
+	blobIDs := make([]contracts.ObjectDigest, 0, len(arguments.IDs))
+	for _, id := range arguments.IDs {
+		trimmed := strings.TrimSpace(id)
+		if trimmed != "" {
+			blobIDs = append(blobIDs, contracts.ObjectDigest(trimmed))
+		}
+	}
+	response, err := handler.services.JMAPBlobLookup(
+		ctx,
+		contracts.JMAPBlobLookupRequest{
+			TypeNames: append([]string{}, arguments.TypeNames...),
+			BlobIDs:   blobIDs,
+		},
+	)
+	if err != nil {
+		return serverFail(call.ClientID, err.Error())
+	}
+
+	list := make([]jmapBlobInfo, 0, len(arguments.IDs))
+	for _, id := range arguments.IDs {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		references := response.Blobs[contracts.ObjectDigest(trimmed)]
+		list = append(list, toJMAPBlobInfo(trimmed, arguments.TypeNames, references))
+	}
+
+	return methodResponse{
+		Name: "Blob/lookup",
+		Arguments: blobLookupResponse{
+			AccountID: "gmeow",
+			List:      list,
+		},
+		ClientID: call.ClientID,
 	}
 }
 
@@ -1019,6 +1098,18 @@ func validateAccountID(accountID string) error {
 	return fmt.Errorf("unknown accountId %q", accountID)
 }
 
+func validateBlobLookupTypeNames(typeNames []string) error {
+	for _, typeName := range typeNames {
+		switch typeName {
+		case "Email", "Thread", "Mailbox":
+		default:
+			return fmt.Errorf("Blob/lookup data type %q is not supported", typeName)
+		}
+	}
+
+	return nil
+}
+
 func toJMAPMailbox(mailbox contracts.JMAPMailbox) jmapMailbox {
 	var parentID *string
 	if mailbox.ParentID != "" {
@@ -1064,6 +1155,32 @@ func toJMAPBlob(blob appsvc.JMAPBlob) jmapBlob {
 	}
 }
 
+func toJMAPBlobInfo(
+	blobID string,
+	typeNames []string,
+	references contracts.JMAPBlobReferences,
+) jmapBlobInfo {
+	matchedIDs := make(map[string][]string, len(typeNames))
+	for _, typeName := range typeNames {
+		switch typeName {
+		case "Email":
+			matchedIDs[typeName] = objectDigestStrings(references.EmailIDs)
+		case "Thread":
+			matchedIDs[typeName] = append([]string{}, references.ThreadIDs...)
+		case "Mailbox":
+			matchedIDs[typeName] = append([]string{}, references.MailboxIDs...)
+		}
+		if matchedIDs[typeName] == nil {
+			matchedIDs[typeName] = []string{}
+		}
+	}
+
+	return jmapBlobInfo{
+		ID:         blobID,
+		MatchedIDs: matchedIDs,
+	}
+}
+
 func toJMAPEmail(
 	digest contracts.ObjectDigest,
 	retrieved appsvc.RetrieveResponse,
@@ -1100,6 +1217,15 @@ func boolSet(values []string) map[string]bool {
 		if strings.TrimSpace(value) != "" {
 			out[value] = true
 		}
+	}
+
+	return out
+}
+
+func objectDigestStrings(values []contracts.ObjectDigest) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, string(value))
 	}
 
 	return out

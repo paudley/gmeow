@@ -74,6 +74,10 @@ type Index interface {
 		request contracts.JMAPEmailQueryRequest,
 	) (contracts.JMAPEmailQueryResponse, error)
 	JMAPThreads(ctx context.Context, ids []string) (map[string]contracts.JMAPThread, error)
+	JMAPBlobLookup(
+		ctx context.Context,
+		request contracts.JMAPBlobLookupRequest,
+	) (contracts.JMAPBlobLookupResponse, error)
 	UpdateJMAPEmailState(
 		ctx context.Context,
 		update contracts.JMAPEmailStateUpdate,

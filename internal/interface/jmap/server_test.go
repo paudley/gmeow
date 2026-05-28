@@ -542,6 +542,124 @@ func TestJMAPBlobGetReturnsMetadata(t *testing.T) {
 	}
 }
 
+func TestJMAPBlobLookupReturnsMatchedIDs(t *testing.T) {
+	bodyDigest := contracts.ObjectDigest("digest-body")
+	messageDigest := contracts.ObjectDigest("digest-message")
+	services, err := appsvc.New(appsvc.Options{
+		Query: jmapQueryFixture{
+			blobLookup: contracts.JMAPBlobLookupResponse{
+				Blobs: map[contracts.ObjectDigest]contracts.JMAPBlobReferences{
+					bodyDigest: {
+						EmailIDs:   []contracts.ObjectDigest{messageDigest},
+						ThreadIDs:  []string{"thread-1"},
+						MailboxIDs: []string{"inbox"},
+					},
+				},
+			},
+		},
+		Objects: objectReaderFixture{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:blob","urn:ietf:params:jmap:mail"],
+		"methodCalls":[["Blob/lookup",{"accountId":"gmeow","typeNames":["Email","Thread","Mailbox"],"ids":["digest-body","missing"]},"b1"]]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &tuple); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	var lookup blobLookupResponse
+	if err := json.Unmarshal(tuple[0], &name); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tuple[1], &lookup); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Blob/lookup" ||
+		len(lookup.List) != 2 ||
+		lookup.List[0].ID != "digest-body" ||
+		lookup.List[0].MatchedIDs["Email"][0] != "digest-message" ||
+		lookup.List[0].MatchedIDs["Thread"][0] != "thread-1" ||
+		lookup.List[0].MatchedIDs["Mailbox"][0] != "inbox" ||
+		len(lookup.List[1].MatchedIDs["Email"]) != 0 ||
+		len(lookup.List[1].MatchedIDs["Thread"]) != 0 ||
+		len(lookup.List[1].MatchedIDs["Mailbox"]) != 0 {
+		t.Fatalf("unexpected blob lookup response name=%q args=%#v", name, lookup)
+	}
+}
+
+func TestJMAPBlobLookupRejectsUnknownDataType(t *testing.T) {
+	services, err := appsvc.New(appsvc.Options{
+		Query:   jmapQueryFixture{},
+		Objects: objectReaderFixture{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:blob"],
+		"methodCalls":[["Blob/lookup",{"accountId":"gmeow","typeNames":["CalendarEvent"],"ids":["digest-body"]},"b1"]]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &tuple); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	var problem jmapError
+	if err := json.Unmarshal(tuple[0], &name); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tuple[1], &problem); err != nil {
+		t.Fatal(err)
+	}
+	if name != "error" || problem.Type != "unknownDataType" {
+		t.Fatalf("unexpected blob lookup error name=%q problem=%#v", name, problem)
+	}
+}
+
 func TestJMAPDownloadStreamsBlob(t *testing.T) {
 	digest := contracts.ObjectDigest("digest-1")
 	services, err := appsvc.New(appsvc.Options{
@@ -793,6 +911,7 @@ type jmapQueryFixture struct {
 	threads    map[string]contracts.JMAPThread
 	search     contracts.SearchResponse
 	emailQuery contracts.JMAPEmailQueryResponse
+	blobLookup contracts.JMAPBlobLookupResponse
 	requested  *contracts.JMAPEmailQueryRequest
 }
 
@@ -831,6 +950,13 @@ func (query jmapQueryFixture) JMAPThreads(
 	[]string,
 ) (map[string]contracts.JMAPThread, error) {
 	return query.threads, nil
+}
+
+func (query jmapQueryFixture) JMAPBlobLookup(
+	context.Context,
+	contracts.JMAPBlobLookupRequest,
+) (contracts.JMAPBlobLookupResponse, error) {
+	return query.blobLookup, nil
 }
 
 func (query jmapQueryFixture) UpdateJMAPEmailState(

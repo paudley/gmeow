@@ -261,6 +261,63 @@ func TestPostgresProjectsFilestore(t *testing.T) {
 	if !ok || len(jmapThread.EmailIDs) != 1 || jmapThread.EmailIDs[0] != mailDigest {
 		t.Fatalf("unexpected JMAP thread response: %#v", jmapThreads)
 	}
+	bodyDigest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("nested JMAP blob lookup body"),
+		MediaType: "text/plain",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nestedMailDigest, err := store.PutCompound(ctx, filestore.CompoundPutRequest{
+		ObjectID:  "gmail-message-compound-" + randomHex(t, 8),
+		MediaType: "application/vnd.gmeow.gmail-message+json",
+		Facets: []contracts.Facet{{
+			Kind: "mail_message",
+			Metadata: map[string]any{
+				"message_id": "gmail-message-compound",
+				"thread_id":  "gmail-thread-compound",
+				"label_ids":  []string{"INBOX"},
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "gmail",
+			SourceName: sourceName,
+			ExternalID: "gmail-message-compound",
+		}},
+		Parts: []contracts.CompoundPart{{
+			Digest: bodyDigest,
+			Role:   "email_body",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupDigests = append(cleanupDigests, nestedMailDigest)
+	nestedMailManifest, err := store.ReadManifest(ctx, nestedMailDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Project(ctx, nestedMailManifest, nil); err != nil {
+		t.Fatal(err)
+	}
+	blobLookup, err := index.JMAPBlobLookup(
+		ctx,
+		contracts.JMAPBlobLookupRequest{
+			TypeNames: []string{"Email", "Thread", "Mailbox"},
+			BlobIDs:   []contracts.ObjectDigest{bodyDigest},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	references := blobLookup.Blobs[bodyDigest]
+	if len(references.EmailIDs) != 1 ||
+		references.EmailIDs[0] != nestedMailDigest ||
+		len(references.ThreadIDs) != 1 ||
+		references.ThreadIDs[0] != "gmail-thread-compound" ||
+		!containsString(references.MailboxIDs, jmapMailboxInbox) {
+		t.Fatalf("unexpected JMAP blob lookup response: %#v", blobLookup)
+	}
 	embeddingDigest, err := store.Put(ctx, filestore.PutRequest{
 		Reader:       strings.NewReader(`{"vector":[0.1,0.2,0.3]}`),
 		MediaType:    "application/json",
