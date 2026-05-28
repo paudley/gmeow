@@ -10,8 +10,6 @@ go:
 repo:
   kind: go-service
   profiles: []
-  protected_branch_work:
-    enabled: true
   license:
     spdx_identifier: AGPL-3.0-only
     copyright: 2026 Blackcat Informatics® Inc.
@@ -98,16 +96,6 @@ filesystem:
       - .git/
       - coding-ethos/
       - .coding-ethos/
-
-git:
-  staged_admin_files:
-    enabled: true
-    basenames:
-      - Makefile
-      - repo_config.yaml
-      - repo_ethos.yml
-    dirs:
-      - .github
 
 python:
   uv_exclude_newer:
