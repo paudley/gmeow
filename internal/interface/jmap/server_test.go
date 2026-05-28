@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"blackcat.ca/gmeow/internal/appsvc"
 	"blackcat.ca/gmeow/internal/contracts"
@@ -1013,6 +1014,34 @@ func TestJMAPSearchSnippetGetMarksMatchingText(t *testing.T) {
 		len(snippets.NotFound) != 1 ||
 		snippets.NotFound[0] != "missing" {
 		t.Fatalf("unexpected snippet response name=%q args=%#v", name, snippets)
+	}
+}
+
+func TestJMAPSearchSnippetHandlesUTF8Matches(t *testing.T) {
+	snippet := markedSnippet(
+		"Résumé status includes München and 東京 updates",
+		"münchen",
+		200,
+	)
+	if snippet == nil {
+		t.Fatal("expected snippet")
+	}
+	if !strings.Contains(*snippet, "<mark>München</mark>") {
+		t.Fatalf("unexpected snippet: %s", *snippet)
+	}
+	if !utf8.ValidString(*snippet) {
+		t.Fatalf("snippet is not valid UTF-8: %q", *snippet)
+	}
+}
+
+func TestJMAPAddressListParsesMultipleRecipients(t *testing.T) {
+	values := addressList("Alice <alice@example.com>, Bob <bob@example.com>")
+	if len(values) != 2 ||
+		values[0].Name != "Alice" ||
+		values[0].Email != "alice@example.com" ||
+		values[1].Name != "Bob" ||
+		values[1].Email != "bob@example.com" {
+		t.Fatalf("unexpected address list: %#v", values)
 	}
 }
 

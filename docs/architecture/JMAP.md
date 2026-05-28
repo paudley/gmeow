@@ -111,8 +111,6 @@ System mailbox ids are fixed:
 - `trash`
 - `spam`
 - `archive`
-- `starred`
-- `unread`
 
 System mailboxes cannot be deleted. Custom folders are global,
 source-neutral, and recoverable from FILESTORE. Gmail `label_ids` and future

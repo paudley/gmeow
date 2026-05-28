@@ -467,14 +467,14 @@ func applyJMAPEmailStateTx(
 	); err != nil {
 		return contracts.JMAPEmailState{}, fmt.Errorf("clear JMAP mailboxes: %w", err)
 	}
-	for _, mailboxID := range mailboxIDs {
+	if len(mailboxIDs) != 0 {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO jmap_email_mailboxes(object_digest, mailbox_id)
-			VALUES($1, $2)`,
+			SELECT $1, unnest($2::text[])`,
 			update.ObjectDigest,
-			mailboxID,
+			mailboxIDs,
 		); err != nil {
-			return contracts.JMAPEmailState{}, fmt.Errorf("insert JMAP mailbox: %w", err)
+			return contracts.JMAPEmailState{}, fmt.Errorf("insert JMAP mailboxes: %w", err)
 		}
 	}
 
@@ -485,14 +485,14 @@ func applyJMAPEmailStateTx(
 	); err != nil {
 		return contracts.JMAPEmailState{}, fmt.Errorf("clear JMAP keywords: %w", err)
 	}
-	for _, keyword := range keywords {
+	if len(keywords) != 0 {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO jmap_email_keywords(object_digest, keyword)
-			VALUES($1, $2)`,
+			SELECT $1, unnest($2::text[])`,
 			update.ObjectDigest,
-			keyword,
+			keywords,
 		); err != nil {
-			return contracts.JMAPEmailState{}, fmt.Errorf("insert JMAP keyword: %w", err)
+			return contracts.JMAPEmailState{}, fmt.Errorf("insert JMAP keywords: %w", err)
 		}
 	}
 
@@ -529,7 +529,11 @@ func seedJMAPEmailStateTx(
 	}
 
 	labelIDs := labelIDsFromMetadata(metadata)
-	if overlay, ok := jmapOverlayState(manifest, annotations); ok {
+	if overlay, ok := jmapOverlayState(
+		manifest,
+		annotations,
+	); ok &&
+		len(overlay.MailboxIDs) != 0 {
 		_, err := applyJMAPEmailStateTx(ctx, tx, contracts.JMAPEmailStateUpdate{
 			ObjectDigest: manifest.ObjectDigest,
 			MailboxIDs:   overlay.MailboxIDs,

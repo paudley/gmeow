@@ -28,8 +28,9 @@ import (
 )
 
 const (
-	testPostgresDSNEnv = "GMEOW_TEST_POSTGRES_DSN"
-	testRabbitMQURLEnv = "GMEOW_TEST_RABBITMQ_URL"
+	testPostgresDSNEnv     = "GMEOW_TEST_POSTGRES_DSN"
+	testQueryMigrationsEnv = "GMEOW_TEST_QUERY_MIGRATIONS_DIR"
+	testRabbitMQURLEnv     = "GMEOW_TEST_RABBITMQ_URL"
 )
 
 type FilestoreService struct {
@@ -88,14 +89,54 @@ type QueryService struct {
 
 func StartQueryGRPC(
 	t *testing.T,
-	_ context.Context,
-	_ *filestore.FilesystemStore,
+	ctx context.Context,
+	source *filestore.FilesystemStore,
 ) *QueryService {
 	t.Helper()
-	t.Skip(
-		"query integration helper requires migration fixtures; tests must not read repo or operator config paths",
-	)
-	return nil
+	dsn := QueryIntegrationDSN(t)
+	migrationsDir := QueryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	schema := createQueryTestSchema(t, ctx, dsn)
+	queryConfig := querypg.Config{
+		ConnString:     dsnWithSearchPath(dsn, schema),
+		MigrationsDir:  migrationsDir,
+		MigrationTable: schema + ".goose_db_version",
+	}
+	if err := querypg.Migrate(ctx, queryConfig); err != nil {
+		releaseQueryIntegrationLock(t, lock)
+		t.Fatal(err)
+	}
+	index, err := querypg.New(ctx, queryConfig, source)
+	if err != nil {
+		dropQueryTestSchema(t, dsn, schema)
+		releaseQueryIntegrationLock(t, lock)
+		t.Fatal(err)
+	}
+	endpoint := unixEndpoint(t, "query.sock")
+	serverCtx, cancel := context.WithCancel(ctx)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- rpc.Serve(serverCtx, endpoint, func(server *grpc.Server) {
+			pb.RegisterQueryServiceServer(server, rpc.NewQueryServer(index))
+		})
+	}()
+	client := dialQuery(t, ctx, endpoint, cancel)
+
+	return &QueryService{
+		Index:  index,
+		Client: client,
+		lock:   lock,
+		stop: func() {
+			_ = client.Close()
+			cancel()
+			if err := <-errc; err != nil {
+				t.Fatalf("stop query grpc: %v", err)
+			}
+			index.Close()
+			dropQueryTestSchema(t, dsn, schema)
+			releaseQueryIntegrationLock(t, lock)
+		},
+	}
 }
 
 func (service *QueryService) Close() {
@@ -237,6 +278,34 @@ func QueryIntegrationDSN(t *testing.T) string {
 	}
 
 	return dsn
+}
+
+func QueryIntegrationMigrationsDir(t *testing.T) string {
+	t.Helper()
+	dir := strings.TrimSpace(os.Getenv(testQueryMigrationsEnv))
+	if dir == "" {
+		t.Skipf("%s is required for postgres integration tests", testQueryMigrationsEnv)
+	}
+	if !filepath.IsAbs(dir) {
+		t.Fatalf("%s must be an absolute path outside the repository", testQueryMigrationsEnv)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("read working directory: %v", err)
+	}
+	rel, err := filepath.Rel(cwd, dir)
+	if err == nil && rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("%s must not point inside the repository: %s", testQueryMigrationsEnv, dir)
+	}
+	if strings.Contains(
+		dir,
+		string(filepath.Separator)+"data"+string(filepath.Separator),
+	) {
+		t.Fatalf("%s must not point inside a data directory: %s", testQueryMigrationsEnv, dir)
+	}
+
+	return dir
 }
 
 func acquireQueryIntegrationLock(

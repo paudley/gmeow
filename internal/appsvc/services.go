@@ -50,6 +50,7 @@ type Services struct {
 	operations       OperationStore
 	operationWaiters map[string]*operationWaiter
 	operationMu      sync.Mutex
+	jmapMailboxMu    sync.Mutex
 }
 
 type Options struct {
@@ -804,6 +805,9 @@ func (services *Services) UpdateJMAPMailboxes(
 			"JMAP query reader is not configured",
 		)
 	}
+
+	services.jmapMailboxMu.Lock()
+	defer services.jmapMailboxMu.Unlock()
 
 	current, err := reader.JMAPMailboxes(ctx)
 	if err != nil {

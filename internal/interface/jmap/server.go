@@ -16,6 +16,7 @@ import (
 	"net/mail"
 	"strings"
 	"time"
+	"unicode"
 
 	"blackcat.ca/gmeow/internal/appsvc"
 	"blackcat.ca/gmeow/internal/contracts"
@@ -27,6 +28,7 @@ const (
 	capabilityCore  = "urn:ietf:params:jmap:core"
 	capabilityMail  = "urn:ietf:params:jmap:mail"
 	capabilityQuota = "urn:ietf:params:jmap:quota"
+	maxAPIBodyBytes = 10 * 1024 * 1024
 )
 
 type Server struct {
@@ -435,6 +437,7 @@ func (handler handler) handleAPI(writer http.ResponseWriter, request *http.Reque
 	defer observeLatency(started)
 
 	var input apiRequest
+	request.Body = http.MaxBytesReader(writer, request.Body, maxAPIBodyBytes)
 	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
 		writeJSON(writer, apiResponse{
 			MethodResponses: []methodResponse{{
@@ -1329,12 +1332,20 @@ func addressList(value string) []emailAddress {
 	if trimmed == "" {
 		return nil
 	}
-	parsed, err := mail.ParseAddress(trimmed)
+	parsed, err := mail.ParseAddressList(trimmed)
 	if err != nil {
 		return []emailAddress{{Email: trimmed}}
 	}
 
-	return []emailAddress{{Name: parsed.Name, Email: parsed.Address}}
+	values := make([]emailAddress, 0, len(parsed))
+	for _, address := range parsed {
+		values = append(values, emailAddress{
+			Name:  address.Name,
+			Email: address.Address,
+		})
+	}
+
+	return values
 }
 
 func mutationFromJMAPPatch(
@@ -1577,35 +1588,57 @@ func markedSnippet(value, filterText string, limit int) *string {
 		return &snippet
 	}
 
-	location := strings.Index(
-		strings.ToLower(collapsed),
-		strings.ToLower(filterText),
-	)
+	runes := []rune(collapsed)
+	filterRunes := []rune(filterText)
+	location := runeIndexFold(runes, filterRunes)
 	if location < 0 {
 		return nil
 	}
 	start := max(0, location-80)
-	end := min(len(collapsed), location+len(filterText)+120)
+	end := min(len(runes), location+len(filterRunes)+120)
 	prefix := ""
 	suffix := ""
 	if start > 0 {
 		prefix = "..."
 	}
-	if end < len(collapsed) {
+	if end < len(runes) {
 		suffix = "..."
 	}
-	window := collapsed[start:end]
+	window := runes[start:end]
 	relative := location - start
 	marked := prefix +
-		html.EscapeString(window[:relative]) +
+		html.EscapeString(string(window[:relative])) +
 		"<mark>" +
-		html.EscapeString(window[relative:relative+len(filterText)]) +
+		html.EscapeString(string(window[relative:relative+len(filterRunes)])) +
 		"</mark>" +
-		html.EscapeString(window[relative+len(filterText):]) +
+		html.EscapeString(string(window[relative+len(filterRunes):])) +
 		suffix
 	snippet := trimOctets(marked, limit)
 
 	return &snippet
+}
+
+func runeIndexFold(value, needle []rune) int {
+	if len(needle) == 0 {
+		return 0
+	}
+	if len(needle) > len(value) {
+		return -1
+	}
+	for index := 0; index <= len(value)-len(needle); index++ {
+		matched := true
+		for offset, item := range needle {
+			if unicode.ToLower(value[index+offset]) != unicode.ToLower(item) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return index
+		}
+	}
+
+	return -1
 }
 
 func trimOctets(value string, limit int) string {
@@ -1613,10 +1646,15 @@ func trimOctets(value string, limit int) string {
 		return value
 	}
 	if limit <= 3 {
-		return value[:limit]
+		return string([]rune(value)[:min(limit, len([]rune(value)))])
 	}
 
-	return value[:limit-3] + "..."
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+
+	return string(runes[:limit-3]) + "..."
 }
 
 func collapseWhitespace(value string) string {
