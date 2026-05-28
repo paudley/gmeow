@@ -23,7 +23,7 @@ paths are explicit admin/recovery operations, not normal runtime refresh.
 
 PostgreSQL can be wiped and rebuilt from FILESTORE. Rebuild walks authoritative
 object manifests and annotations under the FILESTORE root and repopulates QUERY
-state. Recovery sidecars are not projection inputs.
+state. Recovery records are not projection inputs.
 
 Incremental projection uses changed FILESTORE state and preserves the same
 authority model as full rebuild. It is an operator command for controlled
@@ -41,12 +41,12 @@ not assembled from interface-level string formatting.
 
 ## Mail Identity Projection
 
-QUERY projects `mail_message` facets and provenance into
-`query_mail_identities`. This table is rebuildable from FILESTORE and supports
-operator questions that compare archive import coverage against Gmail, such as
-Message-IDs present in `mail_archive` sources but absent from Gmail provenance.
-The projection includes canonical digest, generated-id state, collision state,
-version count, and maximum version scale.
+QUERY projects `mail_message` facets, `mail_archive_membership` facets, and
+provenance into `query_mail_identities`. This table is rebuildable from
+FILESTORE and supports operator questions that compare archive import coverage
+against Gmail, such as Message-IDs present in `mail_archive` sources but absent
+from Gmail provenance. The projection includes canonical digest, generated-id
+state, collision state, version count, and maximum version scale.
 
 `gmeow-admin query mail-missing-gmail` is the admin report surface. It filters by
 archive source name, generated Message-ID inclusion, and collision status. The

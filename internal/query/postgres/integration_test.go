@@ -131,6 +131,13 @@ func TestMailArchiveMissingGmailReport(t *testing.T) {
 		"deep",
 		false,
 	)
+	membershipOnly := putMailMembershipProjectionFixture(
+		t,
+		ctx,
+		store,
+		"<archive-membership@example.test>",
+		"deep",
+	)
 	_ = putMailIdentityProjectionFixture(
 		t,
 		ctx,
@@ -182,13 +189,16 @@ func TestMailArchiveMissingGmailReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Total != 1 || report.Items[0].MessageID != "<archive-only@example.test>" ||
-		report.Items[0].CanonicalDigest != archiveOnly {
+	if report.Total != 2 ||
+		!containsDigest(report.Items, archiveOnly) ||
+		!containsDigest(report.Items, membershipOnly) {
 		t.Fatalf("unexpected missing Gmail report: %#v", report)
 	}
-	if report.Items[0].VersionCount != 1 ||
-		report.Items[0].MaxScale != contracts.VersionScaleMinor {
-		t.Fatalf("missing version metadata in report: %#v", report.Items[0])
+	archiveItem, ok := itemForDigest(report.Items, archiveOnly)
+	if !ok ||
+		archiveItem.VersionCount != 1 ||
+		archiveItem.MaxScale != contracts.VersionScaleMinor {
+		t.Fatalf("missing version metadata in report: %#v", report.Items)
 	}
 
 	report, err = index.MailArchiveMissingGmail(ctx, contracts.MailIdentityReportRequest{
@@ -198,8 +208,20 @@ func TestMailArchiveMissingGmailReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Total != 2 || !containsDigest(report.Items, generated) {
+	if report.Total != 3 || !containsDigest(report.Items, generated) {
 		t.Fatalf("expected generated archive identity when requested: %#v", report)
+	}
+
+	resolved, err := index.ResolveMailIdentity(ctx, contracts.MailIdentityResolveRequest{
+		MessageID: "<archive-only@example.test>",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Total != 1 ||
+		len(resolved.Digests) != 1 ||
+		resolved.Digests[0] != archiveOnly {
+		t.Fatalf("unexpected mail identity resolution: %#v", resolved)
 	}
 }
 
@@ -238,6 +260,39 @@ func putMailIdentityProjectionFixture(
 	return digest
 }
 
+func putMailMembershipProjectionFixture(
+	t *testing.T,
+	ctx context.Context,
+	store *filestore.FilesystemStore,
+	messageID string,
+	sourceName string,
+) contracts.ObjectDigest {
+	t.Helper()
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:       strings.NewReader(`{"membership":true}`),
+		MediaType:    "application/vnd.gmeow.mail-archive-membership+json",
+		SourceHint:   "membership",
+		ContentRoles: []string{contracts.MailArchiveMembershipRole},
+		Facets: []contracts.Facet{{
+			Kind: contracts.MailArchiveMembershipFacetKind,
+			Metadata: map[string]any{
+				"rfc_message_id":       messageID,
+				"generated_message_id": false,
+				"max_scale":            contracts.VersionScaleTrivial,
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: contracts.MailArchiveSourceKind,
+			SourceName: sourceName,
+			ExternalID: messageID + ":membership",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
 func containsDigest(
 	items []contracts.MailIdentityReportItem,
 	digest contracts.ObjectDigest,
@@ -248,6 +303,19 @@ func containsDigest(
 		}
 	}
 	return false
+}
+
+func itemForDigest(
+	items []contracts.MailIdentityReportItem,
+	digest contracts.ObjectDigest,
+) (contracts.MailIdentityReportItem, bool) {
+	for _, item := range items {
+		if item.CanonicalDigest == digest {
+			return item, true
+		}
+	}
+
+	return contracts.MailIdentityReportItem{}, false
 }
 
 func queryIntegrationDSN(t *testing.T) string {

@@ -24,7 +24,15 @@ RFC822/EML directories. The importer treats each root as read-only: it never
 changes maildir flags, mbox separators, NNML state, client index files, or
 archive metadata.
 
-Archive import writes the same `mail_message` compound shape used by Gmail:
+Non-dry-run archive import is queue-backed. `gmeow-admin source import` walks
+the requested roots directly, enqueues one scheduler-owned source-import job per
+message, and drains those jobs in the foreground. Mbox discovery records message
+offsets and workers parse one mbox message at a time, so large mbox files are
+not materialized in memory. Local progress state lives under
+`system.data_dir/import-runs` by default; it is operational resume state, not
+authoritative mail data.
+
+Archive import jobs write the same `mail_message` compound shape used by Gmail:
 headers, canonical text body, MIME structure metadata, archive metadata, and
 attachment parts. Exact bytes still dedupe through FILESTORE BLAKE3 identity.
 Archive source identity uses `mail_archive/<source-name>/<relative-path>` with
@@ -39,12 +47,13 @@ usable Message-ID receive deterministic generated IDs under `gmeow.local` based
 on normalized selected headers and post-attachment-removal body text.
 
 When a repeated Message-ID has the same canonical body-line fingerprint, normal
-import attaches new provenance and low-noise import writes no per-message
-record. Trivial archive-only differences are also skipped in low-noise mode.
-When content differs, the canonical `mail_message` compound stores generic
-FILESTORE version records with scale (`trivial`, `minor`, or `major`) and can
-promote a better full canonical version. See `VERSIONING.md` for the shared
-version set model.
+import attaches new provenance. Low-noise import instead writes compact
+`mail_archive_membership` records, avoiding repeated canonical manifest rewrites
+while preserving coverage projection. Trivial archive-only differences follow
+the same low-noise membership path. When content differs, the canonical
+`mail_message` compound stores generic FILESTORE version records with scale
+(`trivial`, `minor`, or `major`) and can promote a better full canonical
+version. See `VERSIONING.md` for the shared version set model.
 
 ## Gmail Ingest Shape
 

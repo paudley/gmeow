@@ -11,6 +11,7 @@ service QueryService {
   rpc ProjectObject(ProjectObjectRequest) returns (Empty);
   rpc ProjectSourceCursor(ProjectSourceCursorRequest) returns (Empty);
   rpc Search(SearchRequest) returns (SearchResponse);
+  rpc ResolveMailIdentity(MailIdentityResolveRequest) returns (MailIdentityResolveResponse);
   rpc Structure(StructureRequest) returns (StructureResponse);
   rpc Relationships(RelationshipRequest) returns (RelationshipResponse);
   rpc Graph(GraphRequest) returns (GraphResponse);
@@ -83,6 +84,18 @@ message SearchResponse {
   int32 schema_version = 1;
   repeated SearchResult results = 2;
   int32 total = 3;
+}
+
+message MailIdentityResolveRequest {
+  string message_id = 1;
+  int32 limit = 2;
+}
+
+message MailIdentityResolveResponse {
+  string message_id = 1;
+  repeated string object_digests = 2;
+  int32 total = 3;
+  int32 limit = 4;
 }
 
 message StructureRequest { string digest = 1; }

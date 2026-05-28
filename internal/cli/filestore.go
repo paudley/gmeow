@@ -4,15 +4,20 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 
 	"blackcat.ca/gmeow/internal/config"
+	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
@@ -24,6 +29,11 @@ func newFilestoreCommand(out io.Writer, configPath *string) *cobra.Command {
 		Short: "Inspect and verify FILESTORE data",
 	}
 	command.AddCommand(newFilestoreVerifyCommand(out, configPath))
+	command.AddCommand(newFilestoreCleanupLocksCommand(out, configPath))
+	command.AddCommand(newFilestoreCompactCommand(out, configPath))
+	command.AddCommand(newFilestoreExportRecoveryCommand(out, configPath))
+	command.AddCommand(newFilestoreStorageCommand(out, configPath))
+	command.AddCommand(newFilestorePathCommand(out, configPath))
 	command.AddCommand(newFilestoreServeCommand(out, configPath, "serve"))
 
 	return command
@@ -79,6 +89,602 @@ func newFilestoreServeCommand(
 			})
 		},
 	}
+}
+
+func newFilestorePathCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		jsonOutput   bool
+		recordsLimit int
+	)
+
+	command := &cobra.Command{
+		Use:   "path <path>",
+		Short: "Resolve a FILESTORE path back to the data it belongs to",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			root, err := resolvedFilestoreRoot(loaded)
+			if err != nil {
+				return err
+			}
+			report, err := filestore.NewFilesystemStore(root).ResolvePath(
+				command.Context(),
+				filestore.PathResolveRequest{
+					Path:         args[0],
+					RecordsLimit: recordsLimit,
+				},
+			)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				encoded, err := json.MarshalIndent(report, "", "  ")
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(out, string(encoded))
+
+				return err
+			}
+
+			return writePathResolveHuman(out, report)
+		},
+	}
+	command.Flags().BoolVar(&jsonOutput, "json", false, "emit structured JSON")
+	command.Flags().
+		IntVar(&recordsLimit, "records-limit", 20, "maximum decoded shard records to include")
+
+	return command
+}
+
+func writePathResolveHuman(out io.Writer, report filestore.PathResolveReport) error {
+	estimate := ""
+	if report.Estimated {
+		estimate = " estimated=true"
+	}
+	if _, err := fmt.Fprintf(
+		out,
+		"filestore path: kind=%s role=%s path=%s logical_bytes=%d allocated_bytes=%d%s\n",
+		report.Kind,
+		report.Role,
+		report.Path,
+		report.LogicalBytes,
+		report.AllocatedBytes,
+		estimate,
+	); err != nil {
+		return err
+	}
+	if report.ObjectDigest != "" {
+		if _, err := fmt.Fprintf(out, "object: %s\n", report.ObjectDigest); err != nil {
+			return err
+		}
+	}
+	if report.Manifest != nil {
+		if _, err := fmt.Fprintf(
+			out,
+			"manifest: object_id=%s media_type=%s facets=%s compound=%t parts=%d\n",
+			report.Manifest.ObjectID,
+			report.Manifest.MediaType,
+			strings.Join(report.Manifest.Facets, ","),
+			report.Manifest.Compound,
+			len(report.Manifest.Parts),
+		); err != nil {
+			return err
+		}
+	}
+	if report.SourceObject != nil {
+		if _, err := fmt.Fprintf(
+			out,
+			"source: kind=%s name=%s external_id=%s external_version=%s\n",
+			report.SourceObject.SourceKind,
+			report.SourceObject.SourceName,
+			report.SourceObject.ExternalID,
+			report.SourceObject.ExternalVersion,
+		); err != nil {
+			return err
+		}
+	}
+	if report.SourceCursor != nil {
+		if _, err := fmt.Fprintf(
+			out,
+			"cursor: kind=%s name=%s updated_at=%s\n",
+			report.SourceCursor.SourceKind,
+			report.SourceCursor.SourceName,
+			report.SourceCursor.UpdatedAt,
+		); err != nil {
+			return err
+		}
+	}
+	if report.IngestClaim != nil {
+		if _, err := fmt.Fprintf(
+			out,
+			"claim: id=%s acquired_at=%s\n",
+			report.IngestClaim.ClaimID,
+			report.IngestClaim.AcquiredAt,
+		); err != nil {
+			return err
+		}
+	}
+	if report.RecordCount > 0 {
+		if _, err := fmt.Fprintf(
+			out,
+			"records: total=%d shown=%d truncated=%t limit=%d\n",
+			report.RecordCount,
+			len(report.Records),
+			report.Truncated,
+			report.RecordsLimit,
+		); err != nil {
+			return err
+		}
+		table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(table, "TYPE\tDIGEST\tSOURCE\tDETAIL"); err != nil {
+			return err
+		}
+		for _, record := range report.Records {
+			if _, err := fmt.Fprintf(
+				table,
+				"%s\t%s\t%s\t%s\n",
+				pathRecordType(record),
+				firstNonEmptyString(string(record.ObjectDigest), string(record.ChildDigest)),
+				pathRecordSource(record),
+				pathRecordDetail(record),
+			); err != nil {
+				return err
+			}
+		}
+		return table.Flush()
+	}
+
+	return nil
+}
+
+func pathRecordType(record filestore.PathResolveRecord) string {
+	switch {
+	case record.SourceObject != nil:
+		return "source"
+	case record.Recovery != nil:
+		return "recovery"
+	case record.ChildDigest != "":
+		return "parent"
+	default:
+		return "record"
+	}
+}
+
+func pathRecordSource(record filestore.PathResolveRecord) string {
+	if record.SourceObject == nil {
+		return ""
+	}
+
+	return record.SourceObject.SourceKind + "/" +
+		record.SourceObject.SourceName + ":" +
+		record.SourceObject.ExternalID
+}
+
+func pathRecordDetail(record filestore.PathResolveRecord) string {
+	if record.Recovery != nil {
+		return record.Recovery.ObjectID
+	}
+	if len(record.Parents) > 0 {
+		return fmt.Sprintf("parents=%d", len(record.Parents))
+	}
+	if record.UpdatedAt != "" {
+		return "updated_at=" + record.UpdatedAt
+	}
+
+	return ""
+}
+
+func newFilestoreStorageCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		digestValue      string
+		messageID        string
+		sourceKind       string
+		sourceName       string
+		externalID       string
+		externalVersion  string
+		noRecursiveParts bool
+		jsonOutput       bool
+	)
+
+	command := &cobra.Command{
+		Use:   "storage",
+		Short: "Break down FILESTORE storage used by one object",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			root, err := resolvedFilestoreRoot(loaded)
+			if err != nil {
+				return err
+			}
+			store := filestore.NewFilesystemStore(root)
+			digest, err := resolveFilestoreStorageTarget(
+				command.Context(),
+				loaded,
+				store,
+				storageTargetOptions{
+					Digest:          digestValue,
+					MessageID:       messageID,
+					SourceKind:      sourceKind,
+					SourceName:      sourceName,
+					ExternalID:      externalID,
+					ExternalVersion: externalVersion,
+					JSONOutput:      jsonOutput,
+					Out:             out,
+				},
+			)
+			if err != nil {
+				return err
+			}
+
+			report, err := store.StorageBreakdown(
+				command.Context(),
+				filestore.StorageBreakdownRequest{
+					Digest:         digest,
+					RecursiveParts: !noRecursiveParts,
+				},
+			)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				encoded, err := json.MarshalIndent(report, "", "  ")
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(out, string(encoded))
+
+				return err
+			}
+
+			return writeStorageBreakdownHuman(out, report)
+		},
+	}
+	command.Flags().StringVar(&digestValue, "digest", "", "object digest to inspect")
+	command.Flags().
+		StringVar(&messageID, "message-id", "", "RFC Message-ID to resolve through QUERY")
+	command.Flags().StringVar(&sourceKind, "source-kind", "", "source object kind")
+	command.Flags().StringVar(&sourceName, "source-name", "", "source object name")
+	command.Flags().StringVar(&externalID, "external-id", "", "source object external id")
+	command.Flags().
+		StringVar(&externalVersion, "external-version", "", "source object external version")
+	command.Flags().
+		BoolVar(&noRecursiveParts, "no-recursive-parts", false, "exclude compound part objects")
+	command.Flags().BoolVar(&jsonOutput, "json", false, "emit structured JSON")
+
+	return command
+}
+
+type storageTargetOptions struct {
+	Out             io.Writer
+	Digest          string
+	MessageID       string
+	SourceKind      string
+	SourceName      string
+	ExternalID      string
+	ExternalVersion string
+	JSONOutput      bool
+}
+
+func resolveFilestoreStorageTarget(
+	ctx context.Context,
+	loaded *config.Loaded,
+	store *filestore.FilesystemStore,
+	options storageTargetOptions,
+) (contracts.ObjectDigest, error) {
+	digestSet := strings.TrimSpace(options.Digest) != ""
+	messageIDSet := strings.TrimSpace(options.MessageID) != ""
+	sourceSet := strings.TrimSpace(options.SourceKind) != "" ||
+		strings.TrimSpace(options.SourceName) != "" ||
+		strings.TrimSpace(options.ExternalID) != "" ||
+		strings.TrimSpace(options.ExternalVersion) != ""
+	modeCount := 0
+	for _, set := range []bool{digestSet, messageIDSet, sourceSet} {
+		if set {
+			modeCount++
+		}
+	}
+	if modeCount != 1 {
+		return "", errors.New(
+			"exactly one target mode is required: --digest, --message-id, or --source-kind/--source-name/--external-id",
+		)
+	}
+	if digestSet {
+		digest := contracts.ObjectDigest(strings.TrimSpace(options.Digest))
+		if err := validateCLIDigest(digest); err != nil {
+			return "", err
+		}
+
+		return digest, nil
+	}
+	if sourceSet {
+		ref := contracts.SourceObjectRef{
+			SourceKind:      strings.TrimSpace(options.SourceKind),
+			SourceName:      strings.TrimSpace(options.SourceName),
+			ExternalID:      strings.TrimSpace(options.ExternalID),
+			ExternalVersion: strings.TrimSpace(options.ExternalVersion),
+		}
+		if ref.SourceKind == "" || ref.SourceName == "" || ref.ExternalID == "" {
+			return "", errors.New(
+				"--source-kind, --source-name, and --external-id are required for source ref resolution",
+			)
+		}
+		digest, found, err := store.LookupSourceObject(ctx, ref)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			return "", fmt.Errorf(
+				"source object was not found: %s/%s external_id=%q external_version=%q",
+				ref.SourceKind,
+				ref.SourceName,
+				ref.ExternalID,
+				ref.ExternalVersion,
+			)
+		}
+
+		return digest, nil
+	}
+
+	return resolveStorageMessageID(ctx, loaded, options)
+}
+
+func resolveStorageMessageID(
+	ctx context.Context,
+	loaded *config.Loaded,
+	options storageTargetOptions,
+) (contracts.ObjectDigest, error) {
+	queryClient, err := rpc.NewQueryClient(ctx, rpcEndpoint(loaded.Resolved.RPC.Query))
+	if err != nil {
+		return "", err
+	}
+	defer queryClient.Close()
+
+	messageID := strings.TrimSpace(options.MessageID)
+	response, err := queryClient.ResolveMailIdentity(
+		ctx,
+		contracts.MailIdentityResolveRequest{
+			MessageID: messageID,
+			Limit:     50,
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	candidates := response.Digests
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("message_id %q not found", messageID)
+	}
+	if len(candidates) > 1 {
+		if options.JSONOutput {
+			encoded, err := json.MarshalIndent(map[string]any{
+				"message_id":  messageID,
+				"candidates":  candidates,
+				"ambiguous":   true,
+				"target_mode": "message_id",
+			}, "", "  ")
+			if err != nil {
+				return "", err
+			}
+			if _, err := fmt.Fprintln(options.Out, string(encoded)); err != nil {
+				return "", err
+			}
+		}
+
+		return "", fmt.Errorf(
+			"message_id %q matched %d object digests",
+			messageID,
+			len(candidates),
+		)
+	}
+
+	return candidates[0], nil
+}
+
+func writeStorageBreakdownHuman(
+	out io.Writer,
+	report filestore.StorageBreakdownReport,
+) error {
+	estimate := ""
+	if report.EstimatedAllocated {
+		estimate = " estimated=true"
+	}
+	if _, err := fmt.Fprintf(
+		out,
+		"filestore storage: digest=%s allocated_bytes=%d logical_bytes=%d files=%d objects=%d recursive_parts=%t%s\n",
+		report.RootDigest,
+		report.TotalAllocatedBytes,
+		report.TotalLogicalBytes,
+		report.FileCount,
+		report.ReferencedObjectCount,
+		report.RecursiveParts,
+		estimate,
+	); err != nil {
+		return err
+	}
+	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(
+		table,
+		"ROLE\tOBJECT\tLOGICAL\tALLOCATED\tPATH",
+	); err != nil {
+		return err
+	}
+	for _, file := range report.Files {
+		role := file.Role
+		if file.RecursivePart {
+			role = "part:" + firstNonEmptyString(file.CompoundRole, role)
+		}
+		if _, err := fmt.Fprintf(
+			table,
+			"%s\t%s\t%d\t%d\t%s\n",
+			role,
+			file.ObjectDigest,
+			file.LogicalBytes,
+			file.AllocatedBytes,
+			file.Path,
+		); err != nil {
+			return err
+		}
+	}
+
+	return table.Flush()
+}
+
+func validateCLIDigest(digest contracts.ObjectDigest) error {
+	value := string(digest)
+	if len(value) != 64 {
+		return fmt.Errorf("invalid object digest %q", digest)
+	}
+	for _, char := range value {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return fmt.Errorf("invalid object digest %q", digest)
+		}
+	}
+
+	return nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func newFilestoreCleanupLocksCommand(out io.Writer, configPath *string) *cobra.Command {
+	var confirmInstance string
+
+	command := &cobra.Command{
+		Use:   "cleanup-locks",
+		Short: "Remove stale FILESTORE source lock files and empty lock shard directories",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"filestore cleanup-locks",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+			root, err := resolvedFilestoreRoot(loaded)
+			if err != nil {
+				return err
+			}
+			report, err := filestore.NewFilesystemStore(root).
+				CleanupSourceLocks(command.Context())
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(
+				out,
+				"filestore cleanup-locks: removed_files=%d removed_dirs=%d scanned_dirs=%d\n",
+				report.RemovedFiles,
+				report.RemovedDirs,
+				report.ScannedDirs,
+			)
+
+			return err
+		},
+	}
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "required production-like instance id confirmation")
+
+	return command
+}
+
+func newFilestoreCompactCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		confirmInstance string
+		dryRun          bool
+	)
+
+	command := &cobra.Command{
+		Use:   "compact",
+		Short: "Migrate v1 FILESTORE indexes and recovery sidecars into packed v2 shards",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if !dryRun {
+				if err := requireInstanceConfirmation(
+					loaded,
+					"filestore compact",
+					confirmInstance,
+				); err != nil {
+					return err
+				}
+			}
+			root, err := resolvedFilestoreRoot(loaded)
+			if err != nil {
+				return err
+			}
+			report, err := filestore.NewFilesystemStore(root).
+				CompactV1Layout(command.Context(), dryRun)
+			if err != nil {
+				return err
+			}
+			encoded, err := json.MarshalIndent(report, "", "  ")
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(out, string(encoded))
+
+			return err
+		},
+	}
+	command.Flags().
+		BoolVar(&dryRun, "dry-run", false, "count compactable v1 files without writing or removing data")
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "required production-like instance id confirmation")
+
+	return command
+}
+
+func newFilestoreExportRecoveryCommand(
+	out io.Writer,
+	configPath *string,
+) *cobra.Command {
+	var digest string
+
+	command := &cobra.Command{
+		Use:   "export-recovery",
+		Short: "Export one FILESTORE recovery sidecar from packed or legacy recovery data",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			root, err := resolvedFilestoreRoot(loaded)
+			if err != nil {
+				return err
+			}
+			content, err := filestore.NewFilesystemStore(root).
+				ExportRecoveryJSON(command.Context(), contracts.ObjectDigest(digest))
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(out, string(content))
+
+			return err
+		},
+	}
+	command.Flags().
+		StringVar(&digest, "digest", "", "object digest to export recovery data for")
+	_ = command.MarkFlagRequired("digest")
+
+	return command
 }
 
 func newFilestoreVerifyCommand(out io.Writer, configPath *string) *cobra.Command {

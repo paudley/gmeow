@@ -52,10 +52,10 @@ Archive import supports a low-noise mode for bulk older Gmail/archive imports.
 Low-noise mode compares normalized RFC Message-ID plus canonical
 post-attachment-removal body-line fingerprint.
 
-If both match an existing version set, import writes no per-message FILESTORE
-record and increments report counters only. If only trivial fields differ,
-import also skips per-message writes. Missing Message-IDs and meaningful body
-differences import normally.
+If both match an existing version set, import avoids canonical manifest rewrites
+and writes compact `mail_archive_membership` coverage records instead. If only
+trivial fields differ, import follows the same membership path. Missing
+Message-IDs and meaningful body differences import normally.
 
 ## Analysis
 

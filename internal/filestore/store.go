@@ -724,13 +724,6 @@ func (store *FilesystemStore) commitNewObjectDirectory(
 		return fmt.Errorf("stage blob: %w", err)
 	}
 
-	if err := atomicWriteJSON(
-		filepath.Join(stageDir, recoveryFilename),
-		recoverySidecarFor(digest, content, compressed, sourceHint, manifest),
-	); err != nil {
-		return fmt.Errorf("stage recovery sidecar: %w", err)
-	}
-
 	if err := store.writeCompressedJSON(
 		filepath.Join(stageDir, manifestFilename),
 		manifest,
@@ -747,6 +740,14 @@ func (store *FilesystemStore) commitNewObjectDirectory(
 	}
 
 	cleanup = false
+
+	if err := store.writePackedRecovery(
+		ctx,
+		digest,
+		recoverySidecarFor(digest, content, compressed, sourceHint, manifest),
+	); err != nil {
+		return fmt.Errorf("write packed recovery sidecar: %w", err)
+	}
 
 	return fsyncDir(parentDir)
 }
@@ -769,14 +770,6 @@ func (store *FilesystemStore) commitStreamedObjectDirectory(
 	err = os.MkdirAll(parentDir, 0o750)
 	if err != nil {
 		return false, fmt.Errorf("create object parent directory: %w", err)
-	}
-
-	err = atomicWriteJSON(
-		filepath.Join(blob.stageDir, recoveryFilename),
-		recoverySidecarForStream(digest, blob, sourceHint, manifest),
-	)
-	if err != nil {
-		return false, fmt.Errorf("stage recovery sidecar: %w", err)
 	}
 
 	err = store.writeCompressedJSON(
@@ -804,6 +797,14 @@ func (store *FilesystemStore) commitStreamedObjectDirectory(
 		}
 
 		return false, fmt.Errorf("commit object directory: %w", err)
+	}
+
+	if err := store.writePackedRecovery(
+		ctx,
+		digest,
+		recoverySidecarForStream(digest, blob, sourceHint, manifest),
+	); err != nil {
+		return false, fmt.Errorf("write packed recovery sidecar: %w", err)
 	}
 
 	return true, fsyncDir(parentDir)

@@ -55,7 +55,7 @@ func (store *FilesystemStore) Verify(ctx context.Context) (VerifyReport, error) 
 				return filepath.SkipDir
 			}
 
-			store.verifyObject(&report, digest, path)
+			store.verifyObject(ctx, &report, digest, path)
 
 			return filepath.SkipDir
 		},
@@ -78,6 +78,7 @@ func (store *FilesystemStore) Verify(ctx context.Context) (VerifyReport, error) 
 }
 
 func (store *FilesystemStore) verifyObject(
+	ctx context.Context,
 	report *VerifyReport,
 	digest contracts.ObjectDigest,
 	path string,
@@ -97,7 +98,14 @@ func (store *FilesystemStore) verifyObject(
 	}
 
 	if _, err := os.Stat(recoveryPath); err != nil {
-		report.addFinding(digest, recoveryPath, "recovery_missing", err.Error())
+		if _, found, readErr := store.readPackedRecovery(
+			ctx,
+			digest,
+		); readErr != nil {
+			report.addFinding(digest, recoveryPath, "recovery_read_failed", readErr.Error())
+		} else if !found {
+			report.addFinding(digest, recoveryPath, "recovery_missing", err.Error())
+		}
 	} else {
 		store.verifyRecovery(report, digest, recoveryPath, blob, compressedBlob)
 	}

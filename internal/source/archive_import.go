@@ -38,17 +38,26 @@ const (
 var numberedMailFilePattern = regexp.MustCompile(`^[0-9]+$`)
 
 type ArchiveImportRequest struct {
-	SourceName string
-	Format     string
-	Roots      []string
-	DryRun     bool
-	LowNoise   bool
+	SourceName     string
+	Format         string
+	Roots          []string
+	RunID          string
+	StateDir       string
+	DryRun         bool
+	LowNoise       bool
+	Resume         bool
+	QueueHighWater int
+	Publisher      ArchiveImportPublisher
+	Status         ArchiveImportQueueStatusFunc
 }
 
 type ArchiveImportReport struct {
 	SourceName          string   `json:"source_name"`
+	RunID               string   `json:"run_id,omitempty"`
 	Scanned             int      `json:"scanned"`
 	Parsed              int      `json:"parsed"`
+	Enqueued            int      `json:"enqueued"`
+	Processed           int      `json:"processed"`
 	Imported            int      `json:"imported"`
 	ExactDuplicates     int      `json:"exact_duplicates"`
 	MessageIDDuplicates int      `json:"message_id_duplicates"`
@@ -64,6 +73,14 @@ type ArchiveImportReport struct {
 	SkippedMessageIDs   []string `json:"skipped_message_ids,omitempty"`
 	Failures            []string `json:"failures,omitempty"`
 }
+
+type ArchiveImportPublisher interface {
+	PublishSourceImportJob(context.Context, contracts.SourceImportJob) error
+	ProcessSourceImportFailures(context.Context, int) (int, error)
+	SourceImportStatus(context.Context) (contracts.SourceImportQueueStatus, error)
+}
+
+type ArchiveImportQueueStatusFunc func(context.Context) (contracts.SourceImportQueueStatus, error)
 
 type ArchiveImporter struct {
 	service *Service
@@ -302,7 +319,7 @@ func (importer *ArchiveImporter) ingestDuplicateOrVariant(
 			report.TrivialSkipped++
 			appendSkippedMessageID(report, message.MessageID)
 
-			return nil
+			return importer.writeArchiveMembershipRecord(ctx, sourceName, message, canonical)
 		}
 
 		return importer.store.AttachProvenance(ctx, canonical, []contracts.Provenance{
@@ -316,7 +333,7 @@ func (importer *ArchiveImporter) ingestDuplicateOrVariant(
 		report.TrivialSkipped++
 		appendSkippedMessageID(report, message.MessageID)
 
-		return nil
+		return importer.writeArchiveMembershipRecord(ctx, sourceName, message, canonical)
 	}
 
 	report.Collisions++
@@ -997,62 +1014,6 @@ func parseArchiveMessage(
 	}
 
 	return message, nil
-}
-
-func parseMboxFile(path, root string) ([]archiveMessage, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	messages := []archiveMessage{}
-	var current bytes.Buffer
-	offset := 0
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "From ") {
-			if current.Len() > 0 {
-				message, err := parseArchiveMessage(
-					current.Bytes(),
-					path,
-					root,
-					ArchiveImportFormatMbox,
-					offset,
-				)
-				if err == nil {
-					messages = append(messages, message)
-				}
-				current.Reset()
-				offset++
-			}
-			continue
-		}
-		if strings.HasPrefix(line, ">From ") {
-			line = strings.TrimPrefix(line, ">")
-		}
-		current.WriteString(line)
-		current.WriteByte('\n')
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	if current.Len() > 0 {
-		message, err := parseArchiveMessage(
-			current.Bytes(),
-			path,
-			root,
-			ArchiveImportFormatMbox,
-			offset,
-		)
-		if err == nil {
-			messages = append(messages, message)
-		}
-	}
-
-	return messages, nil
 }
 
 func extractMailBodyAndAttachments(

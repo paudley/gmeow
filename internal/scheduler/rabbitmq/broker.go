@@ -19,21 +19,30 @@ import (
 )
 
 const (
-	defaultQueuePrefix   = "gmeow."
-	testQueuePrefix      = "gmeow.test."
-	workSuffix           = "analysis.work"
-	reconcileSuffix      = "analysis.reconcile"
-	retrySuffix          = "analysis.retry.v2"
-	failedSuffix         = "analysis.failed"
-	deadLetterSuffix     = "analysis.dead"
-	projectionSuffix     = "projection.refresh"
-	analysisSuffix       = "analysis"
-	projectionExSuffix   = "projection"
-	workRoutingKey       = "analysis.work"
-	retryRoutingKey      = "analysis.retry"
-	failedRoutingKey     = "analysis.failed"
-	deadLetterRoutingKey = "analysis.dead"
-	projectionRoutingKey = "projection.refresh"
+	defaultQueuePrefix               = "gmeow."
+	testQueuePrefix                  = "gmeow.test."
+	workSuffix                       = "analysis.work"
+	reconcileSuffix                  = "analysis.reconcile"
+	retrySuffix                      = "analysis.retry.v2"
+	failedSuffix                     = "analysis.failed"
+	deadLetterSuffix                 = "analysis.dead"
+	projectionSuffix                 = "projection.refresh"
+	sourceImportWorkSuffix           = "source_import.work"
+	sourceImportRetrySuffix          = "source_import.retry"
+	sourceImportFailedSuffix         = "source_import.failed"
+	sourceImportDeadLetterSuffix     = "source_import.dead"
+	analysisSuffix                   = "analysis"
+	projectionExSuffix               = "projection"
+	sourceImportExSuffix             = "source_import"
+	workRoutingKey                   = "analysis.work"
+	retryRoutingKey                  = "analysis.retry"
+	failedRoutingKey                 = "analysis.failed"
+	deadLetterRoutingKey             = "analysis.dead"
+	projectionRoutingKey             = "projection.refresh"
+	sourceImportWorkRoutingKey       = "source_import.work"
+	sourceImportRetryRoutingKey      = "source_import.retry"
+	sourceImportFailedRoutingKey     = "source_import.failed"
+	sourceImportDeadLetterRoutingKey = "source_import.dead"
 )
 
 type Config struct {
@@ -50,14 +59,25 @@ type Broker struct {
 }
 
 type topology struct {
-	analysisExchange   string
-	projectionExchange string
-	workQueue          string
-	reconcileQueue     string
-	retryQueue         string
-	failedQueue        string
-	deadLetterQueue    string
-	projectionQueue    string
+	analysisExchange            string
+	projectionExchange          string
+	sourceImportExchange        string
+	workQueue                   string
+	reconcileQueue              string
+	retryQueue                  string
+	failedQueue                 string
+	deadLetterQueue             string
+	projectionQueue             string
+	sourceImportWorkQueue       string
+	sourceImportRetryQueue      string
+	sourceImportFailedQueue     string
+	sourceImportDeadLetterQueue string
+}
+
+type queueBinding struct {
+	queue      string
+	routingKey string
+	exchange   string
 }
 
 func New(ctx context.Context, cfg Config) (*Broker, error) {
@@ -128,14 +148,19 @@ func TestConfigFromResolved(
 
 func newTopology(prefix string) topology {
 	return topology{
-		analysisExchange:   prefix + analysisSuffix,
-		projectionExchange: prefix + projectionExSuffix,
-		workQueue:          prefix + workSuffix,
-		reconcileQueue:     prefix + reconcileSuffix,
-		retryQueue:         prefix + retrySuffix,
-		failedQueue:        prefix + failedSuffix,
-		deadLetterQueue:    prefix + deadLetterSuffix,
-		projectionQueue:    prefix + projectionSuffix,
+		analysisExchange:            prefix + analysisSuffix,
+		projectionExchange:          prefix + projectionExSuffix,
+		sourceImportExchange:        prefix + sourceImportExSuffix,
+		workQueue:                   prefix + workSuffix,
+		reconcileQueue:              prefix + reconcileSuffix,
+		retryQueue:                  prefix + retrySuffix,
+		failedQueue:                 prefix + failedSuffix,
+		deadLetterQueue:             prefix + deadLetterSuffix,
+		projectionQueue:             prefix + projectionSuffix,
+		sourceImportWorkQueue:       prefix + sourceImportWorkSuffix,
+		sourceImportRetryQueue:      prefix + sourceImportRetrySuffix,
+		sourceImportFailedQueue:     prefix + sourceImportFailedSuffix,
+		sourceImportDeadLetterQueue: prefix + sourceImportDeadLetterSuffix,
 	}
 }
 
@@ -243,11 +268,11 @@ func (broker *Broker) Declare(ctx context.Context) error {
 		return fmt.Errorf("declare projection queue: %w", err)
 	}
 
-	bindings := []struct {
-		queue      string
-		routingKey string
-		exchange   string
-	}{
+	if err := broker.declareSourceImportQueues(channel); err != nil {
+		return err
+	}
+
+	bindings := []queueBinding{
 		{broker.topology.workQueue, workRoutingKey, broker.topology.analysisExchange},
 		{broker.topology.retryQueue, retryRoutingKey, broker.topology.analysisExchange},
 		{broker.topology.failedQueue, failedRoutingKey, broker.topology.analysisExchange},
@@ -262,6 +287,7 @@ func (broker *Broker) Declare(ctx context.Context) error {
 			broker.topology.projectionExchange,
 		},
 	}
+	bindings = append(bindings, broker.sourceImportBindings()...)
 	for _, binding := range bindings {
 		err := channel.QueueBind(
 			binding.queue,

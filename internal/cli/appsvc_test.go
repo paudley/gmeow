@@ -76,4 +76,9 @@ func TestSourceImportCommandIncludesLowNoise(t *testing.T) {
 	if !strings.Contains(out.String(), "low-noise") {
 		t.Fatalf("help output missing low-noise flag:\n%s", out.String())
 	}
+	for _, flag := range []string{"state-dir", "resume", "queue-high-water"} {
+		if !strings.Contains(out.String(), flag) {
+			t.Fatalf("help output missing %s flag:\n%s", flag, out.String())
+		}
+	}
 }

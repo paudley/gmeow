@@ -6,9 +6,9 @@ service opens RabbitMQ connections or manages queues directly.
 ## Responsibilities
 
 SCHEDULER derives work from FILESTORE notifications, analyzer specs, forced
-interface requests, failed jobs, repair requests, and projection needs. It owns
-priority, retry, exponential backoff, dead-letter routing, requeue, and
-deterministic job identity.
+interface requests, failed jobs, repair requests, projection needs, and
+source-import jobs. It owns priority, retry, exponential backoff, dead-letter
+routing, requeue, and deterministic job identity.
 
 Production RabbitMQ vhost and queue prefix are deployment configuration, not
 hardcoded runtime policy. The production example uses the `gmeow-prod` vhost
@@ -21,6 +21,16 @@ Analysis jobs are scoped by object digest, analyzer name, and analyzer version.
 This keeps retries granular: a failed summary endpoint call reschedules only the
 summary job, not already-complete NER, categorization, embedding, header, or
 metadata annotations.
+
+## Source Import Jobs
+
+Archive import uses scheduler-owned source-import queues. The admin source
+import command is a foreground producer and worker: it walks operator-supplied
+archive roots, publishes one durable job per RFC822 message or mbox offset, and
+consumes those jobs until the run completes. Jobs are idempotent by source name,
+root, relative path, format, and offset. Failed jobs route through the same
+retry/backoff/dead-letter policy as analyzer work, but use separate queues so
+large imports do not block analysis.
 
 ANALYSIS workers consume scheduler-delivered jobs and ack only after durable
 FILESTORE writes. If a worker crashes before ack, RabbitMQ redelivers. If a

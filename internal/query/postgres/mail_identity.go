@@ -18,7 +18,7 @@ func insertMailIdentityRows(
 	tx pgx.Tx,
 	manifest contracts.Manifest,
 ) error {
-	metadata, ok := mailMessageFacetMetadata(manifest)
+	metadata, ok := mailIdentityFacetMetadata(manifest)
 	if !ok {
 		return nil
 	}
@@ -65,6 +65,19 @@ func insertMailIdentityRows(
 	}
 
 	return nil
+}
+
+func mailIdentityFacetMetadata(manifest contracts.Manifest) (map[string]any, bool) {
+	if metadata, ok := mailMessageFacetMetadata(manifest); ok {
+		return metadata, true
+	}
+	for _, facet := range manifest.Facets {
+		if facet.FacetKind() == contracts.MailArchiveMembershipFacetKind {
+			return firstMap(facet.Metadata, facet.Attributes), true
+		}
+	}
+
+	return nil, false
 }
 
 func (index *Index) MailArchiveMissingGmail(
@@ -173,6 +186,63 @@ func (index *Index) MailArchiveMissingGmail(
 		Total:  total,
 		Limit:  limit,
 		Offset: offset,
+	}, nil
+}
+
+func (index *Index) ResolveMailIdentity(
+	ctx context.Context,
+	request contracts.MailIdentityResolveRequest,
+) (contracts.MailIdentityResolveResponse, error) {
+	messageID := strings.TrimSpace(request.MessageID)
+	if messageID == "" {
+		return contracts.MailIdentityResolveResponse{}, fmt.Errorf("message_id is required")
+	}
+	limit := normalizedLimit(request.Limit)
+	rows, err := index.pool.Query(
+		ctx,
+		`SELECT object_digest, count(*) OVER() AS total
+		   FROM (
+		     SELECT DISTINCT object_digest
+		       FROM query_mail_identities
+		      WHERE message_id = $1
+		      ORDER BY object_digest
+		   ) matches
+		  LIMIT $2`,
+		messageID,
+		limit,
+	)
+	if err != nil {
+		return contracts.MailIdentityResolveResponse{}, fmt.Errorf(
+			"resolve mail identity: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	digests := []contracts.ObjectDigest{}
+	total := 0
+	for rows.Next() {
+		var digest contracts.ObjectDigest
+		if err := rows.Scan(&digest, &total); err != nil {
+			return contracts.MailIdentityResolveResponse{}, fmt.Errorf(
+				"scan mail identity resolver: %w",
+				err,
+			)
+		}
+		digests = append(digests, digest)
+	}
+	if err := rows.Err(); err != nil {
+		return contracts.MailIdentityResolveResponse{}, fmt.Errorf(
+			"iterate mail identity resolver: %w",
+			err,
+		)
+	}
+
+	return contracts.MailIdentityResolveResponse{
+		MessageID: messageID,
+		Digests:   digests,
+		Total:     total,
+		Limit:     limit,
 	}, nil
 }
 

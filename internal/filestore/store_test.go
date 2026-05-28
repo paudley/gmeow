@@ -6,6 +6,7 @@ package filestore
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -53,10 +54,17 @@ func TestPutSameBytesDedupesToOneObjectDirectory(t *testing.T) {
 	if count := countObjectDirs(t, store.root); count != 1 {
 		t.Fatalf("expected one object directory, got %d", count)
 	}
-	for _, name := range []string{blobFilename, recoveryFilename, manifestFilename} {
+	for _, name := range []string{blobFilename, manifestFilename} {
 		if _, err := os.Stat(store.objectPath(first, name)); err != nil {
 			t.Fatalf("missing %s: %v", name, err)
 		}
+	}
+	if recovery, err := store.ExportRecoveryJSON(
+		ctx,
+		first,
+	); err != nil ||
+		len(recovery) == 0 {
+		t.Fatalf("missing packed recovery: len=%d err=%v", len(recovery), err)
 	}
 	manifest, err := store.ReadManifest(ctx, first)
 	if err != nil {
@@ -112,6 +120,14 @@ func TestLookupSourceObjectFindsExactSourceVersion(t *testing.T) {
 	if !ok || found != digest {
 		t.Fatalf("expected source lookup hit for %s, got ok=%t digest=%s", digest, ok, found)
 	}
+	if _, err := os.Stat(store.sourceObjectIndexPath(contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1",
+		ExternalVersion: "history-1",
+	})); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new source indexes must not write v1 files: %v", err)
+	}
 	if _, ok, err := store.LookupSourceObject(ctx, contracts.SourceObjectRef{
 		SourceKind:      "gmail",
 		SourceName:      "primary",
@@ -144,7 +160,9 @@ func TestLookupSourceObjectDoesNotWalkUnindexedFilestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(store.sourceObjectIndexPath(ref)); err != nil {
+	if err := os.Remove(
+		store.packedSourceIndexShardPath(sourceObjectRefKey(ref)),
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -335,7 +353,7 @@ func TestPutRejectsObjectWithoutFacet(t *testing.T) {
 	}
 }
 
-func TestPutDoesNotRepairMissingRecoverySidecarOnExistingObject(t *testing.T) {
+func TestPutDoesNotCreateLegacyRecoverySidecarOnExistingObject(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	request := PutRequest{
@@ -344,9 +362,6 @@ func TestPutDoesNotRepairMissingRecoverySidecarOnExistingObject(t *testing.T) {
 	}
 	digest, err := store.Put(ctx, request)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(store.objectPath(digest, recoveryFilename)); err != nil {
 		t.Fatal(err)
 	}
 	_, err = store.Put(ctx, PutRequest{
@@ -361,16 +376,15 @@ func TestPutDoesNotRepairMissingRecoverySidecarOnExistingObject(t *testing.T) {
 			t.Fatal(err)
 		}
 	} else {
-		t.Fatal("existing object write repaired immutable recovery sidecar")
+		t.Fatal("existing object write created legacy recovery sidecar")
 	}
-	report, err := store.Verify(ctx)
-	if err != nil {
-		t.Fatal(err)
+	if recovery, err := store.ExportRecoveryJSON(
+		ctx,
+		digest,
+	); err != nil ||
+		len(recovery) == 0 {
+		t.Fatalf("missing packed recovery: len=%d err=%v", len(recovery), err)
 	}
-	if report.Status != VerifyStatusError {
-		t.Fatalf("expected missing recovery sidecar to remain visible: %#v", report)
-	}
-	assertFinding(t, report, "recovery_missing")
 }
 
 func TestPutRefusesToRepairIncompleteObjectDirectory(t *testing.T) {
@@ -691,6 +705,45 @@ func TestHasAnalysisAnnotationRequiresMatchingAnalyzerVersion(t *testing.T) {
 	}
 }
 
+func TestNewCompoundParentIndexesUsePackedLayout(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	body, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("body text"),
+		Facets: []contracts.Facet{{Kind: "email_part"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := store.PutCompound(ctx, CompoundPutRequest{
+		ObjectID: "mail_message:<packed-parent@example.test>",
+		Facets:   []contracts.Facet{{Kind: "mail_message"}},
+		Parts: []contracts.CompoundPart{{
+			Digest: body,
+			Role:   "email_body",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parents, err := store.compoundParentsForChild(ctx, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parents) != 1 || parents[0].ParentDigest != parent {
+		t.Fatalf("packed parent index mismatch: %#v", parents)
+	}
+	if _, err := os.Stat(
+		store.compoundParentIndexPath(body),
+	); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
+		t.Fatalf("new compound parent indexes must not write v1 files: %v", err)
+	}
+}
+
 func TestAnalysisAnnotationRefreshesCompoundParent(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
@@ -922,13 +975,17 @@ func TestVerifyReportsCompressedRecoveryHashMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	var recovery recoverySidecar
-	recoveryPath := store.objectPath(digest, recoveryFilename)
-	if err := readJSON(recoveryPath, &recovery); err != nil {
+	recoveryContent, err := store.ExportRecoveryJSON(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(recoveryContent, &recovery); err != nil {
 		t.Fatal(err)
 	}
 	recovery.CompressedBlake3 = strings.Repeat("0", 64)
 	recovery.CompressedSHA256 = strings.Repeat("1", 64)
 	recovery.CompressedSize++
+	recoveryPath := store.objectPath(digest, recoveryFilename)
 	if err := atomicWriteJSON(recoveryPath, recovery); err != nil {
 		t.Fatal(err)
 	}
@@ -1176,7 +1233,7 @@ func TestCompoundMergePreservesBlobAndRecoverySidecar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	originalRecovery, err := os.ReadFile(store.objectPath(compound, recoveryFilename))
+	originalRecovery, err := store.ExportRecoveryJSON(ctx, compound)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1195,7 +1252,7 @@ func TestCompoundMergePreservesBlobAndRecoverySidecar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	currentRecovery, err := os.ReadFile(store.objectPath(compound, recoveryFilename))
+	currentRecovery, err := store.ExportRecoveryJSON(ctx, compound)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1308,7 +1365,7 @@ func TestVerifyReportsCorruptBytesMissingRecoveryAndDanglingPart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(store.objectPath(compound, recoveryFilename)); err != nil {
+	if err := os.Remove(store.packedRecoveryShardPath(string(compound))); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(
@@ -1347,6 +1404,426 @@ func TestVerifyReportsCorruptBytesMissingRecoveryAndDanglingPart(t *testing.T) {
 	}
 }
 
+func TestCompactV1LayoutMigratesLegacyIndexesAndRecovery(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	ref := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1",
+		ExternalVersion: "history-1",
+	}
+	body, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("body text"),
+		Facets: []contracts.Facet{{Kind: "email_part"}},
+		Provenance: []contracts.Provenance{{
+			SourceKind:      ref.SourceKind,
+			SourceName:      ref.SourceName,
+			ExternalID:      ref.ExternalID,
+			ExternalVersion: ref.ExternalVersion,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := store.PutCompound(ctx, CompoundPutRequest{
+		ObjectID: "mail_message:<compact@example.test>",
+		Facets:   []contracts.Facet{{Kind: "mail_message"}},
+		Parts: []contracts.CompoundPart{{
+			Digest: body,
+			Role:   "email_body",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryJSON, err := store.ExportRecoveryJSON(ctx, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovery recoverySidecar
+	if err := json.Unmarshal(recoveryJSON, &recovery); err != nil {
+		t.Fatal(err)
+	}
+	parentEdges, err := store.compoundParentsForChild(ctx, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removeFileIfExists(t, store.packedSourceIndexShardPath(sourceObjectRefKey(ref)))
+	removeFileIfExists(t, store.packedCompoundParentShardPath(string(body)))
+	removeFileIfExists(t, store.packedRecoveryShardPath(string(body)))
+	writeTestJSON(t, store.sourceObjectIndexPath(ref), sourceObjectIndexEntry{
+		SourceObject: ref,
+		ObjectDigest: body,
+		UpdatedAt:    time.Now().UTC(),
+	})
+	writeTestJSON(t, store.compoundParentIndexPath(body), compoundParentIndexRecord{
+		SchemaVersion: int(contracts.SchemaVersionPhase00),
+		ChildDigest:   body,
+		Parents:       parentEdges,
+	})
+	writeTestJSON(t, store.objectPath(body, recoveryFilename), recovery)
+
+	report, err := store.CompactV1Layout(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SourceIndexes != 1 ||
+		report.CompoundParentIndexes != 1 ||
+		report.RecoverySidecars != 1 ||
+		report.RemovedFiles != 3 ||
+		report.DryRun {
+		t.Fatalf("unexpected compaction report: %#v", report)
+	}
+	found, ok, err := store.LookupSourceObject(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || found != body {
+		t.Fatalf("compacted source index lookup mismatch: ok=%t digest=%s", ok, found)
+	}
+	compactedParents, err := store.compoundParentsForChild(ctx, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compactedParents) != 1 || compactedParents[0].ParentDigest != parent {
+		t.Fatalf("compacted parent index mismatch: %#v", compactedParents)
+	}
+	if _, err := store.ExportRecoveryJSON(ctx, body); err != nil {
+		t.Fatalf("compacted recovery missing: %v", err)
+	}
+	for _, path := range []string{
+		store.sourceObjectIndexPath(ref),
+		store.compoundParentIndexPath(body),
+		store.objectPath(body, recoveryFilename),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("legacy file was not removed: %s err=%v", path, err)
+		}
+	}
+}
+
+func TestCompactV1LayoutDryRunDoesNotMutateLegacyFiles(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	ref := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1",
+		ExternalVersion: "history-1",
+	}
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("body text"),
+		Facets: []contracts.Facet{{Kind: "email_part"}},
+		Provenance: []contracts.Provenance{{
+			SourceKind:      ref.SourceKind,
+			SourceName:      ref.SourceName,
+			ExternalID:      ref.ExternalID,
+			ExternalVersion: ref.ExternalVersion,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeFileIfExists(t, store.packedSourceIndexShardPath(sourceObjectRefKey(ref)))
+	writeTestJSON(t, store.sourceObjectIndexPath(ref), sourceObjectIndexEntry{
+		SourceObject: ref,
+		ObjectDigest: digest,
+		UpdatedAt:    time.Now().UTC(),
+	})
+
+	report, err := store.CompactV1Layout(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SourceIndexes != 1 || report.RemovedFiles != 0 || !report.DryRun {
+		t.Fatalf("unexpected dry-run report: %#v", report)
+	}
+	if _, err := os.Stat(store.sourceObjectIndexPath(ref)); err != nil {
+		t.Fatalf("dry-run removed legacy source index: %v", err)
+	}
+	if _, err := os.Stat(
+		store.packedSourceIndexShardPath(sourceObjectRefKey(ref)),
+	); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
+		t.Fatalf("dry-run wrote packed source shard: %v", err)
+	}
+}
+
+func TestCleanupSourceLocksRemovesOnlyExpiredLocks(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	expiredRef := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "expired",
+		ExternalVersion: "history-1",
+	}
+	freshRef := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "fresh",
+		ExternalVersion: "history-1",
+	}
+	expiredClaim, ok, err := store.TryAcquireSourceIngest(ctx, expiredRef)
+	if err != nil || !ok {
+		t.Fatalf("acquire expired lock: ok=%t err=%v", ok, err)
+	}
+	if _, ok, err := store.TryAcquireSourceIngest(ctx, freshRef); err != nil || !ok {
+		t.Fatalf("acquire fresh lock: ok=%t err=%v", ok, err)
+	}
+	if err := os.Chtimes(
+		store.sourceObjectLockPath(expiredRef),
+		expiredClaim.AcquiredAt.Add(-sourceIngestClaimTTL),
+		time.Now().Add(-2*sourceIngestClaimTTL),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := store.CleanupSourceLocks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.RemovedFiles != 1 {
+		t.Fatalf("expected one expired lock removed: %#v", report)
+	}
+	if _, err := os.Stat(
+		store.sourceObjectLockPath(expiredRef),
+	); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
+		t.Fatalf("expired lock still exists: %v", err)
+	}
+	if _, err := os.Stat(store.sourceObjectLockPath(freshRef)); err != nil {
+		t.Fatalf("fresh lock was removed: %v", err)
+	}
+}
+
+func TestStorageBreakdownIncludesObjectAndPackedMetadataFiles(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	ref := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1",
+		ExternalVersion: "history-1",
+	}
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+		Provenance: []contracts.Provenance{{
+			SourceKind:      ref.SourceKind,
+			SourceName:      ref.SourceName,
+			ExternalID:      ref.ExternalID,
+			ExternalVersion: ref.ExternalVersion,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := store.StorageBreakdown(ctx, StorageBreakdownRequest{
+		Digest:         digest,
+		RecursiveParts: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.RootDigest != digest || report.FileCount != len(report.Files) {
+		t.Fatalf("unexpected report identity/counts: %#v", report)
+	}
+	if report.TotalAllocatedBytes <= 0 || report.TotalLogicalBytes <= 0 {
+		t.Fatalf("expected positive totals: %#v", report)
+	}
+	for _, role := range []string{"blob", "manifest", "packed_recovery", "packed_source_index"} {
+		assertStorageRole(t, report, role)
+	}
+}
+
+func TestStorageBreakdownRecursesCompoundPartsByRequest(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	body, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("body text"),
+		Facets: []contracts.Facet{{Kind: "email_part"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compound, err := store.PutCompound(ctx, CompoundPutRequest{
+		ObjectID: "mail_message:<storage@example.test>",
+		Facets:   []contracts.Facet{{Kind: contracts.MailMessageFacetKind}},
+		Parts: []contracts.CompoundPart{{
+			Digest: body,
+			Role:   "email_body",
+			Order:  1,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recursive, err := store.StorageBreakdown(ctx, StorageBreakdownRequest{
+		Digest:         compound,
+		RecursiveParts: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownOnly, err := store.StorageBreakdown(ctx, StorageBreakdownRequest{
+		Digest:         compound,
+		RecursiveParts: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recursive.ReferencedObjectCount != 2 {
+		t.Fatalf("expected compound plus body object: %#v", recursive)
+	}
+	if ownOnly.ReferencedObjectCount != 1 {
+		t.Fatalf("expected only compound object: %#v", ownOnly)
+	}
+	if recursive.FileCount <= ownOnly.FileCount {
+		t.Fatalf(
+			"recursive report did not add files: recursive=%d own=%d",
+			recursive.FileCount,
+			ownOnly.FileCount,
+		)
+	}
+	foundPart := false
+	for _, file := range recursive.Files {
+		if file.ObjectDigest == body && file.RecursivePart &&
+			file.CompoundRole == "email_body" {
+			foundPart = true
+			break
+		}
+	}
+	if !foundPart {
+		t.Fatalf("missing recursive part file row: %#v", recursive.Files)
+	}
+}
+
+func TestResolvePathIdentifiesObjectFileAndPackedShard(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	ref := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1",
+		ExternalVersion: "history-1",
+	}
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: contracts.MailMessageFacetKind}},
+		Provenance: []contracts.Provenance{{
+			SourceKind:      ref.SourceKind,
+			SourceName:      ref.SourceName,
+			ExternalID:      ref.ExternalID,
+			ExternalVersion: ref.ExternalVersion,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blobReport, err := store.ResolvePath(ctx, PathResolveRequest{
+		Path: store.objectPath(digest, blobFilename),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blobReport.Kind != "object" ||
+		blobReport.Role != "blob" ||
+		blobReport.ObjectDigest != digest ||
+		blobReport.Manifest == nil ||
+		blobReport.Manifest.ObjectDigest != digest {
+		t.Fatalf("unexpected object path report: %#v", blobReport)
+	}
+
+	shardReport, err := store.ResolvePath(ctx, PathResolveRequest{
+		Path:         store.packedSourceIndexShardPath(sourceObjectRefKey(ref)),
+		RecordsLimit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shardReport.Kind != "packed_source_index" ||
+		shardReport.RecordCount != 1 ||
+		len(shardReport.Records) != 1 ||
+		shardReport.Records[0].ObjectDigest != digest {
+		t.Fatalf("unexpected source shard report: %#v", shardReport)
+	}
+}
+
+func TestResolvePathIdentifiesSourceCursorAndLock(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	cursor := contracts.SourceCursor{
+		SourceKind: "gmail",
+		SourceName: "primary",
+		Cursor:     map[string]any{"history_id": "1"},
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := store.WriteSourceCursor(ctx, cursor); err != nil {
+		t.Fatal(err)
+	}
+	cursorReport, err := store.ResolvePath(ctx, PathResolveRequest{
+		Path: store.sourceCursorPath(cursor),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursorReport.Kind != "source_cursor" ||
+		cursorReport.SourceCursor == nil ||
+		cursorReport.SourceCursor.SourceName != cursor.SourceName {
+		t.Fatalf("unexpected cursor report: %#v", cursorReport)
+	}
+
+	ref := contracts.SourceObjectRef{
+		SourceKind: "gmail",
+		SourceName: "primary",
+		ExternalID: "message-1",
+	}
+	claim, acquired, err := store.TryAcquireSourceIngest(ctx, ref)
+	if err != nil || !acquired {
+		t.Fatalf("acquire lock: acquired=%t err=%v", acquired, err)
+	}
+	lockReport, err := store.ResolvePath(ctx, PathResolveRequest{
+		Path: store.sourceObjectLockPath(ref),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lockReport.Kind != "source_lock" ||
+		lockReport.IngestClaim == nil ||
+		lockReport.IngestClaim.ClaimID != claim.ClaimID {
+		t.Fatalf("unexpected lock report: %#v", lockReport)
+	}
+}
+
+func TestResolvePathRejectsOutsideAndSymlinkEscape(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResolvePath(ctx, PathResolveRequest{Path: outside}); err == nil {
+		t.Fatal("expected outside path rejection")
+	}
+	link := filepath.Join(store.root, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResolvePath(ctx, PathResolveRequest{Path: "escape"}); err == nil {
+		t.Fatal("expected symlink escape rejection")
+	}
+}
+
 func countObjectDirs(t *testing.T, root string) int {
 	t.Helper()
 	count := 0
@@ -1378,4 +1855,35 @@ func assertFinding(t *testing.T, report VerifyReport, code string) {
 		}
 	}
 	t.Fatalf("missing finding %q in %#v", code, report.Findings)
+}
+
+func assertStorageRole(t *testing.T, report StorageBreakdownReport, role string) {
+	t.Helper()
+	for _, file := range report.Files {
+		if file.Role == role {
+			return
+		}
+	}
+	t.Fatalf("missing storage role %q in %#v", role, report.Files)
+}
+
+func writeTestJSON(t *testing.T, path string, value any) {
+	t.Helper()
+	encoded, err := canonicalJSON(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func removeFileIfExists(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
 }

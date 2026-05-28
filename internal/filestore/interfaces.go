@@ -72,6 +72,11 @@ type Store interface {
 	) error
 	WalkSourceCursors(ctx context.Context, fn SourceCursorProjectionFunc) error
 	Verify(ctx context.Context) (VerifyReport, error)
+	StorageBreakdown(
+		ctx context.Context,
+		request StorageBreakdownRequest,
+	) (StorageBreakdownReport, error)
+	ResolvePath(ctx context.Context, request PathResolveRequest) (PathResolveReport, error)
 }
 
 type ProjectionFinding struct {

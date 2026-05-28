@@ -232,6 +232,103 @@ func TestArchiveImportLowNoiseSkipsBodyLineMatchesWithoutProvenance(t *testing.T
 	if found {
 		t.Fatal("low-noise duplicate should not attach per-message provenance")
 	}
+	membershipDigest, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind:      contracts.MailArchiveSourceKind,
+			SourceName:      "archive",
+			ExternalID:      parsed.ExternalID + ":membership",
+			ExternalVersion: parsed.ExternalVersion,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("low-noise duplicate should write compact membership provenance")
+	}
+	membership, err := filestoreService.Store.ReadManifest(ctx, membershipDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFacetKind(membership, contracts.MailArchiveMembershipFacetKind) {
+		t.Fatalf("membership object missing facet: %#v", membership.Facets)
+	}
+}
+
+func TestMboxStreamingOffsetsParseOneMessageAtATime(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "Inbox")
+	writeTestFile(t, path, strings.Join([]string{
+		"From sender@example.test Sat Jan 01 00:00:00 2000",
+		"Message-ID: <one@example.test>",
+		"Subject: one",
+		"",
+		"first body",
+		"From sender@example.test Sat Jan 01 00:00:01 2000",
+		"Message-ID: <two@example.test>",
+		"Subject: two",
+		"",
+		"second body",
+		"",
+	}, "\n"))
+
+	offsets := []int64{}
+	err := forEachMboxMessageOffset(path, func(offset, _ int64) error {
+		offsets = append(offsets, offset)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offsets) != 2 || offsets[0] != 0 || offsets[1] != 1 {
+		t.Fatalf("unexpected offsets: %#v", offsets)
+	}
+	message, err := parseMboxMessageAt(path, root, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.MessageID != "<two@example.test>" ||
+		!strings.Contains(string(message.Body), "second body") {
+		t.Fatalf("parsed wrong mbox message: %#v body=%q", message, message.Body)
+	}
+}
+
+func TestQueuedArchiveImportUsesLocalStateAndMessageJobs(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	writeTestFile(
+		t,
+		filepath.Join(root, "one.eml"),
+		"Message-ID: <queued@example.test>\nSubject: queued\n\nqueued body",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := &memoryArchiveImportQueue{}
+	report, err := (ArchiveImportQueuedRun{
+		Importer: importer,
+		Source:   queue,
+	}).Run(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{root},
+		StateDir:   t.TempDir(),
+		Resume:     true,
+		Publisher:  queue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Enqueued != 1 || report.Processed != 1 || report.Imported != 1 {
+		t.Fatalf("unexpected queued import report: %#v", report)
+	}
+	if queue.published != 1 {
+		t.Fatalf("expected one published job, got %d", queue.published)
+	}
 }
 
 func writeTestFile(t *testing.T, path, content string) {
@@ -264,5 +361,74 @@ func mailMessageMetadataForArchiveTest(
 		}
 	}
 	t.Fatalf("manifest missing mail message facet: %#v", manifest.Facets)
+	return nil
+}
+
+func hasFacetKind(manifest contracts.Manifest, kind string) bool {
+	for _, facet := range manifest.Facets {
+		if facet.FacetKind() == kind {
+			return true
+		}
+	}
+
+	return false
+}
+
+type memoryArchiveImportQueue struct {
+	jobs      []contracts.SourceImportJob
+	published int
+}
+
+func (queue *memoryArchiveImportQueue) PublishSourceImportJob(
+	_ context.Context,
+	job contracts.SourceImportJob,
+) error {
+	queue.jobs = append(queue.jobs, job)
+	queue.published++
+
+	return nil
+}
+
+func (queue *memoryArchiveImportQueue) ProcessSourceImportFailures(
+	context.Context,
+	int,
+) (int, error) {
+	return 0, nil
+}
+
+func (queue *memoryArchiveImportQueue) SourceImportStatus(
+	context.Context,
+) (contracts.SourceImportQueueStatus, error) {
+	return contracts.SourceImportQueueStatus{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Pending:       len(queue.jobs),
+	}, nil
+}
+
+func (queue *memoryArchiveImportQueue) Receive(
+	context.Context,
+) (ArchiveImportJobReceipt, error) {
+	if len(queue.jobs) == 0 {
+		return nil, os.ErrNotExist
+	}
+	job := queue.jobs[0]
+	queue.jobs = queue.jobs[1:]
+
+	return memoryArchiveImportReceipt{job: job}, nil
+}
+
+type memoryArchiveImportReceipt struct {
+	job contracts.SourceImportJob
+}
+
+func (receipt memoryArchiveImportReceipt) Job() contracts.SourceImportJob {
+	return receipt.job
+}
+
+func (memoryArchiveImportReceipt) Ack(context.Context) error {
+	return nil
+}
+
+func (memoryArchiveImportReceipt) Retry(context.Context, error) error {
 	return nil
 }

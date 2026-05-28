@@ -4,25 +4,27 @@
 package contracts
 
 const (
-	MailArchiveSourceKind      = "mail_archive"
-	MailIdentitySourceKind     = "mail_identity"
-	MailIdentitySourceName     = "rfc_message_id"
-	MailGeneratedMessageIDHost = "gmeow.local"
-	MailMessageFacetKind       = "mail_message"
-	MailVariantFacetKind       = "mail_message_variant"
-	MailPatchDiffRole          = "patch_diff"
-	MailArchiveMetadataRole    = "archive_data"
-	MailMessageIdentityRole    = "mail_identity"
-	MailMessageVariantRole     = "mail_variant"
-	MailMessageContentRole     = "mail_message"
-	MailMessageContainerRole   = "container"
-	MailHeadersRole            = "rfc822_headers"
-	MailBodyRole               = "email_body"
-	MailAttachmentRole         = "attachment"
-	MailMIMEStructureRole      = "mime_structure"
-	MailVersionSetDomain       = "mail_message"
-	MailBodyLineFingerprint    = "body_line"
-	MailSemanticFingerprint    = "semantic"
+	MailArchiveSourceKind          = "mail_archive"
+	MailIdentitySourceKind         = "mail_identity"
+	MailIdentitySourceName         = "rfc_message_id"
+	MailGeneratedMessageIDHost     = "gmeow.local"
+	MailMessageFacetKind           = "mail_message"
+	MailVariantFacetKind           = "mail_message_variant"
+	MailArchiveMembershipFacetKind = "mail_archive_membership"
+	MailPatchDiffRole              = "patch_diff"
+	MailArchiveMetadataRole        = "archive_data"
+	MailMessageIdentityRole        = "mail_identity"
+	MailMessageVariantRole         = "mail_variant"
+	MailArchiveMembershipRole      = "mail_archive_membership"
+	MailMessageContentRole         = "mail_message"
+	MailMessageContainerRole       = "container"
+	MailHeadersRole                = "rfc822_headers"
+	MailBodyRole                   = "email_body"
+	MailAttachmentRole             = "attachment"
+	MailMIMEStructureRole          = "mime_structure"
+	MailVersionSetDomain           = "mail_message"
+	MailBodyLineFingerprint        = "body_line"
+	MailSemanticFingerprint        = "semantic"
 )
 
 type MailIdentityReportRequest struct {
@@ -50,4 +52,16 @@ type MailIdentityReportResponse struct {
 	Total  int                      `json:"total"`
 	Limit  int                      `json:"limit"`
 	Offset int                      `json:"offset"`
+}
+
+type MailIdentityResolveRequest struct {
+	MessageID string `json:"message_id"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type MailIdentityResolveResponse struct {
+	MessageID string         `json:"message_id"`
+	Digests   []ObjectDigest `json:"digests"`
+	Total     int            `json:"total"`
+	Limit     int            `json:"limit"`
 }

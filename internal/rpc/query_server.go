@@ -114,6 +114,33 @@ func (server *QueryServer) Search(
 	}, nil
 }
 
+func (server *QueryServer) ResolveMailIdentity(
+	ctx context.Context,
+	request *pb.MailIdentityResolveRequest,
+) (*pb.MailIdentityResolveResponse, error) {
+	response, err := server.index.ResolveMailIdentity(
+		ctx,
+		contracts.MailIdentityResolveRequest{
+			MessageID: request.GetMessageId(),
+			Limit:     int(request.GetLimit()),
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	digests := make([]string, 0, len(response.Digests))
+	for _, digest := range response.Digests {
+		digests = append(digests, string(digest))
+	}
+
+	return &pb.MailIdentityResolveResponse{
+		MessageId:     response.MessageID,
+		ObjectDigests: digests,
+		Total:         int32(response.Total),
+		Limit:         int32(response.Limit),
+	}, nil
+}
+
 func (server *QueryServer) Structure(
 	ctx context.Context,
 	request *pb.StructureRequest,
