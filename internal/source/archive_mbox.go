@@ -82,10 +82,11 @@ func forEachMboxMessage(path, root string, fn func(archiveMessage) error) error 
 					ArchiveImportFormatMbox,
 					offset,
 				)
-				if err == nil {
-					if err := fn(message); err != nil {
-						return err
-					}
+				if err != nil {
+					return fmt.Errorf("parse mbox message %s#%d: %w", path, offset, err)
+				}
+				if err := fn(message); err != nil {
+					return err
 				}
 				current.Reset()
 				offset++
@@ -109,10 +110,11 @@ func forEachMboxMessage(path, root string, fn func(archiveMessage) error) error 
 			ArchiveImportFormatMbox,
 			offset,
 		)
-		if err == nil {
-			if err := fn(message); err != nil {
-				return err
-			}
+		if err != nil {
+			return fmt.Errorf("parse mbox message %s#%d: %w", path, offset, err)
+		}
+		if err := fn(message); err != nil {
+			return err
 		}
 	}
 

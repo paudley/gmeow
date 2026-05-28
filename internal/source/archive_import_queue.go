@@ -26,6 +26,7 @@ const (
 type ArchiveImportJobReceipt interface {
 	Job() contracts.SourceImportJob
 	Ack(context.Context) error
+	Release(context.Context) error
 	Retry(context.Context, error) error
 }
 
@@ -185,10 +186,7 @@ func (run ArchiveImportQueuedRun) drainOne(
 	}
 	job := receipt.Job()
 	if job.RunID != report.RunID {
-		return receipt.Retry(
-			ctx,
-			fmt.Errorf("source import job belongs to run %s", job.RunID),
-		)
+		return receipt.Release(ctx)
 	}
 	if err := run.Importer.ProcessSourceImportJob(
 		ctx,

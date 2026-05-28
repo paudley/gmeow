@@ -491,6 +491,7 @@ type SourceImportJobReceipt struct {
 type SourceImportReceipt interface {
 	Job() contracts.SourceImportJob
 	Ack(context.Context) error
+	Release(context.Context) error
 	Retry(context.Context, error) error
 }
 
@@ -503,6 +504,13 @@ func (receipt *SourceImportJobReceipt) Ack(context.Context) error {
 	defer receipt.source.mutex.Unlock()
 
 	return receipt.delivery.Ack(false)
+}
+
+func (receipt *SourceImportJobReceipt) Release(context.Context) error {
+	receipt.source.mutex.Lock()
+	defer receipt.source.mutex.Unlock()
+
+	return receipt.delivery.Nack(false, true)
 }
 
 func (receipt *SourceImportJobReceipt) Retry(ctx context.Context, cause error) error {

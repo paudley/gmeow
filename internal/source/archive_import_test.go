@@ -5,6 +5,7 @@ package source
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,6 +175,93 @@ func TestArchiveImportMboxNNMLAndCollisionVariant(t *testing.T) {
 	}
 }
 
+func TestArchiveImportVariantDoesNotOverwriteCanonicalParts(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	first := filepath.Join(root, "first.eml")
+	second := filepath.Join(root, "second.eml")
+	writeTestFile(
+		t,
+		first,
+		"Message-ID: <variant@example.test>\nFrom: a@example.test\nTo: b@example.test\nSubject: canonical\n\ncanonical body is much longer\n",
+	)
+	writeTestFile(
+		t,
+		second,
+		"Message-ID: <variant@example.test>\nFrom: a@example.test\nTo: b@example.test\nSubject: variant\n\nshort\n",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{first},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Collisions != 1 || report.Promoted != 0 {
+		t.Fatalf("expected non-promoted variant collision, got %#v", report)
+	}
+	canonical, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind: contracts.MailIdentitySourceKind,
+			SourceName: contracts.MailIdentitySourceName,
+			ExternalID: "<variant@example.test>",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected canonical message lookup")
+	}
+	structure, err := filestoreService.Store.GetStructure(ctx, canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyParts := structure.PartsByRole[contracts.MailBodyRole]
+	if len(bodyParts) == 0 {
+		t.Fatalf("canonical body missing: %#v", structure.PartsByRole)
+	}
+	reader, err := filestoreService.Store.Open(ctx, bodyParts[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(reader)
+	if closeErr := reader.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "canonical body is much longer\n" {
+		t.Fatalf("canonical body was overwritten: %q", body)
+	}
+	manifest, err := filestoreService.Store.ReadManifest(ctx, canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mailMessageMetadataForArchiveTest(t, manifest)
+	if metadata["subject"] != "canonical" {
+		t.Fatalf("canonical metadata was overwritten: %#v", metadata)
+	}
+	if metadata["version_count"] != float64(2) && metadata["version_count"] != 2 {
+		t.Fatalf("expected version_count=2, got %#v", metadata)
+	}
+}
+
 func TestArchiveImportLowNoiseSkipsBodyLineMatchesWithoutProvenance(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
@@ -294,6 +382,29 @@ func TestMboxStreamingOffsetsParseOneMessageAtATime(t *testing.T) {
 	}
 }
 
+func TestMboxStreamingReturnsMessageParseError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "Inbox")
+	writeTestFile(t, path, strings.Join([]string{
+		"From sender@example.test Sat Jan 01 00:00:00 2000",
+		"this is not a valid header",
+		"",
+		"bad body",
+		"",
+	}, "\n"))
+	called := false
+	err := forEachMboxMessage(path, root, func(archiveMessage) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected mbox parse error")
+	}
+	if called {
+		t.Fatal("callback should not run for an unparseable message")
+	}
+}
+
 func TestExtractMailBodyAndAttachmentsRecursesNestedMultipart(t *testing.T) {
 	raw := strings.Join([]string{
 		"Message-ID: <nested@example.test>",
@@ -408,6 +519,41 @@ func TestQueuedArchiveImportDrainsAtQueueHighWater(t *testing.T) {
 	}
 }
 
+func TestQueuedArchiveImportReleasesForeignRunJobs(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := &memoryArchiveImportQueue{
+		jobs: []contracts.SourceImportJob{{
+			RunID: "other-run",
+		}},
+	}
+	report := ArchiveImportReport{RunID: "this-run"}
+	state := archiveImportRunState{RunID: "this-run"}
+	err = (ArchiveImportQueuedRun{
+		Importer: importer,
+		Source:   queue,
+	}).drainOne(ctx, ArchiveImportRequest{Publisher: queue}, "archive", &state, &report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queue.released != 1 || queue.retried != 0 || report.Processed != 0 {
+		t.Fatalf(
+			"foreign job should be released without retry/process: released=%d retried=%d report=%#v",
+			queue.released,
+			queue.retried,
+			report,
+		)
+	}
+	if len(queue.jobs) != 1 || queue.jobs[0].RunID != "other-run" {
+		t.Fatalf("foreign job was not left available: %#v", queue.jobs)
+	}
+}
+
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -454,6 +600,8 @@ func hasFacetKind(manifest contracts.Manifest, kind string) bool {
 type memoryArchiveImportQueue struct {
 	jobs      []contracts.SourceImportJob
 	published int
+	released  int
+	retried   int
 }
 
 func (queue *memoryArchiveImportQueue) PublishSourceImportJob(
@@ -491,21 +639,33 @@ func (queue *memoryArchiveImportQueue) Receive(
 	job := queue.jobs[0]
 	queue.jobs = queue.jobs[1:]
 
-	return memoryArchiveImportReceipt{job: job}, nil
+	return &memoryArchiveImportReceipt{queue: queue, job: job}, nil
 }
 
 type memoryArchiveImportReceipt struct {
-	job contracts.SourceImportJob
+	queue *memoryArchiveImportQueue
+	job   contracts.SourceImportJob
 }
 
-func (receipt memoryArchiveImportReceipt) Job() contracts.SourceImportJob {
+func (receipt *memoryArchiveImportReceipt) Job() contracts.SourceImportJob {
 	return receipt.job
 }
 
-func (memoryArchiveImportReceipt) Ack(context.Context) error {
+func (*memoryArchiveImportReceipt) Ack(context.Context) error {
 	return nil
 }
 
-func (memoryArchiveImportReceipt) Retry(context.Context, error) error {
+func (receipt *memoryArchiveImportReceipt) Release(context.Context) error {
+	receipt.queue.released++
+	receipt.queue.jobs = append(
+		[]contracts.SourceImportJob{receipt.job},
+		receipt.queue.jobs...)
+
+	return nil
+}
+
+func (receipt *memoryArchiveImportReceipt) Retry(context.Context, error) error {
+	receipt.queue.retried++
+
 	return nil
 }

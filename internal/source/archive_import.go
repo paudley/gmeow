@@ -485,11 +485,37 @@ func (importer *ArchiveImporter) ingestVariantMessage(
 	if err != nil {
 		return err
 	}
-	parts = append(parts, contracts.CompoundPart{
+	canonicalParts := []contracts.CompoundPart{{
 		Digest: recordDigest,
 		Role:   contracts.VersionRecordRole,
 		Order:  100 + versionCount(canonicalManifest),
-	})
+	}}
+	if promote {
+		canonicalParts = append(canonicalParts, parts...)
+	}
+	maxScale := maxVersionScale(
+		stringValue(mailFacetMetadata(canonicalManifest)["max_scale"]),
+		scale,
+	)
+	nextVersionCount := versionCount(canonicalManifest) + 1
+	canonicalVersionID := firstNonEmpty(
+		promotedCanonicalVersionID(promote, message),
+		stringValue(mailFacetMetadata(canonicalManifest)["canonical_version_id"]),
+	)
+	canonicalMailMetadata := archiveMailMetadata(
+		message,
+		true,
+		maxScale,
+		nextVersionCount,
+		canonicalVersionID,
+	)
+	if !promote {
+		canonicalMailMetadata = cloneMetadata(mailFacetMetadata(canonicalManifest))
+		canonicalMailMetadata["message_id_collision"] = true
+		canonicalMailMetadata["version_count"] = nextVersionCount
+		canonicalMailMetadata["max_scale"] = maxScale
+		canonicalMailMetadata["canonical_version_id"] = canonicalVersionID
+	}
 
 	object := IngestObject{
 		ObservedAt:  message.ObservedAt,
@@ -507,39 +533,21 @@ func (importer *ArchiveImporter) ingestVariantMessage(
 				contracts.MailMessageContainerRole,
 			},
 			Facets: []contracts.Facet{{
-				Kind: contracts.MailMessageFacetKind,
-				Metadata: archiveMailMetadata(
-					message,
-					true,
-					maxVersionScale(
-						stringValue(mailFacetMetadata(canonicalManifest)["max_scale"]),
-						scale,
-					),
-					versionCount(canonicalManifest)+1,
-					firstNonEmpty(
-						promotedCanonicalVersionID(promote, message),
-						stringValue(mailFacetMetadata(canonicalManifest)["canonical_version_id"]),
-					),
-				),
+				Kind:     contracts.MailMessageFacetKind,
+				Metadata: canonicalMailMetadata,
 			}, {
 				Kind: contracts.VersionSetFacetKind,
 				Metadata: map[string]any{
-					"domain_kind": contracts.MailVersionSetDomain,
-					"logical_id":  message.MessageID,
-					"canonical_version_id": firstNonEmpty(
-						promotedCanonicalVersionID(promote, message),
-						stringValue(mailFacetMetadata(canonicalManifest)["canonical_version_id"]),
-					),
-					"version_count": versionCount(canonicalManifest) + 1,
-					"max_scale": maxVersionScale(
-						stringValue(mailFacetMetadata(canonicalManifest)["max_scale"]),
-						scale,
-					),
-					"updated_at": message.ObservedAt.Format(time.RFC3339Nano),
+					"domain_kind":          contracts.MailVersionSetDomain,
+					"logical_id":           message.MessageID,
+					"canonical_version_id": canonicalVersionID,
+					"version_count":        nextVersionCount,
+					"max_scale":            maxScale,
+					"updated_at":           message.ObservedAt.Format(time.RFC3339Nano),
 				},
 			}, {Kind: "container"}},
 			Provenance: []contracts.Provenance{archiveProvenance(sourceName, message)},
-			Parts:      parts,
+			Parts:      canonicalParts,
 		},
 	}
 	_, _, err = importer.service.Ingest(ctx, object)
@@ -1263,6 +1271,15 @@ func mailFacetMetadata(manifest contracts.Manifest) map[string]any {
 		}
 	}
 	return map[string]any{}
+}
+
+func cloneMetadata(metadata map[string]any) map[string]any {
+	cloned := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		cloned[key] = value
+	}
+
+	return cloned
 }
 
 func headerMap(header mail.Header) map[string]string {
