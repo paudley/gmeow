@@ -445,6 +445,7 @@ func (source *SourceImportJobSource) publishFailure(
 		return fmt.Errorf("enable scheduler rabbitmq source import failure confirms: %w", err)
 	}
 	confirms := channel.NotifyPublish(make(chan amqp.Confirmation, 1))
+	closed := channel.NotifyClose(make(chan *amqp.Error, 1))
 
 	headers := amqp.Table{"attempt": int32(job.Attempt)}
 	if cause != nil {
@@ -471,14 +472,23 @@ func (source *SourceImportJobSource) publishFailure(
 	}
 
 	select {
-	case confirmation := <-confirms:
+	case confirmation, ok := <-confirms:
+		if !ok {
+			return errors.New("source import failure confirm channel closed before confirmation")
+		}
 		if !confirmation.Ack {
 			return errors.New("source import failure publish was not confirmed")
 		}
 
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	case closeErr := <-closed:
+		if closeErr != nil {
+			return fmt.Errorf(
+				"source import failure publish channel closed before confirmation: %w",
+				closeErr,
+			)
+		}
+		return errors.New("source import failure publish channel closed before confirmation")
 	}
 }
 

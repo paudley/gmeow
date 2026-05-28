@@ -468,7 +468,10 @@ func scanPackedShard(
 		if hitTooLong {
 			// ReadSlice hit its buffer limit, not the packed record limit.
 			// Collect the whole line and then apply packedShardMaxLineBytes.
-			fullLine, terminated, tooLarge, drainErr := drainPackedLongLine(reader, copied)
+			fullLine, terminated, tooLarge, spanLen, drainErr := drainPackedLongLine(
+				reader,
+				copied,
+			)
 			if drainErr != nil {
 				return packedShardScanResult{}, drainErr
 			}
@@ -482,7 +485,7 @@ func scanPackedShard(
 				)
 			}
 			if !terminated {
-				result.TornTailBytes = int64(len(fullLine))
+				result.TornTailBytes = spanLen
 				if tooLarge {
 					result.TornTailErr = fmt.Errorf(
 						"torn tail exceeds %d bytes",
@@ -580,25 +583,32 @@ func scanPackedShard(
 func drainPackedLongLine(
 	reader *bufio.Reader,
 	initial []byte,
-) ([]byte, bool, bool, error) {
+) ([]byte, bool, bool, int64, error) {
 	collected := append([]byte(nil), initial...)
-	tooLarge := int64(len(collected)) > packedShardMaxLineBytes
+	spanLen := int64(len(initial))
+	tooLarge := spanLen > packedShardMaxLineBytes
 	for {
 		chunk, err := reader.ReadSlice('\n')
-		collected = append(collected, chunk...)
-		if int64(len(collected)) > packedShardMaxLineBytes {
+		spanLen += int64(len(chunk))
+		if !tooLarge {
+			collected = append(collected, chunk...)
+		}
+		if spanLen > packedShardMaxLineBytes {
 			tooLarge = true
+			if cap(collected) > int(packedShardMaxLineBytes) {
+				collected = nil
+			}
 		}
 		if errors.Is(err, io.EOF) {
-			return collected, false, tooLarge, nil
+			return collected, false, tooLarge, spanLen, nil
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
 		}
 		if err != nil {
-			return nil, false, false, err
+			return nil, false, false, spanLen, err
 		}
-		return collected, true, tooLarge, nil
+		return collected, true, tooLarge, spanLen, nil
 	}
 }
 

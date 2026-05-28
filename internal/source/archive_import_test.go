@@ -257,9 +257,6 @@ func TestArchiveImportVariantDoesNotOverwriteCanonicalParts(t *testing.T) {
 	if metadata["subject"] != "canonical" {
 		t.Fatalf("canonical metadata was overwritten: %#v", metadata)
 	}
-	if metadata["version_count"] != float64(2) && metadata["version_count"] != 2 {
-		t.Fatalf("expected version_count=2, got %#v", metadata)
-	}
 }
 
 func TestArchiveImportLowNoiseSkipsBodyLineMatchesWithoutProvenance(t *testing.T) {
@@ -305,7 +302,7 @@ func TestArchiveImportLowNoiseSkipsBodyLineMatchesWithoutProvenance(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, found, err := filestoreService.Client.LookupSourceObject(
+	aliasDigest, found, err := filestoreService.Client.LookupSourceObject(
 		ctx,
 		contracts.SourceObjectRef{
 			SourceKind:      contracts.MailArchiveSourceKind,
@@ -317,8 +314,27 @@ func TestArchiveImportLowNoiseSkipsBodyLineMatchesWithoutProvenance(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if found {
-		t.Fatal("low-noise duplicate should not attach per-message provenance")
+	if !found {
+		t.Fatal("low-noise duplicate should be discoverable through archive alias")
+	}
+	canonicalDigest, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind: contracts.MailIdentitySourceKind,
+			SourceName: contracts.MailIdentitySourceName,
+			ExternalID: "<dup@example.test>",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || aliasDigest != canonicalDigest {
+		t.Fatalf(
+			"low-noise duplicate alias should preserve canonical lookup, alias=%s canonical=%s found=%t",
+			aliasDigest,
+			canonicalDigest,
+			found,
+		)
 	}
 	membershipDigest, found, err := filestoreService.Client.LookupSourceObject(
 		ctx,

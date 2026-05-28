@@ -123,7 +123,7 @@ func (store *FilesystemStore) verifyObject(
 				blob,
 				compressedBlob,
 			)
-		} else if !found {
+		} else {
 			report.addFinding(digest, recoveryPath, "recovery_missing", err.Error())
 		}
 	} else {

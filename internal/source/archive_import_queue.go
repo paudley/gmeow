@@ -186,7 +186,15 @@ func (run ArchiveImportQueuedRun) drainOne(
 	}
 	job := receipt.Job()
 	if job.RunID != report.RunID {
-		return receipt.Release(ctx)
+		if err := receipt.Release(ctx); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+			return nil
+		}
 	}
 	if err := run.Importer.ProcessSourceImportJob(
 		ctx,
