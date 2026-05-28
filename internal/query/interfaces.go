@@ -64,6 +64,14 @@ type Index interface {
 		ctx context.Context,
 		request contracts.SourceCursorRequest,
 	) (contracts.SourceCursorResponse, error)
+	MailArchiveMissingGmail(
+		ctx context.Context,
+		request contracts.MailIdentityReportRequest,
+	) (contracts.MailIdentityReportResponse, error)
+	ResolveMailIdentity(
+		ctx context.Context,
+		request contracts.MailIdentityResolveRequest,
+	) (contracts.MailIdentityResolveResponse, error)
 	JMAPMailboxes(ctx context.Context) ([]contracts.JMAPMailbox, error)
 	JMAPEmailStates(
 		ctx context.Context,

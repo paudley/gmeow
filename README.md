@@ -19,19 +19,20 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Runs typed gRPC service endpoints for FILESTORE, QUERY, and SCHEDULER over Unix sockets by default.
 - Keeps concrete backend ownership isolated: QUERY owns PostgreSQL, SCHEDULER owns RabbitMQ,
   ANALYSIS only reads/writes FILESTORE, and services communicate over typed gRPC boundaries.
-- Provides admin commands for config, FILESTORE verification, QUERY projection, and SCHEDULER operations.
+- Provides admin commands for config, FILESTORE verification, QUERY projection, read-only archive mail import, and SCHEDULER operations.
 - Runs Go ANALYSIS workers that consume scheduler jobs, read/write FILESTORE through typed gRPC, and support explicit `gmeow-intel` external analyzer adapters for Python/model behavior.
 - Provides Go SOURCE adapters for local filesystem fixtures, push/ringme records, the Gmail SOURCE adapter for ingest/hydrate/live search/live retrieve/actions, and design-only Drive capability checks.
 - Exposes shared application services through stdio `gmeow mcp-serve`, Streamable HTTP `gmeow mcp-http-serve`, `gmeow rest-serve`, read-only `gmeow imap-serve`, and HTTP `gmeow jmap-serve`; user-facing `search`, `mail-search`, `retrieve`, `ops-status`, and `force-analysis` commands use the same service layer.
 
 ## Features
 
-- BLAKE3 content identity with zstd-compressed FILESTORE blobs and immutable recovery sidecars.
+- BLAKE3 content identity with zstd-compressed FILESTORE blobs and immutable packed recovery records.
 - Atomic manifest, analysis, overlay, and source-cursor annotations.
 - Rebuildable PostgreSQL projection for facets, provenance, relationships, compound parts, analysis status, graph facts, keywords, embeddings, overlays, and source cursors.
 - Read-only Apache AGE graph inspection over projected graph facts.
 - Go SCHEDULER work derivation with RabbitMQ priority, retry, and dead-letter queues.
 - Go SOURCE adapters submit normalized content to FILESTORE and use source lookup/ingest claims before payload streaming.
+- Read-only archive import ingests Maildir, mbox, Evolution, Gnus NNML/MH, Thunderbird/Mozilla, and RFC822/EML directories as `mail_message` compounds with Message-ID dedupe.
 - The old Python runtime code is retired. The remaining `python/` package is the explicit ANALYSIS external adapter package.
 
 ## Install
@@ -128,10 +129,26 @@ bin/gmeow --config gmeow.toml jmap-serve
 by default. Override `BIN_DIR` only when packaging or deploying to an explicit
 operator-owned path.
 
-Operational commands include `gmeow-admin filestore verify`, `gmeow-admin query rebuild`,
-and `gmeow-admin query project-changed --since <RFC3339>` for FILESTORE verification and QUERY
-projection work. Broad or destructive production-like operations require explicit instance
-confirmation.
+Operational commands include `gmeow-admin filestore verify`, `gmeow-admin filestore storage`,
+`gmeow-admin filestore path`, `gmeow-admin filestore compact`, `gmeow-admin filestore cleanup-locks`,
+`gmeow-admin query rebuild`, and `gmeow-admin query project-changed --since <RFC3339>` for
+FILESTORE verification, object storage inspection, metadata maintenance, and QUERY projection work.
+Broad or destructive production-like operations require explicit instance confirmation.
+Historical archive mail import is available through
+`gmeow-admin source import --source-name <name> <root...>`. Import roots are
+read-only inputs: gmeow never rewrites maildir flags, mbox files, NNML folders,
+or source archive metadata. Imported messages use normalized RFC Message-ID as
+the primary dedupe key; messages without one receive deterministic
+`gmeow-generated` Message-IDs. Non-dry-run archive import is queue-backed:
+the command walks the roots, enqueues one scheduler-owned source-import job per
+message, and drains those jobs in the foreground. Local run state defaults to
+`system.data_dir/import-runs` and can be overridden with `--state-dir`.
+`--low-noise` records compact archive membership for existing Message-ID/body-line
+matches and trivial archive differences without rewriting canonical message
+manifests.
+QUERY can report archive Message-IDs absent from Gmail with
+`gmeow-admin query mail-missing-gmail --source-name <name>`. See
+`docs/architecture/VERSIONING.md` for canonical promotion and version scale.
 SCHEDULER provides `gmeow-admin scheduler scan`, `status`, `failed`, `dead-letter`, `requeue`, and
 `force`; RabbitMQ is mandatory. FILESTORE notifies SCHEDULER over gRPC after object and annotation
 writes. Object changes schedule missing/stale analyzer work, while analysis annotation writes enqueue
@@ -192,10 +209,12 @@ code does not talk directly to PostgreSQL. See `docs/architecture/JMAP.md`.
 By default, local data is ignored by git and stored under `data/`:
 
 - `data/filestore/` is the Go FILESTORE root.
-- `data/filestore/source-index/` stores source identity lookup records so SOURCE hydrate/search
-  paths do not walk object directories.
-- `data/filestore/compound-parent-index/` stores reverse child-to-parent references so annotation
-  refresh can update compound parents without scanning the filestore.
+- `data/filestore/source-index-v2/` stores packed source identity lookup records so SOURCE
+  hydrate/search paths do not walk object directories.
+- `data/filestore/compound-parent-index-v2/` stores packed reverse child-to-parent references so
+  annotation refresh can update compound parents without scanning the filestore.
+- `data/filestore/recovery-v2/` stores packed object recovery records for emergency operator
+  export.
 - PostgreSQL, RabbitMQ, object storage, query indexes, analysis annotations, and source state are
   runtime data.
 

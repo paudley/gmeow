@@ -1,0 +1,1443 @@
+// SPDX-FileCopyrightText: 2026 Blackcat Informatics Inc.
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package source
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/mail"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"blackcat.ca/gmeow/internal/contracts"
+)
+
+const (
+	ArchiveImportFormatAuto    = "auto"
+	ArchiveImportFormatMaildir = "maildir"
+	ArchiveImportFormatMbox    = "mbox"
+	ArchiveImportFormatNNML    = "nnml"
+	ArchiveImportFormatMH      = "mh"
+	ArchiveImportFormatEMLDir  = "eml-dir"
+)
+
+var numberedMailFilePattern = regexp.MustCompile(`^[0-9]+$`)
+
+type ArchiveImportRequest struct {
+	SourceName      string
+	Format          string
+	Roots           []string
+	RunID           string
+	StateDir        string
+	DryRun          bool
+	LowNoise        bool
+	Resume          bool
+	QueueHighWater  int
+	Publisher       ArchiveImportPublisher
+	Status          ArchiveImportQueueStatusFunc
+	CapacityDrainer func(context.Context) error
+}
+
+type ArchiveImportReport struct {
+	SourceName          string   `json:"source_name"`
+	RunID               string   `json:"run_id,omitempty"`
+	Scanned             int      `json:"scanned"`
+	Parsed              int      `json:"parsed"`
+	Enqueued            int      `json:"enqueued"`
+	Processed           int      `json:"processed"`
+	Imported            int      `json:"imported"`
+	ExactDuplicates     int      `json:"exact_duplicates"`
+	MessageIDDuplicates int      `json:"message_id_duplicates"`
+	GeneratedMessageIDs int      `json:"generated_message_ids"`
+	LowNoiseSkipped     int      `json:"low_noise_skipped"`
+	TrivialSkipped      int      `json:"trivial_skipped"`
+	MinorVersions       int      `json:"minor_versions"`
+	MajorVersions       int      `json:"major_versions"`
+	Promoted            int      `json:"promoted"`
+	Collisions          int      `json:"collisions"`
+	ParseFailures       int      `json:"parse_failures"`
+	Skipped             int      `json:"skipped"`
+	SkippedMessageIDs   []string `json:"skipped_message_ids,omitempty"`
+	Failures            []string `json:"failures,omitempty"`
+}
+
+type ArchiveImportPublisher interface {
+	PublishSourceImportJob(context.Context, contracts.SourceImportJob) error
+	ProcessSourceImportFailures(context.Context, int) (int, error)
+	SourceImportStatus(context.Context) (contracts.SourceImportQueueStatus, error)
+}
+
+type ArchiveImportQueueStatusFunc func(context.Context) (contracts.SourceImportQueueStatus, error)
+
+type ArchiveImporter struct {
+	service *Service
+	store   FilestoreClient
+}
+
+type archiveMessage struct {
+	ObservedAt       time.Time
+	SourcePath       string
+	Mailbox          string
+	Format           string
+	ExternalID       string
+	ExternalVersion  string
+	Raw              []byte
+	Headers          map[string]string
+	Body             []byte
+	BodyMediaType    string
+	Attachments      []archiveAttachment
+	MessageID        string
+	GeneratedMessage bool
+	Fingerprint      string
+	BodyLineHash     string
+	Subject          string
+	Date             string
+	From             string
+	To               string
+}
+
+type archiveAttachment struct {
+	Content   []byte
+	FileName  string
+	MediaType string
+}
+
+func NewArchiveImporter(store FilestoreClient) (*ArchiveImporter, error) {
+	service, err := NewService(store)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ArchiveImporter{service: service, store: store}, nil
+}
+
+func (importer *ArchiveImporter) Import(
+	ctx context.Context,
+	request ArchiveImportRequest,
+) (ArchiveImportReport, error) {
+	sourceName := strings.TrimSpace(request.SourceName)
+	if sourceName == "" {
+		if len(request.Roots) == 0 {
+			return ArchiveImportReport{}, errors.New("archive import root is required")
+		}
+		sourceName = sourceNameFromRoot(request.Roots[0])
+	}
+
+	report := ArchiveImportReport{SourceName: sourceName}
+	for _, root := range request.Roots {
+		if err := importer.importRoot(ctx, request, sourceName, root, &report); err != nil {
+			report.Failures = append(report.Failures, err.Error())
+		}
+	}
+
+	if len(report.Failures) > 0 {
+		return report, fmt.Errorf(
+			"archive import completed with %d root failure(s)",
+			len(report.Failures),
+		)
+	}
+
+	return report, nil
+}
+
+func (importer *ArchiveImporter) importRoot(
+	ctx context.Context,
+	request ArchiveImportRequest,
+	sourceName string,
+	root string,
+	report *ArchiveImportReport,
+) error {
+	root = filepath.Clean(root)
+	info, err := os.Stat(root)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		message, parseErr := parseArchiveFile(root, root, request.Format, 0)
+		if parseErr != nil {
+			report.ParseFailures++
+			return parseErr
+		}
+		report.Scanned++
+		report.Parsed++
+		return importer.ingestArchiveMessage(ctx, sourceName, message, request, report)
+	}
+
+	return filepath.WalkDir(
+		root,
+		func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				report.Failures = append(report.Failures, walkErr.Error())
+				return nil
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if shouldSkipArchiveDir(entry.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if shouldSkipArchiveFile(entry.Name()) {
+				report.Skipped++
+				return nil
+			}
+			format := detectArchiveFileFormat(path, root, request.Format)
+			if format == "" {
+				report.Skipped++
+				return nil
+			}
+			report.Scanned++
+			if format == ArchiveImportFormatMbox {
+				parseErr := forEachMboxMessage(path, root, func(message archiveMessage) error {
+					report.Parsed++
+					if err := importer.ingestArchiveMessage(
+						ctx,
+						sourceName,
+						message,
+						request,
+						report,
+					); err != nil {
+						report.Failures = append(report.Failures, err.Error())
+					}
+
+					return nil
+				})
+				if parseErr != nil {
+					report.ParseFailures++
+					report.Failures = append(report.Failures, parseErr.Error())
+					return nil
+				}
+				return nil
+			}
+
+			message, parseErr := parseArchiveFile(path, root, format, 0)
+			if parseErr != nil {
+				report.ParseFailures++
+				report.Failures = append(report.Failures, parseErr.Error())
+				return nil
+			}
+			report.Parsed++
+			if err := importer.ingestArchiveMessage(
+				ctx,
+				sourceName,
+				message,
+				request,
+				report,
+			); err != nil {
+				report.Failures = append(report.Failures, err.Error())
+			}
+
+			return nil
+		},
+	)
+}
+
+func (importer *ArchiveImporter) ingestArchiveMessage(
+	ctx context.Context,
+	sourceName string,
+	message archiveMessage,
+	request ArchiveImportRequest,
+	report *ArchiveImportReport,
+) error {
+	if message.GeneratedMessage {
+		report.GeneratedMessageIDs++
+	}
+	if request.DryRun {
+		report.Imported++
+		return nil
+	}
+
+	identityRef := contracts.SourceObjectRef{
+		SourceKind: contracts.MailIdentitySourceKind,
+		SourceName: contracts.MailIdentitySourceName,
+		ExternalID: message.MessageID,
+	}
+	if existing, found, err := importer.store.LookupSourceObject(
+		ctx,
+		identityRef,
+	); err != nil {
+		return err
+	} else if found {
+		return importer.ingestDuplicateOrVariant(
+			ctx,
+			sourceName,
+			existing,
+			message,
+			request.LowNoise,
+			report,
+		)
+	}
+
+	digest, created, err := importer.ingestCanonicalMessage(ctx, sourceName, message)
+	if err != nil {
+		return err
+	}
+	if created {
+		report.Imported++
+	} else {
+		report.ExactDuplicates++
+	}
+	if digest == "" {
+		return errors.New("archive import produced empty digest")
+	}
+
+	return nil
+}
+
+func (importer *ArchiveImporter) ingestDuplicateOrVariant(
+	ctx context.Context,
+	sourceName string,
+	canonical contracts.ObjectDigest,
+	message archiveMessage,
+	lowNoise bool,
+	report *ArchiveImportReport,
+) error {
+	manifest, err := importer.store.ReadManifest(ctx, canonical)
+	if err != nil {
+		return err
+	}
+	metadata := mailFacetMetadata(manifest)
+	bodyLineHash := stringValue(metadata["body_line_fingerprint"])
+	if bodyLineHash == message.BodyLineHash {
+		report.MessageIDDuplicates++
+		if lowNoise {
+			report.LowNoiseSkipped++
+			report.TrivialSkipped++
+			appendSkippedMessageID(report, message.MessageID)
+
+			return importer.writeArchiveMembershipRecord(ctx, sourceName, message, canonical)
+		}
+
+		return importer.store.AttachProvenance(ctx, canonical, []contracts.Provenance{
+			archiveProvenance(sourceName, message),
+		})
+	}
+
+	scale := archiveVersionScale(metadata, message)
+	if lowNoise && scale == contracts.VersionScaleTrivial {
+		report.LowNoiseSkipped++
+		report.TrivialSkipped++
+		appendSkippedMessageID(report, message.MessageID)
+
+		return importer.writeArchiveMembershipRecord(ctx, sourceName, message, canonical)
+	}
+
+	report.Collisions++
+	switch scale {
+	case contracts.VersionScaleMajor:
+		report.MajorVersions++
+	default:
+		report.MinorVersions++
+	}
+
+	return importer.ingestVariantMessage(
+		ctx,
+		sourceName,
+		canonical,
+		manifest,
+		message,
+		scale,
+		report,
+	)
+}
+
+func (importer *ArchiveImporter) ingestCanonicalMessage(
+	ctx context.Context,
+	sourceName string,
+	message archiveMessage,
+) (contracts.ObjectDigest, bool, error) {
+	parts, err := importer.writeArchiveMessageParts(ctx, sourceName, message, false)
+	if err != nil {
+		return "", false, err
+	}
+	recordDigest, err := importer.writeVersionRecord(
+		ctx,
+		sourceName,
+		message,
+		contracts.VersionRepresentationFull,
+		contracts.VersionScaleMinor,
+		true,
+		"",
+		"",
+		"",
+	)
+	if err != nil {
+		return "", false, err
+	}
+	parts = append(parts, contracts.CompoundPart{
+		Digest: recordDigest,
+		Role:   contracts.VersionRecordRole,
+		Order:  100,
+	})
+	provenance := []contracts.Provenance{
+		archiveProvenance(sourceName, message),
+		identityProvenance(message),
+	}
+	object := IngestObject{
+		ObservedAt:  message.ObservedAt,
+		SourceKind:  contracts.MailArchiveSourceKind,
+		SourceName:  sourceName,
+		ExternalID:  message.ExternalID,
+		ExternalVer: message.ExternalVersion,
+		SourceHint:  message.Subject,
+		Compound: &CompoundObject{
+			ObjectID:   "mail_message:" + message.MessageID,
+			MediaType:  "application/vnd.gmeow.archive-message+json",
+			SourceHint: message.Subject,
+			ContentRoles: []string{
+				contracts.MailMessageContentRole,
+				contracts.MailMessageContainerRole,
+			},
+			Facets: []contracts.Facet{
+				{
+					Kind: contracts.MailMessageFacetKind,
+					Metadata: archiveMailMetadata(
+						message,
+						false,
+						contracts.VersionScaleMinor,
+						1,
+						message.Fingerprint,
+					),
+				},
+				{
+					Kind: contracts.VersionSetFacetKind,
+					Metadata: map[string]any{
+						"domain_kind":          contracts.MailVersionSetDomain,
+						"logical_id":           message.MessageID,
+						"canonical_version_id": message.Fingerprint,
+						"version_count":        1,
+						"max_scale":            contracts.VersionScaleMinor,
+						"updated_at":           message.ObservedAt.Format(time.RFC3339Nano),
+					},
+				},
+				{Kind: "container"},
+			},
+			Provenance: provenance,
+			Parts:      parts,
+		},
+	}
+
+	return importer.service.Ingest(ctx, object)
+}
+
+func (importer *ArchiveImporter) ingestVariantMessage(
+	ctx context.Context,
+	sourceName string,
+	canonical contracts.ObjectDigest,
+	canonicalManifest contracts.Manifest,
+	message archiveMessage,
+	scale string,
+	report *ArchiveImportReport,
+) error {
+	parts, err := importer.writeArchiveMessageParts(ctx, sourceName, message, true)
+	if err != nil {
+		return err
+	}
+	bodyOrder := importer.canonicalBodyOrder(
+		ctx,
+		canonicalManifest,
+		int64(len(message.Body)),
+	)
+	for index, part := range parts {
+		if part.Role == contracts.MailBodyRole {
+			parts[index].Order = bodyOrder
+			break
+		}
+	}
+
+	promote := shouldPromoteCanonical(ctx, importer.store, canonicalManifest, message)
+	headerPatch, bodyPatch, err := importer.writeVariantPatches(
+		ctx,
+		sourceName,
+		canonicalManifest,
+		message,
+	)
+	if err != nil {
+		return err
+	}
+	recordDigest, err := importer.writeVersionRecord(
+		ctx,
+		sourceName,
+		message,
+		contracts.VersionRepresentationDelta,
+		scale,
+		promote,
+		stringValue(mailFacetMetadata(canonicalManifest)["canonical_version_id"]),
+		canonical,
+		firstNonEmptyDigest(bodyPatch, headerPatch),
+	)
+	if err != nil {
+		return err
+	}
+	canonicalParts := []contracts.CompoundPart{{
+		Digest: recordDigest,
+		Role:   contracts.VersionRecordRole,
+		Order:  100 + versionCount(canonicalManifest),
+	}}
+	if promote {
+		canonicalParts = append(canonicalParts, parts...)
+	}
+	maxScale := maxVersionScale(
+		stringValue(mailFacetMetadata(canonicalManifest)["max_scale"]),
+		scale,
+	)
+	nextVersionCount := versionCount(canonicalManifest) + 1
+	canonicalVersionID := firstNonEmpty(
+		promotedCanonicalVersionID(promote, message),
+		stringValue(mailFacetMetadata(canonicalManifest)["canonical_version_id"]),
+	)
+	canonicalMailMetadata := archiveMailMetadata(
+		message,
+		true,
+		maxScale,
+		nextVersionCount,
+		canonicalVersionID,
+	)
+	if !promote {
+		canonicalMailMetadata = cloneMetadata(mailFacetMetadata(canonicalManifest))
+		canonicalMailMetadata["message_id_collision"] = true
+		canonicalMailMetadata["version_count"] = nextVersionCount
+		canonicalMailMetadata["max_scale"] = maxScale
+		canonicalMailMetadata["canonical_version_id"] = canonicalVersionID
+	}
+
+	object := IngestObject{
+		ObservedAt:  message.ObservedAt,
+		SourceKind:  contracts.MailArchiveSourceKind,
+		SourceName:  sourceName,
+		ExternalID:  message.ExternalID,
+		ExternalVer: message.ExternalVersion,
+		SourceHint:  message.Subject,
+		Compound: &CompoundObject{
+			ObjectID:   "mail_message:" + message.MessageID,
+			MediaType:  "application/vnd.gmeow.archive-message+json",
+			SourceHint: message.Subject,
+			ContentRoles: []string{
+				contracts.MailMessageContentRole,
+				contracts.MailMessageContainerRole,
+			},
+			Facets: []contracts.Facet{{
+				Kind:     contracts.MailMessageFacetKind,
+				Metadata: canonicalMailMetadata,
+			}, {
+				Kind: contracts.VersionSetFacetKind,
+				Metadata: map[string]any{
+					"domain_kind":          contracts.MailVersionSetDomain,
+					"logical_id":           message.MessageID,
+					"canonical_version_id": canonicalVersionID,
+					"version_count":        nextVersionCount,
+					"max_scale":            maxScale,
+					"updated_at":           message.ObservedAt.Format(time.RFC3339Nano),
+				},
+			}, {Kind: "container"}},
+			Provenance: []contracts.Provenance{archiveProvenance(sourceName, message)},
+			Parts:      canonicalParts,
+		},
+	}
+	_, _, err = importer.service.Ingest(ctx, object)
+	if err != nil {
+		return err
+	}
+	if promote {
+		report.Promoted++
+	}
+
+	variantParts := []contracts.CompoundPart{}
+	if headerPatch != "" {
+		variantParts = append(
+			variantParts,
+			contracts.CompoundPart{Digest: headerPatch, Role: contracts.MailPatchDiffRole},
+		)
+	}
+	if bodyPatch != "" {
+		variantParts = append(
+			variantParts,
+			contracts.CompoundPart{
+				Digest: bodyPatch,
+				Role:   contracts.MailPatchDiffRole,
+				Order:  1,
+			},
+		)
+	}
+	if len(variantParts) == 0 {
+		return nil
+	}
+	variantObject := IngestObject{
+		ObservedAt:  message.ObservedAt,
+		SourceKind:  contracts.MailArchiveSourceKind,
+		SourceName:  sourceName,
+		ExternalID:  message.ExternalID + ":variant",
+		ExternalVer: message.ExternalVersion,
+		SourceHint:  "variant " + message.Subject,
+		Compound: &CompoundObject{
+			ObjectID:     "mail_message_variant:" + message.Fingerprint,
+			MediaType:    "application/vnd.gmeow.mail-message-variant+json",
+			ContentRoles: []string{contracts.MailMessageVariantRole},
+			Facets: []contracts.Facet{
+				{
+					Kind: contracts.MailVariantFacetKind,
+					Metadata: archiveMailMetadata(
+						message,
+						true,
+						scale,
+						versionCount(canonicalManifest)+1,
+						message.Fingerprint,
+					),
+				},
+			},
+			Provenance: []contracts.Provenance{archiveProvenance(sourceName, message)},
+			Parts:      variantParts,
+		},
+	}
+	_, _, err = importer.service.Ingest(ctx, variantObject)
+
+	return err
+}
+
+func (importer *ArchiveImporter) writeArchiveMessageParts(
+	ctx context.Context,
+	sourceName string,
+	message archiveMessage,
+	variant bool,
+) ([]contracts.CompoundPart, error) {
+	headers, err := json.Marshal(sortedHeaderRows(message.Headers))
+	if err != nil {
+		return nil, err
+	}
+	archiveData, err := json.Marshal(map[string]any{
+		"format":                message.Format,
+		"source_path":           message.SourcePath,
+		"mailbox":               message.Mailbox,
+		"external_id":           message.ExternalID,
+		"external_version":      message.ExternalVersion,
+		"message_id":            message.MessageID,
+		"generated_message_id":  message.GeneratedMessage,
+		"canonical_fingerprint": message.Fingerprint,
+		"variant":               variant,
+	})
+	if err != nil {
+		return nil, err
+	}
+	inputs := []struct {
+		role      string
+		mediaType string
+		payload   []byte
+		order     int
+		facets    []contracts.Facet
+	}{
+		{
+			contracts.MailHeadersRole,
+			"text/rfc822-headers",
+			headers,
+			0,
+			[]contracts.Facet{{Kind: "email_part"}},
+		},
+		{
+			contracts.MailBodyRole,
+			firstNonEmpty(message.BodyMediaType, "text/plain"),
+			message.Body,
+			1,
+			[]contracts.Facet{{Kind: "email_part"}},
+		},
+		{
+			contracts.MailArchiveMetadataRole,
+			"application/json",
+			archiveData,
+			2,
+			[]contracts.Facet{{Kind: "file"}},
+		},
+		{
+			contracts.MailMIMEStructureRole,
+			"application/vnd.gmeow.mime-structure+json",
+			[]byte(`{"source":"archive_import"}`),
+			3,
+			[]contracts.Facet{{Kind: "email_part"}},
+		},
+	}
+
+	parts := make([]contracts.CompoundPart, 0, len(inputs)+len(message.Attachments))
+	for _, input := range inputs {
+		digest, _, err := importer.service.Ingest(ctx, IngestObject{
+			ObservedAt:   message.ObservedAt,
+			Reader:       bytes.NewReader(input.payload),
+			MediaType:    input.mediaType,
+			SourceKind:   contracts.MailArchiveSourceKind,
+			SourceName:   sourceName,
+			ExternalID:   message.ExternalID + ":" + input.role,
+			ExternalVer:  message.ExternalVersion,
+			SourceHint:   input.role,
+			ContentRoles: []string{input.role},
+			Facets:       input.facets,
+		})
+		if err != nil {
+			return nil, err
+		}
+		parts = append(
+			parts,
+			contracts.CompoundPart{Digest: digest, Role: input.role, Order: input.order},
+		)
+	}
+	for index, attachment := range message.Attachments {
+		attachmentID := firstNonEmpty(attachment.FileName, fmt.Sprintf("%d", index))
+		digest, _, err := importer.service.Ingest(ctx, IngestObject{
+			ObservedAt:   message.ObservedAt,
+			Reader:       bytes.NewReader(attachment.Content),
+			MediaType:    firstNonEmpty(attachment.MediaType, "application/octet-stream"),
+			SourceKind:   contracts.MailArchiveSourceKind,
+			SourceName:   sourceName,
+			ExternalID:   fmt.Sprintf("%s:attachment:%s", message.ExternalID, attachmentID),
+			ExternalVer:  message.ExternalVersion,
+			SourceHint:   attachment.FileName,
+			ContentRoles: []string{contracts.MailAttachmentRole},
+			Facets: []contracts.Facet{{
+				Kind: "file",
+				Metadata: map[string]any{
+					"display_name": attachment.FileName,
+				},
+			}},
+		})
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, contracts.CompoundPart{
+			Digest: digest,
+			Role:   contracts.MailAttachmentRole,
+			Order:  10 + index,
+			Metadata: map[string]any{
+				"filename": attachment.FileName,
+			},
+		})
+	}
+
+	return parts, nil
+}
+
+func (importer *ArchiveImporter) writeVariantPatches(
+	ctx context.Context,
+	sourceName string,
+	canonical contracts.Manifest,
+	message archiveMessage,
+) (contracts.ObjectDigest, contracts.ObjectDigest, error) {
+	canonicalHeaders, err := importer.canonicalPartContent(
+		ctx,
+		canonical,
+		contracts.MailHeadersRole,
+	)
+	if err != nil {
+		return "", "", err
+	}
+	canonicalBody, err := importer.canonicalPartContent(
+		ctx,
+		canonical,
+		contracts.MailBodyRole,
+	)
+	if err != nil {
+		return "", "", err
+	}
+	headerTarget := mustJSON(sortedHeaderRows(message.Headers))
+	headerPatch := []byte(linePatch(string(canonicalHeaders), string(headerTarget)))
+	bodyPatch := []byte(linePatch(string(canonicalBody), string(message.Body)))
+	headerDigest, _, err := importer.service.Ingest(ctx, IngestObject{
+		ObservedAt:   message.ObservedAt,
+		Reader:       bytes.NewReader(headerPatch),
+		MediaType:    "text/x-gmeow-patch",
+		SourceKind:   contracts.MailArchiveSourceKind,
+		SourceName:   sourceName,
+		ExternalID:   message.ExternalID + ":header_patch",
+		ExternalVer:  message.ExternalVersion,
+		SourceHint:   "header patch",
+		ContentRoles: []string{contracts.MailPatchDiffRole},
+		Facets: []contracts.Facet{
+			{Kind: contracts.VersionDeltaFacetKind, Metadata: map[string]any{
+				"base_digest":   canonical.ObjectDigest,
+				"target_sha256": sha256Hex(headerTarget),
+				"codec":         "gmeow-patch-v1",
+				"role":          contracts.MailHeadersRole,
+			}},
+		},
+	})
+	if err != nil {
+		return "", "", err
+	}
+	bodyDigest, _, err := importer.service.Ingest(ctx, IngestObject{
+		ObservedAt:   message.ObservedAt,
+		Reader:       bytes.NewReader(bodyPatch),
+		MediaType:    "text/x-gmeow-patch",
+		SourceKind:   contracts.MailArchiveSourceKind,
+		SourceName:   sourceName,
+		ExternalID:   message.ExternalID + ":body_patch",
+		ExternalVer:  message.ExternalVersion,
+		SourceHint:   "body patch",
+		ContentRoles: []string{contracts.MailPatchDiffRole},
+		Facets: []contracts.Facet{
+			{Kind: contracts.VersionDeltaFacetKind, Metadata: map[string]any{
+				"base_digest":   canonical.ObjectDigest,
+				"target_sha256": sha256Hex(message.Body),
+				"codec":         "gmeow-patch-v1",
+				"role":          contracts.MailBodyRole,
+			}},
+		},
+	})
+
+	return headerDigest, bodyDigest, err
+}
+
+func (importer *ArchiveImporter) writeVersionRecord(
+	ctx context.Context,
+	sourceName string,
+	message archiveMessage,
+	representation string,
+	scale string,
+	canonical bool,
+	baseVersionID string,
+	baseDigest contracts.ObjectDigest,
+	deltaDigest contracts.ObjectDigest,
+) (contracts.ObjectDigest, error) {
+	metadata := contracts.VersionRecordMetadata{
+		ObservedAt:              message.ObservedAt.Format(time.RFC3339Nano),
+		Representation:          representation,
+		VersionID:               message.Fingerprint,
+		VersionSetID:            "mail_message:" + message.MessageID,
+		DomainKind:              contracts.MailVersionSetDomain,
+		LogicalID:               message.MessageID,
+		BaseVersionID:           baseVersionID,
+		BaseDigest:              baseDigest,
+		DeltaDigest:             deltaDigest,
+		TargetHash:              message.Fingerprint,
+		CanonicalizationVersion: "mail-archive-v1",
+		Scale:                   scale,
+		Canonical:               canonical,
+		Promoted:                canonical && baseVersionID != "",
+		InputFingerprints: map[string]string{
+			contracts.MailBodyLineFingerprint: message.BodyLineHash,
+			contracts.MailSemanticFingerprint: message.Fingerprint,
+		},
+	}
+	if representation == contracts.VersionRepresentationFull {
+		metadata.FullDigest = baseDigest
+	}
+	payload, err := json.Marshal(metadata)
+	if err != nil {
+		return "", err
+	}
+	digest, _, err := importer.service.Ingest(ctx, IngestObject{
+		ObservedAt:   message.ObservedAt,
+		Reader:       bytes.NewReader(payload),
+		MediaType:    "application/vnd.gmeow.version-record+json",
+		SourceKind:   contracts.MailArchiveSourceKind,
+		SourceName:   sourceName,
+		ExternalID:   message.ExternalID + ":version_record",
+		ExternalVer:  message.ExternalVersion,
+		SourceHint:   "version record",
+		ContentRoles: []string{contracts.VersionRecordRole},
+		Facets: []contracts.Facet{{
+			Kind: contracts.VersionRecordFacetKind,
+			Metadata: map[string]any{
+				"version_id":       metadata.VersionID,
+				"version_set_id":   metadata.VersionSetID,
+				"domain_kind":      metadata.DomainKind,
+				"logical_id":       metadata.LogicalID,
+				"representation":   metadata.Representation,
+				"scale":            metadata.Scale,
+				"canonical":        metadata.Canonical,
+				"promoted":         metadata.Promoted,
+				"target_hash":      metadata.TargetHash,
+				"body_line_hash":   message.BodyLineHash,
+				"base_version_id":  metadata.BaseVersionID,
+				"base_digest":      string(metadata.BaseDigest),
+				"delta_digest":     string(metadata.DeltaDigest),
+				"source_path":      message.SourcePath,
+				"source_format":    message.Format,
+				"source_mailbox":   message.Mailbox,
+				"generated_msg_id": message.GeneratedMessage,
+			},
+		}},
+	})
+
+	return digest, err
+}
+
+func archiveVersionScale(metadata map[string]any, message archiveMessage) string {
+	if stringValue(metadata["body_line_fingerprint"]) == message.BodyLineHash {
+		return contracts.VersionScaleTrivial
+	}
+	if strings.EqualFold(stringValue(metadata["subject"]), message.Subject) &&
+		strings.EqualFold(stringValue(metadata["from"]), message.From) &&
+		strings.EqualFold(stringValue(metadata["to"]), message.To) {
+		return contracts.VersionScaleMinor
+	}
+
+	return contracts.VersionScaleMajor
+}
+
+func shouldPromoteCanonical(
+	ctx context.Context,
+	store FilestoreClient,
+	manifest contracts.Manifest,
+	message archiveMessage,
+) bool {
+	for _, part := range manifest.Compound.Parts {
+		if part.Role != contracts.MailBodyRole || part.Order != 1 {
+			continue
+		}
+		bodyManifest, err := store.ReadManifest(ctx, part.Digest)
+		return err == nil && int64(len(message.Body)) > bodyManifest.Size
+	}
+	return false
+}
+
+func promotedCanonicalVersionID(promote bool, message archiveMessage) string {
+	if promote {
+		return message.Fingerprint
+	}
+	return ""
+}
+
+func firstNonEmptyDigest(values ...contracts.ObjectDigest) contracts.ObjectDigest {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func versionCount(manifest contracts.Manifest) int {
+	metadata := mailFacetMetadata(manifest)
+	if count := intFromAny(metadata["version_count"]); count > 0 {
+		return count
+	}
+	count := 0
+	for _, part := range manifest.Compound.Parts {
+		if part.Role == contracts.VersionRecordRole {
+			count++
+		}
+	}
+	if count == 0 {
+		return 1
+	}
+	return count
+}
+
+func maxVersionScale(left, right string) string {
+	rank := map[string]int{
+		contracts.VersionScaleTrivial: 0,
+		contracts.VersionScaleMinor:   1,
+		contracts.VersionScaleMajor:   2,
+	}
+	if rank[right] > rank[left] {
+		return right
+	}
+	if left != "" {
+		return left
+	}
+	return right
+}
+
+func (importer *ArchiveImporter) canonicalPartContent(
+	ctx context.Context,
+	manifest contracts.Manifest,
+	role string,
+) ([]byte, error) {
+	for _, part := range manifest.Compound.Parts {
+		if part.Role != role {
+			continue
+		}
+		reader, err := importer.store.Open(ctx, part.Digest)
+		if err != nil {
+			return nil, err
+		}
+		defer reader.Close()
+		content, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, err
+		}
+		return content, nil
+	}
+
+	return nil, nil
+}
+
+func parseArchiveFile(path, root, format string, offset int) (archiveMessage, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return archiveMessage{}, err
+	}
+	return parseArchiveMessage(raw, path, root, format, offset)
+}
+
+func parseArchiveMessage(
+	raw []byte,
+	path, root, format string,
+	offset int,
+) (archiveMessage, error) {
+	parsed, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return archiveMessage{}, fmt.Errorf("parse mail %s: %w", path, err)
+	}
+	body, attachments := extractMailBodyAndAttachments(parsed.Header, parsed.Body)
+	headers := headerMap(parsed.Header)
+	rel, _ := filepath.Rel(root, path)
+	message := archiveMessage{
+		ObservedAt:      time.Now().UTC(),
+		SourcePath:      filepath.Clean(path),
+		Mailbox:         archiveMailbox(rel, format),
+		Format:          format,
+		ExternalID:      archiveExternalID(rel, offset),
+		ExternalVersion: archiveExternalVersion(raw),
+		Raw:             raw,
+		Headers:         headers,
+		Body:            body,
+		BodyMediaType:   "text/plain",
+		Attachments:     attachments,
+		Subject:         headers["subject"],
+		Date:            headers["date"],
+		From:            headers["from"],
+		To:              headers["to"],
+	}
+	message.MessageID = normalizeArchiveMessageID(headers["message-id"])
+	message.BodyLineHash = canonicalBodyLineFingerprint(message.Body)
+	message.Fingerprint = canonicalFingerprint(message)
+	if message.MessageID == "" {
+		message.GeneratedMessage = true
+		message.MessageID = fmt.Sprintf(
+			"<gmeow-generated-%s@%s>",
+			message.Fingerprint,
+			contracts.MailGeneratedMessageIDHost,
+		)
+	}
+
+	return message, nil
+}
+
+func extractMailBodyAndAttachments(
+	headers mail.Header,
+	body io.Reader,
+) ([]byte, []archiveAttachment) {
+	textBodies := []string{}
+	attachments := []archiveAttachment{}
+	extractMailPart(headers, body, &textBodies, &attachments)
+
+	return []byte(strings.Join(textBodies, "\n")), attachments
+}
+
+func extractMailPart(
+	headers mail.Header,
+	body io.Reader,
+	textBodies *[]string,
+	attachments *[]archiveAttachment,
+) {
+	contentType := headers.Get("Content-Type")
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		content, _ := io.ReadAll(body)
+		disposition, _, _ := mime.ParseMediaType(headers.Get("Content-Disposition"))
+		fileName := archivePartFilename(headers)
+		if disposition == "attachment" || fileName != "" {
+			*attachments = append(*attachments, archiveAttachment{
+				Content:   content,
+				FileName:  fileName,
+				MediaType: firstNonEmpty(mediaType, "application/octet-stream"),
+			})
+			return
+		}
+		if mediaType == "text/plain" || (mediaType == "" && len(*textBodies) == 0) {
+			*textBodies = append(*textBodies, string(content))
+		}
+		return
+	}
+	reader := multipart.NewReader(body, params["boundary"])
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			break
+		}
+		extractMailPart(mail.Header(part.Header), part, textBodies, attachments)
+	}
+}
+
+func archivePartFilename(headers mail.Header) string {
+	_, params, err := mime.ParseMediaType(headers.Get("Content-Disposition"))
+	if err == nil && params["filename"] != "" {
+		return params["filename"]
+	}
+	_, params, err = mime.ParseMediaType(headers.Get("Content-Type"))
+	if err == nil {
+		return params["name"]
+	}
+
+	return ""
+}
+
+func detectArchiveFileFormat(path, root, requested string) string {
+	if requested != "" && requested != ArchiveImportFormatAuto {
+		return requested
+	}
+	name := filepath.Base(path)
+	if strings.HasPrefix(name, ".") {
+		return ""
+	}
+	if strings.HasSuffix(strings.ToLower(name), ".eml") {
+		return ArchiveImportFormatEMLDir
+	}
+	parent := filepath.Base(filepath.Dir(path))
+	if parent == "cur" || parent == "new" {
+		if hasSiblingDir(filepath.Dir(filepath.Dir(path)), "tmp") {
+			return ArchiveImportFormatMaildir
+		}
+	}
+	if numberedMailFilePattern.MatchString(name) {
+		return ArchiveImportFormatNNML
+	}
+	if looksLikeMboxPath(path) {
+		return ArchiveImportFormatMbox
+	}
+	if looksLikeRFC822File(path) {
+		return ArchiveImportFormatEMLDir
+	}
+	_, _ = root, name
+	return ""
+}
+
+func looksLikeMboxPath(path string) bool {
+	name := filepath.Base(path)
+	if strings.Contains(name, ".") || strings.HasSuffix(name, "~") {
+		return false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	reader := bufio.NewReader(file)
+	line, err := reader.ReadString('\n')
+	return err == nil && strings.HasPrefix(line, "From ")
+}
+
+func looksLikeRFC822File(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	reader := bufio.NewReader(file)
+	for range 20 {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return false
+		}
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "message-id:") ||
+			strings.HasPrefix(lower, "from:") ||
+			strings.HasPrefix(lower, "subject:") {
+			return true
+		}
+		if strings.TrimSpace(line) == "" {
+			return false
+		}
+	}
+	return false
+}
+
+func shouldSkipArchiveDir(name string) bool {
+	return name == "tmp" || name == ".git"
+}
+
+func shouldSkipArchiveFile(name string) bool {
+	lower := strings.ToLower(name)
+	if strings.HasPrefix(name, ".") ||
+		strings.HasSuffix(lower, ".msf") ||
+		strings.Contains(lower, ".ibex.") ||
+		strings.HasSuffix(lower, ".cmeta") ||
+		strings.HasSuffix(lower, ".ev-summary") ||
+		strings.HasSuffix(lower, ".ev-summary-meta") ||
+		strings.HasSuffix(lower, ".index") ||
+		strings.HasSuffix(lower, ".index.ids") ||
+		strings.HasSuffix(lower, ".index.sorted") ||
+		strings.HasSuffix(lower, ".xml") {
+		return true
+	}
+	return false
+}
+
+func hasSiblingDir(path, name string) bool {
+	info, err := os.Stat(filepath.Join(path, name))
+	return err == nil && info.IsDir()
+}
+
+func archiveProvenance(sourceName string, message archiveMessage) contracts.Provenance {
+	return contracts.Provenance{
+		SourceKind:      contracts.MailArchiveSourceKind,
+		SourceName:      sourceName,
+		ExternalID:      message.ExternalID,
+		ExternalVersion: message.ExternalVersion,
+		ObservedAt:      message.ObservedAt,
+		CapabilitiesSeen: []string{
+			contracts.MailMessageContentRole,
+			contracts.MailHeadersRole,
+			contracts.MailBodyRole,
+		},
+		Metadata: map[string]any{
+			"format":      message.Format,
+			"source_path": message.SourcePath,
+			"mailbox":     message.Mailbox,
+		},
+	}
+}
+
+func identityProvenance(message archiveMessage) contracts.Provenance {
+	return contracts.Provenance{
+		SourceKind:      contracts.MailIdentitySourceKind,
+		SourceName:      contracts.MailIdentitySourceName,
+		ExternalID:      message.MessageID,
+		ExternalVersion: "",
+		ObservedAt:      message.ObservedAt,
+		CapabilitiesSeen: []string{
+			contracts.MailMessageIdentityRole,
+		},
+	}
+}
+
+func archiveMailMetadata(
+	message archiveMessage,
+	collision bool,
+	maxScale string,
+	versionCount int,
+	canonicalVersionID string,
+) map[string]any {
+	return map[string]any{
+		"rfc_message_id":           message.MessageID,
+		"subject":                  message.Subject,
+		"date":                     message.Date,
+		"from":                     message.From,
+		"to":                       message.To,
+		"archive_format":           message.Format,
+		"archive_mailbox":          message.Mailbox,
+		"archive_source_path":      message.SourcePath,
+		"generated_message_id":     message.GeneratedMessage,
+		"canonical_fingerprint":    message.Fingerprint,
+		"body_line_fingerprint":    message.BodyLineHash,
+		"canonical_version_id":     canonicalVersionID,
+		"version_count":            versionCount,
+		"max_scale":                maxScale,
+		"message_id_collision":     collision,
+		"analysis_scope":           contracts.AnalysisScopeCanonical,
+		"analysis_input_body_line": message.BodyLineHash,
+	}
+}
+
+func (importer *ArchiveImporter) canonicalBodyOrder(
+	ctx context.Context,
+	manifest contracts.Manifest,
+	incomingSize int64,
+) int {
+	for _, part := range manifest.Compound.Parts {
+		if part.Role != contracts.MailBodyRole || part.Order != 1 {
+			continue
+		}
+		bodyManifest, err := importer.store.ReadManifest(ctx, part.Digest)
+		if err == nil && incomingSize > bodyManifest.Size {
+			return 1
+		}
+
+		return 1000
+	}
+	return 1
+}
+
+func mailFacetMetadata(manifest contracts.Manifest) map[string]any {
+	for _, facet := range manifest.Facets {
+		if facet.FacetKind() == contracts.MailMessageFacetKind {
+			return facet.Metadata
+		}
+	}
+	return map[string]any{}
+}
+
+func cloneMetadata(metadata map[string]any) map[string]any {
+	cloned := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		cloned[key] = value
+	}
+
+	return cloned
+}
+
+func headerMap(header mail.Header) map[string]string {
+	result := map[string]string{}
+	for key, values := range header {
+		result[strings.ToLower(key)] = strings.Join(values, "\n")
+	}
+	return result
+}
+
+func sortedHeaderRows(headers map[string]string) []map[string]string {
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	rows := make([]map[string]string, 0, len(names))
+	for _, name := range names {
+		rows = append(rows, map[string]string{"name": name, "value": headers[name]})
+	}
+	return rows
+}
+
+func normalizeArchiveMessageID(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	trimmed = strings.Trim(trimmed, "<>")
+	if trimmed == "" {
+		return ""
+	}
+	return "<" + strings.ToLower(trimmed) + ">"
+}
+
+func canonicalFingerprint(message archiveMessage) string {
+	parts := []string{
+		normalizeArchiveMessageID(message.Headers["message-id"]),
+		strings.ToLower(strings.TrimSpace(message.Subject)),
+		strings.ToLower(strings.TrimSpace(message.From)),
+		strings.ToLower(strings.TrimSpace(message.To)),
+		collapseArchiveWhitespace(string(message.Body)),
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:])[:32]
+}
+
+func canonicalBodyLineFingerprint(body []byte) string {
+	lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
+	normalized := make([]string, 0, len(lines))
+	for _, line := range lines {
+		collapsed := collapseArchiveWhitespace(line)
+		if collapsed != "" {
+			normalized = append(normalized, collapsed)
+		}
+	}
+	sum := sha256.Sum256([]byte(strings.Join(normalized, "\n")))
+
+	return hex.EncodeToString(sum[:])[:32]
+}
+
+func appendSkippedMessageID(report *ArchiveImportReport, messageID string) {
+	if len(report.SkippedMessageIDs) >= 20 {
+		return
+	}
+	report.SkippedMessageIDs = append(report.SkippedMessageIDs, messageID)
+}
+
+func intFromAny(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
+	}
+}
+
+func archiveExternalID(relative string, offset int) string {
+	if offset > 0 {
+		return fmt.Sprintf("%s#%d", filepath.ToSlash(relative), offset)
+	}
+	return filepath.ToSlash(relative)
+}
+
+func archiveExternalVersion(raw []byte) string {
+	return sha256Hex(raw)
+}
+
+func archiveMailbox(relative, format string) string {
+	clean := filepath.ToSlash(filepath.Clean(relative))
+	switch format {
+	case ArchiveImportFormatMaildir:
+		dir := filepath.Dir(filepath.Dir(clean))
+		if dir == "." {
+			return "maildir"
+		}
+		return dir
+	case ArchiveImportFormatMbox:
+		return strings.TrimSuffix(clean, filepath.Ext(clean))
+	default:
+		dir := filepath.Dir(clean)
+		if dir == "." {
+			return format
+		}
+		return dir
+	}
+}
+
+func sourceNameFromRoot(root string) string {
+	base := filepath.Base(filepath.Clean(root))
+	base = strings.TrimSpace(base)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return "archive"
+	}
+	return base
+}
+
+func collapseArchiveWhitespace(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func sha256Hex(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
+func mustJSON(value any) []byte {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return []byte("{}")
+	}
+	return encoded
+}
+
+func linePatch(base, target string) string {
+	baseLines := strings.Split(base, "\n")
+	targetLines := strings.Split(target, "\n")
+	var out strings.Builder
+	out.WriteString("gmeow-patch-v1\n")
+	out.WriteString("--- canonical\n")
+	out.WriteString("+++ variant\n")
+	for _, line := range baseLines {
+		if line != "" {
+			out.WriteString("-")
+			out.WriteString(line)
+			out.WriteString("\n")
+		}
+	}
+	for _, line := range targetLines {
+		if line != "" {
+			out.WriteString("+")
+			out.WriteString(line)
+			out.WriteString("\n")
+		}
+	}
+	return out.String()
+}

@@ -112,6 +112,212 @@ func TestPostgresProjectsFilestoreWithSourceCursorRebuild(t *testing.T) {
 	}
 }
 
+func TestMailArchiveMissingGmailReport(t *testing.T) {
+	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	migrationsDir := queryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
+	schema := createQueryTestSchema(t, ctx, dsn)
+	t.Cleanup(func() { dropQueryTestSchema(t, dsn, schema) })
+
+	store := filestore.NewFilesystemStore(t.TempDir())
+	archiveOnly := putMailIdentityProjectionFixture(
+		t,
+		ctx,
+		store,
+		"<archive-only@example.test>",
+		contracts.MailArchiveSourceKind,
+		"deep",
+		false,
+	)
+	membershipOnly := putMailMembershipProjectionFixture(
+		t,
+		ctx,
+		store,
+		"<archive-membership@example.test>",
+		"deep",
+	)
+	_ = putMailIdentityProjectionFixture(
+		t,
+		ctx,
+		store,
+		"<in-gmail@example.test>",
+		contracts.MailArchiveSourceKind,
+		"deep",
+		false,
+	)
+	_ = putMailIdentityProjectionFixture(
+		t,
+		ctx,
+		store,
+		"<in-gmail@example.test>",
+		"gmail",
+		"primary",
+		false,
+	)
+	generated := putMailIdentityProjectionFixture(
+		t,
+		ctx,
+		store,
+		"<gmeow-generated-test@gmeow.local>",
+		contracts.MailArchiveSourceKind,
+		"deep",
+		true,
+	)
+
+	config := Config{
+		ConnString:     dsnWithSearchPath(dsn, schema),
+		MigrationsDir:  migrationsDir,
+		MigrationTable: schema + ".goose_db_version",
+	}
+	if err := Migrate(ctx, config); err != nil {
+		t.Fatal(err)
+	}
+	index, err := New(ctx, config, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(index.Close)
+	if err := index.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := index.MailArchiveMissingGmail(ctx, contracts.MailIdentityReportRequest{
+		SourceNames: []string{"deep"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Total != 2 ||
+		!containsDigest(report.Items, archiveOnly) ||
+		!containsDigest(report.Items, membershipOnly) {
+		t.Fatalf("unexpected missing Gmail report: %#v", report)
+	}
+	archiveItem, ok := itemForDigest(report.Items, archiveOnly)
+	if !ok ||
+		archiveItem.VersionCount != 1 ||
+		archiveItem.MaxScale != contracts.VersionScaleMinor {
+		t.Fatalf("missing version metadata in report: %#v", report.Items)
+	}
+
+	report, err = index.MailArchiveMissingGmail(ctx, contracts.MailIdentityReportRequest{
+		SourceNames:      []string{"deep"},
+		IncludeGenerated: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Total != 3 || !containsDigest(report.Items, generated) {
+		t.Fatalf("expected generated archive identity when requested: %#v", report)
+	}
+
+	resolved, err := index.ResolveMailIdentity(ctx, contracts.MailIdentityResolveRequest{
+		MessageID: "<archive-only@example.test>",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Total != 1 ||
+		len(resolved.Digests) != 1 ||
+		resolved.Digests[0] != archiveOnly {
+		t.Fatalf("unexpected mail identity resolution: %#v", resolved)
+	}
+}
+
+func putMailIdentityProjectionFixture(
+	t *testing.T,
+	ctx context.Context,
+	store *filestore.FilesystemStore,
+	messageID string,
+	sourceKind string,
+	sourceName string,
+	generated bool,
+) contracts.ObjectDigest {
+	t.Helper()
+	digest, err := store.PutCompound(ctx, filestore.CompoundPutRequest{
+		ObjectID:     "fixture:" + sourceKind + ":" + sourceName + ":" + messageID,
+		MediaType:    "application/vnd.gmeow.fixture+json",
+		ContentRoles: []string{contracts.MailMessageContentRole},
+		Facets: []contracts.Facet{{
+			Kind: contracts.MailMessageFacetKind,
+			Metadata: map[string]any{
+				"rfc_message_id":       messageID,
+				"generated_message_id": generated,
+				"max_scale":            contracts.VersionScaleMinor,
+				"version_count":        1,
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: sourceKind,
+			SourceName: sourceName,
+			ExternalID: messageID,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func putMailMembershipProjectionFixture(
+	t *testing.T,
+	ctx context.Context,
+	store *filestore.FilesystemStore,
+	messageID string,
+	sourceName string,
+) contracts.ObjectDigest {
+	t.Helper()
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:       strings.NewReader(`{"membership":true}`),
+		MediaType:    "application/vnd.gmeow.mail-archive-membership+json",
+		SourceHint:   "membership",
+		ContentRoles: []string{contracts.MailArchiveMembershipRole},
+		Facets: []contracts.Facet{{
+			Kind: contracts.MailArchiveMembershipFacetKind,
+			Metadata: map[string]any{
+				"rfc_message_id":       messageID,
+				"generated_message_id": false,
+				"max_scale":            contracts.VersionScaleTrivial,
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: contracts.MailArchiveSourceKind,
+			SourceName: sourceName,
+			ExternalID: messageID + ":membership",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func containsDigest(
+	items []contracts.MailIdentityReportItem,
+	digest contracts.ObjectDigest,
+) bool {
+	for _, item := range items {
+		if item.CanonicalDigest == digest {
+			return true
+		}
+	}
+	return false
+}
+
+func itemForDigest(
+	items []contracts.MailIdentityReportItem,
+	digest contracts.ObjectDigest,
+) (contracts.MailIdentityReportItem, bool) {
+	for _, item := range items {
+		if item.CanonicalDigest == digest {
+			return item, true
+		}
+	}
+
+	return contracts.MailIdentityReportItem{}, false
+}
+
 func queryIntegrationDSN(t *testing.T) string {
 	t.Helper()
 	dsn := strings.TrimSpace(os.Getenv(testPostgresDSNEnv))

@@ -71,7 +71,12 @@ type Store interface {
 		fn ProjectionFunc,
 	) error
 	WalkSourceCursors(ctx context.Context, fn SourceCursorProjectionFunc) error
-	Verify(ctx context.Context) (VerifyReport, error)
+	Verify(ctx context.Context, request VerifyRequest) (VerifyReport, error)
+	StorageBreakdown(
+		ctx context.Context,
+		request StorageBreakdownRequest,
+	) (StorageBreakdownReport, error)
+	ResolvePath(ctx context.Context, request PathResolveRequest) (PathResolveReport, error)
 }
 
 type ProjectionFinding struct {
@@ -114,6 +119,10 @@ type CompoundPutRequest struct {
 	Parts         []contracts.CompoundPart
 }
 
+type VerifyRequest struct {
+	Repair bool `json:"repair,omitempty"`
+}
+
 type VerifyStatus string
 
 const (
@@ -132,4 +141,5 @@ type VerifyReport struct {
 	Status   VerifyStatus    `json:"status"`
 	Findings []VerifyFinding `json:"findings,omitempty"`
 	Checked  int             `json:"checked"`
+	Repaired int             `json:"repaired,omitempty"`
 }

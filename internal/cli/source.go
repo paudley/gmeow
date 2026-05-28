@@ -5,8 +5,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
+	schedmq "blackcat.ca/gmeow/internal/scheduler/rabbitmq"
 	"blackcat.ca/gmeow/internal/source"
 	"blackcat.ca/gmeow/internal/source/sourcegrpc"
 )
@@ -28,9 +31,162 @@ func newSourceCommand(out io.Writer, configPath *string) *cobra.Command {
 		Short: "Run source administrative workflows",
 	}
 	command.AddCommand(newSourceBackfillCommand(out, configPath))
+	command.AddCommand(newSourceImportCommand(out, configPath))
 	command.AddCommand(newSourceServeCommand(out, configPath, "serve"))
 
 	return command
+}
+
+func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		sourceName      string
+		format          string
+		confirmInstance string
+		stateDir        string
+		dryRun          bool
+		lowNoise        bool
+		resume          bool
+		queueHighWater  int
+	)
+
+	command := &cobra.Command{
+		Use:   "import <root...>",
+		Short: "Import read-only archive mail roots into FILESTORE",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			ctx := command.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if !dryRun {
+				if err := requireInstanceConfirmation(
+					loaded,
+					"source import",
+					confirmInstance,
+				); err != nil {
+					return err
+				}
+			}
+
+			filestoreClient, err := rpc.NewFilestoreClient(
+				ctx,
+				rpcEndpoint(loaded.Resolved.RPC.Filestore),
+			)
+			if err != nil {
+				return err
+			}
+			defer filestoreClient.Close()
+
+			importer, err := source.NewArchiveImporter(filestoreClient)
+			if err != nil {
+				return err
+			}
+			request := source.ArchiveImportRequest{
+				SourceName:     sourceName,
+				Format:         format,
+				Roots:          args,
+				DryRun:         dryRun,
+				LowNoise:       lowNoise,
+				Resume:         resume,
+				StateDir:       archiveImportStateDir(loaded, stateDir),
+				QueueHighWater: queueHighWater,
+			}
+			var report source.ArchiveImportReport
+			if dryRun {
+				report, err = importer.Import(ctx, request)
+			} else {
+				broker, brokerErr := schedmq.New(
+					ctx,
+					schedmq.ConfigFromResolved(
+						loaded.Resolved.RabbitMQ,
+						loaded.Resolved.Scheduler,
+					),
+				)
+				if brokerErr != nil {
+					return brokerErr
+				}
+				defer broker.Close()
+
+				jobSource, sourceErr := schedmq.NewSourceImportJobSource(
+					ctx,
+					schedmq.SourceImportJobSourceConfig{
+						URL:         loaded.Resolved.RabbitMQ.URL,
+						QueuePrefix: loaded.Resolved.Scheduler.QueuePrefix,
+						Prefetch:    1,
+					},
+				)
+				if sourceErr != nil {
+					return sourceErr
+				}
+				defer jobSource.Close()
+
+				request.Publisher = broker
+				report, err = source.ArchiveImportQueuedRun{
+					Importer: importer,
+					Source:   sourceImportJobSourceAdapter{source: jobSource},
+				}.Run(ctx, request)
+			}
+			if printErr := printArchiveImportReport(out, report); printErr != nil {
+				return printErr
+			}
+
+			return err
+		},
+	}
+	command.Flags().
+		StringVar(&sourceName, "source-name", "", "archive source name; defaults to first root basename")
+	command.Flags().
+		StringVar(&format, "format", source.ArchiveImportFormatAuto, "archive format: auto, maildir, mbox, nnml, mh, eml-dir")
+	command.Flags().
+		BoolVar(&dryRun, "dry-run", false, "scan and parse without writing FILESTORE")
+	command.Flags().
+		BoolVar(&lowNoise, "low-noise", false, "skip Message-ID/body-line matches and trivial archive differences without per-message writes")
+	command.Flags().
+		BoolVar(&resume, "resume", true, "resume queued import progress from local state")
+	command.Flags().
+		StringVar(&stateDir, "state-dir", "", "local import run state directory; defaults to system.data_dir/import-runs")
+	command.Flags().
+		IntVar(&queueHighWater, "queue-high-water", 10000, "pause discovery while source import queue depth is at or above this value")
+	command.Flags().StringVar(
+		&confirmInstance,
+		"confirm-instance",
+		"",
+		"required production-like instance id confirmation",
+	)
+
+	return command
+}
+
+func archiveImportStateDir(loaded *config.Loaded, override string) string {
+	if strings.TrimSpace(override) != "" {
+		return override
+	}
+
+	return filepath.Join(loaded.Config.System.DataDir, "import-runs")
+}
+
+type sourceImportJobSourceAdapter struct {
+	source *schedmq.SourceImportJobSource
+}
+
+func (adapter sourceImportJobSourceAdapter) Receive(
+	ctx context.Context,
+) (source.ArchiveImportJobReceipt, error) {
+	return adapter.source.Receive(ctx)
+}
+
+func printArchiveImportReport(out io.Writer, report source.ArchiveImportReport) error {
+	encoded, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(out, string(encoded))
+
+	return err
 }
 
 func newSourceServeCommand(

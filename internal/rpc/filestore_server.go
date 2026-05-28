@@ -516,7 +516,7 @@ func (server *FilestoreServer) Verify(
 	ctx context.Context,
 	_ *pb.VerifyRequest,
 ) (*pb.VerifyResponse, error) {
-	report, err := server.store.Verify(ctx)
+	report, err := server.store.Verify(ctx, filestore.VerifyRequest{})
 	if err != nil {
 		return nil, err
 	}

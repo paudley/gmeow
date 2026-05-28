@@ -36,6 +36,8 @@ const (
 	manifestFilename                 = "manifest.json.zst"
 	sourceCursorFilename             = "cursor.json.zst"
 	schemaVersion                    = "1"
+	stagingObjectsDir                = "staging/objects"
+	stagingIncomingDir               = "staging/incoming"
 )
 
 var errStopWalk = errors.New("stop filestore walk")
@@ -703,7 +705,12 @@ func (store *FilesystemStore) commitNewObjectDirectory(
 		return fmt.Errorf("create object parent directory: %w", err)
 	}
 
-	stageDir, err := os.MkdirTemp(parentDir, "."+string(digest)+".")
+	stagingDir := filepath.Join(store.root, stagingObjectsDir)
+	if err := os.MkdirAll(stagingDir, 0o750); err != nil {
+		return fmt.Errorf("create staging directory: %w", err)
+	}
+
+	stageDir, err := os.MkdirTemp(stagingDir, string(digest)+".")
 	if err != nil {
 		return fmt.Errorf("create staged object directory: %w", err)
 	}
@@ -724,13 +731,6 @@ func (store *FilesystemStore) commitNewObjectDirectory(
 		return fmt.Errorf("stage blob: %w", err)
 	}
 
-	if err := atomicWriteJSON(
-		filepath.Join(stageDir, recoveryFilename),
-		recoverySidecarFor(digest, content, compressed, sourceHint, manifest),
-	); err != nil {
-		return fmt.Errorf("stage recovery sidecar: %w", err)
-	}
-
 	if err := store.writeCompressedJSON(
 		filepath.Join(stageDir, manifestFilename),
 		manifest,
@@ -747,6 +747,14 @@ func (store *FilesystemStore) commitNewObjectDirectory(
 	}
 
 	cleanup = false
+
+	if err := store.writePackedRecovery(
+		ctx,
+		digest,
+		recoverySidecarFor(digest, content, compressed, sourceHint, manifest),
+	); err != nil {
+		return fmt.Errorf("write packed recovery sidecar: %w", err)
+	}
 
 	return fsyncDir(parentDir)
 }
@@ -769,14 +777,6 @@ func (store *FilesystemStore) commitStreamedObjectDirectory(
 	err = os.MkdirAll(parentDir, 0o750)
 	if err != nil {
 		return false, fmt.Errorf("create object parent directory: %w", err)
-	}
-
-	err = atomicWriteJSON(
-		filepath.Join(blob.stageDir, recoveryFilename),
-		recoverySidecarForStream(digest, blob, sourceHint, manifest),
-	)
-	if err != nil {
-		return false, fmt.Errorf("stage recovery sidecar: %w", err)
 	}
 
 	err = store.writeCompressedJSON(
@@ -806,6 +806,14 @@ func (store *FilesystemStore) commitStreamedObjectDirectory(
 		return false, fmt.Errorf("commit object directory: %w", err)
 	}
 
+	if err := store.writePackedRecovery(
+		ctx,
+		digest,
+		recoverySidecarForStream(digest, blob, sourceHint, manifest),
+	); err != nil {
+		return false, fmt.Errorf("write packed recovery sidecar: %w", err)
+	}
+
 	return true, fsyncDir(parentDir)
 }
 
@@ -827,7 +835,7 @@ func (store *FilesystemStore) streamObjectBlob(
 		return streamedBlob{}, err
 	}
 
-	incomingDir := filepath.Join(store.root, ".incoming")
+	incomingDir := filepath.Join(store.root, stagingIncomingDir)
 	if err := os.MkdirAll(incomingDir, 0o750); err != nil {
 		return streamedBlob{}, fmt.Errorf("create incoming object directory: %w", err)
 	}
@@ -1325,7 +1333,7 @@ func mergeManifest(existing, incoming contracts.Manifest) contracts.Manifest {
 	merged.ContentRoles = uniqueStrings(
 		append(merged.ContentRoles, incoming.ContentRoles...),
 	)
-	merged.Facets = normalizeFacets(append(merged.Facets, incoming.Facets...))
+	merged.Facets = mergeFacets(merged.Facets, incoming.Facets)
 	merged.Provenance = mergeProvenance(merged.Provenance, incoming.Provenance)
 	merged.Relationships = mergeRelationships(merged.Relationships, incoming.Relationships)
 	merged.Compound.Parts = mergeParts(merged.Compound.Parts, incoming.Compound.Parts)
@@ -1380,6 +1388,27 @@ func mergeMaps(existing, incoming map[string]any) map[string]any {
 	maps.Copy(merged, incoming)
 
 	return merged
+}
+
+func mergeFacets(existing, incoming []contracts.Facet) []contracts.Facet {
+	incomingKinds := map[string]bool{}
+	for _, item := range incoming {
+		kind := strings.TrimSpace(item.FacetKind())
+		if kind != "" {
+			incomingKinds[kind] = true
+		}
+	}
+
+	result := make([]contracts.Facet, 0, len(existing)+len(incoming))
+	for _, item := range existing {
+		if incomingKinds[strings.TrimSpace(item.FacetKind())] {
+			continue
+		}
+		result = append(result, item)
+	}
+	result = append(result, incoming...)
+
+	return normalizeFacets(result)
 }
 
 func mergeProvenance(existing, incoming []contracts.Provenance) []contracts.Provenance {

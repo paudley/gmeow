@@ -31,13 +31,18 @@ func (store *FilesystemStore) LookupSourceObject(
 		return "", false, err
 	}
 
-	var entry sourceObjectIndexEntry
-	err := readJSON(store.sourceObjectIndexPath(ref), &entry)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", false, nil
-	}
+	entry, found, err := store.readPackedSourceObjectIndex(ctx, ref)
 	if err != nil {
 		return "", false, err
+	}
+	if !found {
+		err = readJSON(store.sourceObjectIndexPath(ref), &entry)
+		if errors.Is(err, os.ErrNotExist) {
+			return store.lookupSourceObjectViaAlias(ctx, ref)
+		}
+		if err != nil {
+			return "", false, err
+		}
 	}
 	if !sourceObjectRefsEqual(entry.SourceObject, ref) {
 		return "", false, errors.New("source object index key does not match payload")
@@ -59,6 +64,34 @@ func (store *FilesystemStore) LookupSourceObject(
 		}
 	}
 
+	return "", false, nil
+}
+
+func (store *FilesystemStore) lookupSourceObjectViaAlias(
+	ctx context.Context,
+	ref contracts.SourceObjectRef,
+) (contracts.ObjectDigest, bool, error) {
+	aliasDigest, found, err := store.readPackedSourceAlias(ctx, ref)
+	if err != nil || !found {
+		return "", false, err
+	}
+	if err := validateObjectDigest(aliasDigest); err != nil {
+		return "", false, err
+	}
+	manifest, err := store.ReadManifest(ctx, aliasDigest)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	for _, prov := range manifest.Provenance {
+		if prov.SourceKind == ref.SourceKind &&
+			prov.SourceName == ref.SourceName &&
+			prov.ExternalID == ref.ExternalID {
+			return aliasDigest, true, nil
+		}
+	}
 	return "", false, nil
 }
 
@@ -299,6 +332,16 @@ func sourceObjectRefKey(ref contracts.SourceObjectRef) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func sourceAliasKey(ref contracts.SourceObjectRef) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		ref.SourceKind,
+		ref.SourceName,
+		ref.ExternalID,
+	}, "\x00")))
+
+	return hex.EncodeToString(sum[:])
+}
+
 func sourceObjectLockID(ref contracts.SourceObjectRef, acquiredAt time.Time) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		sourceObjectRefKey(ref),
@@ -358,7 +401,10 @@ func (store *FilesystemStore) recordSourceObjectIndexes(
 			ObjectDigest: digest,
 			UpdatedAt:    updatedAt,
 		}
-		if err := atomicWriteJSON(store.sourceObjectIndexPath(ref), entry); err != nil {
+		if err := store.writePackedSourceObjectIndex(ctx, entry); err != nil {
+			return err
+		}
+		if err := store.writePackedSourceAlias(ctx, ref, digest); err != nil {
 			return err
 		}
 	}
@@ -418,12 +464,22 @@ func (store *FilesystemStore) mergeCompoundParentIndex(
 	unlock := store.lockKey("compound-parent-index:" + string(childDigest))
 	defer unlock()
 
-	path := store.compoundParentIndexPath(childDigest)
 	record := compoundParentIndexRecord{
 		SchemaVersion: int(contracts.SchemaVersionPhase00),
 		ChildDigest:   childDigest,
 	}
-	if err := readJSON(path, &record); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if packed, found, err := store.readPackedCompoundParentIndex(
+		ctx,
+		childDigest,
+	); err != nil {
+		return err
+	} else if found {
+		record = packed
+	} else if err := readJSON(
+		store.compoundParentIndexPath(childDigest),
+		&record,
+	); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if record.ChildDigest != "" && record.ChildDigest != childDigest {
@@ -452,7 +508,7 @@ func (store *FilesystemStore) mergeCompoundParentIndex(
 	}
 	sortCompoundParentEdges(record.Parents)
 
-	return atomicWriteJSON(path, record)
+	return store.writePackedCompoundParentIndex(ctx, record)
 }
 
 func (store *FilesystemStore) compoundParentsForChild(
@@ -466,13 +522,18 @@ func (store *FilesystemStore) compoundParentsForChild(
 		return nil, err
 	}
 
-	var record compoundParentIndexRecord
-	err := readJSON(store.compoundParentIndexPath(childDigest), &record)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	record, found, err := store.readPackedCompoundParentIndex(ctx, childDigest)
 	if err != nil {
 		return nil, err
+	}
+	if !found {
+		err = readJSON(store.compoundParentIndexPath(childDigest), &record)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	if record.ChildDigest != childDigest {
 		return nil, errors.New("compound parent index key does not match payload")

@@ -47,8 +47,9 @@ cannot silently bypass the deployed service model.
 ## FILESTORE
 
 FILESTORE is authoritative. Objects are addressed by BLAKE3 identity and stored
-under the configured FILESTORE root with zstd-compressed bytes, immutable
-recovery sidecars, manifests, annotations, overlays, and source-state metadata.
+under the configured FILESTORE root with zstd-compressed bytes, manifests,
+annotations, overlays, source-state metadata, and packed immutable recovery
+records.
 
 FILESTORE creates both byte-bearing objects and stable compound objects.
 Compound objects carry their own digest, manifest, facets, and role-mapped
@@ -58,14 +59,14 @@ headers, body, Gmail metadata, MIME structure, and attachment subobjects.
 SOURCE adapters never compute dedupe locally. They look up source identity,
 acquire FILESTORE ingest claims for misses, stream payloads through
 `FilestoreService`, and let FILESTORE own identity and reuse decisions.
-Source identity lookups use FILESTORE source-index records and validate the
-target manifest. Runtime SOURCE paths must not walk the object tree to recover
-missing source indexes; a missing index is a lookup miss and normal ingest will
-write the index.
+Source identity lookups use packed FILESTORE source-index records and validate
+the target manifest. Runtime SOURCE paths must not walk the object tree to
+recover missing source indexes; a missing index is a lookup miss and normal
+ingest will write the index.
 
-FILESTORE also maintains a reverse parent index for compound parts. Annotation
-refresh uses that index to update affected compound parents directly instead of
-walking all compound objects.
+FILESTORE also maintains a packed reverse parent index for compound parts.
+Annotation refresh uses that index to update affected compound parents directly
+instead of walking all compound objects.
 
 ## QUERY
 

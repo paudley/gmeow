@@ -15,6 +15,7 @@ import (
 
 	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
 	"blackcat.ca/gmeow/internal/observability"
 	"blackcat.ca/gmeow/internal/rpc"
 	"blackcat.ca/gmeow/internal/testsupport"
@@ -79,7 +80,7 @@ func TestPhaseSevenLoadWorkflowIngestAnalysisProjectionAndSearch(t *testing.T) {
 		t.Fatalf("expected load ingest to produce searchable objects, got %#v", response)
 	}
 
-	report, err := filestoreService.Store.Verify(ctx)
+	report, err := filestoreService.Store.Verify(ctx, filestore.VerifyRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,11 +133,11 @@ func TestPhaseSevenFilestoreRestoreDrillRebuildsSearchableProjection(t *testing.
 	copyTree(t, sourceService.Root, restoredRoot)
 	restoredService := testsupport.StartFilestoreGRPCAt(t, ctx, restoredRoot)
 	defer restoredService.Close()
-	report, err := restoredService.Store.Verify(ctx)
+	report, err := restoredService.Store.Verify(ctx, filestore.VerifyRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(report.Status) != "ok" || report.Checked != 1 {
+	if string(report.Status) != "ok" || len(report.Findings) != 0 {
 		t.Fatalf("restored FILESTORE did not verify cleanly: %#v", report)
 	}
 
