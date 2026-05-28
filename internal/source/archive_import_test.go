@@ -294,6 +294,47 @@ func TestMboxStreamingOffsetsParseOneMessageAtATime(t *testing.T) {
 	}
 }
 
+func TestExtractMailBodyAndAttachmentsRecursesNestedMultipart(t *testing.T) {
+	raw := strings.Join([]string{
+		"Message-ID: <nested@example.test>",
+		"Content-Type: multipart/mixed; boundary=mixed",
+		"",
+		"--mixed",
+		"Content-Type: multipart/alternative; boundary=alt",
+		"",
+		"--alt",
+		"Content-Type: text/plain",
+		"",
+		"nested plain body",
+		"--alt--",
+		"--mixed",
+		"Content-Type: text/plain; name=note.txt",
+		"Content-Disposition: attachment; filename=note.txt",
+		"",
+		"attachment body",
+		"--mixed--",
+		"",
+	}, "\n")
+	message, err := parseArchiveMessage(
+		[]byte(raw),
+		"nested.eml",
+		".",
+		ArchiveImportFormatEMLDir,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(message.Body) != "nested plain body" {
+		t.Fatalf("unexpected body: %q", message.Body)
+	}
+	if len(message.Attachments) != 1 ||
+		message.Attachments[0].FileName != "note.txt" ||
+		string(message.Attachments[0].Content) != "attachment body" {
+		t.Fatalf("unexpected attachments: %#v", message.Attachments)
+	}
+}
+
 func TestQueuedArchiveImportUsesLocalStateAndMessageJobs(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
@@ -328,6 +369,42 @@ func TestQueuedArchiveImportUsesLocalStateAndMessageJobs(t *testing.T) {
 	}
 	if queue.published != 1 {
 		t.Fatalf("expected one published job, got %d", queue.published)
+	}
+}
+
+func TestQueuedArchiveImportDrainsAtQueueHighWater(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	for _, name := range []string{"one", "two", "three"} {
+		writeTestFile(
+			t,
+			filepath.Join(root, name+".eml"),
+			"Message-ID: <"+name+"@example.test>\nSubject: "+name+"\n\n"+name+" body",
+		)
+	}
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := &memoryArchiveImportQueue{}
+	report, err := (ArchiveImportQueuedRun{
+		Importer: importer,
+		Source:   queue,
+	}).Run(ctx, ArchiveImportRequest{
+		SourceName:     "archive",
+		Roots:          []string{root},
+		StateDir:       t.TempDir(),
+		Publisher:      queue,
+		QueueHighWater: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Enqueued != 3 || report.Processed != 3 || report.Imported != 3 {
+		t.Fatalf("unexpected queued import report: %#v", report)
 	}
 }
 

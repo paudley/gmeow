@@ -98,11 +98,20 @@ func (store *FilesystemStore) verifyObject(
 	}
 
 	if _, err := os.Stat(recoveryPath); err != nil {
-		if _, found, readErr := store.readPackedRecovery(
+		if recovery, found, readErr := store.readPackedRecovery(
 			ctx,
 			digest,
 		); readErr != nil {
 			report.addFinding(digest, recoveryPath, "recovery_read_failed", readErr.Error())
+		} else if found {
+			store.verifyRecoveryRecord(
+				report,
+				digest,
+				recoveryPath,
+				recovery,
+				blob,
+				compressedBlob,
+			)
 		} else if !found {
 			report.addFinding(digest, recoveryPath, "recovery_missing", err.Error())
 		}
@@ -240,6 +249,17 @@ func (store *FilesystemStore) verifyRecovery(
 		return
 	}
 
+	store.verifyRecoveryRecord(report, digest, path, recovery, content, compressed)
+}
+
+func (store *FilesystemStore) verifyRecoveryRecord(
+	report *VerifyReport,
+	digest contracts.ObjectDigest,
+	path string,
+	recovery recoverySidecar,
+	content []byte,
+	compressed []byte,
+) {
 	if recovery.Digest != string(digest) {
 		report.addFinding(
 			digest,

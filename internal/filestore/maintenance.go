@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"syscall"
+	"strings"
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -282,7 +282,7 @@ func removeEmptyDirs(ctx context.Context, base string) (int, error) {
 		}
 		if err := os.Remove(path); err == nil {
 			removed++
-		} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscallENOTEMPTY()) {
+		} else if !errors.Is(err, os.ErrNotExist) && !isDirectoryNotEmpty(err) {
 			return removed, err
 		}
 	}
@@ -290,6 +290,8 @@ func removeEmptyDirs(ctx context.Context, base string) (int, error) {
 	return removed, nil
 }
 
-func syscallENOTEMPTY() error {
-	return syscall.ENOTEMPTY
+func isDirectoryNotEmpty(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "directory not empty") ||
+		strings.Contains(message, "not empty")
 }

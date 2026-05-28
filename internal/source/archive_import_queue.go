@@ -100,6 +100,9 @@ func (run ArchiveImportQueuedRun) Run(
 		Processed:  state.Processed,
 	}
 	request.RunID = runID
+	request.CapacityDrainer = func(ctx context.Context) error {
+		return run.drainOne(ctx, request, sourceName, &state, &report)
+	}
 	if !state.DiscoveryDone {
 		if err := run.Importer.enqueueArchiveImportJobs(
 			ctx,
@@ -141,69 +144,72 @@ func (run ArchiveImportQueuedRun) drain(
 	report *ArchiveImportReport,
 ) error {
 	for report.Processed < report.Enqueued {
-		status, err := request.Publisher.SourceImportStatus(ctx)
-		if err != nil {
-			return err
-		}
-		if status.Failed > 0 {
-			if _, err := request.Publisher.ProcessSourceImportFailures(ctx, 100); err != nil {
-				return err
-			}
-			continue
-		}
-		if status.Pending == 0 {
-			if status.Retry == 0 && status.DeadLetter > 0 {
-				return fmt.Errorf("source import dead-lettered %d job(s)", status.DeadLetter)
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(500 * time.Millisecond):
-			}
-			continue
-		}
-
-		receipt, err := run.Source.Receive(ctx)
-		if err != nil {
-			return err
-		}
-		job := receipt.Job()
-		if job.RunID != report.RunID {
-			if err := receipt.Retry(
-				ctx,
-				fmt.Errorf("source import job belongs to run %s", job.RunID),
-			); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := run.Importer.ProcessSourceImportJob(
-			ctx,
-			sourceName,
-			job,
-			request,
-			report,
-		); err != nil {
-			state.Failures++
-			if retryErr := receipt.Retry(ctx, err); retryErr != nil {
-				return retryErr
-			}
-			if saveErr := saveArchiveImportState(request.StateDir, *state); saveErr != nil {
-				return saveErr
-			}
-			continue
-		}
-		if err := receipt.Ack(ctx); err != nil {
-			return err
-		}
-		report.Processed++
-		state.Processed = report.Processed
-		if err := saveArchiveImportState(request.StateDir, *state); err != nil {
+		if err := run.drainOne(ctx, request, sourceName, state, report); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func (run ArchiveImportQueuedRun) drainOne(
+	ctx context.Context,
+	request ArchiveImportRequest,
+	sourceName string,
+	state *archiveImportRunState,
+	report *ArchiveImportReport,
+) error {
+	status, err := request.Publisher.SourceImportStatus(ctx)
+	if err != nil {
+		return err
+	}
+	if status.Failed > 0 {
+		_, err := request.Publisher.ProcessSourceImportFailures(ctx, 100)
+		return err
+	}
+	if status.Pending == 0 {
+		if status.Retry == 0 && status.DeadLetter > 0 {
+			return fmt.Errorf("source import dead-lettered %d job(s)", status.DeadLetter)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+			return nil
+		}
+	}
+
+	receipt, err := run.Source.Receive(ctx)
+	if err != nil {
+		return err
+	}
+	job := receipt.Job()
+	if job.RunID != report.RunID {
+		return receipt.Retry(
+			ctx,
+			fmt.Errorf("source import job belongs to run %s", job.RunID),
+		)
+	}
+	if err := run.Importer.ProcessSourceImportJob(
+		ctx,
+		sourceName,
+		job,
+		request,
+		report,
+	); err != nil {
+		state.Failures++
+		if retryErr := receipt.Retry(ctx, err); retryErr != nil {
+			return retryErr
+		}
+		return saveArchiveImportState(request.StateDir, *state)
+	}
+	if err := receipt.Ack(ctx); err != nil {
+		return err
+	}
+	report.Processed++
+	state.Processed = report.Processed
+
+	return saveArchiveImportState(request.StateDir, *state)
 }
 
 func (importer *ArchiveImporter) enqueueArchiveImportJobs(
@@ -383,7 +389,7 @@ func (importer *ArchiveImporter) publishArchiveImportJob(
 	state *archiveImportRunState,
 	report *ArchiveImportReport,
 ) error {
-	if err := waitForArchiveImportCapacity(ctx, request.Publisher, highWater); err != nil {
+	if err := waitForArchiveImportCapacity(ctx, request, highWater); err != nil {
 		return err
 	}
 	relative, _ := filepath.Rel(root, path)
@@ -433,16 +439,22 @@ func shouldSkipArchivePath(path, format string, state *archiveImportRunState) bo
 
 func waitForArchiveImportCapacity(
 	ctx context.Context,
-	publisher ArchiveImportPublisher,
+	request ArchiveImportRequest,
 	highWater int,
 ) error {
 	for {
-		status, err := publisher.SourceImportStatus(ctx)
+		status, err := request.Publisher.SourceImportStatus(ctx)
 		if err != nil {
 			return err
 		}
 		if status.Pending+status.Retry < highWater {
 			return nil
+		}
+		if request.CapacityDrainer != nil {
+			if err := request.CapacityDrainer(ctx); err != nil {
+				return err
+			}
+			continue
 		}
 		select {
 		case <-ctx.Done():

@@ -51,15 +51,24 @@ func forEachMboxMessageOffset(path string, fn func(offset, size int64) error) er
 }
 
 func parseMboxFile(path, root string) ([]archiveMessage, error) {
+	messages := []archiveMessage{}
+	err := forEachMboxMessage(path, root, func(message archiveMessage) error {
+		messages = append(messages, message)
+		return nil
+	})
+
+	return messages, err
+}
+
+func forEachMboxMessage(path, root string, fn func(archiveMessage) error) error {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	messages := []archiveMessage{}
 	var current bytes.Buffer
 	offset := 0
 	for scanner.Scan() {
@@ -74,7 +83,9 @@ func parseMboxFile(path, root string) ([]archiveMessage, error) {
 					offset,
 				)
 				if err == nil {
-					messages = append(messages, message)
+					if err := fn(message); err != nil {
+						return err
+					}
 				}
 				current.Reset()
 				offset++
@@ -88,7 +99,7 @@ func parseMboxFile(path, root string) ([]archiveMessage, error) {
 		current.WriteByte('\n')
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return err
 	}
 	if current.Len() > 0 {
 		message, err := parseArchiveMessage(
@@ -99,11 +110,13 @@ func parseMboxFile(path, root string) ([]archiveMessage, error) {
 			offset,
 		)
 		if err == nil {
-			messages = append(messages, message)
+			if err := fn(message); err != nil {
+				return err
+			}
 		}
 	}
 
-	return messages, nil
+	return nil
 }
 
 func parseMboxMessageAt(path, root string, wantedOffset int) (archiveMessage, error) {

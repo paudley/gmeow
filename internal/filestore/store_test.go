@@ -1000,6 +1000,41 @@ func TestVerifyReportsCompressedRecoveryHashMismatch(t *testing.T) {
 	assertFinding(t, report, "recovery_compressed_size_mismatch")
 }
 
+func TestVerifyReportsPackedRecoveryHashMismatch(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovery recoverySidecar
+	recoveryContent, err := store.ExportRecoveryJSON(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(recoveryContent, &recovery); err != nil {
+		t.Fatal(err)
+	}
+	recovery.CompressedBlake3 = strings.Repeat("0", 64)
+	recovery.CompressedSHA256 = strings.Repeat("1", 64)
+	recovery.CompressedSize++
+	if err := store.writePackedRecovery(ctx, digest, recovery); err != nil {
+		t.Fatal(err)
+	}
+	report, err := store.Verify(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != VerifyStatusError {
+		t.Fatalf("expected packed recovery mismatch report: %#v", report)
+	}
+	assertFinding(t, report, "recovery_compressed_hash_mismatch")
+	assertFinding(t, report, "recovery_compressed_size_mismatch")
+}
+
 func TestVerifyReportsInterruptedAnnotationWrites(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()

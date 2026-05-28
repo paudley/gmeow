@@ -38,17 +38,18 @@ const (
 var numberedMailFilePattern = regexp.MustCompile(`^[0-9]+$`)
 
 type ArchiveImportRequest struct {
-	SourceName     string
-	Format         string
-	Roots          []string
-	RunID          string
-	StateDir       string
-	DryRun         bool
-	LowNoise       bool
-	Resume         bool
-	QueueHighWater int
-	Publisher      ArchiveImportPublisher
-	Status         ArchiveImportQueueStatusFunc
+	SourceName      string
+	Format          string
+	Roots           []string
+	RunID           string
+	StateDir        string
+	DryRun          bool
+	LowNoise        bool
+	Resume          bool
+	QueueHighWater  int
+	Publisher       ArchiveImportPublisher
+	Status          ArchiveImportQueueStatusFunc
+	CapacityDrainer func(context.Context) error
 }
 
 type ArchiveImportReport struct {
@@ -203,13 +204,7 @@ func (importer *ArchiveImporter) importRoot(
 			}
 			report.Scanned++
 			if format == ArchiveImportFormatMbox {
-				messages, parseErr := parseMboxFile(path, root)
-				if parseErr != nil {
-					report.ParseFailures++
-					report.Failures = append(report.Failures, parseErr.Error())
-					return nil
-				}
-				for _, message := range messages {
+				parseErr := forEachMboxMessage(path, root, func(message archiveMessage) error {
 					report.Parsed++
 					if err := importer.ingestArchiveMessage(
 						ctx,
@@ -220,6 +215,13 @@ func (importer *ArchiveImporter) importRoot(
 					); err != nil {
 						report.Failures = append(report.Failures, err.Error())
 					}
+
+					return nil
+				})
+				if parseErr != nil {
+					report.ParseFailures++
+					report.Failures = append(report.Failures, parseErr.Error())
+					return nil
 				}
 				return nil
 			}
@@ -1020,15 +1022,39 @@ func extractMailBodyAndAttachments(
 	headers mail.Header,
 	body io.Reader,
 ) ([]byte, []archiveAttachment) {
+	textBodies := []string{}
+	attachments := []archiveAttachment{}
+	extractMailPart(headers, body, &textBodies, &attachments)
+
+	return []byte(strings.Join(textBodies, "\n")), attachments
+}
+
+func extractMailPart(
+	headers mail.Header,
+	body io.Reader,
+	textBodies *[]string,
+	attachments *[]archiveAttachment,
+) {
 	contentType := headers.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
 		content, _ := io.ReadAll(body)
-		return content, nil
+		disposition, _, _ := mime.ParseMediaType(headers.Get("Content-Disposition"))
+		fileName := archivePartFilename(headers)
+		if disposition == "attachment" || fileName != "" {
+			*attachments = append(*attachments, archiveAttachment{
+				Content:   content,
+				FileName:  fileName,
+				MediaType: firstNonEmpty(mediaType, "application/octet-stream"),
+			})
+			return
+		}
+		if mediaType == "text/plain" || (mediaType == "" && len(*textBodies) == 0) {
+			*textBodies = append(*textBodies, string(content))
+		}
+		return
 	}
 	reader := multipart.NewReader(body, params["boundary"])
-	textBodies := []string{}
-	attachments := []archiveAttachment{}
 	for {
 		part, err := reader.NextPart()
 		if errors.Is(err, io.EOF) {
@@ -1037,23 +1063,21 @@ func extractMailBodyAndAttachments(
 		if err != nil {
 			break
 		}
-		content, _ := io.ReadAll(part)
-		partType, _, _ := mime.ParseMediaType(part.Header.Get("Content-Type"))
-		disposition, _, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
-		if disposition == "attachment" || part.FileName() != "" {
-			attachments = append(attachments, archiveAttachment{
-				Content:   content,
-				FileName:  part.FileName(),
-				MediaType: firstNonEmpty(partType, "application/octet-stream"),
-			})
-			continue
-		}
-		if partType == "text/plain" || (partType == "" && len(textBodies) == 0) {
-			textBodies = append(textBodies, string(content))
-		}
+		extractMailPart(mail.Header(part.Header), part, textBodies, attachments)
+	}
+}
+
+func archivePartFilename(headers mail.Header) string {
+	_, params, err := mime.ParseMediaType(headers.Get("Content-Disposition"))
+	if err == nil && params["filename"] != "" {
+		return params["filename"]
+	}
+	_, params, err = mime.ParseMediaType(headers.Get("Content-Type"))
+	if err == nil {
+		return params["name"]
 	}
 
-	return []byte(strings.Join(textBodies, "\n")), attachments
+	return ""
 }
 
 func detectArchiveFileFormat(path, root, requested string) string {

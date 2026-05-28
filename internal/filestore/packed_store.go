@@ -199,31 +199,33 @@ func (store *FilesystemStore) appendPackedRecord(
 	unlock := store.lockKey(lockKey)
 	defer unlock()
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
-	if err != nil {
-		return err
-	}
-	encoded, err := json.Marshal(record)
-	if err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := file.Write(append(encoded, '\n')); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
+	return store.withPackedMetadataLock(ctx, func() error {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			return err
+		}
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
+		if err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			_ = file.Close()
+			return err
+		}
+		if _, err := file.Write(append(encoded, '\n')); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
 
-	return fsyncDir(filepath.Dir(path))
+		return fsyncDir(filepath.Dir(path))
+	})
 }
 
 func scanPackedRecords[T any](path string, fn func(T) error) error {
