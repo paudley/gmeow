@@ -38,7 +38,7 @@ func (store *FilesystemStore) LookupSourceObject(
 	if !found {
 		err = readJSON(store.sourceObjectIndexPath(ref), &entry)
 		if errors.Is(err, os.ErrNotExist) {
-			return "", false, nil
+			return store.lookupSourceObjectViaAlias(ctx, ref)
 		}
 		if err != nil {
 			return "", false, err
@@ -64,6 +64,34 @@ func (store *FilesystemStore) LookupSourceObject(
 		}
 	}
 
+	return "", false, nil
+}
+
+func (store *FilesystemStore) lookupSourceObjectViaAlias(
+	ctx context.Context,
+	ref contracts.SourceObjectRef,
+) (contracts.ObjectDigest, bool, error) {
+	aliasDigest, found, err := store.readPackedSourceAlias(ctx, ref)
+	if err != nil || !found {
+		return "", false, err
+	}
+	if err := validateObjectDigest(aliasDigest); err != nil {
+		return "", false, err
+	}
+	manifest, err := store.ReadManifest(ctx, aliasDigest)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	for _, prov := range manifest.Provenance {
+		if prov.SourceKind == ref.SourceKind &&
+			prov.SourceName == ref.SourceName &&
+			prov.ExternalID == ref.ExternalID {
+			return aliasDigest, true, nil
+		}
+	}
 	return "", false, nil
 }
 
@@ -304,6 +332,16 @@ func sourceObjectRefKey(ref contracts.SourceObjectRef) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func sourceAliasKey(ref contracts.SourceObjectRef) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		ref.SourceKind,
+		ref.SourceName,
+		ref.ExternalID,
+	}, "\x00")))
+
+	return hex.EncodeToString(sum[:])
+}
+
 func sourceObjectLockID(ref contracts.SourceObjectRef, acquiredAt time.Time) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		sourceObjectRefKey(ref),
@@ -364,6 +402,9 @@ func (store *FilesystemStore) recordSourceObjectIndexes(
 			UpdatedAt:    updatedAt,
 		}
 		if err := store.writePackedSourceObjectIndex(ctx, entry); err != nil {
+			return err
+		}
+		if err := store.writePackedSourceAlias(ctx, ref, digest); err != nil {
 			return err
 		}
 	}

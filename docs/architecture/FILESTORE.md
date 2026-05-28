@@ -63,14 +63,18 @@ existing FILESTORE roots remain readable during migration. New writes use v2.
 
 ## Operations
 
-`gmeow-admin filestore verify` checks object integrity and reports corrupt or
-incomplete state without poisoning unrelated reads. Backup and restore
-procedures are documented in `docs/FILESTORE_BACKUP_RESTORE.md`.
+`gmeow-admin filestore verify` checks object integrity, packed metadata shard
+integrity, and source-index reachability. `verify --repair` truncates torn JSONL
+tails, reaps stale staging directories, rebuilds missing source-index entries
+from manifest provenance, and cleans up expired source locks. This is the
+post-restore normalization step. Backup and restore procedures are documented in
+`docs/FILESTORE_BACKUP_RESTORE.md`.
 
 `gmeow-admin filestore cleanup-locks` removes expired source ingest lock files
 and empty lock shard directories. `gmeow-admin filestore compact` migrates
-legacy v1 metadata files into packed v2 shards; use `--dry-run` first to count
-eligible files without mutating the FILESTORE root. `gmeow-admin filestore
+legacy v1 metadata files into packed v2 shards and deduplicates v2 shards
+(keeping only the last record per key); use `--dry-run` first to count eligible
+files without mutating the FILESTORE root. `gmeow-admin filestore
 export-recovery --digest <digest>` prints one object's recovery record from v2
 or legacy recovery data.
 

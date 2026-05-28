@@ -92,7 +92,7 @@ func TestPutSameBytesDedupesToOneObjectDirectory(t *testing.T) {
 	}
 }
 
-func TestLookupSourceObjectFindsExactSourceVersion(t *testing.T) {
+func TestLookupSourceObjectFindsSourceAliasAcrossVersions(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	digest, err := store.Put(ctx, PutRequest{
@@ -128,13 +128,22 @@ func TestLookupSourceObjectFindsExactSourceVersion(t *testing.T) {
 	})); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("new source indexes must not write v1 files: %v", err)
 	}
-	if _, ok, err := store.LookupSourceObject(ctx, contracts.SourceObjectRef{
+	found, ok, err = store.LookupSourceObject(ctx, contracts.SourceObjectRef{
 		SourceKind:      "gmail",
 		SourceName:      "primary",
 		ExternalID:      "message-1",
 		ExternalVersion: "history-2",
-	}); err != nil || ok {
-		t.Fatalf("expected exact source version miss, ok=%t err=%v", ok, err)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || found != digest {
+		t.Fatalf(
+			"expected source alias lookup hit for %s, got ok=%t digest=%s",
+			digest,
+			ok,
+			found,
+		)
 	}
 }
 
@@ -162,6 +171,11 @@ func TestLookupSourceObjectDoesNotWalkUnindexedFilestore(t *testing.T) {
 	}
 	if err := os.Remove(
 		store.packedSourceIndexShardPath(sourceObjectRefKey(ref)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(
+		store.packedSourceAliasIndexShardPath(sourceAliasKey(ref)),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +427,7 @@ func TestPutRefusesToRepairIncompleteObjectDirectory(t *testing.T) {
 	if !strings.Contains(err.Error(), "missing immutable blob") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	report, err := store.Verify(ctx)
+	report, err := store.Verify(ctx, VerifyRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +473,7 @@ func TestPutDuplicateCleansIncomingStageDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries, err := os.ReadDir(filepath.Join(store.root, ".incoming"))
+	entries, err := os.ReadDir(filepath.Join(store.root, "staging", "incoming"))
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
@@ -989,7 +1003,7 @@ func TestVerifyReportsCompressedRecoveryHashMismatch(t *testing.T) {
 	if err := atomicWriteJSON(recoveryPath, recovery); err != nil {
 		t.Fatal(err)
 	}
-	report, err := store.Verify(ctx)
+	report, err := store.Verify(ctx, VerifyRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1024,7 +1038,7 @@ func TestVerifyReportsPackedRecoveryHashMismatch(t *testing.T) {
 	if err := store.writePackedRecovery(ctx, digest, recovery); err != nil {
 		t.Fatal(err)
 	}
-	report, err := store.Verify(ctx)
+	report, err := store.Verify(ctx, VerifyRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1060,7 +1074,7 @@ func TestVerifyReportsInterruptedAnnotationWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := store.Verify(ctx)
+	report, err := store.Verify(ctx, VerifyRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1089,7 +1103,7 @@ func TestVerifyReportsObjectDirectoryUnderWrongPrefix(t *testing.T) {
 	if err := os.Rename(store.objectDir(digest), wrongDir); err != nil {
 		t.Fatal(err)
 	}
-	report, err := store.Verify(ctx)
+	report, err := store.Verify(ctx, VerifyRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1318,7 +1332,7 @@ func TestCompoundMergePreservesBlobAndRecoverySidecar(t *testing.T) {
 		len(structure.PartsByRole["second"]) != 1 {
 		t.Fatalf("compound manifest did not include merged parts: %#v", structure.PartsByRole)
 	}
-	report, err := store.Verify(ctx)
+	report, err := store.Verify(ctx, VerifyRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1417,7 +1431,7 @@ func TestVerifyReportsCorruptBytesMissingRecoveryAndDanglingPart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := store.Verify(ctx)
+	report, err := store.Verify(ctx, VerifyRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1674,7 +1688,7 @@ func TestStorageBreakdownIncludesObjectAndPackedMetadataFiles(t *testing.T) {
 	if report.TotalAllocatedBytes <= 0 || report.TotalLogicalBytes <= 0 {
 		t.Fatalf("expected positive totals: %#v", report)
 	}
-	for _, role := range []string{"blob", "manifest", "packed_recovery", "packed_source_index"} {
+	for _, role := range []string{"blob", "manifest", "packed_recovery", "packed_source_index", "packed_source_alias_index"} {
 		assertStorageRole(t, report, role)
 	}
 }

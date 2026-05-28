@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -35,6 +37,8 @@ func newFilestoreCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newFilestoreStorageCommand(out, configPath))
 	command.AddCommand(newFilestorePathCommand(out, configPath))
 	command.AddCommand(newFilestoreServeCommand(out, configPath, "serve"))
+	command.AddCommand(newFilestoreBackupCommand(out, configPath))
+	command.AddCommand(newFilestoreRestoreCommand(out, configPath))
 
 	return command
 }
@@ -611,7 +615,7 @@ func newFilestoreCompactCommand(out io.Writer, configPath *string) *cobra.Comman
 
 	command := &cobra.Command{
 		Use:   "compact",
-		Short: "Migrate v1 FILESTORE indexes and recovery sidecars into packed v2 shards",
+		Short: "Migrate v1 indexes to packed v2 shards and deduplicate v2 shards",
 		RunE: func(command *cobra.Command, _ []string) error {
 			loaded, err := config.Load(config.Options{Path: *configPath})
 			if err != nil {
@@ -631,7 +635,7 @@ func newFilestoreCompactCommand(out io.Writer, configPath *string) *cobra.Comman
 				return err
 			}
 			report, err := filestore.NewFilesystemStore(root).
-				CompactV1Layout(command.Context(), dryRun)
+				Compact(command.Context(), dryRun)
 			if err != nil {
 				return err
 			}
@@ -688,9 +692,11 @@ func newFilestoreExportRecoveryCommand(
 }
 
 func newFilestoreVerifyCommand(out io.Writer, configPath *string) *cobra.Command {
-	return &cobra.Command{
+	var repair bool
+
+	command := &cobra.Command{
 		Use:   "verify",
-		Short: "Verify FILESTORE object directories",
+		Short: "Verify FILESTORE object directories and packed metadata shards",
 		RunE: func(command *cobra.Command, _ []string) error {
 			loaded, err := config.Load(config.Options{Path: *configPath})
 			if err != nil {
@@ -704,17 +710,20 @@ func newFilestoreVerifyCommand(out io.Writer, configPath *string) *cobra.Command
 
 			store := filestore.NewFilesystemStore(root)
 
-			report, err := store.Verify(command.Context())
+			report, err := store.Verify(command.Context(), filestore.VerifyRequest{
+				Repair: repair,
+			})
 			if err != nil {
 				return err
 			}
 
 			if _, err := fmt.Fprintf(
 				out,
-				"filestore verify: status=%s checked=%d findings=%d\n",
+				"filestore verify: status=%s checked=%d findings=%d repaired=%d\n",
 				report.Status,
 				report.Checked,
 				len(report.Findings),
+				report.Repaired,
 			); err != nil {
 				return err
 			}
@@ -732,13 +741,164 @@ func newFilestoreVerifyCommand(out io.Writer, configPath *string) *cobra.Command
 				}
 			}
 
-			if report.Status == filestore.VerifyStatusError {
+			if report.Status == filestore.VerifyStatusError && !repair {
 				return errors.New("filestore verification failed")
 			}
 
 			return nil
 		},
 	}
+	command.Flags().
+		BoolVar(&repair, "repair", false, "attempt to repair torn tails and stale staging directories")
+
+	return command
+}
+
+func newFilestoreBackupCommand(out io.Writer, configPath *string) *cobra.Command {
+	var destPath string
+
+	command := &cobra.Command{
+		Use:   "backup",
+		Short: "Back up FILESTORE to a destination directory using rsync",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			root, err := resolvedFilestoreRoot(loaded)
+			if err != nil {
+				return err
+			}
+			if destPath == "" {
+				return errors.New("--to is required")
+			}
+
+			src := strings.TrimRight(root, "/") + "/"
+			dst := strings.TrimRight(destPath, "/") + "/"
+
+			args := []string{
+				"-aH", "--delete",
+				"--exclude=staging/",
+				"--exclude=*.next",
+				src, dst,
+			}
+			if _, err := fmt.Fprintf(
+				out,
+				"filestore backup: rsync %s\n",
+				strings.Join(args, " "),
+			); err != nil {
+				return err
+			}
+
+			rsync := exec.CommandContext(command.Context(), "rsync", args...)
+			rsync.Stdout = out
+			rsync.Stderr = out
+			if err := rsync.Run(); err != nil {
+				return fmt.Errorf("rsync failed: %w", err)
+			}
+
+			snapshot := map[string]any{
+				"taken_at":    time.Now().UTC().Format(time.RFC3339),
+				"source_root": root,
+				"tool":        "rsync",
+			}
+			encoded, err := json.MarshalIndent(snapshot, "", "  ")
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(out, "filestore backup: complete\n%s\n", encoded)
+			return err
+		},
+	}
+	command.Flags().StringVar(&destPath, "to", "", "destination directory for the backup")
+	_ = command.MarkFlagRequired("to")
+
+	return command
+}
+
+func newFilestoreRestoreCommand(out io.Writer, configPath *string) *cobra.Command {
+	var fromPath string
+
+	command := &cobra.Command{
+		Use:   "restore",
+		Short: "Restore FILESTORE from a backup directory and run verify --repair",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			root, err := resolvedFilestoreRoot(loaded)
+			if err != nil {
+				return err
+			}
+			if fromPath == "" {
+				return errors.New("--from is required")
+			}
+
+			src := strings.TrimRight(fromPath, "/") + "/"
+			dst := strings.TrimRight(root, "/") + "/"
+
+			args := []string{"-aH", "--delete", src, dst}
+			if _, err := fmt.Fprintf(
+				out,
+				"filestore restore: rsync %s\n",
+				strings.Join(args, " "),
+			); err != nil {
+				return err
+			}
+
+			rsync := exec.CommandContext(command.Context(), "rsync", args...)
+			rsync.Stdout = out
+			rsync.Stderr = out
+			if err := rsync.Run(); err != nil {
+				return fmt.Errorf("rsync failed: %w", err)
+			}
+
+			if _, err := fmt.Fprintln(
+				out,
+				"filestore restore: running verify --repair",
+			); err != nil {
+				return err
+			}
+
+			store := filestore.NewFilesystemStore(root)
+			report, err := store.Verify(command.Context(), filestore.VerifyRequest{Repair: true})
+			if err != nil {
+				return err
+			}
+
+			if _, err := fmt.Fprintf(
+				out,
+				"filestore restore: verify status=%s checked=%d findings=%d repaired=%d\n",
+				report.Status,
+				report.Checked,
+				len(report.Findings),
+				report.Repaired,
+			); err != nil {
+				return err
+			}
+
+			for _, finding := range report.Findings {
+				if _, err := fmt.Fprintf(
+					out,
+					"%s %s %s %s\n",
+					finding.Code,
+					finding.Digest,
+					finding.Path,
+					finding.Message,
+				); err != nil {
+					return err
+				}
+			}
+
+			return nil
+		},
+	}
+	command.Flags().
+		StringVar(&fromPath, "from", "", "source backup directory to restore from")
+	_ = command.MarkFlagRequired("from")
+
+	return command
 }
 
 func resolvedFilestoreRoot(loaded *config.Loaded) (string, error) {

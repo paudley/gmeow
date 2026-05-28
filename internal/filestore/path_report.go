@@ -119,9 +119,11 @@ func (store *FilesystemStore) ResolvePath(
 	}
 	if info.IsDir() {
 		report.Kind = "directory"
-		if parts[0] == ".incoming" {
+		if parts[0] == "staging" {
 			report.Kind = "staging"
-			report.Role = "incoming"
+			if len(parts) >= 2 {
+				report.Role = parts[1]
+			}
 		}
 		return report, nil
 	}
@@ -131,6 +133,8 @@ func (store *FilesystemStore) ResolvePath(
 		return store.resolveObjectPath(ctx, report, parts)
 	case packedSourceIndexDir:
 		return resolvePackedSourceIndexPath(report, physicalPath, parts, limit)
+	case packedSourceAliasIndexDir:
+		return resolvePackedSourceAliasPath(report, physicalPath, parts, limit)
 	case packedCompoundParentIndexDir:
 		return resolvePackedCompoundParentPath(report, physicalPath, parts, limit)
 	case packedRecoveryDir:
@@ -143,9 +147,11 @@ func (store *FilesystemStore) ResolvePath(
 		return store.resolveSourceCursorPath(report, physicalPath)
 	case "source-locks":
 		return resolveSourceLockPath(report, physicalPath)
-	case ".incoming":
+	case "staging":
 		report.Kind = "staging"
-		report.Role = "incoming"
+		if len(parts) >= 2 {
+			report.Role = parts[1]
+		}
 		return report, nil
 	default:
 		report.Kind = "unknown"
@@ -245,6 +251,38 @@ func resolvePackedSourceIndexPath(
 		report.Records = append(report.Records, PathResolveRecord{
 			SourceObject: &sourceObject,
 			ObjectDigest: record.ObjectDigest,
+			UpdatedAt:    record.UpdatedAt.Format(time.RFC3339Nano),
+		})
+		return nil
+	})
+	return report, err
+}
+
+func resolvePackedSourceAliasPath(
+	report PathResolveReport,
+	path string,
+	parts []string,
+	limit int,
+) (PathResolveReport, error) {
+	report.Kind = "packed_source_alias_index"
+	report.Role = "records"
+	if !validPackedShardParts(parts, false) {
+		report.Role = "invalid_shard_path"
+		return report, nil
+	}
+	err := scanPackedRecords(path, func(record packedSourceAliasEntry) error {
+		report.RecordCount++
+		if len(report.Records) >= limit {
+			report.Truncated = true
+			return nil
+		}
+		report.Records = append(report.Records, PathResolveRecord{
+			SourceObject: &contracts.SourceObjectRef{
+				SourceKind: record.SourceKind,
+				SourceName: record.SourceName,
+				ExternalID: record.ExternalID,
+			},
+			ObjectDigest: record.Digest,
 			UpdatedAt:    record.UpdatedAt.Format(time.RFC3339Nano),
 		})
 		return nil

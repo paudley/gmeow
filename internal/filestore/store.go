@@ -36,6 +36,8 @@ const (
 	manifestFilename                 = "manifest.json.zst"
 	sourceCursorFilename             = "cursor.json.zst"
 	schemaVersion                    = "1"
+	stagingObjectsDir                = "staging/objects"
+	stagingIncomingDir               = "staging/incoming"
 )
 
 var errStopWalk = errors.New("stop filestore walk")
@@ -703,7 +705,12 @@ func (store *FilesystemStore) commitNewObjectDirectory(
 		return fmt.Errorf("create object parent directory: %w", err)
 	}
 
-	stageDir, err := os.MkdirTemp(parentDir, "."+string(digest)+".")
+	stagingDir := filepath.Join(store.root, stagingObjectsDir)
+	if err := os.MkdirAll(stagingDir, 0o750); err != nil {
+		return fmt.Errorf("create staging directory: %w", err)
+	}
+
+	stageDir, err := os.MkdirTemp(stagingDir, string(digest)+".")
 	if err != nil {
 		return fmt.Errorf("create staged object directory: %w", err)
 	}
@@ -828,7 +835,7 @@ func (store *FilesystemStore) streamObjectBlob(
 		return streamedBlob{}, err
 	}
 
-	incomingDir := filepath.Join(store.root, ".incoming")
+	incomingDir := filepath.Join(store.root, stagingIncomingDir)
 	if err := os.MkdirAll(incomingDir, 0o750); err != nil {
 		return streamedBlob{}, fmt.Errorf("create incoming object directory: %w", err)
 	}

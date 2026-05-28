@@ -299,6 +299,21 @@ func (store *FilesystemStore) addObjectMetadataFiles(
 				return err
 			}
 		}
+		if _, found, err := store.readPackedSourceAlias(ctx, ref); err != nil {
+			return err
+		} else if found {
+			if err := store.addStorageFile(report, seenFiles, storageFileContext{
+				ObjectDigest:  digest,
+				Role:          "packed_source_alias_index",
+				Path:          store.packedSourceAliasIndexShardPath(sourceAliasKey(ref)),
+				ReferencedBy:  referencedBy,
+				CompoundRole:  compoundRole,
+				CompoundOrder: compoundOrder,
+				RecursivePart: recursivePart,
+			}); err != nil {
+				return err
+			}
+		}
 		if legacyPath := store.sourceObjectIndexPath(ref); fileExists(legacyPath) {
 			if err := store.addStorageFile(report, seenFiles, storageFileContext{
 				ObjectDigest:  digest,

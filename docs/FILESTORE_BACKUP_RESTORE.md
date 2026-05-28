@@ -5,19 +5,40 @@ durable work messages that can be redelivered or rederived.
 
 ## Backup
 
-1. Stop `gmeow`, `gmeow-worker`, FILESTORE, QUERY, and SCHEDULER services.
-2. Back up `gmeow.toml`, SOPS age identity material, and the configured `filestore.root`.
-3. Keep file permissions intact for config, secret material, and object directories.
-4. Restart services and run `gmeow-admin filestore verify`.
+FILESTORE is crash-consistent at every instant. Backups may be taken while the
+system is actively writing — no quiesce, pause, or signal coordination is
+required. Any tool that produces a point-in-time copy of a directory tree is
+sufficient:
 
-## Restore Drill
+```
+rsync -aH --delete <filestore.root>/ <dest>/
+```
 
-1. Restore the config, SOPS key, and FILESTORE tree into a temporary target.
-2. Run `gmeow-admin --config <restore.toml> filestore verify`.
-3. Run `gmeow-admin --config <restore.toml> query migrate`.
-4. Run `gmeow-admin --config <restore.toml> query rebuild --confirm-instance <instance_id>`.
-5. Run `gmeow-admin --config <restore.toml> scheduler scan`.
-6. Smoke test `gmeow --config <restore.toml> search <synthetic-term>` and object retrieval.
+The `staging/` directory contains transient in-flight data and may be excluded
+from backups without loss:
+
+```
+rsync -aH --delete --exclude=staging/ --exclude='*.next' <filestore.root>/ <dest>/
+```
+
+Also back up `gmeow.toml`, SOPS age identity material, and keep file
+permissions intact for config, secret material, and object directories.
+
+A backup snapshot is indistinguishable from a hard power-loss snapshot of the
+live process. If the store survives a hard kill, it survives a backup.
+
+## Restore
+
+1. Restore the config, SOPS key, and FILESTORE tree into the target location.
+2. Run `gmeow-admin --config <restore.toml> filestore verify --repair`.
+3. Verify reports findings that are the expected post-snapshot artifacts (torn
+   JSONL tails, stale staging dirs, missing source-index entries) and repairs
+   them automatically. If unrepairable findings remain, the source filesystem
+   was corrupted or the backup tool lost data.
+4. Run `gmeow-admin --config <restore.toml> query migrate`.
+5. Run `gmeow-admin --config <restore.toml> query rebuild --confirm-instance <instance_id>`.
+6. Run `gmeow-admin --config <restore.toml> scheduler scan`.
+7. Smoke test `gmeow --config <restore.toml> search <synthetic-term>` and object retrieval.
 
 If PostgreSQL is lost, recreate the database/extensions, run migrations, and rebuild QUERY from
 FILESTORE. Do not use recovery records for normal rebuilds; they are emergency human recovery aids
@@ -36,12 +57,14 @@ data, normal ingest or an explicit repair workflow recreates it.
 Current FILESTORE roots write packed v2 metadata:
 
 - `source-index-v2/<hh>/<hh>/records.jsonl`
+- `source-alias-index-v2/<hh>/<hh>/records.jsonl`
 - `compound-parent-index-v2/blake3/<hh>/<hh>/records.jsonl`
 - `recovery-v2/blake3/<hh>/<hh>/records.jsonl`
 
 Legacy roots may still contain `source-index/`, `compound-parent-index/`, and
 per-object `recovery.json` files. Readers fall back to those files, but they can
-be migrated into packed shards:
+be migrated into packed shards. Compact also deduplicates v2 shards, keeping
+only the last record per key:
 
 ```
 gmeow-admin --config <restore.toml> filestore compact --dry-run
