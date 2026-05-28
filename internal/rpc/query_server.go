@@ -302,17 +302,7 @@ func (server *QueryServer) JMAPMailboxes(
 
 	converted := make([]*pb.JMAPMailbox, 0, len(mailboxes))
 	for _, mailbox := range mailboxes {
-		converted = append(converted, &pb.JMAPMailbox{
-			MailboxId:   mailbox.MailboxID,
-			Name:        mailbox.Name,
-			Role:        mailbox.Role,
-			ParentId:    mailbox.ParentID,
-			SortOrder:   int32(mailbox.SortOrder),
-			IsSystem:    mailbox.IsSystem,
-			IsDestroyed: mailbox.IsDestroyed,
-			CreatedAt:   formatTime(mailbox.CreatedAt),
-			UpdatedAt:   formatTime(mailbox.UpdatedAt),
-		})
+		converted = append(converted, toPBJMAPMailbox(mailbox))
 	}
 
 	return &pb.JMAPMailboxResponse{Mailboxes: converted}, nil
@@ -443,6 +433,60 @@ func (server *QueryServer) JMAPBlobLookup(
 	return &pb.JMAPBlobLookupResponse{Blobs: converted}, nil
 }
 
+func (server *QueryServer) UpdateJMAPMailboxCatalog(
+	ctx context.Context,
+	request *pb.UpdateJMAPMailboxCatalogRequest,
+) (*pb.JMAPMailboxResponse, error) {
+	mailboxes := make([]contracts.JMAPMailbox, 0, len(request.GetMailboxes()))
+	for _, mailbox := range request.GetMailboxes() {
+		mailboxes = append(mailboxes, contracts.JMAPMailbox{
+			MailboxID: mailbox.GetMailboxId(),
+			Name:      mailbox.GetName(),
+			ParentID:  mailbox.GetParentId(),
+			SortOrder: int(mailbox.GetSortOrder()),
+		})
+	}
+	updated, err := server.index.UpdateJMAPMailboxCatalog(
+		ctx,
+		contracts.JMAPMailboxCatalogUpdate{Mailboxes: mailboxes},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	converted := make([]*pb.JMAPMailbox, 0, len(updated))
+	for _, mailbox := range updated {
+		converted = append(converted, toPBJMAPMailbox(mailbox))
+	}
+
+	return &pb.JMAPMailboxResponse{Mailboxes: converted}, nil
+}
+
+func (server *QueryServer) JMAPMailboxEmailCounts(
+	ctx context.Context,
+	request *pb.JMAPMailboxEmailCountRequest,
+) (*pb.JMAPMailboxEmailCountResponse, error) {
+	response, err := server.index.JMAPMailboxEmailCounts(
+		ctx,
+		contracts.JMAPMailboxEmailCountRequest{
+			MailboxIDs: append([]string{}, request.GetMailboxIds()...),
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	converted := make([]*pb.JMAPMailboxEmailCount, 0, len(response.Counts))
+	for mailboxID, count := range response.Counts {
+		converted = append(converted, &pb.JMAPMailboxEmailCount{
+			MailboxId:  mailboxID,
+			EmailCount: int64(count),
+		})
+	}
+
+	return &pb.JMAPMailboxEmailCountResponse{Counts: converted}, nil
+}
+
 func (server *QueryServer) UpdateJMAPEmailState(
 	ctx context.Context,
 	request *pb.UpdateJMAPEmailStateRequest,
@@ -464,6 +508,20 @@ func (server *QueryServer) Rebuild(
 	_ *pb.Empty,
 ) (*pb.Empty, error) {
 	return &pb.Empty{}, server.index.Rebuild(ctx)
+}
+
+func toPBJMAPMailbox(mailbox contracts.JMAPMailbox) *pb.JMAPMailbox {
+	return &pb.JMAPMailbox{
+		MailboxId:   mailbox.MailboxID,
+		Name:        mailbox.Name,
+		Role:        mailbox.Role,
+		ParentId:    mailbox.ParentID,
+		SortOrder:   int32(mailbox.SortOrder),
+		IsSystem:    mailbox.IsSystem,
+		IsDestroyed: mailbox.IsDestroyed,
+		CreatedAt:   formatTime(mailbox.CreatedAt),
+		UpdatedAt:   formatTime(mailbox.UpdatedAt),
+	}
 }
 
 func toPBJMAPEmailState(state contracts.JMAPEmailState) *pb.JMAPEmailState {

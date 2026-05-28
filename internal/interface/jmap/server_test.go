@@ -354,6 +354,218 @@ func TestJMAPEmailSetUpdatesKeywordsAndMailboxes(t *testing.T) {
 	}
 }
 
+func TestJMAPMailboxSetCreatesCustomMailboxAndPersistsCatalog(t *testing.T) {
+	var cursor contracts.SourceCursor
+	services, err := appsvc.New(appsvc.Options{
+		Query: jmapQueryFixture{
+			mailboxes: []contracts.JMAPMailbox{{
+				MailboxID: "inbox",
+				Name:      "Inbox",
+				Role:      "inbox",
+				SortOrder: 10,
+				IsSystem:  true,
+			}},
+		},
+		Objects: objectReaderFixture{sourceCursor: &cursor},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:mail"],
+		"methodCalls":[
+			["Mailbox/set",{"accountId":"gmeow","create":{
+				"c1":{"name":"Research","parentId":"inbox","sortOrder":70}
+			}},"m1"]
+		]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &tuple); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	var setResponse mailboxSetResponse
+	if err := json.Unmarshal(tuple[0], &name); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tuple[1], &setResponse); err != nil {
+		t.Fatal(err)
+	}
+	created := setResponse.Created["c1"]
+	if name != "Mailbox/set" ||
+		created.Name != "Research" ||
+		created.ParentID == nil ||
+		*created.ParentID != "inbox" ||
+		len(setResponse.NotCreated) != 0 {
+		t.Fatalf("unexpected Mailbox/set response name=%q args=%#v", name, setResponse)
+	}
+	if cursor.SourceKind != contracts.JMAPMailboxCatalogSourceKind ||
+		cursor.SourceName != contracts.JMAPMailboxCatalogSourceName {
+		t.Fatalf("JMAP mailbox catalog was not persisted: %#v", cursor)
+	}
+	catalog, ok := cursor.Cursor[contracts.JMAPMailboxCatalogCursorKey].([]contracts.JMAPMailbox)
+	if !ok || len(catalog) != 1 ||
+		catalog[0].Name != "Research" ||
+		catalog[0].ParentID != "inbox" {
+		t.Fatalf("unexpected persisted mailbox catalog: %#v", cursor.Cursor)
+	}
+}
+
+func TestJMAPMailboxSetRejectsParentCycle(t *testing.T) {
+	services, err := appsvc.New(appsvc.Options{
+		Query: jmapQueryFixture{
+			mailboxes: []contracts.JMAPMailbox{
+				{
+					MailboxID:   "parent",
+					Name:        "Parent",
+					SortOrder:   70,
+					IsSystem:    false,
+					IsDestroyed: false,
+				},
+				{
+					MailboxID:   "child",
+					Name:        "Child",
+					ParentID:    "parent",
+					SortOrder:   80,
+					IsSystem:    false,
+					IsDestroyed: false,
+				},
+			},
+		},
+		Objects: objectReaderFixture{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:mail"],
+		"methodCalls":[
+			["Mailbox/set",{"accountId":"gmeow","update":{
+				"parent":{"parentId":"child"}
+			}},"m1"]
+		]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &tuple); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	var setResponse mailboxSetResponse
+	if err := json.Unmarshal(tuple[0], &name); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tuple[1], &setResponse); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Mailbox/set" ||
+		len(setResponse.Updated) != 0 ||
+		setResponse.NotUpdated["parent"].Type != "invalidPatch" {
+		t.Fatalf("unexpected Mailbox/set response name=%q args=%#v", name, setResponse)
+	}
+}
+
+func TestJMAPMailboxSetRejectsDestroyWhenMailboxContainsEmail(t *testing.T) {
+	services, err := appsvc.New(appsvc.Options{
+		Query: jmapQueryFixture{
+			mailboxes: []contracts.JMAPMailbox{{
+				MailboxID:   "active",
+				Name:        "Active",
+				SortOrder:   70,
+				IsSystem:    false,
+				IsDestroyed: false,
+			}},
+			mailboxEmailCounts: map[string]int{"active": 1},
+		},
+		Objects: objectReaderFixture{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(services, Options{BearerToken: "secret"}))
+	defer server.Close()
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:mail"],
+		"methodCalls":[
+			["Mailbox/set",{"accountId":"gmeow","destroy":["active"]},"m1"]
+		]
+	}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(decoded.MethodResponses[0], &tuple); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	var setResponse mailboxSetResponse
+	if err := json.Unmarshal(tuple[0], &name); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tuple[1], &setResponse); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Mailbox/set" ||
+		len(setResponse.Destroyed) != 0 ||
+		setResponse.NotDestroyed["active"].Type != "invalidArguments" {
+		t.Fatalf("unexpected Mailbox/set response name=%q args=%#v", name, setResponse)
+	}
+}
+
 func TestJMAPEmailQueryPassesFilterToAppServices(t *testing.T) {
 	var captured contracts.JMAPEmailQueryRequest
 	services, err := appsvc.New(appsvc.Options{
@@ -906,13 +1118,14 @@ func TestJMAPQuotaReadMethodsReturnEmptyState(t *testing.T) {
 }
 
 type jmapQueryFixture struct {
-	mailboxes  []contracts.JMAPMailbox
-	states     map[contracts.ObjectDigest]contracts.JMAPEmailState
-	threads    map[string]contracts.JMAPThread
-	search     contracts.SearchResponse
-	emailQuery contracts.JMAPEmailQueryResponse
-	blobLookup contracts.JMAPBlobLookupResponse
-	requested  *contracts.JMAPEmailQueryRequest
+	mailboxes          []contracts.JMAPMailbox
+	states             map[contracts.ObjectDigest]contracts.JMAPEmailState
+	threads            map[string]contracts.JMAPThread
+	search             contracts.SearchResponse
+	emailQuery         contracts.JMAPEmailQueryResponse
+	blobLookup         contracts.JMAPBlobLookupResponse
+	mailboxEmailCounts map[string]int
+	requested          *contracts.JMAPEmailQueryRequest
 }
 
 func (query jmapQueryFixture) Search(
@@ -957,6 +1170,22 @@ func (query jmapQueryFixture) JMAPBlobLookup(
 	contracts.JMAPBlobLookupRequest,
 ) (contracts.JMAPBlobLookupResponse, error) {
 	return query.blobLookup, nil
+}
+
+func (query jmapQueryFixture) UpdateJMAPMailboxCatalog(
+	context.Context,
+	contracts.JMAPMailboxCatalogUpdate,
+) ([]contracts.JMAPMailbox, error) {
+	return query.mailboxes, nil
+}
+
+func (query jmapQueryFixture) JMAPMailboxEmailCounts(
+	context.Context,
+	contracts.JMAPMailboxEmailCountRequest,
+) (contracts.JMAPMailboxEmailCountResponse, error) {
+	return contracts.JMAPMailboxEmailCountResponse{
+		Counts: query.mailboxEmailCounts,
+	}, nil
 }
 
 func (query jmapQueryFixture) UpdateJMAPEmailState(
@@ -1006,8 +1235,9 @@ func (jmapQueryFixture) SourceCursors(
 }
 
 type objectReaderFixture struct {
-	manifests map[contracts.ObjectDigest]contracts.Manifest
-	content   map[contracts.ObjectDigest]string
+	manifests    map[contracts.ObjectDigest]contracts.Manifest
+	content      map[contracts.ObjectDigest]string
+	sourceCursor *contracts.SourceCursor
 }
 
 func (objects objectReaderFixture) ReadManifest(
@@ -1054,5 +1284,16 @@ func (objectReaderFixture) WriteOverlays(
 	contracts.ObjectDigest,
 	map[string]any,
 ) error {
+	return nil
+}
+
+func (objects objectReaderFixture) WriteSourceCursor(
+	_ context.Context,
+	cursor contracts.SourceCursor,
+) error {
+	if objects.sourceCursor != nil {
+		*objects.sourceCursor = cursor
+	}
+
 	return nil
 }

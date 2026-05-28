@@ -5,6 +5,12 @@ package contracts
 
 import "time"
 
+const (
+	JMAPMailboxCatalogSourceKind = "jmap"
+	JMAPMailboxCatalogSourceName = "mailboxes"
+	JMAPMailboxCatalogCursorKey  = "mailboxes"
+)
+
 type JMAPMailbox struct {
 	CreatedAt   time.Time `json:"created_at,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at,omitempty"`
@@ -15,6 +21,18 @@ type JMAPMailbox struct {
 	SortOrder   int       `json:"sort_order,omitempty"`
 	IsSystem    bool      `json:"is_system,omitempty"`
 	IsDestroyed bool      `json:"is_destroyed,omitempty"`
+}
+
+type JMAPMailboxCatalogUpdate struct {
+	Mailboxes []JMAPMailbox `json:"mailboxes"`
+}
+
+type JMAPMailboxEmailCountRequest struct {
+	MailboxIDs []string `json:"mailbox_ids"`
+}
+
+type JMAPMailboxEmailCountResponse struct {
+	Counts map[string]int `json:"counts"`
 }
 
 type JMAPEmailState struct {

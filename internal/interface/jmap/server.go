@@ -270,12 +270,37 @@ type setArguments struct {
 	AccountID string                                `json:"accountId"`
 }
 
+type mailboxSetArguments struct {
+	Create    map[string]mailboxSetObject           `json:"create,omitempty"`
+	Update    map[string]map[string]json.RawMessage `json:"update,omitempty"`
+	Destroy   []string                              `json:"destroy,omitempty"`
+	AccountID string                                `json:"accountId"`
+}
+
+type mailboxSetObject struct {
+	Name      string  `json:"name"`
+	ParentID  *string `json:"parentId,omitempty"`
+	SortOrder *int    `json:"sortOrder,omitempty"`
+}
+
 type emailSetResponse struct {
 	AccountID  string               `json:"accountId"`
 	OldState   string               `json:"oldState"`
 	NewState   string               `json:"newState"`
 	Updated    map[string]any       `json:"updated,omitempty"`
 	NotUpdated map[string]jmapError `json:"notUpdated,omitempty"`
+}
+
+type mailboxSetResponse struct {
+	Created      map[string]jmapMailbox `json:"created,omitempty"`
+	Updated      map[string]any         `json:"updated,omitempty"`
+	NotCreated   map[string]jmapError   `json:"notCreated,omitempty"`
+	NotUpdated   map[string]jmapError   `json:"notUpdated,omitempty"`
+	NotDestroyed map[string]jmapError   `json:"notDestroyed,omitempty"`
+	AccountID    string                 `json:"accountId"`
+	OldState     string                 `json:"oldState"`
+	NewState     string                 `json:"newState"`
+	Destroyed    []string               `json:"destroyed,omitempty"`
 }
 
 type jmapEmail struct {
@@ -532,6 +557,8 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 		return handler.handleMailboxGet(ctx, call)
 	case "Mailbox/query":
 		return handler.handleMailboxQuery(ctx, call)
+	case "Mailbox/set":
+		return handler.handleMailboxSet(ctx, call)
 	case "Email/query":
 		return handler.handleEmailQuery(ctx, call)
 	case "Email/get":
@@ -878,6 +905,63 @@ func (handler handler) handleEmailSet(
 			NewState:   "0",
 			Updated:    emptyMapAsNil(updated),
 			NotUpdated: emptyJMAPErrorMapAsNil(notUpdated),
+		},
+		ClientID: call.ClientID,
+	}
+}
+
+func (handler handler) handleMailboxSet(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
+	var arguments mailboxSetArguments
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if err := validateAccountID(arguments.AccountID); err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+
+	mutation, notCreated, notUpdated := mailboxMutationFromJMAP(arguments)
+	result, err := handler.services.UpdateJMAPMailboxes(ctx, mutation)
+	if err != nil {
+		return serverFail(call.ClientID, err.Error())
+	}
+	for id, description := range result.NotCreated {
+		notCreated[id] = jmapError{Type: "invalidArguments", Description: description}
+	}
+	for id, description := range result.NotUpdated {
+		notUpdated[id] = jmapError{Type: "invalidPatch", Description: description}
+	}
+	notDestroyed := map[string]jmapError{}
+	for id, description := range result.NotDestroyed {
+		notDestroyed[id] = jmapError{Type: "invalidArguments", Description: description}
+	}
+
+	created := map[string]jmapMailbox{}
+	for id, mailbox := range result.Created {
+		created[id] = toJMAPMailbox(mailbox)
+	}
+	updated := map[string]any{}
+	for _, id := range result.Updated {
+		updated[id] = nil
+	}
+
+	return methodResponse{
+		Name: "Mailbox/set",
+		Arguments: mailboxSetResponse{
+			AccountID:    "gmeow",
+			OldState:     "0",
+			NewState:     "0",
+			Created:      emptyJMAPMailboxMapAsNil(created),
+			Updated:      emptyMapAsNil(updated),
+			Destroyed:    emptyStringSliceAsNil(result.Destroyed),
+			NotCreated:   emptyJMAPErrorMapAsNil(notCreated),
+			NotUpdated:   emptyJMAPErrorMapAsNil(notUpdated),
+			NotDestroyed: emptyJMAPErrorMapAsNil(notDestroyed),
 		},
 		ClientID: call.ClientID,
 	}
@@ -1302,6 +1386,86 @@ func mutationFromJMAPPatch(
 	return mutation, nil
 }
 
+func mailboxMutationFromJMAP(
+	arguments mailboxSetArguments,
+) (appsvc.JMAPMailboxMutation, map[string]jmapError, map[string]jmapError) {
+	mutation := appsvc.JMAPMailboxMutation{
+		Create:  map[string]appsvc.JMAPMailboxCreate{},
+		Update:  map[string]appsvc.JMAPMailboxPatch{},
+		Destroy: append([]string{}, arguments.Destroy...),
+	}
+	notCreated := map[string]jmapError{}
+	notUpdated := map[string]jmapError{}
+	for id, create := range arguments.Create {
+		parentID := ""
+		if create.ParentID != nil {
+			parentID = *create.ParentID
+		}
+		sortOrder := 0
+		if create.SortOrder != nil {
+			sortOrder = *create.SortOrder
+		}
+		mutation.Create[id] = appsvc.JMAPMailboxCreate{
+			Name:      create.Name,
+			ParentID:  parentID,
+			SortOrder: sortOrder,
+		}
+	}
+	for id, patches := range arguments.Update {
+		patch, err := mailboxPatchFromJMAP(patches)
+		if err != nil {
+			notUpdated[id] = jmapError{Type: "invalidPatch", Description: err.Error()}
+			continue
+		}
+		mutation.Update[id] = patch
+	}
+	for id := range notCreated {
+		delete(mutation.Create, id)
+	}
+	for id := range notUpdated {
+		delete(mutation.Update, id)
+	}
+
+	return mutation, notCreated, notUpdated
+}
+
+func mailboxPatchFromJMAP(
+	patches map[string]json.RawMessage,
+) (appsvc.JMAPMailboxPatch, error) {
+	var patch appsvc.JMAPMailboxPatch
+	for path, raw := range patches {
+		switch path {
+		case "name":
+			var value string
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return appsvc.JMAPMailboxPatch{}, fmt.Errorf("name: %w", err)
+			}
+			patch.Name = &value
+		case "parentId":
+			if string(raw) == "null" {
+				value := ""
+				patch.ParentID = &value
+				continue
+			}
+			var value string
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return appsvc.JMAPMailboxPatch{}, fmt.Errorf("parentId: %w", err)
+			}
+			patch.ParentID = &value
+		case "sortOrder":
+			var value int
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return appsvc.JMAPMailboxPatch{}, fmt.Errorf("sortOrder: %w", err)
+			}
+			patch.SortOrder = &value
+		default:
+			return appsvc.JMAPMailboxPatch{}, fmt.Errorf("unsupported patch %q", path)
+		}
+	}
+
+	return patch, nil
+}
+
 func boolMapFromRaw(raw json.RawMessage) (map[string]bool, error) {
 	var values map[string]bool
 	if err := json.Unmarshal(raw, &values); err != nil {
@@ -1324,6 +1488,24 @@ func boolPatchValue(raw json.RawMessage) (bool, error) {
 }
 
 func emptyMapAsNil(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+
+	return values
+}
+
+func emptyJMAPMailboxMapAsNil(
+	values map[string]jmapMailbox,
+) map[string]jmapMailbox {
+	if len(values) == 0 {
+		return nil
+	}
+
+	return values
+}
+
+func emptyStringSliceAsNil(values []string) []string {
 	if len(values) == 0 {
 		return nil
 	}

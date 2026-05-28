@@ -34,6 +34,8 @@ const (
 	QueryService_JMAPEmailQuery_FullMethodName            = "/gmeow.v1.QueryService/JMAPEmailQuery"
 	QueryService_JMAPThreads_FullMethodName               = "/gmeow.v1.QueryService/JMAPThreads"
 	QueryService_JMAPBlobLookup_FullMethodName            = "/gmeow.v1.QueryService/JMAPBlobLookup"
+	QueryService_UpdateJMAPMailboxCatalog_FullMethodName  = "/gmeow.v1.QueryService/UpdateJMAPMailboxCatalog"
+	QueryService_JMAPMailboxEmailCounts_FullMethodName    = "/gmeow.v1.QueryService/JMAPMailboxEmailCounts"
 	QueryService_UpdateJMAPEmailState_FullMethodName      = "/gmeow.v1.QueryService/UpdateJMAPEmailState"
 	QueryService_CreateOrGetOperation_FullMethodName      = "/gmeow.v1.QueryService/CreateOrGetOperation"
 	QueryService_AppendOperationProgress_FullMethodName   = "/gmeow.v1.QueryService/AppendOperationProgress"
@@ -64,6 +66,8 @@ type QueryServiceClient interface {
 	JMAPEmailQuery(ctx context.Context, in *JMAPEmailQueryRequest, opts ...grpc.CallOption) (*JMAPEmailQueryResponse, error)
 	JMAPThreads(ctx context.Context, in *JMAPThreadRequest, opts ...grpc.CallOption) (*JMAPThreadResponse, error)
 	JMAPBlobLookup(ctx context.Context, in *JMAPBlobLookupRequest, opts ...grpc.CallOption) (*JMAPBlobLookupResponse, error)
+	UpdateJMAPMailboxCatalog(ctx context.Context, in *UpdateJMAPMailboxCatalogRequest, opts ...grpc.CallOption) (*JMAPMailboxResponse, error)
+	JMAPMailboxEmailCounts(ctx context.Context, in *JMAPMailboxEmailCountRequest, opts ...grpc.CallOption) (*JMAPMailboxEmailCountResponse, error)
 	UpdateJMAPEmailState(ctx context.Context, in *UpdateJMAPEmailStateRequest, opts ...grpc.CallOption) (*JMAPEmailState, error)
 	CreateOrGetOperation(ctx context.Context, in *CreateOperationRequest, opts ...grpc.CallOption) (*CreateOrGetOperationResponse, error)
 	AppendOperationProgress(ctx context.Context, in *AppendOperationProgressRequest, opts ...grpc.CallOption) (*Empty, error)
@@ -233,6 +237,26 @@ func (c *queryServiceClient) JMAPBlobLookup(ctx context.Context, in *JMAPBlobLoo
 	return out, nil
 }
 
+func (c *queryServiceClient) UpdateJMAPMailboxCatalog(ctx context.Context, in *UpdateJMAPMailboxCatalogRequest, opts ...grpc.CallOption) (*JMAPMailboxResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JMAPMailboxResponse)
+	err := c.cc.Invoke(ctx, QueryService_UpdateJMAPMailboxCatalog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) JMAPMailboxEmailCounts(ctx context.Context, in *JMAPMailboxEmailCountRequest, opts ...grpc.CallOption) (*JMAPMailboxEmailCountResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JMAPMailboxEmailCountResponse)
+	err := c.cc.Invoke(ctx, QueryService_JMAPMailboxEmailCounts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *queryServiceClient) UpdateJMAPEmailState(ctx context.Context, in *UpdateJMAPEmailStateRequest, opts ...grpc.CallOption) (*JMAPEmailState, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(JMAPEmailState)
@@ -342,6 +366,8 @@ type QueryServiceServer interface {
 	JMAPEmailQuery(context.Context, *JMAPEmailQueryRequest) (*JMAPEmailQueryResponse, error)
 	JMAPThreads(context.Context, *JMAPThreadRequest) (*JMAPThreadResponse, error)
 	JMAPBlobLookup(context.Context, *JMAPBlobLookupRequest) (*JMAPBlobLookupResponse, error)
+	UpdateJMAPMailboxCatalog(context.Context, *UpdateJMAPMailboxCatalogRequest) (*JMAPMailboxResponse, error)
+	JMAPMailboxEmailCounts(context.Context, *JMAPMailboxEmailCountRequest) (*JMAPMailboxEmailCountResponse, error)
 	UpdateJMAPEmailState(context.Context, *UpdateJMAPEmailStateRequest) (*JMAPEmailState, error)
 	CreateOrGetOperation(context.Context, *CreateOperationRequest) (*CreateOrGetOperationResponse, error)
 	AppendOperationProgress(context.Context, *AppendOperationProgressRequest) (*Empty, error)
@@ -405,6 +431,12 @@ func (UnimplementedQueryServiceServer) JMAPThreads(context.Context, *JMAPThreadR
 }
 func (UnimplementedQueryServiceServer) JMAPBlobLookup(context.Context, *JMAPBlobLookupRequest) (*JMAPBlobLookupResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method JMAPBlobLookup not implemented")
+}
+func (UnimplementedQueryServiceServer) UpdateJMAPMailboxCatalog(context.Context, *UpdateJMAPMailboxCatalogRequest) (*JMAPMailboxResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateJMAPMailboxCatalog not implemented")
+}
+func (UnimplementedQueryServiceServer) JMAPMailboxEmailCounts(context.Context, *JMAPMailboxEmailCountRequest) (*JMAPMailboxEmailCountResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method JMAPMailboxEmailCounts not implemented")
 }
 func (UnimplementedQueryServiceServer) UpdateJMAPEmailState(context.Context, *UpdateJMAPEmailStateRequest) (*JMAPEmailState, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateJMAPEmailState not implemented")
@@ -724,6 +756,42 @@ func _QueryService_JMAPBlobLookup_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _QueryService_UpdateJMAPMailboxCatalog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateJMAPMailboxCatalogRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).UpdateJMAPMailboxCatalog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_UpdateJMAPMailboxCatalog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).UpdateJMAPMailboxCatalog(ctx, req.(*UpdateJMAPMailboxCatalogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_JMAPMailboxEmailCounts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JMAPMailboxEmailCountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).JMAPMailboxEmailCounts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_JMAPMailboxEmailCounts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).JMAPMailboxEmailCounts(ctx, req.(*JMAPMailboxEmailCountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _QueryService_UpdateJMAPEmailState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UpdateJMAPEmailStateRequest)
 	if err := dec(in); err != nil {
@@ -952,6 +1020,14 @@ var QueryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "JMAPBlobLookup",
 			Handler:    _QueryService_JMAPBlobLookup_Handler,
+		},
+		{
+			MethodName: "UpdateJMAPMailboxCatalog",
+			Handler:    _QueryService_UpdateJMAPMailboxCatalog_Handler,
+		},
+		{
+			MethodName: "JMAPMailboxEmailCounts",
+			Handler:    _QueryService_JMAPMailboxEmailCounts_Handler,
 		},
 		{
 			MethodName: "UpdateJMAPEmailState",

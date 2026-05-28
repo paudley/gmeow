@@ -53,6 +53,14 @@ type JMAPQueryReader interface {
 		ctx context.Context,
 		request contracts.JMAPBlobLookupRequest,
 	) (contracts.JMAPBlobLookupResponse, error)
+	UpdateJMAPMailboxCatalog(
+		ctx context.Context,
+		update contracts.JMAPMailboxCatalogUpdate,
+	) ([]contracts.JMAPMailbox, error)
+	JMAPMailboxEmailCounts(
+		ctx context.Context,
+		request contracts.JMAPMailboxEmailCountRequest,
+	) (contracts.JMAPMailboxEmailCountResponse, error)
 	UpdateJMAPEmailState(
 		ctx context.Context,
 		update contracts.JMAPEmailStateUpdate,
@@ -77,6 +85,7 @@ type ObjectWriter interface {
 		digest contracts.ObjectDigest,
 		overlays map[string]any,
 	) error
+	WriteSourceCursor(ctx context.Context, cursor contracts.SourceCursor) error
 }
 
 type SchedulerClient interface {

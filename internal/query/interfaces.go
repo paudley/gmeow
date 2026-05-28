@@ -78,6 +78,14 @@ type Index interface {
 		ctx context.Context,
 		request contracts.JMAPBlobLookupRequest,
 	) (contracts.JMAPBlobLookupResponse, error)
+	UpdateJMAPMailboxCatalog(
+		ctx context.Context,
+		update contracts.JMAPMailboxCatalogUpdate,
+	) ([]contracts.JMAPMailbox, error)
+	JMAPMailboxEmailCounts(
+		ctx context.Context,
+		request contracts.JMAPMailboxEmailCountRequest,
+	) (contracts.JMAPMailboxEmailCountResponse, error)
 	UpdateJMAPEmailState(
 		ctx context.Context,
 		update contracts.JMAPEmailStateUpdate,

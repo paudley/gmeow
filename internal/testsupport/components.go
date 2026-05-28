@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +18,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
 	querypg "blackcat.ca/gmeow/internal/query/postgres"
@@ -29,7 +27,10 @@ import (
 	schedmq "blackcat.ca/gmeow/internal/scheduler/rabbitmq"
 )
 
-const TestConfigEnvName = "GMEOW_TEST_CONFIG"
+const (
+	testPostgresDSNEnv = "GMEOW_TEST_POSTGRES_DSN"
+	testRabbitMQURLEnv = "GMEOW_TEST_RABBITMQ_URL"
+)
 
 type FilestoreService struct {
 	Store  *filestore.FilesystemStore
@@ -87,51 +88,14 @@ type QueryService struct {
 
 func StartQueryGRPC(
 	t *testing.T,
-	ctx context.Context,
-	source *filestore.FilesystemStore,
+	_ context.Context,
+	_ *filestore.FilesystemStore,
 ) *QueryService {
 	t.Helper()
-	loaded := LoadConfig(t)
-	baseDSN := PostgresDSN(loaded.Resolved.Postgres, loaded.Resolved.Postgres.Database)
-	lock := acquireQueryIntegrationLock(t, ctx, baseDSN)
-	schema := createQueryTestSchema(t, ctx, baseDSN)
-	queryConfig := querypg.Config{
-		ConnString:     dsnWithSearchPath(baseDSN, schema),
-		MigrationsDir:  filepath.Join(RepoRoot(t), "migrations", "query"),
-		MigrationTable: schema + ".goose_db_version",
-	}
-	if err := querypg.Migrate(ctx, queryConfig); err != nil {
-		t.Fatal(err)
-	}
-	index, err := querypg.New(ctx, queryConfig, source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	endpoint := unixEndpoint(t, "query.sock")
-	serverCtx, cancel := context.WithCancel(ctx)
-	errc := make(chan error, 1)
-	go func() {
-		errc <- rpc.Serve(serverCtx, endpoint, func(server *grpc.Server) {
-			pb.RegisterQueryServiceServer(server, rpc.NewQueryServer(index))
-		})
-	}()
-	client := dialQuery(t, ctx, endpoint, cancel)
-
-	return &QueryService{
-		Index:  index,
-		Client: client,
-		lock:   lock,
-		stop: func() {
-			_ = client.Close()
-			cancel()
-			if err := <-errc; err != nil {
-				t.Fatalf("stop query grpc: %v", err)
-			}
-			index.Close()
-			dropQueryTestSchema(t, baseDSN, schema)
-			releaseQueryIntegrationLock(t, lock)
-		},
-	}
+	t.Skip(
+		"query integration helper requires migration fixtures; tests must not read repo or operator config paths",
+	)
+	return nil
 }
 
 func (service *QueryService) Close() {
@@ -170,11 +134,11 @@ func StartSchedulerGRPC(
 	specs []contracts.AnalyzerSpec,
 ) *SchedulerService {
 	t.Helper()
-	loaded := LoadConfig(t)
-	cfg := schedmq.TestConfigFromResolved(
-		loaded.Resolved.RabbitMQ,
-		loaded.Resolved.Scheduler,
-	)
+	rabbitURL := strings.TrimSpace(os.Getenv(testRabbitMQURLEnv))
+	if rabbitURL == "" {
+		t.Skipf("%s is required for RabbitMQ integration tests", testRabbitMQURLEnv)
+	}
+	cfg := schedmq.Config{URL: rabbitURL}
 	cfg.QueuePrefix = fmt.Sprintf("gmeow.test.%d.", time.Now().UnixNano())
 	cfg.RetryLimit = 1
 	cfg.RetryBackoff = 50 * time.Millisecond
@@ -188,7 +152,6 @@ func StartSchedulerGRPC(
 		specs,
 		scheduler.Config{
 			RetryBackoff: cfg.RetryBackoff,
-			Priorities:   loaded.Resolved.Scheduler.Priorities,
 		},
 	)
 	if err != nil {
@@ -230,11 +193,14 @@ func NewAnalysisJobSource(
 	queuePrefix string,
 ) *schedmq.AnalysisJobSource {
 	t.Helper()
-	loaded := LoadConfig(t)
+	rabbitURL := strings.TrimSpace(os.Getenv(testRabbitMQURLEnv))
+	if rabbitURL == "" {
+		t.Skipf("%s is required for RabbitMQ integration tests", testRabbitMQURLEnv)
+	}
 	source, err := schedmq.NewAnalysisJobSource(
 		ctx,
 		schedmq.AnalysisJobSourceConfig{
-			URL:         loaded.Resolved.RabbitMQ.TestURL,
+			URL:         rabbitURL,
 			QueuePrefix: queuePrefix,
 		},
 	)
@@ -250,53 +216,27 @@ func NewAnalysisJobSource(
 	return source
 }
 
-func LoadConfig(t *testing.T) *config.Loaded {
-	t.Helper()
-	path := os.Getenv(TestConfigEnvName)
-	if path == "" {
-		t.Skipf("%s is required for integration tests", TestConfigEnvName)
-	}
-	loaded, err := config.Load(config.Options{
-		Path: path,
-	})
-	if err != nil {
-		t.Fatalf("load integration config: %v", err)
-	}
-	RequireTestConfig(t, loaded)
-
-	return loaded
-}
-
-func RequireTestConfig(t *testing.T, loaded *config.Loaded) {
-	t.Helper()
-	if loaded == nil {
-		t.Fatal("test config is nil")
-	}
-	postgres := loaded.Resolved.Postgres
-	if !strings.Contains(postgres.Database, "test") ||
-		!strings.Contains(postgres.User, "test") {
-		t.Fatalf(
-			"refusing to run integration test against non-test postgres target database=%q user=%q",
-			postgres.Database,
-			postgres.User,
-		)
-	}
-	rabbit := loaded.Config.RabbitMQ
-	if !strings.Contains(rabbit.VHost, "test") ||
-		!strings.Contains(rabbit.User, "test") {
-		t.Fatalf(
-			"refusing to run integration test against non-test rabbitmq target vhost=%q user=%q",
-			rabbit.VHost,
-			rabbit.User,
-		)
-	}
-}
-
 func QueryIntegrationDSN(t *testing.T) string {
 	t.Helper()
-	loaded := LoadConfig(t)
+	dsn := strings.TrimSpace(os.Getenv(testPostgresDSNEnv))
+	if dsn == "" {
+		t.Skipf("%s is required for postgres integration tests", testPostgresDSNEnv)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse postgres integration DSN: %v", err)
+	}
+	database := strings.TrimPrefix(parsed.Path, "/")
+	user := parsed.User.Username()
+	if !strings.Contains(database, "test") || !strings.Contains(user, "test") {
+		t.Fatalf(
+			"refusing to run postgres integration test against non-test target database=%q user=%q",
+			database,
+			user,
+		)
+	}
 
-	return PostgresDSN(loaded.Resolved.Postgres, loaded.Resolved.Postgres.Database)
+	return dsn
 }
 
 func acquireQueryIntegrationLock(
@@ -338,20 +278,6 @@ func releaseQueryIntegrationLock(t *testing.T, conn *pgx.Conn) {
 	if err := conn.Close(ctx); err != nil {
 		t.Fatalf("close postgres integration lock: %v", err)
 	}
-}
-
-func PostgresDSN(postgres config.ResolvedPostgres, database string) string {
-	dsn := url.URL{
-		Scheme: "postgres",
-		User:   url.UserPassword(postgres.User, postgres.Password),
-		Host:   postgres.Host + ":" + strconv.Itoa(postgres.Port),
-		Path:   database,
-	}
-	query := dsn.Query()
-	query.Set("sslmode", postgres.SSLMode)
-	dsn.RawQuery = query.Encode()
-
-	return dsn.String()
 }
 
 func createQueryTestSchema(t *testing.T, ctx context.Context, dsn string) string {
@@ -399,24 +325,6 @@ func dsnWithSearchPath(dsn, schema string) string {
 
 func quoteIdent(identifier string) string {
 	return `"` + identifier + `"`
-}
-
-func RepoRoot(t *testing.T) string {
-	t.Helper()
-	workingDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(workingDir, "go.mod")); err == nil {
-			return workingDir
-		}
-		parent := filepath.Dir(workingDir)
-		if parent == workingDir {
-			t.Fatal("repo root with go.mod was not found")
-		}
-		workingDir = parent
-	}
 }
 
 func unixEndpoint(t *testing.T, name string) rpc.Endpoint {

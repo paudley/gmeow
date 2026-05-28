@@ -22,6 +22,8 @@ service QueryService {
   rpc JMAPEmailQuery(JMAPEmailQueryRequest) returns (JMAPEmailQueryResponse);
   rpc JMAPThreads(JMAPThreadRequest) returns (JMAPThreadResponse);
   rpc JMAPBlobLookup(JMAPBlobLookupRequest) returns (JMAPBlobLookupResponse);
+  rpc UpdateJMAPMailboxCatalog(UpdateJMAPMailboxCatalogRequest) returns (JMAPMailboxResponse);
+  rpc JMAPMailboxEmailCounts(JMAPMailboxEmailCountRequest) returns (JMAPMailboxEmailCountResponse);
   rpc UpdateJMAPEmailState(UpdateJMAPEmailStateRequest) returns (JMAPEmailState);
   rpc CreateOrGetOperation(CreateOperationRequest) returns (CreateOrGetOperationResponse);
   rpc AppendOperationProgress(AppendOperationProgressRequest) returns (Empty);
@@ -183,6 +185,23 @@ message JMAPMailbox {
 
 message JMAPMailboxResponse {
   repeated JMAPMailbox mailboxes = 1;
+}
+
+message UpdateJMAPMailboxCatalogRequest {
+  repeated JMAPMailbox mailboxes = 1;
+}
+
+message JMAPMailboxEmailCountRequest {
+  repeated string mailbox_ids = 1;
+}
+
+message JMAPMailboxEmailCount {
+  string mailbox_id = 1;
+  int64 email_count = 2;
+}
+
+message JMAPMailboxEmailCountResponse {
+  repeated JMAPMailboxEmailCount counts = 1;
 }
 
 message JMAPEmailStateRequest {

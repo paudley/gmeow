@@ -5,6 +5,8 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -68,6 +70,76 @@ func (index *Index) JMAPMailboxes(
 	return mailboxes, nil
 }
 
+func (index *Index) UpdateJMAPMailboxCatalog(
+	ctx context.Context,
+	update contracts.JMAPMailboxCatalogUpdate,
+) ([]contracts.JMAPMailbox, error) {
+	tx, err := index.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin JMAP mailbox catalog update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := projectJMAPMailboxCatalogTx(ctx, tx, update.Mailboxes, true); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit JMAP mailbox catalog update: %w", err)
+	}
+
+	return index.JMAPMailboxes(ctx)
+}
+
+func (index *Index) JMAPMailboxEmailCounts(
+	ctx context.Context,
+	request contracts.JMAPMailboxEmailCountRequest,
+) (contracts.JMAPMailboxEmailCountResponse, error) {
+	mailboxIDs := uniqueSortedNonEmpty(request.MailboxIDs)
+	counts := make(map[string]int, len(mailboxIDs))
+	for _, mailboxID := range mailboxIDs {
+		counts[mailboxID] = 0
+	}
+	if len(mailboxIDs) == 0 {
+		return contracts.JMAPMailboxEmailCountResponse{Counts: counts}, nil
+	}
+
+	rows, err := index.pool.Query(ctx, `
+		SELECT mailbox_id, count(*)
+		  FROM jmap_email_mailboxes
+		 WHERE mailbox_id = ANY($1::text[])
+		 GROUP BY mailbox_id`,
+		mailboxIDs)
+	if err != nil {
+		return contracts.JMAPMailboxEmailCountResponse{}, fmt.Errorf(
+			"query JMAP mailbox email counts: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			mailboxID string
+			count     int64
+		)
+		if err := rows.Scan(&mailboxID, &count); err != nil {
+			return contracts.JMAPMailboxEmailCountResponse{}, fmt.Errorf(
+				"scan JMAP mailbox email count: %w",
+				err,
+			)
+		}
+		counts[mailboxID] = int(count)
+	}
+	if err := rows.Err(); err != nil {
+		return contracts.JMAPMailboxEmailCountResponse{}, fmt.Errorf(
+			"iterate JMAP mailbox email counts: %w",
+			err,
+		)
+	}
+
+	return contracts.JMAPMailboxEmailCountResponse{Counts: counts}, nil
+}
+
 func (index *Index) JMAPEmailStates(
 	ctx context.Context,
 	digests []contracts.ObjectDigest,
@@ -83,10 +155,12 @@ func (index *Index) JMAPEmailStates(
 
 	rows, err := index.pool.Query(ctx, `
 		SELECT s.object_digest, s.thread_id, s.received_at, s.state_seq,
-		       COALESCE(array_agg(DISTINCT m.mailbox_id) FILTER (WHERE m.mailbox_id IS NOT NULL), '{}') AS mailbox_ids,
+		       COALESCE(array_agg(DISTINCT m.mailbox_id) FILTER (WHERE m.mailbox_id IS NOT NULL AND mb.mailbox_id IS NOT NULL), '{}') AS mailbox_ids,
 		       COALESCE(array_agg(DISTINCT k.keyword) FILTER (WHERE k.keyword IS NOT NULL), '{}') AS keywords
 		  FROM jmap_email_state s
 		  LEFT JOIN jmap_email_mailboxes m ON m.object_digest = s.object_digest
+		  LEFT JOIN jmap_mailboxes mb ON mb.mailbox_id = m.mailbox_id
+		   AND mb.is_destroyed = false
 		  LEFT JOIN jmap_email_keywords k ON k.object_digest = s.object_digest
 		 WHERE s.object_digest = ANY($1::text[])
 		 GROUP BY s.object_digest, s.thread_id, s.received_at, s.state_seq`,
@@ -142,6 +216,8 @@ func (index *Index) JMAPEmailQuery(
 		where = append(where, fmt.Sprintf(`
 			EXISTS (
 				SELECT 1 FROM jmap_email_mailboxes m
+				  JOIN jmap_mailboxes mb ON mb.mailbox_id = m.mailbox_id
+				   AND mb.is_destroyed = false
 				 WHERE m.object_digest = s.object_digest
 				   AND m.mailbox_id = $%d
 			)`, len(args)))
@@ -723,4 +799,170 @@ func appendUniqueString(values []string, value string) []string {
 	}
 
 	return append(values, value)
+}
+
+func projectJMAPMailboxCatalogTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	mailboxes []contracts.JMAPMailbox,
+	incrementSequence bool,
+) error {
+	catalog, err := normalizedJMAPMailboxCatalog(mailboxes)
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(catalog))
+	for _, mailbox := range catalog {
+		ids = append(ids, mailbox.MailboxID)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE jmap_mailboxes
+		   SET is_destroyed = true, updated_at = now()
+		 WHERE is_system = false
+		   AND NOT (mailbox_id = ANY($1::text[]))`,
+		ids,
+	); err != nil {
+		return fmt.Errorf("destroy removed JMAP mailboxes: %w", err)
+	}
+	for _, mailbox := range catalog {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO jmap_mailboxes(
+			  mailbox_id, name, role, parent_id, sort_order, is_system,
+			  is_destroyed
+			)
+			VALUES($1, $2, '', $3, $4, false, false)
+			ON CONFLICT(mailbox_id) DO UPDATE SET
+			  name = excluded.name,
+			  role = '',
+			  parent_id = excluded.parent_id,
+			  sort_order = excluded.sort_order,
+			  is_system = false,
+			  is_destroyed = false,
+			  updated_at = now()`,
+			mailbox.MailboxID,
+			mailbox.Name,
+			mailbox.ParentID,
+			mailbox.SortOrder,
+		); err != nil {
+			return fmt.Errorf("upsert JMAP mailbox %s: %w", mailbox.MailboxID, err)
+		}
+	}
+	if incrementSequence {
+		if _, err := tx.Exec(ctx, `
+			UPDATE jmap_state_seq
+			   SET state_seq = state_seq + 1, updated_at = now()
+			 WHERE datatype = 'Mailbox'`,
+		); err != nil {
+			return fmt.Errorf("advance JMAP mailbox state: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func normalizedJMAPMailboxCatalog(
+	mailboxes []contracts.JMAPMailbox,
+) ([]contracts.JMAPMailbox, error) {
+	systemIDs := map[string]bool{
+		jmapMailboxAll:     true,
+		jmapMailboxArchive: true,
+		jmapMailboxDrafts:  true,
+		jmapMailboxInbox:   true,
+		jmapMailboxSent:    true,
+		jmapMailboxSpam:    true,
+		jmapMailboxTrash:   true,
+	}
+	seenIDs := map[string]bool{}
+	namesByParent := map[string]map[string]bool{}
+	catalog := make([]contracts.JMAPMailbox, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		mailbox.MailboxID = strings.TrimSpace(mailbox.MailboxID)
+		mailbox.Name = strings.TrimSpace(mailbox.Name)
+		mailbox.ParentID = strings.TrimSpace(mailbox.ParentID)
+		mailbox.Role = ""
+		mailbox.IsSystem = false
+		mailbox.IsDestroyed = false
+		if mailbox.MailboxID == "" {
+			return nil, errors.New("JMAP mailbox id is required")
+		}
+		if systemIDs[mailbox.MailboxID] {
+			return nil, fmt.Errorf(
+				"JMAP mailbox catalog cannot replace system mailbox %q",
+				mailbox.MailboxID,
+			)
+		}
+		if seenIDs[mailbox.MailboxID] {
+			return nil, fmt.Errorf("duplicate JMAP mailbox id %q", mailbox.MailboxID)
+		}
+		if mailbox.Name == "" {
+			return nil, fmt.Errorf("JMAP mailbox %q name is required", mailbox.MailboxID)
+		}
+		if mailbox.ParentID == mailbox.MailboxID {
+			return nil, fmt.Errorf(
+				"JMAP mailbox %q cannot be its own parent",
+				mailbox.MailboxID,
+			)
+		}
+		if mailbox.ParentID != "" && !systemIDs[mailbox.ParentID] {
+			parentSeen := false
+			for _, candidate := range mailboxes {
+				if strings.TrimSpace(candidate.MailboxID) == mailbox.ParentID {
+					parentSeen = true
+					break
+				}
+			}
+			if !parentSeen {
+				return nil, fmt.Errorf(
+					"JMAP mailbox %q parent %q is not in catalog",
+					mailbox.MailboxID,
+					mailbox.ParentID,
+				)
+			}
+		}
+		if namesByParent[mailbox.ParentID] == nil {
+			namesByParent[mailbox.ParentID] = map[string]bool{}
+		}
+		nameKey := strings.ToLower(mailbox.Name)
+		if namesByParent[mailbox.ParentID][nameKey] {
+			return nil, fmt.Errorf(
+				"duplicate JMAP mailbox name %q under parent %q",
+				mailbox.Name,
+				mailbox.ParentID,
+			)
+		}
+		namesByParent[mailbox.ParentID][nameKey] = true
+		seenIDs[mailbox.MailboxID] = true
+		catalog = append(catalog, mailbox)
+	}
+	sort.Slice(catalog, func(left, right int) bool {
+		if catalog[left].SortOrder != catalog[right].SortOrder {
+			return catalog[left].SortOrder < catalog[right].SortOrder
+		}
+		return catalog[left].MailboxID < catalog[right].MailboxID
+	})
+
+	return catalog, nil
+}
+
+func jmapMailboxCatalogFromSourceCursor(
+	cursor contracts.SourceCursor,
+) ([]contracts.JMAPMailbox, bool, error) {
+	if cursor.SourceKind != contracts.JMAPMailboxCatalogSourceKind ||
+		cursor.SourceName != contracts.JMAPMailboxCatalogSourceName {
+		return nil, false, nil
+	}
+	raw := cursor.Cursor[contracts.JMAPMailboxCatalogCursorKey]
+	if raw == nil {
+		return []contracts.JMAPMailbox{}, true, nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, true, err
+	}
+	var mailboxes []contracts.JMAPMailbox
+	if err := json.Unmarshal(encoded, &mailboxes); err != nil {
+		return nil, true, err
+	}
+
+	return mailboxes, true, nil
 }

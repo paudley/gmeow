@@ -5,6 +5,8 @@ package appsvc
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/observability"
@@ -198,6 +201,33 @@ type JMAPEmailMutation struct {
 	Keywords         map[string]bool        `json:"keywords,omitempty"`
 	ReplaceMailboxes bool                   `json:"replace_mailboxes,omitempty"`
 	ReplaceKeywords  bool                   `json:"replace_keywords,omitempty"`
+}
+
+type JMAPMailboxMutation struct {
+	Create  map[string]JMAPMailboxCreate `json:"create,omitempty"`
+	Update  map[string]JMAPMailboxPatch  `json:"update,omitempty"`
+	Destroy []string                     `json:"destroy,omitempty"`
+}
+
+type JMAPMailboxCreate struct {
+	Name      string `json:"name"`
+	ParentID  string `json:"parent_id,omitempty"`
+	SortOrder int    `json:"sort_order,omitempty"`
+}
+
+type JMAPMailboxPatch struct {
+	Name      *string `json:"name,omitempty"`
+	ParentID  *string `json:"parent_id,omitempty"`
+	SortOrder *int    `json:"sort_order,omitempty"`
+}
+
+type JMAPMailboxMutationResult struct {
+	Created      map[string]contracts.JMAPMailbox `json:"created,omitempty"`
+	Updated      []string                         `json:"updated,omitempty"`
+	Destroyed    []string                         `json:"destroyed,omitempty"`
+	NotCreated   map[string]string                `json:"not_created,omitempty"`
+	NotUpdated   map[string]string                `json:"not_updated,omitempty"`
+	NotDestroyed map[string]string                `json:"not_destroyed,omitempty"`
 }
 
 type JMAPBlob struct {
@@ -758,6 +788,162 @@ func (services *Services) JMAPBlobLookup(
 	return reader.JMAPBlobLookup(ctx, request)
 }
 
+func (services *Services) UpdateJMAPMailboxes(
+	ctx context.Context,
+	mutation JMAPMailboxMutation,
+) (JMAPMailboxMutationResult, error) {
+	writer, ok := services.objects.(ObjectWriter)
+	if !ok {
+		return JMAPMailboxMutationResult{}, errors.New(
+			"JMAP object writer is not configured",
+		)
+	}
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return JMAPMailboxMutationResult{}, errors.New(
+			"JMAP query reader is not configured",
+		)
+	}
+
+	current, err := reader.JMAPMailboxes(ctx)
+	if err != nil {
+		return JMAPMailboxMutationResult{}, err
+	}
+	result := JMAPMailboxMutationResult{
+		Created:      map[string]contracts.JMAPMailbox{},
+		Updated:      []string{},
+		Destroyed:    []string{},
+		NotCreated:   map[string]string{},
+		NotUpdated:   map[string]string{},
+		NotDestroyed: map[string]string{},
+	}
+	mailboxes := map[string]contracts.JMAPMailbox{}
+	for _, mailbox := range current {
+		mailboxes[mailbox.MailboxID] = mailbox
+	}
+	mailboxEmailCounts := map[string]int{}
+	if len(mutation.Destroy) != 0 {
+		counts, err := reader.JMAPMailboxEmailCounts(
+			ctx,
+			contracts.JMAPMailboxEmailCountRequest{
+				MailboxIDs: append([]string{}, mutation.Destroy...),
+			},
+		)
+		if err != nil {
+			return JMAPMailboxMutationResult{}, err
+		}
+		mailboxEmailCounts = counts.Counts
+	}
+
+	for creationID, create := range mutation.Create {
+		mailbox, err := newJMAPMailbox(create)
+		if err != nil {
+			result.NotCreated[creationID] = err.Error()
+			continue
+		}
+		if err := validateJMAPMailboxParent(mailboxes, mailbox.ParentID); err != nil {
+			result.NotCreated[creationID] = err.Error()
+			continue
+		}
+		if err := validateJMAPMailboxNameAvailable(mailboxes, mailbox); err != nil {
+			result.NotCreated[creationID] = err.Error()
+			continue
+		}
+		mailboxes[mailbox.MailboxID] = mailbox
+		result.Created[creationID] = mailbox
+	}
+
+	for id, patch := range mutation.Update {
+		mailbox, ok := mailboxes[id]
+		if !ok || mailbox.IsDestroyed {
+			result.NotUpdated[id] = "mailbox not found"
+			continue
+		}
+		if mailbox.IsSystem {
+			result.NotUpdated[id] = "system mailbox cannot be updated"
+			continue
+		}
+		if patch.Name != nil {
+			mailbox.Name = strings.TrimSpace(*patch.Name)
+		}
+		if patch.ParentID != nil {
+			mailbox.ParentID = strings.TrimSpace(*patch.ParentID)
+		}
+		if patch.SortOrder != nil {
+			mailbox.SortOrder = *patch.SortOrder
+		}
+		if err := validateJMAPMailbox(mailbox); err != nil {
+			result.NotUpdated[id] = err.Error()
+			continue
+		}
+		if err := validateJMAPMailboxParent(mailboxes, mailbox.ParentID); err != nil {
+			result.NotUpdated[id] = err.Error()
+			continue
+		}
+		if mailbox.ParentID == mailbox.MailboxID {
+			result.NotUpdated[id] = "mailbox cannot be its own parent"
+			continue
+		}
+		if hasJMAPMailboxParentCycle(mailboxes, mailbox) {
+			result.NotUpdated[id] = "mailbox parent cycle"
+			continue
+		}
+		if err := validateJMAPMailboxNameAvailable(mailboxes, mailbox); err != nil {
+			result.NotUpdated[id] = err.Error()
+			continue
+		}
+		mailboxes[id] = mailbox
+		result.Updated = append(result.Updated, id)
+	}
+
+	for _, id := range mutation.Destroy {
+		mailbox, ok := mailboxes[id]
+		if !ok || mailbox.IsDestroyed {
+			result.NotDestroyed[id] = "mailbox not found"
+			continue
+		}
+		if mailbox.IsSystem {
+			result.NotDestroyed[id] = "system mailbox cannot be destroyed"
+			continue
+		}
+		if hasJMAPMailboxChild(mailboxes, id) {
+			result.NotDestroyed[id] = "mailbox has child mailboxes"
+			continue
+		}
+		if mailboxEmailCounts[id] != 0 {
+			result.NotDestroyed[id] = "mailbox contains email"
+			continue
+		}
+		delete(mailboxes, id)
+		result.Destroyed = append(result.Destroyed, id)
+	}
+
+	catalog := customJMAPMailboxCatalog(mailboxes)
+	if err := writer.WriteSourceCursor(ctx, contracts.SourceCursor{
+		SourceKind: contracts.JMAPMailboxCatalogSourceKind,
+		SourceName: contracts.JMAPMailboxCatalogSourceName,
+		Cursor: map[string]any{
+			contracts.JMAPMailboxCatalogCursorKey: catalog,
+		},
+	}); err != nil {
+		return JMAPMailboxMutationResult{}, err
+	}
+	if _, err := reader.UpdateJMAPMailboxCatalog(ctx, contracts.JMAPMailboxCatalogUpdate{
+		Mailboxes: catalog,
+	}); err != nil {
+		return JMAPMailboxMutationResult{}, err
+	}
+
+	result.Created = emptyMailboxMapAsNil(result.Created)
+	result.Updated = emptyStringSliceAsNil(result.Updated)
+	result.Destroyed = emptyStringSliceAsNil(result.Destroyed)
+	result.NotCreated = emptyStringMapAsNil(result.NotCreated)
+	result.NotUpdated = emptyStringMapAsNil(result.NotUpdated)
+	result.NotDestroyed = emptyStringMapAsNil(result.NotDestroyed)
+
+	return result, nil
+}
+
 func (services *Services) JMAPBlobGet(
 	ctx context.Context,
 	ids []string,
@@ -1183,6 +1369,163 @@ func applyJMAPBoolMap(existing []string, patch map[string]bool, replace bool) []
 	sort.Strings(out)
 
 	return out
+}
+
+func newJMAPMailbox(create JMAPMailboxCreate) (contracts.JMAPMailbox, error) {
+	mailbox := contracts.JMAPMailbox{
+		MailboxID: newJMAPMailboxID(),
+		Name:      strings.TrimSpace(create.Name),
+		ParentID:  strings.TrimSpace(create.ParentID),
+		SortOrder: create.SortOrder,
+	}
+	if err := validateJMAPMailbox(mailbox); err != nil {
+		return contracts.JMAPMailbox{}, err
+	}
+
+	return mailbox, nil
+}
+
+func newJMAPMailboxID() string {
+	var buffer [8]byte
+	if _, err := rand.Read(buffer[:]); err != nil {
+		return fmt.Sprintf("mbox-%d", time.Now().UnixNano())
+	}
+
+	return "mbox-" + hex.EncodeToString(buffer[:])
+}
+
+func validateJMAPMailbox(mailbox contracts.JMAPMailbox) error {
+	if strings.TrimSpace(mailbox.MailboxID) == "" {
+		return errors.New("mailbox id is required")
+	}
+	if strings.TrimSpace(mailbox.Name) == "" {
+		return errors.New("mailbox name is required")
+	}
+	if mailbox.Role != "" {
+		return errors.New("custom mailbox role must be empty")
+	}
+	if mailbox.IsSystem {
+		return errors.New("custom mailbox cannot be a system mailbox")
+	}
+
+	return nil
+}
+
+func validateJMAPMailboxParent(
+	mailboxes map[string]contracts.JMAPMailbox,
+	parentID string,
+) error {
+	if parentID == "" {
+		return nil
+	}
+	parent, ok := mailboxes[parentID]
+	if !ok || parent.IsDestroyed {
+		return fmt.Errorf("parent mailbox %q not found", parentID)
+	}
+
+	return nil
+}
+
+func validateJMAPMailboxNameAvailable(
+	mailboxes map[string]contracts.JMAPMailbox,
+	mailbox contracts.JMAPMailbox,
+) error {
+	for _, existing := range mailboxes {
+		if existing.MailboxID == mailbox.MailboxID || existing.IsDestroyed {
+			continue
+		}
+		if existing.ParentID == mailbox.ParentID &&
+			strings.EqualFold(existing.Name, mailbox.Name) {
+			return fmt.Errorf("mailbox %q already exists", mailbox.Name)
+		}
+	}
+
+	return nil
+}
+
+func hasJMAPMailboxChild(
+	mailboxes map[string]contracts.JMAPMailbox,
+	parentID string,
+) bool {
+	for _, mailbox := range mailboxes {
+		if !mailbox.IsDestroyed && mailbox.ParentID == parentID {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hasJMAPMailboxParentCycle(
+	mailboxes map[string]contracts.JMAPMailbox,
+	mailbox contracts.JMAPMailbox,
+) bool {
+	seen := map[string]bool{mailbox.MailboxID: true}
+	parentID := mailbox.ParentID
+	for parentID != "" {
+		if seen[parentID] {
+			return true
+		}
+		seen[parentID] = true
+		parent, ok := mailboxes[parentID]
+		if !ok || parent.IsDestroyed {
+			return false
+		}
+		parentID = parent.ParentID
+	}
+
+	return false
+}
+
+func customJMAPMailboxCatalog(
+	mailboxes map[string]contracts.JMAPMailbox,
+) []contracts.JMAPMailbox {
+	catalog := make([]contracts.JMAPMailbox, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		if mailbox.IsSystem || mailbox.IsDestroyed {
+			continue
+		}
+		catalog = append(catalog, contracts.JMAPMailbox{
+			MailboxID: mailbox.MailboxID,
+			Name:      mailbox.Name,
+			ParentID:  mailbox.ParentID,
+			SortOrder: mailbox.SortOrder,
+		})
+	}
+	sort.Slice(catalog, func(left, right int) bool {
+		if catalog[left].SortOrder != catalog[right].SortOrder {
+			return catalog[left].SortOrder < catalog[right].SortOrder
+		}
+		return catalog[left].MailboxID < catalog[right].MailboxID
+	})
+
+	return catalog
+}
+
+func emptyMailboxMapAsNil(
+	value map[string]contracts.JMAPMailbox,
+) map[string]contracts.JMAPMailbox {
+	if len(value) == 0 {
+		return nil
+	}
+
+	return value
+}
+
+func emptyStringMapAsNil(value map[string]string) map[string]string {
+	if len(value) == 0 {
+		return nil
+	}
+
+	return value
+}
+
+func emptyStringSliceAsNil(value []string) []string {
+	if len(value) == 0 {
+		return nil
+	}
+
+	return value
 }
 
 func copyMap(value map[string]any) map[string]any {

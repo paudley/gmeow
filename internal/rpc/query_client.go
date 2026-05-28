@@ -322,30 +322,7 @@ func (client *QueryClient) JMAPMailboxes(
 		return nil, err
 	}
 
-	mailboxes := make([]contracts.JMAPMailbox, 0, len(response.GetMailboxes()))
-	for _, mailbox := range response.GetMailboxes() {
-		createdAt, err := parseTime(mailbox.GetCreatedAt())
-		if err != nil {
-			return nil, err
-		}
-		updatedAt, err := parseTime(mailbox.GetUpdatedAt())
-		if err != nil {
-			return nil, err
-		}
-		mailboxes = append(mailboxes, contracts.JMAPMailbox{
-			CreatedAt:   createdAt,
-			UpdatedAt:   updatedAt,
-			MailboxID:   mailbox.GetMailboxId(),
-			Name:        mailbox.GetName(),
-			Role:        mailbox.GetRole(),
-			ParentID:    mailbox.GetParentId(),
-			SortOrder:   int(mailbox.GetSortOrder()),
-			IsSystem:    mailbox.GetIsSystem(),
-			IsDestroyed: mailbox.GetIsDestroyed(),
-		})
-	}
-
-	return mailboxes, nil
+	return fromPBJMAPMailboxes(response.GetMailboxes())
 }
 
 func (client *QueryClient) JMAPEmailStates(
@@ -463,6 +440,47 @@ func (client *QueryClient) JMAPBlobLookup(
 	return contracts.JMAPBlobLookupResponse{Blobs: blobs}, nil
 }
 
+func (client *QueryClient) UpdateJMAPMailboxCatalog(
+	ctx context.Context,
+	update contracts.JMAPMailboxCatalogUpdate,
+) ([]contracts.JMAPMailbox, error) {
+	mailboxes := make([]*pb.JMAPMailbox, 0, len(update.Mailboxes))
+	for _, mailbox := range update.Mailboxes {
+		mailboxes = append(mailboxes, toPBJMAPMailbox(mailbox))
+	}
+	response, err := client.client.UpdateJMAPMailboxCatalog(
+		ctx,
+		&pb.UpdateJMAPMailboxCatalogRequest{Mailboxes: mailboxes},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return fromPBJMAPMailboxes(response.GetMailboxes())
+}
+
+func (client *QueryClient) JMAPMailboxEmailCounts(
+	ctx context.Context,
+	request contracts.JMAPMailboxEmailCountRequest,
+) (contracts.JMAPMailboxEmailCountResponse, error) {
+	response, err := client.client.JMAPMailboxEmailCounts(
+		ctx,
+		&pb.JMAPMailboxEmailCountRequest{
+			MailboxIds: append([]string{}, request.MailboxIDs...),
+		},
+	)
+	if err != nil {
+		return contracts.JMAPMailboxEmailCountResponse{}, err
+	}
+
+	counts := make(map[string]int, len(response.GetCounts()))
+	for _, count := range response.GetCounts() {
+		counts[count.GetMailboxId()] = int(count.GetEmailCount())
+	}
+
+	return contracts.JMAPMailboxEmailCountResponse{Counts: counts}, nil
+}
+
 func (client *QueryClient) UpdateJMAPEmailState(
 	ctx context.Context,
 	update contracts.JMAPEmailStateUpdate,
@@ -480,6 +498,35 @@ func (client *QueryClient) UpdateJMAPEmailState(
 	}
 
 	return fromPBJMAPEmailState(response)
+}
+
+func fromPBJMAPMailboxes(
+	values []*pb.JMAPMailbox,
+) ([]contracts.JMAPMailbox, error) {
+	mailboxes := make([]contracts.JMAPMailbox, 0, len(values))
+	for _, mailbox := range values {
+		createdAt, err := parseTime(mailbox.GetCreatedAt())
+		if err != nil {
+			return nil, err
+		}
+		updatedAt, err := parseTime(mailbox.GetUpdatedAt())
+		if err != nil {
+			return nil, err
+		}
+		mailboxes = append(mailboxes, contracts.JMAPMailbox{
+			CreatedAt:   createdAt,
+			UpdatedAt:   updatedAt,
+			MailboxID:   mailbox.GetMailboxId(),
+			Name:        mailbox.GetName(),
+			Role:        mailbox.GetRole(),
+			ParentID:    mailbox.GetParentId(),
+			SortOrder:   int(mailbox.GetSortOrder()),
+			IsSystem:    mailbox.GetIsSystem(),
+			IsDestroyed: mailbox.GetIsDestroyed(),
+		})
+	}
+
+	return mailboxes, nil
 }
 
 func (client *QueryClient) Rebuild(ctx context.Context) error {
