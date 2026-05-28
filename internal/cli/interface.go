@@ -16,6 +16,7 @@ import (
 	"blackcat.ca/gmeow/internal/appsvc"
 	"blackcat.ca/gmeow/internal/config"
 	imapiface "blackcat.ca/gmeow/internal/interface/imap"
+	jmapiface "blackcat.ca/gmeow/internal/interface/jmap"
 	mcpiface "blackcat.ca/gmeow/internal/interface/mcp"
 	"blackcat.ca/gmeow/internal/interface/rest"
 	"blackcat.ca/gmeow/internal/rpc"
@@ -142,6 +143,40 @@ func newIMAPServeCommand(out io.Writer, configPath *string) *cobra.Command {
 				return err
 			}
 			_, _ = fmt.Fprintf(out, "imap serve: %s\n", interfaceAddress(iface))
+
+			return server.Start(command.Context())
+		},
+	}
+}
+
+func newJMAPServeCommand(out io.Writer, configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "jmap-serve",
+		Short: "Run the JMAP interface",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			iface, err := interfaceByKindWithAddress(loaded.Config.Interfaces, "jmap")
+			if err != nil {
+				return err
+			}
+			services, closeFn, err := openInterfaceServicesLoaded(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			server, err := jmapiface.New(
+				interfaceAddress(iface),
+				services,
+				jmapiface.Options{BearerToken: iface.Password},
+			)
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(out, "jmap serve: %s\n", interfaceAddress(iface))
 
 			return server.Start(command.Context())
 		},

@@ -7,14 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
 	sched "blackcat.ca/gmeow/internal/scheduler"
@@ -575,13 +574,11 @@ func amqpPublishingForTest(job contracts.AnalyzerJob, body []byte) amqp.Publishi
 
 func testRabbitMQConfig(t *testing.T) Config {
 	t.Helper()
-	loaded, err := config.Load(config.Options{
-		Path: filepath.Join("..", "..", "..", "gmeow.toml"),
-	})
-	if err != nil {
-		t.Fatalf("load gmeow.toml for RabbitMQ integration tests: %v", err)
+	rabbitURL := strings.TrimSpace(os.Getenv("GMEOW_TEST_RABBITMQ_URL"))
+	if rabbitURL == "" {
+		t.Skip("GMEOW_TEST_RABBITMQ_URL is required for RabbitMQ integration tests")
 	}
-	cfg := TestConfigFromResolved(loaded.Resolved.RabbitMQ, loaded.Resolved.Scheduler)
+	cfg := Config{URL: rabbitURL, QueuePrefix: testQueuePrefix}
 	cfg.RetryLimit = 1
 	cfg.RetryBackoff = 50 * time.Millisecond
 	return cfg

@@ -6,7 +6,7 @@
 
 FILESTORE-first local knowledge services for agents.
 
-Gmeow is the Go runtime for FILESTORE-first local knowledge services. This branch replaces the old Python application with typed Go services for config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, ANALYSIS workers, SOURCE/BACKEND services, and MCP/REST/read-only IMAP interfaces.
+Gmeow is the Go runtime for FILESTORE-first local knowledge services. This branch replaces the old Python application with typed Go services for config validation, FILESTORE authority, rebuildable PostgreSQL QUERY projection, RabbitMQ-backed SCHEDULER work derivation, ANALYSIS workers, SOURCE/BACKEND services, and MCP/REST/IMAP/JMAP interfaces.
 
 Gmeow is designed for trusted single-user local systems. By default it binds to `127.0.0.1` and does not add application-level authentication. Do not expose it directly to an untrusted network.
 
@@ -22,7 +22,7 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Provides admin commands for config, FILESTORE verification, QUERY projection, and SCHEDULER operations.
 - Runs Go ANALYSIS workers that consume scheduler jobs, read/write FILESTORE through typed gRPC, and support explicit `gmeow-intel` external analyzer adapters for Python/model behavior.
 - Provides Go SOURCE adapters for local filesystem fixtures, push/ringme records, the Gmail SOURCE adapter for ingest/hydrate/live search/live retrieve/actions, and design-only Drive capability checks.
-- Exposes shared application services through stdio `gmeow mcp-serve`, Streamable HTTP `gmeow mcp-http-serve`, `gmeow rest-serve`, and read-only `gmeow imap-serve`; user-facing `search`, `mail-search`, `retrieve`, `ops-status`, and `force-analysis` commands use the same service layer.
+- Exposes shared application services through stdio `gmeow mcp-serve`, Streamable HTTP `gmeow mcp-http-serve`, `gmeow rest-serve`, read-only `gmeow imap-serve`, and HTTP `gmeow jmap-serve`; user-facing `search`, `mail-search`, `retrieve`, `ops-status`, and `force-analysis` commands use the same service layer.
 
 ## Features
 
@@ -121,6 +121,7 @@ bin/gmeow --config gmeow.toml mcp-serve
 bin/gmeow --config gmeow.toml mcp-http-serve
 bin/gmeow --config gmeow.toml rest-serve
 bin/gmeow --config gmeow.toml imap-serve
+bin/gmeow --config gmeow.toml jmap-serve
 ```
 
 `make go-build` writes `gmeow`, `gmeow-admin`, and `gmeow-worker` to `./bin/`
@@ -179,6 +180,13 @@ MCP tool result content is TOON-only for agent-facing output. Gmeow does not kee
 JSON text or `structuredContent` compatibility for MCP tools; REST and gRPC keep
 their existing JSON/protobuf contracts.
 
+JMAP runs as a dedicated HTTP interface server with JMAP Core, Mail, Blob, and
+Quota support. It serves query-backed mailboxes, email state, email queries,
+threads, blobs, and local mailbox/keyword writes through the same application
+service boundaries as MCP and REST. JMAP mutable state is persisted through
+FILESTORE recovery data and projected into QUERY-owned serving tables; interface
+code does not talk directly to PostgreSQL. See `docs/architecture/JMAP.md`.
+
 ## Local Data
 
 By default, local data is ignored by git and stored under `data/`:
@@ -191,10 +199,14 @@ By default, local data is ignored by git and stored under `data/`:
 - PostgreSQL, RabbitMQ, object storage, query indexes, analysis annotations, and source state are
   runtime data.
 
-## Archive and IMAP
+## Archive, IMAP, and JMAP
 
 IMAP is read-only and exposes only objects with the `mail_message` facet. Non-mail facets remain
 invisible to IMAP clients.
+
+JMAP is a local interface over the same mail projection, with local mailbox and
+keyword state. Provider write-through is out of scope for the initial JMAP
+interface.
 
 ## Development
 

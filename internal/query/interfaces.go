@@ -64,6 +64,32 @@ type Index interface {
 		ctx context.Context,
 		request contracts.SourceCursorRequest,
 	) (contracts.SourceCursorResponse, error)
+	JMAPMailboxes(ctx context.Context) ([]contracts.JMAPMailbox, error)
+	JMAPEmailStates(
+		ctx context.Context,
+		digests []contracts.ObjectDigest,
+	) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error)
+	JMAPEmailQuery(
+		ctx context.Context,
+		request contracts.JMAPEmailQueryRequest,
+	) (contracts.JMAPEmailQueryResponse, error)
+	JMAPThreads(ctx context.Context, ids []string) (map[string]contracts.JMAPThread, error)
+	JMAPBlobLookup(
+		ctx context.Context,
+		request contracts.JMAPBlobLookupRequest,
+	) (contracts.JMAPBlobLookupResponse, error)
+	UpdateJMAPMailboxCatalog(
+		ctx context.Context,
+		update contracts.JMAPMailboxCatalogUpdate,
+	) ([]contracts.JMAPMailbox, error)
+	JMAPMailboxEmailCounts(
+		ctx context.Context,
+		request contracts.JMAPMailboxEmailCountRequest,
+	) (contracts.JMAPMailboxEmailCountResponse, error)
+	UpdateJMAPEmailState(
+		ctx context.Context,
+		update contracts.JMAPEmailStateUpdate,
+	) (contracts.JMAPEmailState, error)
 	CreateOrGet(
 		ctx context.Context,
 		request contracts.CreateOperationRequest,

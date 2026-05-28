@@ -38,6 +38,35 @@ type QueryReader interface {
 	) (contracts.SourceCursorResponse, error)
 }
 
+type JMAPQueryReader interface {
+	JMAPMailboxes(ctx context.Context) ([]contracts.JMAPMailbox, error)
+	JMAPEmailStates(
+		ctx context.Context,
+		digests []contracts.ObjectDigest,
+	) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error)
+	JMAPEmailQuery(
+		ctx context.Context,
+		request contracts.JMAPEmailQueryRequest,
+	) (contracts.JMAPEmailQueryResponse, error)
+	JMAPThreads(ctx context.Context, ids []string) (map[string]contracts.JMAPThread, error)
+	JMAPBlobLookup(
+		ctx context.Context,
+		request contracts.JMAPBlobLookupRequest,
+	) (contracts.JMAPBlobLookupResponse, error)
+	UpdateJMAPMailboxCatalog(
+		ctx context.Context,
+		update contracts.JMAPMailboxCatalogUpdate,
+	) ([]contracts.JMAPMailbox, error)
+	JMAPMailboxEmailCounts(
+		ctx context.Context,
+		request contracts.JMAPMailboxEmailCountRequest,
+	) (contracts.JMAPMailboxEmailCountResponse, error)
+	UpdateJMAPEmailState(
+		ctx context.Context,
+		update contracts.JMAPEmailStateUpdate,
+	) (contracts.JMAPEmailState, error)
+}
+
 type ObjectReader interface {
 	ReadManifest(
 		ctx context.Context,
@@ -48,6 +77,15 @@ type ObjectReader interface {
 		digest contracts.ObjectDigest,
 	) (contracts.Structure, error)
 	Open(ctx context.Context, digest contracts.ObjectDigest) (io.ReadCloser, error)
+}
+
+type ObjectWriter interface {
+	WriteOverlays(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+		overlays map[string]any,
+	) error
+	WriteSourceCursor(ctx context.Context, cursor contracts.SourceCursor) error
 }
 
 type SchedulerClient interface {

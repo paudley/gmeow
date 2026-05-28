@@ -314,10 +314,245 @@ func (client *QueryClient) SourceCursors(
 	}, nil
 }
 
+func (client *QueryClient) JMAPMailboxes(
+	ctx context.Context,
+) ([]contracts.JMAPMailbox, error) {
+	response, err := client.client.JMAPMailboxes(ctx, &pb.JMAPMailboxRequest{})
+	if err != nil {
+		return nil, err
+	}
+
+	return fromPBJMAPMailboxes(response.GetMailboxes())
+}
+
+func (client *QueryClient) JMAPEmailStates(
+	ctx context.Context,
+	digests []contracts.ObjectDigest,
+) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error) {
+	values := make([]string, 0, len(digests))
+	for _, digest := range digests {
+		values = append(values, string(digest))
+	}
+	response, err := client.client.JMAPEmailStates(ctx, &pb.JMAPEmailStateRequest{
+		ObjectDigests: values,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	states := make(map[contracts.ObjectDigest]contracts.JMAPEmailState)
+	for _, item := range response.GetStates() {
+		state, err := fromPBJMAPEmailState(item)
+		if err != nil {
+			return nil, err
+		}
+		states[state.ObjectDigest] = state
+	}
+
+	return states, nil
+}
+
+func (client *QueryClient) JMAPEmailQuery(
+	ctx context.Context,
+	request contracts.JMAPEmailQueryRequest,
+) (contracts.JMAPEmailQueryResponse, error) {
+	response, err := client.client.JMAPEmailQuery(ctx, &pb.JMAPEmailQueryRequest{
+		Text:       request.Text,
+		InMailbox:  request.InMailbox,
+		HasKeyword: request.HasKeyword,
+		NotKeyword: request.NotKeyword,
+		Limit:      int32(request.Limit),
+		Offset:     int32(request.Offset),
+	})
+	if err != nil {
+		return contracts.JMAPEmailQueryResponse{}, err
+	}
+
+	ids := make([]contracts.ObjectDigest, 0, len(response.GetIds()))
+	for _, id := range response.GetIds() {
+		ids = append(ids, contracts.ObjectDigest(id))
+	}
+
+	return contracts.JMAPEmailQueryResponse{
+		IDs:    ids,
+		Total:  int(response.GetTotal()),
+		Offset: int(response.GetOffset()),
+		Limit:  int(response.GetLimit()),
+	}, nil
+}
+
+func (client *QueryClient) JMAPThreads(
+	ctx context.Context,
+	ids []string,
+) (map[string]contracts.JMAPThread, error) {
+	response, err := client.client.JMAPThreads(ctx, &pb.JMAPThreadRequest{
+		Ids: append([]string{}, ids...),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	threads := make(map[string]contracts.JMAPThread)
+	for _, thread := range response.GetThreads() {
+		emailIDs := make([]contracts.ObjectDigest, 0, len(thread.GetEmailIds()))
+		for _, emailID := range thread.GetEmailIds() {
+			emailIDs = append(emailIDs, contracts.ObjectDigest(emailID))
+		}
+		threads[thread.GetId()] = contracts.JMAPThread{
+			ID:       thread.GetId(),
+			EmailIDs: emailIDs,
+		}
+	}
+
+	return threads, nil
+}
+
+func (client *QueryClient) JMAPBlobLookup(
+	ctx context.Context,
+	request contracts.JMAPBlobLookupRequest,
+) (contracts.JMAPBlobLookupResponse, error) {
+	blobIDs := make([]string, 0, len(request.BlobIDs))
+	for _, blobID := range request.BlobIDs {
+		blobIDs = append(blobIDs, string(blobID))
+	}
+	response, err := client.client.JMAPBlobLookup(ctx, &pb.JMAPBlobLookupRequest{
+		TypeNames: append([]string{}, request.TypeNames...),
+		BlobIds:   blobIDs,
+	})
+	if err != nil {
+		return contracts.JMAPBlobLookupResponse{}, err
+	}
+
+	blobs := make(map[contracts.ObjectDigest]contracts.JMAPBlobReferences)
+	for _, blob := range response.GetBlobs() {
+		blobID := contracts.ObjectDigest(blob.GetBlobId())
+		emailIDs := make([]contracts.ObjectDigest, 0, len(blob.GetEmailIds()))
+		for _, emailID := range blob.GetEmailIds() {
+			emailIDs = append(emailIDs, contracts.ObjectDigest(emailID))
+		}
+		blobs[blobID] = contracts.JMAPBlobReferences{
+			EmailIDs:   emailIDs,
+			ThreadIDs:  append([]string{}, blob.GetThreadIds()...),
+			MailboxIDs: append([]string{}, blob.GetMailboxIds()...),
+		}
+	}
+
+	return contracts.JMAPBlobLookupResponse{Blobs: blobs}, nil
+}
+
+func (client *QueryClient) UpdateJMAPMailboxCatalog(
+	ctx context.Context,
+	update contracts.JMAPMailboxCatalogUpdate,
+) ([]contracts.JMAPMailbox, error) {
+	mailboxes := make([]*pb.JMAPMailbox, 0, len(update.Mailboxes))
+	for _, mailbox := range update.Mailboxes {
+		mailboxes = append(mailboxes, toPBJMAPMailbox(mailbox))
+	}
+	response, err := client.client.UpdateJMAPMailboxCatalog(
+		ctx,
+		&pb.UpdateJMAPMailboxCatalogRequest{Mailboxes: mailboxes},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return fromPBJMAPMailboxes(response.GetMailboxes())
+}
+
+func (client *QueryClient) JMAPMailboxEmailCounts(
+	ctx context.Context,
+	request contracts.JMAPMailboxEmailCountRequest,
+) (contracts.JMAPMailboxEmailCountResponse, error) {
+	response, err := client.client.JMAPMailboxEmailCounts(
+		ctx,
+		&pb.JMAPMailboxEmailCountRequest{
+			MailboxIds: append([]string{}, request.MailboxIDs...),
+		},
+	)
+	if err != nil {
+		return contracts.JMAPMailboxEmailCountResponse{}, err
+	}
+
+	counts := make(map[string]int, len(response.GetCounts()))
+	for _, count := range response.GetCounts() {
+		counts[count.GetMailboxId()] = int(count.GetEmailCount())
+	}
+
+	return contracts.JMAPMailboxEmailCountResponse{Counts: counts}, nil
+}
+
+func (client *QueryClient) UpdateJMAPEmailState(
+	ctx context.Context,
+	update contracts.JMAPEmailStateUpdate,
+) (contracts.JMAPEmailState, error) {
+	response, err := client.client.UpdateJMAPEmailState(
+		ctx,
+		&pb.UpdateJMAPEmailStateRequest{
+			ObjectDigest: string(update.ObjectDigest),
+			MailboxIds:   append([]string{}, update.MailboxIDs...),
+			Keywords:     append([]string{}, update.Keywords...),
+		},
+	)
+	if err != nil {
+		return contracts.JMAPEmailState{}, err
+	}
+
+	return fromPBJMAPEmailState(response)
+}
+
+func fromPBJMAPMailboxes(
+	values []*pb.JMAPMailbox,
+) ([]contracts.JMAPMailbox, error) {
+	mailboxes := make([]contracts.JMAPMailbox, 0, len(values))
+	for _, mailbox := range values {
+		createdAt, err := parseTime(mailbox.GetCreatedAt())
+		if err != nil {
+			return nil, err
+		}
+		updatedAt, err := parseTime(mailbox.GetUpdatedAt())
+		if err != nil {
+			return nil, err
+		}
+		mailboxes = append(mailboxes, contracts.JMAPMailbox{
+			CreatedAt:   createdAt,
+			UpdatedAt:   updatedAt,
+			MailboxID:   mailbox.GetMailboxId(),
+			Name:        mailbox.GetName(),
+			Role:        mailbox.GetRole(),
+			ParentID:    mailbox.GetParentId(),
+			SortOrder:   int(mailbox.GetSortOrder()),
+			IsSystem:    mailbox.GetIsSystem(),
+			IsDestroyed: mailbox.GetIsDestroyed(),
+		})
+	}
+
+	return mailboxes, nil
+}
+
 func (client *QueryClient) Rebuild(ctx context.Context) error {
 	_, err := client.client.Rebuild(ctx, &pb.Empty{})
 
 	return err
+}
+
+func fromPBJMAPEmailState(state *pb.JMAPEmailState) (contracts.JMAPEmailState, error) {
+	if state == nil {
+		return contracts.JMAPEmailState{}, nil
+	}
+	receivedAt, err := parseTime(state.GetReceivedAt())
+	if err != nil {
+		return contracts.JMAPEmailState{}, err
+	}
+	digest := contracts.ObjectDigest(state.GetObjectDigest())
+
+	return contracts.JMAPEmailState{
+		ReceivedAt:    receivedAt,
+		ObjectDigest:  digest,
+		ThreadID:      state.GetThreadId(),
+		MailboxIDs:    append([]string{}, state.GetMailboxIds()...),
+		Keywords:      append([]string{}, state.GetKeywords()...),
+		StateSequence: state.GetStateSequence(),
+	}, nil
 }
 
 func (client *QueryClient) ProjectChanged(ctx context.Context, since time.Time) error {

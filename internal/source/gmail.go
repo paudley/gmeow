@@ -524,6 +524,9 @@ func gmailMailMessageMetadata(message GmailMessage) map[string]any {
 	if rfcMessageID := headerValue(message.Headers, "message-id"); rfcMessageID != "" {
 		metadata["rfc_message_id"] = rfcMessageID
 	}
+	if labelIDs := stringSliceValue(message.Metadata["label_ids"]); len(labelIDs) > 0 {
+		metadata["label_ids"] = labelIDs
+	}
 
 	return metadata
 }
@@ -738,4 +741,21 @@ func stringValue(value any) string {
 	}
 
 	return fmt.Sprint(value)
+}
+
+func stringSliceValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string{}, typed...)
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if value := stringValue(item); value != "" {
+				values = append(values, value)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
 }

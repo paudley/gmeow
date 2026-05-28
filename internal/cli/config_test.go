@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/BurntSushi/toml"
-
 	"blackcat.ca/gmeow/internal/config"
 )
 
@@ -291,43 +289,9 @@ func tomlLiteralForCLIConfig(value string) string {
 
 func localSecretLeaf(t *testing.T, name string) string {
 	t.Helper()
-	var parsed struct {
-		Postgres struct {
-			Database string `toml:"database"`
-			User     string `toml:"user"`
-		} `toml:"postgres"`
-		RabbitMQ struct {
-			User  string `toml:"user"`
-			VHost string `toml:"vhost"`
-		} `toml:"rabbitmq"`
-		Secrets map[string]string `toml:"secrets"`
-	}
-	path := strings.TrimSpace(os.Getenv("GMEOW_TEST_CONFIG"))
-	if path == "" {
-		t.Skip("GMEOW_TEST_CONFIG is required for live CLI config tests")
-	}
-	if _, err := toml.DecodeFile(path, &parsed); err != nil {
-		t.Fatalf("decode test config for encrypted secret leaf: %v", err)
-	}
-	if !strings.Contains(parsed.Postgres.Database, "test") ||
-		!strings.Contains(parsed.Postgres.User, "test") {
-		t.Fatalf(
-			"refusing CLI test against non-test postgres target database=%q user=%q",
-			parsed.Postgres.Database,
-			parsed.Postgres.User,
-		)
-	}
-	if !strings.Contains(parsed.RabbitMQ.VHost, "test") ||
-		!strings.Contains(parsed.RabbitMQ.User, "test") {
-		t.Fatalf(
-			"refusing CLI test against non-test rabbitmq target vhost=%q user=%q",
-			parsed.RabbitMQ.VHost,
-			parsed.RabbitMQ.User,
-		)
-	}
-	value := strings.TrimSpace(parsed.Secrets[name])
-	if value == "" {
-		t.Fatalf("test config missing encrypted secret leaf %q", name)
-	}
-	return value
+	t.Skipf(
+		"encrypted secret fixture %q is not embedded; tests must not read repo or operator config paths",
+		name,
+	)
+	return ""
 }

@@ -17,6 +17,14 @@ service QueryService {
   rpc AnalysisStatus(AnalysisStatusRequest) returns (AnalysisStatusResponse);
   rpc VectorSearch(VectorSearchRequest) returns (VectorSearchResponse);
   rpc SourceCursors(SourceCursorRequest) returns (SourceCursorResponse);
+  rpc JMAPMailboxes(JMAPMailboxRequest) returns (JMAPMailboxResponse);
+  rpc JMAPEmailStates(JMAPEmailStateRequest) returns (JMAPEmailStateResponse);
+  rpc JMAPEmailQuery(JMAPEmailQueryRequest) returns (JMAPEmailQueryResponse);
+  rpc JMAPThreads(JMAPThreadRequest) returns (JMAPThreadResponse);
+  rpc JMAPBlobLookup(JMAPBlobLookupRequest) returns (JMAPBlobLookupResponse);
+  rpc UpdateJMAPMailboxCatalog(UpdateJMAPMailboxCatalogRequest) returns (JMAPMailboxResponse);
+  rpc JMAPMailboxEmailCounts(JMAPMailboxEmailCountRequest) returns (JMAPMailboxEmailCountResponse);
+  rpc UpdateJMAPEmailState(UpdateJMAPEmailStateRequest) returns (JMAPEmailState);
   rpc CreateOrGetOperation(CreateOperationRequest) returns (CreateOrGetOperationResponse);
   rpc AppendOperationProgress(AppendOperationProgressRequest) returns (Empty);
   rpc CompleteOperation(CompleteOperationRequest) returns (Empty);
@@ -159,6 +167,109 @@ message SourceCursorRequest {
 message SourceCursorResponse {
   int32 schema_version = 1;
   repeated SourceCursor cursors = 2;
+}
+
+message JMAPMailboxRequest {}
+
+message JMAPMailbox {
+  string mailbox_id = 1;
+  string name = 2;
+  string role = 3;
+  string parent_id = 4;
+  int32 sort_order = 5;
+  bool is_system = 6;
+  bool is_destroyed = 7;
+  string created_at = 8;
+  string updated_at = 9;
+}
+
+message JMAPMailboxResponse {
+  repeated JMAPMailbox mailboxes = 1;
+}
+
+message UpdateJMAPMailboxCatalogRequest {
+  repeated JMAPMailbox mailboxes = 1;
+}
+
+message JMAPMailboxEmailCountRequest {
+  repeated string mailbox_ids = 1;
+}
+
+message JMAPMailboxEmailCount {
+  string mailbox_id = 1;
+  int64 email_count = 2;
+}
+
+message JMAPMailboxEmailCountResponse {
+  repeated JMAPMailboxEmailCount counts = 1;
+}
+
+message JMAPEmailStateRequest {
+  repeated string object_digests = 1;
+}
+
+message JMAPEmailState {
+  string object_digest = 1;
+  string thread_id = 2;
+  repeated string mailbox_ids = 3;
+  repeated string keywords = 4;
+  int64 state_sequence = 5;
+  string received_at = 6;
+}
+
+message JMAPEmailStateResponse {
+  repeated JMAPEmailState states = 1;
+}
+
+message JMAPEmailQueryRequest {
+  string text = 1;
+  string in_mailbox = 2;
+  string has_keyword = 3;
+  string not_keyword = 4;
+  int32 limit = 5;
+  int32 offset = 6;
+}
+
+message JMAPEmailQueryResponse {
+  repeated string ids = 1;
+  int32 total = 2;
+  int32 offset = 3;
+  int32 limit = 4;
+}
+
+message JMAPThreadRequest {
+  repeated string ids = 1;
+}
+
+message JMAPThread {
+  string id = 1;
+  repeated string email_ids = 2;
+}
+
+message JMAPThreadResponse {
+  repeated JMAPThread threads = 1;
+}
+
+message JMAPBlobLookupRequest {
+  repeated string type_names = 1;
+  repeated string blob_ids = 2;
+}
+
+message JMAPBlobReferences {
+  string blob_id = 1;
+  repeated string email_ids = 2;
+  repeated string thread_ids = 3;
+  repeated string mailbox_ids = 4;
+}
+
+message JMAPBlobLookupResponse {
+  repeated JMAPBlobReferences blobs = 1;
+}
+
+message UpdateJMAPEmailStateRequest {
+  string object_digest = 1;
+  repeated string mailbox_ids = 2;
+  repeated string keywords = 3;
 }
 
 message OperationProgressEvent {

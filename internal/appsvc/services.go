@@ -5,6 +5,8 @@ package appsvc
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,13 +18,17 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/observability"
 	"blackcat.ca/gmeow/internal/source"
 )
 
-const MailMessageFacet = "mail_message"
+const (
+	MailMessageFacet = "mail_message"
+	jmapDefaultLimit = 50
+)
 
 var (
 	emailAddressExpression = regexp.MustCompile(`<([^<>@\s]+@[^<>@\s]+)>`)
@@ -44,6 +50,7 @@ type Services struct {
 	operations       OperationStore
 	operationWaiters map[string]*operationWaiter
 	operationMu      sync.Mutex
+	jmapMailboxMu    sync.Mutex
 }
 
 type Options struct {
@@ -171,6 +178,63 @@ type OpsStatusResponse struct {
 	Errors    map[string]string              `json:"errors,omitempty"`
 	Counts    map[string]int                 `json:"counts,omitempty"`
 	Metadata  map[string]any                 `json:"metadata,omitempty"`
+}
+
+type JMAPEmailQueryResponse struct {
+	IDs    []contracts.ObjectDigest `json:"ids"`
+	Total  int                      `json:"total"`
+	Offset int                      `json:"offset"`
+	Limit  int                      `json:"limit"`
+}
+
+type JMAPEmailQueryRequest struct {
+	Text       string `json:"text,omitempty"`
+	InMailbox  string `json:"in_mailbox,omitempty"`
+	HasKeyword string `json:"has_keyword,omitempty"`
+	NotKeyword string `json:"not_keyword,omitempty"`
+	Offset     int    `json:"offset"`
+	Limit      int    `json:"limit"`
+}
+
+type JMAPEmailMutation struct {
+	ObjectDigest     contracts.ObjectDigest `json:"object_digest"`
+	MailboxIDs       map[string]bool        `json:"mailbox_ids,omitempty"`
+	Keywords         map[string]bool        `json:"keywords,omitempty"`
+	ReplaceMailboxes bool                   `json:"replace_mailboxes,omitempty"`
+	ReplaceKeywords  bool                   `json:"replace_keywords,omitempty"`
+}
+
+type JMAPMailboxMutation struct {
+	Create  map[string]JMAPMailboxCreate `json:"create,omitempty"`
+	Update  map[string]JMAPMailboxPatch  `json:"update,omitempty"`
+	Destroy []string                     `json:"destroy,omitempty"`
+}
+
+type JMAPMailboxCreate struct {
+	Name      string `json:"name"`
+	ParentID  string `json:"parent_id,omitempty"`
+	SortOrder int    `json:"sort_order,omitempty"`
+}
+
+type JMAPMailboxPatch struct {
+	Name      *string `json:"name,omitempty"`
+	ParentID  *string `json:"parent_id,omitempty"`
+	SortOrder *int    `json:"sort_order,omitempty"`
+}
+
+type JMAPMailboxMutationResult struct {
+	Created      map[string]contracts.JMAPMailbox `json:"created,omitempty"`
+	Updated      []string                         `json:"updated,omitempty"`
+	Destroyed    []string                         `json:"destroyed,omitempty"`
+	NotCreated   map[string]string                `json:"not_created,omitempty"`
+	NotUpdated   map[string]string                `json:"not_updated,omitempty"`
+	NotDestroyed map[string]string                `json:"not_destroyed,omitempty"`
+}
+
+type JMAPBlob struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	Size int64  `json:"size"`
 }
 
 type StaticSourceRegistry struct {
@@ -642,6 +706,370 @@ func (services *Services) AnalysisStatus(
 	return services.query.AnalysisStatus(ctx, request)
 }
 
+func (services *Services) JMAPMailboxes(
+	ctx context.Context,
+) ([]contracts.JMAPMailbox, error) {
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return nil, errors.New("JMAP query reader is not configured")
+	}
+
+	return reader.JMAPMailboxes(ctx)
+}
+
+func (services *Services) JMAPEmailStates(
+	ctx context.Context,
+	digests []contracts.ObjectDigest,
+) (map[contracts.ObjectDigest]contracts.JMAPEmailState, error) {
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return nil, errors.New("JMAP query reader is not configured")
+	}
+
+	return reader.JMAPEmailStates(ctx, digests)
+}
+
+func (services *Services) JMAPEmailQuery(
+	ctx context.Context,
+	request JMAPEmailQueryRequest,
+) (JMAPEmailQueryResponse, error) {
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return JMAPEmailQueryResponse{}, errors.New(
+			"JMAP query reader is not configured",
+		)
+	}
+	limit := request.Limit
+	if limit <= 0 {
+		limit = jmapDefaultLimit
+	}
+	response, err := reader.JMAPEmailQuery(ctx, contracts.JMAPEmailQueryRequest{
+		Text:       request.Text,
+		InMailbox:  request.InMailbox,
+		HasKeyword: request.HasKeyword,
+		NotKeyword: request.NotKeyword,
+		Limit:      limit,
+		Offset:     request.Offset,
+	})
+	if err != nil {
+		return JMAPEmailQueryResponse{}, err
+	}
+
+	return JMAPEmailQueryResponse{
+		IDs:    append([]contracts.ObjectDigest{}, response.IDs...),
+		Total:  response.Total,
+		Offset: response.Offset,
+		Limit:  response.Limit,
+	}, nil
+}
+
+func (services *Services) JMAPThreads(
+	ctx context.Context,
+	ids []string,
+) (map[string]contracts.JMAPThread, error) {
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return nil, errors.New("JMAP query reader is not configured")
+	}
+
+	return reader.JMAPThreads(ctx, ids)
+}
+
+func (services *Services) JMAPBlobLookup(
+	ctx context.Context,
+	request contracts.JMAPBlobLookupRequest,
+) (contracts.JMAPBlobLookupResponse, error) {
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return contracts.JMAPBlobLookupResponse{}, errors.New(
+			"JMAP query reader is not configured",
+		)
+	}
+
+	return reader.JMAPBlobLookup(ctx, request)
+}
+
+func (services *Services) UpdateJMAPMailboxes(
+	ctx context.Context,
+	mutation JMAPMailboxMutation,
+) (JMAPMailboxMutationResult, error) {
+	writer, ok := services.objects.(ObjectWriter)
+	if !ok {
+		return JMAPMailboxMutationResult{}, errors.New(
+			"JMAP object writer is not configured",
+		)
+	}
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return JMAPMailboxMutationResult{}, errors.New(
+			"JMAP query reader is not configured",
+		)
+	}
+
+	services.jmapMailboxMu.Lock()
+	defer services.jmapMailboxMu.Unlock()
+
+	current, err := reader.JMAPMailboxes(ctx)
+	if err != nil {
+		return JMAPMailboxMutationResult{}, err
+	}
+	result := JMAPMailboxMutationResult{
+		Created:      map[string]contracts.JMAPMailbox{},
+		Updated:      []string{},
+		Destroyed:    []string{},
+		NotCreated:   map[string]string{},
+		NotUpdated:   map[string]string{},
+		NotDestroyed: map[string]string{},
+	}
+	mailboxes := map[string]contracts.JMAPMailbox{}
+	for _, mailbox := range current {
+		mailboxes[mailbox.MailboxID] = mailbox
+	}
+	mailboxEmailCounts := map[string]int{}
+	if len(mutation.Destroy) != 0 {
+		counts, err := reader.JMAPMailboxEmailCounts(
+			ctx,
+			contracts.JMAPMailboxEmailCountRequest{
+				MailboxIDs: append([]string{}, mutation.Destroy...),
+			},
+		)
+		if err != nil {
+			return JMAPMailboxMutationResult{}, err
+		}
+		mailboxEmailCounts = counts.Counts
+	}
+
+	for creationID, create := range mutation.Create {
+		mailbox, err := newJMAPMailbox(create)
+		if err != nil {
+			result.NotCreated[creationID] = err.Error()
+			continue
+		}
+		if err := validateJMAPMailboxParent(mailboxes, mailbox.ParentID); err != nil {
+			result.NotCreated[creationID] = err.Error()
+			continue
+		}
+		if err := validateJMAPMailboxNameAvailable(mailboxes, mailbox); err != nil {
+			result.NotCreated[creationID] = err.Error()
+			continue
+		}
+		mailboxes[mailbox.MailboxID] = mailbox
+		result.Created[creationID] = mailbox
+	}
+
+	for id, patch := range mutation.Update {
+		mailbox, ok := mailboxes[id]
+		if !ok || mailbox.IsDestroyed {
+			result.NotUpdated[id] = "mailbox not found"
+			continue
+		}
+		if mailbox.IsSystem {
+			result.NotUpdated[id] = "system mailbox cannot be updated"
+			continue
+		}
+		if patch.Name != nil {
+			mailbox.Name = strings.TrimSpace(*patch.Name)
+		}
+		if patch.ParentID != nil {
+			mailbox.ParentID = strings.TrimSpace(*patch.ParentID)
+		}
+		if patch.SortOrder != nil {
+			mailbox.SortOrder = *patch.SortOrder
+		}
+		if err := validateJMAPMailbox(mailbox); err != nil {
+			result.NotUpdated[id] = err.Error()
+			continue
+		}
+		if err := validateJMAPMailboxParent(mailboxes, mailbox.ParentID); err != nil {
+			result.NotUpdated[id] = err.Error()
+			continue
+		}
+		if mailbox.ParentID == mailbox.MailboxID {
+			result.NotUpdated[id] = "mailbox cannot be its own parent"
+			continue
+		}
+		if hasJMAPMailboxParentCycle(mailboxes, mailbox) {
+			result.NotUpdated[id] = "mailbox parent cycle"
+			continue
+		}
+		if err := validateJMAPMailboxNameAvailable(mailboxes, mailbox); err != nil {
+			result.NotUpdated[id] = err.Error()
+			continue
+		}
+		mailboxes[id] = mailbox
+		result.Updated = append(result.Updated, id)
+	}
+
+	for _, id := range mutation.Destroy {
+		mailbox, ok := mailboxes[id]
+		if !ok || mailbox.IsDestroyed {
+			result.NotDestroyed[id] = "mailbox not found"
+			continue
+		}
+		if mailbox.IsSystem {
+			result.NotDestroyed[id] = "system mailbox cannot be destroyed"
+			continue
+		}
+		if hasJMAPMailboxChild(mailboxes, id) {
+			result.NotDestroyed[id] = "mailbox has child mailboxes"
+			continue
+		}
+		if mailboxEmailCounts[id] != 0 {
+			result.NotDestroyed[id] = "mailbox contains email"
+			continue
+		}
+		delete(mailboxes, id)
+		result.Destroyed = append(result.Destroyed, id)
+	}
+
+	catalog := customJMAPMailboxCatalog(mailboxes)
+	if err := writer.WriteSourceCursor(ctx, contracts.SourceCursor{
+		SourceKind: contracts.JMAPMailboxCatalogSourceKind,
+		SourceName: contracts.JMAPMailboxCatalogSourceName,
+		Cursor: map[string]any{
+			contracts.JMAPMailboxCatalogCursorKey: catalog,
+		},
+	}); err != nil {
+		return JMAPMailboxMutationResult{}, err
+	}
+	if _, err := reader.UpdateJMAPMailboxCatalog(ctx, contracts.JMAPMailboxCatalogUpdate{
+		Mailboxes: catalog,
+	}); err != nil {
+		return JMAPMailboxMutationResult{}, err
+	}
+
+	result.Created = emptyMailboxMapAsNil(result.Created)
+	result.Updated = emptyStringSliceAsNil(result.Updated)
+	result.Destroyed = emptyStringSliceAsNil(result.Destroyed)
+	result.NotCreated = emptyStringMapAsNil(result.NotCreated)
+	result.NotUpdated = emptyStringMapAsNil(result.NotUpdated)
+	result.NotDestroyed = emptyStringMapAsNil(result.NotDestroyed)
+
+	return result, nil
+}
+
+func (services *Services) JMAPBlobGet(
+	ctx context.Context,
+	ids []string,
+) (map[string]JMAPBlob, []string, error) {
+	blobs := map[string]JMAPBlob{}
+	notFound := []string{}
+	for _, id := range ids {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		manifest, err := services.objects.ReadManifest(
+			ctx,
+			contracts.ObjectDigest(trimmed),
+		)
+		if err != nil {
+			notFound = append(notFound, id)
+			continue
+		}
+		blobs[id] = jmapBlobFromManifest(trimmed, manifest)
+	}
+
+	return blobs, notFound, nil
+}
+
+func (services *Services) JMAPBlobOpen(
+	ctx context.Context,
+	id string,
+) (JMAPBlob, io.ReadCloser, error) {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return JMAPBlob{}, nil, errors.New("blob id is required")
+	}
+	digest := contracts.ObjectDigest(trimmed)
+	manifest, err := services.objects.ReadManifest(ctx, digest)
+	if err != nil {
+		return JMAPBlob{}, nil, err
+	}
+	reader, err := services.objects.Open(ctx, digest)
+	if err != nil {
+		return JMAPBlob{}, nil, err
+	}
+
+	return jmapBlobFromManifest(trimmed, manifest), reader, nil
+}
+
+func (services *Services) UpdateJMAPEmailState(
+	ctx context.Context,
+	mutation JMAPEmailMutation,
+) (contracts.JMAPEmailState, error) {
+	writer, ok := services.objects.(ObjectWriter)
+	if !ok {
+		return contracts.JMAPEmailState{}, errors.New(
+			"JMAP object writer is not configured",
+		)
+	}
+	reader, ok := services.query.(JMAPQueryReader)
+	if !ok {
+		return contracts.JMAPEmailState{}, errors.New(
+			"JMAP query reader is not configured",
+		)
+	}
+
+	states, err := reader.JMAPEmailStates(
+		ctx,
+		[]contracts.ObjectDigest{mutation.ObjectDigest},
+	)
+	if err != nil {
+		return contracts.JMAPEmailState{}, err
+	}
+	current, ok := states[mutation.ObjectDigest]
+	if !ok {
+		return contracts.JMAPEmailState{}, fmt.Errorf(
+			"JMAP email state for %s not found",
+			mutation.ObjectDigest,
+		)
+	}
+
+	update := contracts.JMAPEmailStateUpdate{
+		ObjectDigest: mutation.ObjectDigest,
+		MailboxIDs: applyJMAPBoolMap(
+			current.MailboxIDs,
+			mutation.MailboxIDs,
+			mutation.ReplaceMailboxes,
+		),
+		Keywords: applyJMAPBoolMap(
+			current.Keywords,
+			mutation.Keywords,
+			mutation.ReplaceKeywords,
+		),
+	}
+	if len(update.MailboxIDs) == 0 {
+		return contracts.JMAPEmailState{}, errors.New(
+			"JMAP email must remain in at least one mailbox",
+		)
+	}
+
+	if err := writer.WriteOverlays(ctx, mutation.ObjectDigest, map[string]any{
+		"jmap": map[string]any{
+			"mailbox_ids": update.MailboxIDs,
+			"keywords":    update.Keywords,
+		},
+	}); err != nil {
+		return contracts.JMAPEmailState{}, err
+	}
+
+	return reader.UpdateJMAPEmailState(ctx, update)
+}
+
+func jmapBlobFromManifest(id string, manifest contracts.Manifest) JMAPBlob {
+	mediaType := strings.TrimSpace(manifest.MediaType)
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+
+	return JMAPBlob{
+		ID:   id,
+		Type: mediaType,
+		Size: manifest.Size,
+	}
+}
+
 func (services *Services) ForceAnalysis(
 	ctx context.Context,
 	request ForceAnalysisRequest,
@@ -916,6 +1344,192 @@ func unionStrings(left, right []string) []string {
 	sort.Strings(values)
 
 	return values
+}
+
+func applyJMAPBoolMap(existing []string, patch map[string]bool, replace bool) []string {
+	values := map[string]bool{}
+	if !replace {
+		for _, value := range existing {
+			if value != "" {
+				values[value] = true
+			}
+		}
+	}
+	for key, enabled := range patch {
+		if key == "" {
+			continue
+		}
+		if enabled {
+			values[key] = true
+		} else {
+			delete(values, key)
+		}
+	}
+
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+
+	return out
+}
+
+func newJMAPMailbox(create JMAPMailboxCreate) (contracts.JMAPMailbox, error) {
+	mailbox := contracts.JMAPMailbox{
+		MailboxID: newJMAPMailboxID(),
+		Name:      strings.TrimSpace(create.Name),
+		ParentID:  strings.TrimSpace(create.ParentID),
+		SortOrder: create.SortOrder,
+	}
+	if err := validateJMAPMailbox(mailbox); err != nil {
+		return contracts.JMAPMailbox{}, err
+	}
+
+	return mailbox, nil
+}
+
+func newJMAPMailboxID() string {
+	var buffer [8]byte
+	if _, err := rand.Read(buffer[:]); err != nil {
+		return fmt.Sprintf("mbox-%d", time.Now().UnixNano())
+	}
+
+	return "mbox-" + hex.EncodeToString(buffer[:])
+}
+
+func validateJMAPMailbox(mailbox contracts.JMAPMailbox) error {
+	if strings.TrimSpace(mailbox.MailboxID) == "" {
+		return errors.New("mailbox id is required")
+	}
+	if strings.TrimSpace(mailbox.Name) == "" {
+		return errors.New("mailbox name is required")
+	}
+	if mailbox.Role != "" {
+		return errors.New("custom mailbox role must be empty")
+	}
+	if mailbox.IsSystem {
+		return errors.New("custom mailbox cannot be a system mailbox")
+	}
+
+	return nil
+}
+
+func validateJMAPMailboxParent(
+	mailboxes map[string]contracts.JMAPMailbox,
+	parentID string,
+) error {
+	if parentID == "" {
+		return nil
+	}
+	parent, ok := mailboxes[parentID]
+	if !ok || parent.IsDestroyed {
+		return fmt.Errorf("parent mailbox %q not found", parentID)
+	}
+
+	return nil
+}
+
+func validateJMAPMailboxNameAvailable(
+	mailboxes map[string]contracts.JMAPMailbox,
+	mailbox contracts.JMAPMailbox,
+) error {
+	for _, existing := range mailboxes {
+		if existing.MailboxID == mailbox.MailboxID || existing.IsDestroyed {
+			continue
+		}
+		if existing.ParentID == mailbox.ParentID &&
+			strings.EqualFold(existing.Name, mailbox.Name) {
+			return fmt.Errorf("mailbox %q already exists", mailbox.Name)
+		}
+	}
+
+	return nil
+}
+
+func hasJMAPMailboxChild(
+	mailboxes map[string]contracts.JMAPMailbox,
+	parentID string,
+) bool {
+	for _, mailbox := range mailboxes {
+		if !mailbox.IsDestroyed && mailbox.ParentID == parentID {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hasJMAPMailboxParentCycle(
+	mailboxes map[string]contracts.JMAPMailbox,
+	mailbox contracts.JMAPMailbox,
+) bool {
+	seen := map[string]bool{mailbox.MailboxID: true}
+	parentID := mailbox.ParentID
+	for parentID != "" {
+		if seen[parentID] {
+			return true
+		}
+		seen[parentID] = true
+		parent, ok := mailboxes[parentID]
+		if !ok || parent.IsDestroyed {
+			return false
+		}
+		parentID = parent.ParentID
+	}
+
+	return false
+}
+
+func customJMAPMailboxCatalog(
+	mailboxes map[string]contracts.JMAPMailbox,
+) []contracts.JMAPMailbox {
+	catalog := make([]contracts.JMAPMailbox, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		if mailbox.IsSystem || mailbox.IsDestroyed {
+			continue
+		}
+		catalog = append(catalog, contracts.JMAPMailbox{
+			MailboxID: mailbox.MailboxID,
+			Name:      mailbox.Name,
+			ParentID:  mailbox.ParentID,
+			SortOrder: mailbox.SortOrder,
+		})
+	}
+	sort.Slice(catalog, func(left, right int) bool {
+		if catalog[left].SortOrder != catalog[right].SortOrder {
+			return catalog[left].SortOrder < catalog[right].SortOrder
+		}
+		return catalog[left].MailboxID < catalog[right].MailboxID
+	})
+
+	return catalog
+}
+
+func emptyMailboxMapAsNil(
+	value map[string]contracts.JMAPMailbox,
+) map[string]contracts.JMAPMailbox {
+	if len(value) == 0 {
+		return nil
+	}
+
+	return value
+}
+
+func emptyStringMapAsNil(value map[string]string) map[string]string {
+	if len(value) == 0 {
+		return nil
+	}
+
+	return value
+}
+
+func emptyStringSliceAsNil(value []string) []string {
+	if len(value) == 0 {
+		return nil
+	}
+
+	return value
 }
 
 func copyMap(value map[string]any) map[string]any {

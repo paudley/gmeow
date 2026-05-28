@@ -35,6 +35,7 @@ func NewServiceCommand(name, summary string, out io.Writer) *cobra.Command {
 	root.AddCommand(newMCPHTTPServeCommand(out, &configPath))
 	root.AddCommand(newRESTServeCommand(out, &configPath))
 	root.AddCommand(newIMAPServeCommand(out, &configPath))
+	root.AddCommand(newJMAPServeCommand(out, &configPath))
 	root.AddCommand(newObjectSearchCommand(out, &configPath))
 	root.AddCommand(newMailSearchCommand(out, &configPath))
 	root.AddCommand(newObjectRetrieveCommand(out, &configPath))

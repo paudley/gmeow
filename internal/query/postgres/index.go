@@ -239,42 +239,6 @@ func (index *Index) ProjectObject(
 	return nil
 }
 
-func (index *Index) ProjectSourceCursor(
-	ctx context.Context,
-	cursor contracts.SourceCursor,
-) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	encoded, err := json.Marshal(nonNilMap(cursor.Cursor))
-	if err != nil {
-		return err
-	}
-
-	if cursor.UpdatedAt.IsZero() {
-		cursor.UpdatedAt = time.Now().UTC()
-	}
-
-	if _, err := index.pool.Exec(
-		ctx,
-		`INSERT INTO query_source_cursors(source_name, source_kind, cursor_json, updated_at)
-		 VALUES($1,$2,$3,$4)
-		 ON CONFLICT(source_name) DO UPDATE SET
-		   source_kind = excluded.source_kind,
-		   cursor_json = excluded.cursor_json,
-		   updated_at = excluded.updated_at`,
-		cursor.SourceName,
-		cursor.SourceKind,
-		encoded,
-		cursor.UpdatedAt,
-	); err != nil {
-		return fmt.Errorf("project source cursor %s: %w", cursor.SourceName, err)
-	}
-
-	return nil
-}
-
 func (index *Index) Rebuild(ctx context.Context) error {
 	_, err := index.RebuildReport(ctx)
 
@@ -1327,6 +1291,15 @@ func projectObjectTx(
 	}
 
 	if err := insertSummaryRows(ctx, tx, object.Manifest, object.Annotations); err != nil {
+		return err
+	}
+
+	if err := seedJMAPEmailStateTx(
+		ctx,
+		tx,
+		object.Manifest,
+		object.Annotations,
+	); err != nil {
 		return err
 	}
 

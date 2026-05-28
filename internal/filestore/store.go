@@ -94,13 +94,14 @@ func (store *FilesystemStore) Put(
 		request.Relationships,
 		contracts.Compound{IsCompound: false},
 	)
-	if err := store.commitStreamedObject(
+	committedStage, err := store.commitStreamedObject(
 		ctx,
 		digest,
 		blob,
 		request.SourceHint,
 		manifest,
-	); err != nil {
+	)
+	if err != nil {
 		return "", err
 	}
 	if err := store.recordSourceObjectIndexes(
@@ -111,7 +112,9 @@ func (store *FilesystemStore) Put(
 		return "", err
 	}
 
-	cleanup = false
+	if committedStage {
+		cleanup = false
+	}
 
 	return digest, nil
 }
@@ -637,10 +640,10 @@ func (store *FilesystemStore) commitStreamedObject(
 	blob streamedBlob,
 	sourceHint string,
 	incoming contracts.Manifest,
-) error {
+) (bool, error) {
 	err := ctx.Err()
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	objectDir := store.objectDir(digest)
@@ -651,24 +654,27 @@ func (store *FilesystemStore) commitStreamedObject(
 	if existing, err := store.ReadManifest(ctx, digest); err == nil {
 		manifest = mergeManifest(existing, incoming)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read existing manifest: %w", err)
+		return false, fmt.Errorf("read existing manifest: %w", err)
 	}
 
 	blobExists := true
 	if _, err := os.Stat(blobPath); errors.Is(err, os.ErrNotExist) {
 		blobExists = false
 	} else if err != nil {
-		return fmt.Errorf("stat blob: %w", err)
+		return false, fmt.Errorf("stat blob: %w", err)
 	}
 
 	if blobExists {
-		return store.writeCompressedJSON(manifestPath, manifest)
+		return false, store.writeCompressedJSON(manifestPath, manifest)
 	}
 
 	if exists, err := pathExists(objectDir); err != nil {
-		return fmt.Errorf("stat object directory: %w", err)
+		return false, fmt.Errorf("stat object directory: %w", err)
 	} else if exists {
-		return fmt.Errorf("object %s is incomplete: missing immutable blob", digest)
+		return false, fmt.Errorf(
+			"object %s is incomplete: missing immutable blob",
+			digest,
+		)
 	}
 
 	return store.commitStreamedObjectDirectory(ctx, digest, blob, sourceHint, manifest)
@@ -751,10 +757,10 @@ func (store *FilesystemStore) commitStreamedObjectDirectory(
 	blob streamedBlob,
 	sourceHint string,
 	manifest contracts.Manifest,
-) error {
+) (bool, error) {
 	err := ctx.Err()
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	objectDir := store.objectDir(digest)
@@ -762,7 +768,7 @@ func (store *FilesystemStore) commitStreamedObjectDirectory(
 	parentDir := filepath.Dir(objectDir)
 	err = os.MkdirAll(parentDir, 0o750)
 	if err != nil {
-		return fmt.Errorf("create object parent directory: %w", err)
+		return false, fmt.Errorf("create object parent directory: %w", err)
 	}
 
 	err = atomicWriteJSON(
@@ -770,7 +776,7 @@ func (store *FilesystemStore) commitStreamedObjectDirectory(
 		recoverySidecarForStream(digest, blob, sourceHint, manifest),
 	)
 	if err != nil {
-		return fmt.Errorf("stage recovery sidecar: %w", err)
+		return false, fmt.Errorf("stage recovery sidecar: %w", err)
 	}
 
 	err = store.writeCompressedJSON(
@@ -778,12 +784,12 @@ func (store *FilesystemStore) commitStreamedObjectDirectory(
 		manifest,
 	)
 	if err != nil {
-		return fmt.Errorf("stage manifest: %w", err)
+		return false, fmt.Errorf("stage manifest: %w", err)
 	}
 
 	err = fsyncDir(blob.stageDir)
 	if err != nil {
-		return fmt.Errorf("fsync staged object directory: %w", err)
+		return false, fmt.Errorf("fsync staged object directory: %w", err)
 	}
 
 	err = os.Rename(blob.stageDir, objectDir)
@@ -791,13 +797,16 @@ func (store *FilesystemStore) commitStreamedObjectDirectory(
 		if existing, readErr := store.ReadManifest(ctx, digest); readErr == nil {
 			merged := mergeManifest(existing, manifest)
 
-			return store.writeCompressedJSON(filepath.Join(objectDir, manifestFilename), merged)
+			return false, store.writeCompressedJSON(
+				filepath.Join(objectDir, manifestFilename),
+				merged,
+			)
 		}
 
-		return fmt.Errorf("commit object directory: %w", err)
+		return false, fmt.Errorf("commit object directory: %w", err)
 	}
 
-	return fsyncDir(parentDir)
+	return true, fsyncDir(parentDir)
 }
 
 type streamedBlob struct {
