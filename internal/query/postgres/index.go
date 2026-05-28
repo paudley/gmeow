@@ -1234,6 +1234,7 @@ func projectObjectTx(
 		"query_object_embeddings",
 		"query_object_overlays",
 		"query_summaries",
+		"query_mail_identities",
 	} {
 		if _, err := tx.Exec(
 			ctx,
@@ -1249,6 +1250,10 @@ func projectObjectTx(
 	}
 
 	if err := insertProvenanceRows(ctx, tx, object.Manifest); err != nil {
+		return err
+	}
+
+	if err := insertMailIdentityRows(ctx, tx, object.Manifest); err != nil {
 		return err
 	}
 
@@ -1339,6 +1344,8 @@ func deleteProjectionRowsSQL(table string) string {
 		return "DELETE FROM query_object_overlays WHERE object_digest = $1"
 	case "query_summaries":
 		return "DELETE FROM query_summaries WHERE object_digest = $1"
+	case "query_mail_identities":
+		return "DELETE FROM query_mail_identities WHERE object_digest = $1"
 	default:
 		panic("unsupported query projection delete table: " + table)
 	}

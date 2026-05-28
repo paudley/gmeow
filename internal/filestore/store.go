@@ -1325,7 +1325,7 @@ func mergeManifest(existing, incoming contracts.Manifest) contracts.Manifest {
 	merged.ContentRoles = uniqueStrings(
 		append(merged.ContentRoles, incoming.ContentRoles...),
 	)
-	merged.Facets = normalizeFacets(append(merged.Facets, incoming.Facets...))
+	merged.Facets = mergeFacets(merged.Facets, incoming.Facets)
 	merged.Provenance = mergeProvenance(merged.Provenance, incoming.Provenance)
 	merged.Relationships = mergeRelationships(merged.Relationships, incoming.Relationships)
 	merged.Compound.Parts = mergeParts(merged.Compound.Parts, incoming.Compound.Parts)
@@ -1380,6 +1380,27 @@ func mergeMaps(existing, incoming map[string]any) map[string]any {
 	maps.Copy(merged, incoming)
 
 	return merged
+}
+
+func mergeFacets(existing, incoming []contracts.Facet) []contracts.Facet {
+	incomingKinds := map[string]bool{}
+	for _, item := range incoming {
+		kind := strings.TrimSpace(item.FacetKind())
+		if kind != "" {
+			incomingKinds[kind] = true
+		}
+	}
+
+	result := make([]contracts.Facet, 0, len(existing)+len(incoming))
+	for _, item := range existing {
+		if incomingKinds[strings.TrimSpace(item.FacetKind())] {
+			continue
+		}
+		result = append(result, item)
+	}
+	result = append(result, incoming...)
+
+	return normalizeFacets(result)
 }
 
 func mergeProvenance(existing, incoming []contracts.Provenance) []contracts.Provenance {

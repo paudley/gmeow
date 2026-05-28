@@ -19,7 +19,7 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Runs typed gRPC service endpoints for FILESTORE, QUERY, and SCHEDULER over Unix sockets by default.
 - Keeps concrete backend ownership isolated: QUERY owns PostgreSQL, SCHEDULER owns RabbitMQ,
   ANALYSIS only reads/writes FILESTORE, and services communicate over typed gRPC boundaries.
-- Provides admin commands for config, FILESTORE verification, QUERY projection, and SCHEDULER operations.
+- Provides admin commands for config, FILESTORE verification, QUERY projection, read-only archive mail import, and SCHEDULER operations.
 - Runs Go ANALYSIS workers that consume scheduler jobs, read/write FILESTORE through typed gRPC, and support explicit `gmeow-intel` external analyzer adapters for Python/model behavior.
 - Provides Go SOURCE adapters for local filesystem fixtures, push/ringme records, the Gmail SOURCE adapter for ingest/hydrate/live search/live retrieve/actions, and design-only Drive capability checks.
 - Exposes shared application services through stdio `gmeow mcp-serve`, Streamable HTTP `gmeow mcp-http-serve`, `gmeow rest-serve`, read-only `gmeow imap-serve`, and HTTP `gmeow jmap-serve`; user-facing `search`, `mail-search`, `retrieve`, `ops-status`, and `force-analysis` commands use the same service layer.
@@ -32,6 +32,7 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Read-only Apache AGE graph inspection over projected graph facts.
 - Go SCHEDULER work derivation with RabbitMQ priority, retry, and dead-letter queues.
 - Go SOURCE adapters submit normalized content to FILESTORE and use source lookup/ingest claims before payload streaming.
+- Read-only archive import ingests Maildir, mbox, Evolution, Gnus NNML/MH, Thunderbird/Mozilla, and RFC822/EML directories as `mail_message` compounds with Message-ID dedupe.
 - The old Python runtime code is retired. The remaining `python/` package is the explicit ANALYSIS external adapter package.
 
 ## Install
@@ -132,6 +133,16 @@ Operational commands include `gmeow-admin filestore verify`, `gmeow-admin query 
 and `gmeow-admin query project-changed --since <RFC3339>` for FILESTORE verification and QUERY
 projection work. Broad or destructive production-like operations require explicit instance
 confirmation.
+Historical archive mail import is available through
+`gmeow-admin source import --source-name <name> <root...>`. Import roots are
+read-only inputs: gmeow never rewrites maildir flags, mbox files, NNML folders,
+or source archive metadata. Imported messages use normalized RFC Message-ID as
+the primary dedupe key; messages without one receive deterministic
+`gmeow-generated` Message-IDs. `--low-noise` skips existing Message-ID/body-line
+matches and trivial archive differences without per-message FILESTORE writes.
+QUERY can report archive Message-IDs absent from Gmail with
+`gmeow-admin query mail-missing-gmail --source-name <name>`. See
+`docs/architecture/VERSIONING.md` for canonical promotion and version scale.
 SCHEDULER provides `gmeow-admin scheduler scan`, `status`, `failed`, `dead-letter`, `requeue`, and
 `force`; RabbitMQ is mandatory. FILESTORE notifies SCHEDULER over gRPC after object and annotation
 writes. Object changes schedule missing/stale analyzer work, while analysis annotation writes enqueue

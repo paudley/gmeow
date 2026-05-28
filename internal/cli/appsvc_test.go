@@ -43,7 +43,37 @@ func TestAdminCommandIncludesSourceBackfill(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "backfill") {
-		t.Fatalf("help output missing source backfill:\n%s", out.String())
+	for _, commandName := range []string{"backfill", "import"} {
+		if !strings.Contains(out.String(), commandName) {
+			t.Fatalf("help output missing source %s:\n%s", commandName, out.String())
+		}
+	}
+}
+
+func TestAdminCommandIncludesMailMissingGmailReport(t *testing.T) {
+	var out bytes.Buffer
+	command := NewAdminCommand(&out, strings.NewReader(""))
+	command.SetOut(&out)
+	command.SetArgs([]string{"query", "--help"})
+
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "mail-missing-gmail") {
+		t.Fatalf("help output missing mail missing Gmail report:\n%s", out.String())
+	}
+}
+
+func TestSourceImportCommandIncludesLowNoise(t *testing.T) {
+	var out bytes.Buffer
+	command := NewAdminCommand(&out, strings.NewReader(""))
+	command.SetOut(&out)
+	command.SetArgs([]string{"source", "import", "--help"})
+
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "low-noise") {
+		t.Fatalf("help output missing low-noise flag:\n%s", out.String())
 	}
 }

@@ -43,6 +43,7 @@ type FilestoreClient interface {
 	) (contracts.SourceIngestClaim, bool, error)
 	ReleaseSourceIngest(context.Context, contracts.SourceIngestClaim) error
 	Put(context.Context, rpc.PutRequest) (contracts.ObjectDigest, error)
+	Open(context.Context, contracts.ObjectDigest) (io.ReadCloser, error)
 	ReadManifest(context.Context, contracts.ObjectDigest) (contracts.Manifest, error)
 	AttachProvenance(context.Context, contracts.ObjectDigest, []contracts.Provenance) error
 	PutCompound(context.Context, rpc.CompoundPutRequest) (contracts.ObjectDigest, error)

@@ -38,3 +38,17 @@ contracts.
 
 SQL stays inside QUERY. Calls are parameterized through Go database APIs and are
 not assembled from interface-level string formatting.
+
+## Mail Identity Projection
+
+QUERY projects `mail_message` facets and provenance into
+`query_mail_identities`. This table is rebuildable from FILESTORE and supports
+operator questions that compare archive import coverage against Gmail, such as
+Message-IDs present in `mail_archive` sources but absent from Gmail provenance.
+The projection includes canonical digest, generated-id state, collision state,
+version count, and maximum version scale.
+
+`gmeow-admin query mail-missing-gmail` is the admin report surface. It filters by
+archive source name, generated Message-ID inclusion, and collision status. The
+report reads only QUERY projection tables; it never walks FILESTORE or archive
+roots.

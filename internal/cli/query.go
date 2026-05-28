@@ -36,6 +36,7 @@ func newQueryCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newQueryProjectChangedCommand(out, configPath))
 	command.AddCommand(newQueryProjectCommand(out, configPath))
 	command.AddCommand(newQuerySearchCommand(out, configPath))
+	command.AddCommand(newQueryMailMissingGmailCommand(out, configPath))
 	command.AddCommand(newQueryAgeCommand(out, configPath))
 	command.AddCommand(newQueryServeCommand(out, configPath, "serve"))
 
@@ -282,6 +283,59 @@ func newQuerySearchCommand(out io.Writer, configPath *string) *cobra.Command {
 		},
 	}
 	command.Flags().StringSliceVar(&facets, "facet", nil, "facet filter")
+
+	return command
+}
+
+func newQueryMailMissingGmailCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		sourceNames      []string
+		includeGenerated bool
+		collisionsOnly   bool
+		limit            int
+		offset           int
+	)
+
+	command := &cobra.Command{
+		Use:   "mail-missing-gmail",
+		Short: "List archive Message-IDs absent from Gmail",
+		RunE: func(command *cobra.Command, _ []string) error {
+			index, err := openQueryIndexFromPath(command.Context(), configPath)
+			if err != nil {
+				return err
+			}
+			defer index.Close()
+
+			response, err := index.MailArchiveMissingGmail(
+				command.Context(),
+				contracts.MailIdentityReportRequest{
+					SourceNames:      sourceNames,
+					IncludeGenerated: includeGenerated,
+					CollisionsOnly:   collisionsOnly,
+					Limit:            limit,
+					Offset:           offset,
+				},
+			)
+			if err != nil {
+				return err
+			}
+			encoded, err := json.MarshalIndent(response, "", "  ")
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(out, string(encoded))
+
+			return err
+		},
+	}
+	command.Flags().
+		StringSliceVar(&sourceNames, "source-name", nil, "archive source name filter")
+	command.Flags().
+		BoolVar(&includeGenerated, "include-generated", false, "include deterministic generated Message-IDs")
+	command.Flags().
+		BoolVar(&collisionsOnly, "collisions-only", false, "include only Message-ID collision groups")
+	command.Flags().IntVar(&limit, "limit", 50, "maximum rows to return")
+	command.Flags().IntVar(&offset, "offset", 0, "rows to skip")
 
 	return command
 }

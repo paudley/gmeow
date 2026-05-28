@@ -15,6 +15,37 @@ Local and push sources submit normalized content to FILESTORE-facing ingest
 contracts. Drive remains design-only on this email-focused branch, and
 unsupported Drive operations fail through capability checks.
 
+## Read-Only Archive Import
+
+`gmeow-admin source import <root...>` imports historical mail archives as a
+SOURCE workflow. Supported inputs are Maildir, mbox, Evolution mail stores,
+Gnus NNML/MH-style numbered folders, Thunderbird/Mozilla mbox trees, and generic
+RFC822/EML directories. The importer treats each root as read-only: it never
+changes maildir flags, mbox separators, NNML state, client index files, or
+archive metadata.
+
+Archive import writes the same `mail_message` compound shape used by Gmail:
+headers, canonical text body, MIME structure metadata, archive metadata, and
+attachment parts. Exact bytes still dedupe through FILESTORE BLAKE3 identity.
+Archive source identity uses `mail_archive/<source-name>/<relative-path>` with
+stable version hashes, and the source name defaults to the first root basename
+unless `--source-name` is supplied.
+
+RFC Message-ID is the cross-source mail identity. Imported canonical messages
+also carry a synthetic FILESTORE source-index entry
+`mail_identity/rfc_message_id/<message-id>` so later archive imports can resolve
+Message-ID matches without walking FILESTORE or asking QUERY. Messages missing a
+usable Message-ID receive deterministic generated IDs under `gmeow.local` based
+on normalized selected headers and post-attachment-removal body text.
+
+When a repeated Message-ID has the same canonical body-line fingerprint, normal
+import attaches new provenance and low-noise import writes no per-message
+record. Trivial archive-only differences are also skipped in low-noise mode.
+When content differs, the canonical `mail_message` compound stores generic
+FILESTORE version records with scale (`trivial`, `minor`, or `major`) and can
+promote a better full canonical version. See `VERSIONING.md` for the shared
+version set model.
+
 ## Gmail Ingest Shape
 
 Gmail messages hydrate into compound `mail_message` objects. The compound

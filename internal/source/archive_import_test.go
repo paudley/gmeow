@@ -1,0 +1,268 @@
+// SPDX-FileCopyrightText: 2026 Blackcat Informatics Inc.
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package source
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/testsupport"
+)
+
+func TestArchiveImportMaildirReadOnlyAndGeneratedMessageID(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	messagePath := filepath.Join(root, "inbox", "cur", "1:2,S")
+	writeTestFile(t, filepath.Join(root, "inbox", "tmp", ".keep"), "")
+	writeTestFile(t, filepath.Join(root, "inbox", "new", ".keep"), "")
+	writeTestFile(
+		t,
+		messagePath,
+		"From: a@example.test\nTo: b@example.test\nSubject: No id\n\nbody one\n",
+	)
+	before := statModTime(t, messagePath)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Imported != 1 || report.GeneratedMessageIDs != 1 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	after := statModTime(t, messagePath)
+	if !after.Equal(before) {
+		t.Fatalf("maildir source file was modified: before=%s after=%s", before, after)
+	}
+	parsed, err := parseArchiveFile(messagePath, root, ArchiveImportFormatMaildir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := contracts.SourceObjectRef{
+		SourceKind: contracts.MailIdentitySourceKind,
+		SourceName: contracts.MailIdentitySourceName,
+		ExternalID: parsed.MessageID,
+	}
+	digest, found, err := filestoreService.Client.LookupSourceObject(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected archive source lookup")
+	}
+	manifest, err := filestoreService.Store.ReadManifest(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mailMessageMetadataForArchiveTest(t, manifest)
+	messageID, _ := metadata["rfc_message_id"].(string)
+	if !strings.HasPrefix(messageID, "<gmeow-generated-") {
+		t.Fatalf("expected generated message id, got %#v", metadata)
+	}
+}
+
+func TestArchiveImportMboxNNMLAndCollisionVariant(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "Inbox"), strings.Join([]string{
+		"From sender@example.test Sat Jan 01 00:00:00 2000",
+		"Message-ID: <same@example.test>",
+		"From: sender@example.test",
+		"To: recv@example.test",
+		"Subject: first",
+		"",
+		"short body",
+		"From sender@example.test Sat Jan 01 00:00:01 2000",
+		"Message-ID: <same@example.test>",
+		"From: sender@example.test",
+		"To: recv@example.test",
+		"Subject: first changed",
+		"",
+		"longer body wins canonical slot",
+		"",
+	}, "\n"))
+	writeTestFile(
+		t,
+		filepath.Join(root, "nnml", "1"),
+		"Message-ID: <nnml@example.test>\nSubject: nnml\n\nnnml body",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Imported != 2 || report.Collisions != 1 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+
+	digest, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind: contracts.MailIdentitySourceKind,
+			SourceName: contracts.MailIdentitySourceName,
+			ExternalID: "<same@example.test>",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected Message-ID identity lookup")
+	}
+	if digest == "" {
+		t.Fatal("empty canonical digest")
+	}
+	parsedMessages, err := parseMboxFile(filepath.Join(root, "Inbox"), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variantDigest, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind:      contracts.MailArchiveSourceKind,
+			SourceName:      "archive",
+			ExternalID:      "Inbox#1:variant",
+			ExternalVersion: parsedMessages[1].ExternalVersion,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected variant source lookup")
+	}
+	structure, err := filestoreService.Store.GetStructure(ctx, variantDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(structure.PartsByRole[contracts.MailPatchDiffRole]) < 2 {
+		t.Fatalf(
+			"expected variant patch diffs in canonical compound: %#v",
+			structure.PartsByRole,
+		)
+	}
+	manifest, err := filestoreService.Store.ReadManifest(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mailMessageMetadataForArchiveTest(t, manifest)
+	if metadata["version_count"] != float64(2) && metadata["version_count"] != 2 {
+		t.Fatalf("expected version_count=2, got %#v", metadata)
+	}
+}
+
+func TestArchiveImportLowNoiseSkipsBodyLineMatchesWithoutProvenance(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	first := filepath.Join(root, "one.eml")
+	second := filepath.Join(root, "backup", "two.eml")
+	writeTestFile(
+		t,
+		first,
+		"Message-ID: <dup@example.test>\nFrom: a@example.test\nTo: b@example.test\nSubject: Same\n\nline one\nline two\n",
+	)
+	writeTestFile(
+		t,
+		second,
+		"Message-ID: <dup@example.test>\nReceived: backup host\nFrom: a@example.test\nTo: b@example.test\nSubject: Same\n\nline one\nline two\n",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{first},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{second},
+		LowNoise:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.LowNoiseSkipped != 1 || report.TrivialSkipped != 1 {
+		t.Fatalf("expected low-noise trivial skip, got %#v", report)
+	}
+	parsed, err := parseArchiveFile(second, second, ArchiveImportFormatEMLDir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind:      contracts.MailArchiveSourceKind,
+			SourceName:      "archive",
+			ExternalID:      parsed.ExternalID,
+			ExternalVersion: parsed.ExternalVersion,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatal("low-noise duplicate should not attach per-message provenance")
+	}
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func statModTime(t *testing.T, path string) time.Time {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.ModTime()
+}
+
+func mailMessageMetadataForArchiveTest(
+	t *testing.T,
+	manifest contracts.Manifest,
+) map[string]any {
+	t.Helper()
+	for _, facet := range manifest.Facets {
+		if facet.FacetKind() == contracts.MailMessageFacetKind {
+			return facet.Metadata
+		}
+	}
+	t.Fatalf("manifest missing mail message facet: %#v", manifest.Facets)
+	return nil
+}
