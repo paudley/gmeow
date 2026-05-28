@@ -428,6 +428,35 @@ func TestPutCommitsNoStagedObjectDirectories(t *testing.T) {
 	}
 }
 
+func TestPutDuplicateCleansIncomingStageDirectory(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	_, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("hello"),
+		Facets: []contracts.Facet{{Kind: "email"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(store.root, ".incoming"))
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("incoming staged object directories were left behind: %#v", entries)
+	}
+}
+
 func TestPublicMethodsRejectMalformedDigests(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
