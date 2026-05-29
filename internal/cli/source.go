@@ -86,7 +86,7 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			importer.SetPartConcurrency(concurrency)
+			importer.SetConcurrency(concurrency)
 			request := source.ArchiveImportRequest{
 				SourceName:     sourceName,
 				Format:         format,

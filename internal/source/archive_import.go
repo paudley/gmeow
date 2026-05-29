@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -84,28 +85,54 @@ type ArchiveImportPublisher interface {
 
 type ArchiveImportQueueStatusFunc func(context.Context) (contracts.SourceImportQueueStatus, error)
 
-// defaultPartIngestConcurrency bounds how many parts of a single message
-// (headers, body, metadata, mime-structure, and one per attachment) are ingested
-// in parallel. The parts are independent content-addressed objects with no
-// ordering dependency, so overlapping their Puts — especially byte-heavy
-// attachments — is the safe parallelism point in archive import (unlike
-// inter-message parallelism, which must serialize same-Message-ID dedup).
-const defaultPartIngestConcurrency = 8
+// defaultIngestConcurrency bounds the total number of concurrent object Puts a
+// single import drives — across both messages (the direct importRoot fans
+// messages out to a worker pool) and the parts within a message (headers, body,
+// metadata, mime-structure, attachments). One shared semaphore caps the total so
+// the two layers compose without an N×M goroutine blow-up.
+const defaultIngestConcurrency = 8
+
+// messageIDLockShards stripes the per-Message-ID lock that serializes ingestion
+// of messages sharing a Message-ID, so concurrent workers cannot both pass the
+// "canonical not found" check and double-ingest a duplicate as a new canonical.
+const messageIDLockShards = 1024
 
 type ArchiveImporter struct {
-	service         *Service
-	store           FilestoreClient
-	partConcurrency int
+	service     *Service
+	store       FilestoreClient
+	concurrency int
+	// ingestSem caps concurrent object Puts; nil means unbounded (never, since the
+	// constructor seeds the default). messageLocks serializes same-Message-ID work.
+	ingestSem    chan struct{}
+	messageLocks [messageIDLockShards]sync.Mutex
 }
 
-// SetPartConcurrency overrides how many of a message's parts ingest in parallel.
-// A value <= 0 restores the default. It is not safe to call concurrently with
-// Import.
-func (importer *ArchiveImporter) SetPartConcurrency(workers int) {
+// SetConcurrency sets how many object Puts the import runs in parallel (across
+// messages and their parts). A value <= 0 restores the default. It is not safe
+// to call concurrently with Import.
+func (importer *ArchiveImporter) SetConcurrency(workers int) {
 	if workers <= 0 {
-		workers = defaultPartIngestConcurrency
+		workers = defaultIngestConcurrency
 	}
-	importer.partConcurrency = workers
+	importer.concurrency = workers
+	importer.ingestSem = make(chan struct{}, workers)
+}
+
+// lockMessageID serializes ingestion keyed by Message-ID (sharded). Distinct ids
+// (including distinct generated ids) hash to independent stripes and run freely;
+// identical ids serialize. A hash collision only over-serializes, never corrupts.
+func (importer *ArchiveImporter) lockMessageID(messageID string) func() {
+	shard := &importer.messageLocks[messageIDShard(messageID)]
+	shard.Lock()
+
+	return shard.Unlock
+}
+
+func messageIDShard(messageID string) uint32 {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(messageID))
+
+	return hash.Sum32() % messageIDLockShards
 }
 
 type archiveMessage struct {
@@ -143,9 +170,10 @@ func NewArchiveImporter(store FilestoreClient) (*ArchiveImporter, error) {
 	}
 
 	return &ArchiveImporter{
-		service:         service,
-		store:           store,
-		partConcurrency: defaultPartIngestConcurrency,
+		service:     service,
+		store:       store,
+		concurrency: defaultIngestConcurrency,
+		ingestSem:   make(chan struct{}, defaultIngestConcurrency),
 	}, nil
 }
 
@@ -201,7 +229,34 @@ func (importer *ArchiveImporter) importRoot(
 		return importer.ingestArchiveMessage(ctx, sourceName, message, request, report)
 	}
 
-	return filepath.WalkDir(
+	// The directory walk is the single producer: it owns the parse-side counters
+	// on the shared report and feeds parsed messages to a pool of ingest workers,
+	// each of which accumulates ingest-side counters into its own report. The
+	// per-Message-ID lock inside ingestArchiveMessage keeps same-id dedup correct;
+	// the worker reports are merged once the walk and all workers have finished.
+	workers := importer.concurrency
+	if workers < 1 {
+		workers = 1
+	}
+	messages := make(chan archiveMessage, workers)
+	locals := make([]ArchiveImportReport, workers)
+
+	var workerGroup sync.WaitGroup
+	for index := range workers {
+		workerGroup.Add(1)
+		go func(local *ArchiveImportReport) {
+			defer workerGroup.Done()
+			for message := range messages {
+				if err := importer.ingestArchiveMessage(
+					ctx, sourceName, message, request, local,
+				); err != nil {
+					local.Failures = append(local.Failures, err.Error())
+				}
+			}
+		}(&locals[index])
+	}
+
+	walkErr := filepath.WalkDir(
 		root,
 		func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -230,15 +285,7 @@ func (importer *ArchiveImporter) importRoot(
 			if format == ArchiveImportFormatMbox {
 				parseErr := forEachMboxMessage(path, root, func(message archiveMessage) error {
 					report.Parsed++
-					if err := importer.ingestArchiveMessage(
-						ctx,
-						sourceName,
-						message,
-						request,
-						report,
-					); err != nil {
-						report.Failures = append(report.Failures, err.Error())
-					}
+					messages <- message
 
 					return nil
 				})
@@ -257,19 +304,37 @@ func (importer *ArchiveImporter) importRoot(
 				return nil
 			}
 			report.Parsed++
-			if err := importer.ingestArchiveMessage(
-				ctx,
-				sourceName,
-				message,
-				request,
-				report,
-			); err != nil {
-				report.Failures = append(report.Failures, err.Error())
-			}
+			messages <- message
 
 			return nil
 		},
 	)
+
+	close(messages)
+	workerGroup.Wait()
+	for index := range locals {
+		mergeArchiveIngestReport(report, &locals[index])
+	}
+
+	return walkErr
+}
+
+// mergeArchiveIngestReport folds a worker's ingest-side counters and message
+// lists into the shared report. Parse-side counters (Scanned/Parsed/Skipped/
+// ParseFailures) are owned by the single walk goroutine and are not merged here.
+func mergeArchiveIngestReport(dst, src *ArchiveImportReport) {
+	dst.Imported += src.Imported
+	dst.ExactDuplicates += src.ExactDuplicates
+	dst.MessageIDDuplicates += src.MessageIDDuplicates
+	dst.GeneratedMessageIDs += src.GeneratedMessageIDs
+	dst.LowNoiseSkipped += src.LowNoiseSkipped
+	dst.TrivialSkipped += src.TrivialSkipped
+	dst.MinorVersions += src.MinorVersions
+	dst.MajorVersions += src.MajorVersions
+	dst.Promoted += src.Promoted
+	dst.Collisions += src.Collisions
+	dst.SkippedMessageIDs = append(dst.SkippedMessageIDs, src.SkippedMessageIDs...)
+	dst.Failures = append(dst.Failures, src.Failures...)
 }
 
 func (importer *ArchiveImporter) ingestArchiveMessage(
@@ -286,6 +351,12 @@ func (importer *ArchiveImporter) ingestArchiveMessage(
 		report.Imported++
 		return nil
 	}
+
+	// Serialize messages sharing a Message-ID so two workers cannot both observe
+	// "canonical not found" and each ingest it as a new canonical; the second to
+	// acquire the lock then correctly takes the duplicate/variant path.
+	unlock := importer.lockMessageID(message.MessageID)
+	defer unlock()
 
 	identityRef := contracts.SourceObjectRef{
 		SourceKind: contracts.MailIdentitySourceKind,
@@ -751,31 +822,27 @@ type partIngestJob struct {
 	part   contracts.CompoundPart
 }
 
-// ingestMessageParts ingests a message's parts concurrently (bounded by
-// partConcurrency) and returns them in their original order. The parts are
-// independent content-addressed objects with no inter-part ordering dependency,
-// so overlapping their Puts — especially byte-heavy attachments — is safe; only
-// the resulting slice order matters, so each result is written back by index.
+// ingestMessageParts ingests a message's parts concurrently and returns them in
+// their original order. The parts are independent content-addressed objects with
+// no inter-part ordering dependency, so overlapping their Puts — especially
+// byte-heavy attachments — is safe; only the resulting slice order matters, so
+// each result is written back by index. Each Put goes through the importer's
+// shared ingest semaphore, so parts and concurrent messages together never exceed
+// the configured ingest concurrency.
 func (importer *ArchiveImporter) ingestMessageParts(
 	ctx context.Context,
 	jobs []partIngestJob,
 ) ([]contracts.CompoundPart, error) {
-	workers := importer.partConcurrency
-	if workers <= 0 {
-		workers = defaultPartIngestConcurrency
-	}
-
 	parts := make([]contracts.CompoundPart, len(jobs))
 	errs := make([]error, len(jobs))
-	semaphore := make(chan struct{}, workers)
 	var waitGroup sync.WaitGroup
 
 	for index := range jobs {
 		waitGroup.Add(1)
-		semaphore <- struct{}{}
+		importer.acquireIngest()
 		go func(index int) {
 			defer waitGroup.Done()
-			defer func() { <-semaphore }()
+			defer importer.releaseIngest()
 
 			digest, _, err := importer.service.Ingest(ctx, jobs[index].object)
 			if err != nil {
@@ -797,6 +864,18 @@ func (importer *ArchiveImporter) ingestMessageParts(
 	}
 
 	return parts, nil
+}
+
+func (importer *ArchiveImporter) acquireIngest() {
+	if importer.ingestSem != nil {
+		importer.ingestSem <- struct{}{}
+	}
+}
+
+func (importer *ArchiveImporter) releaseIngest() {
+	if importer.ingestSem != nil {
+		<-importer.ingestSem
+	}
 }
 
 func (importer *ArchiveImporter) writeVariantPatches(
