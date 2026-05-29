@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -52,6 +53,64 @@ type ArchiveImportRequest struct {
 	Publisher       ArchiveImportPublisher
 	Status          ArchiveImportQueueStatusFunc
 	CapacityDrainer func(context.Context) error
+	// Progress, when set, is called periodically (every ProgressInterval, default
+	// 2s) and once at completion with a running snapshot of import counts so a
+	// caller can render live progress on a long import.
+	Progress         func(ArchiveImportProgress)
+	ProgressInterval time.Duration
+}
+
+// ArchiveImportProgress is a point-in-time snapshot of an in-flight import.
+type ArchiveImportProgress struct {
+	Scanned           int64
+	Parsed            int64
+	Ingested          int64
+	Failures          int64
+	Elapsed           time.Duration
+	MessagesPerSecond float64
+	LastPath          string
+}
+
+// importProgress accumulates live counters shared by the directory walk and the
+// ingest workers. Counters are atomic so progress can be sampled concurrently;
+// lastPath is guarded separately. It is always allocated (counters are cheap);
+// only the periodic emit is gated on a configured callback.
+type importProgress struct {
+	scanned  atomic.Int64
+	parsed   atomic.Int64
+	ingested atomic.Int64
+	failures atomic.Int64
+	start    time.Time
+	mu       sync.Mutex
+	lastPath string
+}
+
+func (progress *importProgress) setLastPath(path string) {
+	progress.mu.Lock()
+	progress.lastPath = path
+	progress.mu.Unlock()
+}
+
+func (progress *importProgress) snapshot() ArchiveImportProgress {
+	elapsed := time.Since(progress.start)
+	ingested := progress.ingested.Load()
+	rate := 0.0
+	if seconds := elapsed.Seconds(); seconds > 0 {
+		rate = float64(ingested) / seconds
+	}
+	progress.mu.Lock()
+	lastPath := progress.lastPath
+	progress.mu.Unlock()
+
+	return ArchiveImportProgress{
+		Scanned:           progress.scanned.Load(),
+		Parsed:            progress.parsed.Load(),
+		Ingested:          ingested,
+		Failures:          progress.failures.Load(),
+		Elapsed:           elapsed,
+		MessagesPerSecond: rate,
+		LastPath:          lastPath,
+	}
 }
 
 type ArchiveImportReport struct {
@@ -190,8 +249,20 @@ func (importer *ArchiveImporter) Import(
 	}
 
 	report := ArchiveImportReport{SourceName: sourceName}
+
+	progress := &importProgress{start: time.Now()}
+	stopProgress := importer.startProgress(ctx, request, progress)
+	defer stopProgress()
+
 	for _, root := range request.Roots {
-		if err := importer.importRoot(ctx, request, sourceName, root, &report); err != nil {
+		if err := importer.importRoot(
+			ctx,
+			request,
+			sourceName,
+			root,
+			&report,
+			progress,
+		); err != nil {
 			report.Failures = append(report.Failures, err.Error())
 		}
 	}
@@ -206,12 +277,55 @@ func (importer *ArchiveImporter) Import(
 	return report, nil
 }
 
+// startProgress launches the periodic progress emitter (if a callback is set)
+// and returns a stop function that halts the ticker, waits for the emitter to
+// exit, and delivers one final snapshot. The stop function is safe to defer.
+func (importer *ArchiveImporter) startProgress(
+	ctx context.Context,
+	request ArchiveImportRequest,
+	progress *importProgress,
+) func() {
+	if request.Progress == nil {
+		return func() {}
+	}
+
+	interval := request.ProgressInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	done := make(chan struct{})
+	finished := make(chan struct{})
+
+	go func() {
+		defer close(finished)
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				request.Progress(progress.snapshot())
+			}
+		}
+	}()
+
+	return func() {
+		ticker.Stop()
+		close(done)
+		<-finished
+		request.Progress(progress.snapshot())
+	}
+}
+
 func (importer *ArchiveImporter) importRoot(
 	ctx context.Context,
 	request ArchiveImportRequest,
 	sourceName string,
 	root string,
 	report *ArchiveImportReport,
+	progress *importProgress,
 ) error {
 	root = filepath.Clean(root)
 	info, err := os.Stat(root)
@@ -226,7 +340,17 @@ func (importer *ArchiveImporter) importRoot(
 		}
 		report.Scanned++
 		report.Parsed++
-		return importer.ingestArchiveMessage(ctx, sourceName, message, request, report)
+		progress.scanned.Add(1)
+		progress.parsed.Add(1)
+		progress.setLastPath(root)
+		ingestErr := importer.ingestArchiveMessage(ctx, sourceName, message, request, report)
+		if ingestErr != nil {
+			progress.failures.Add(1)
+		} else {
+			progress.ingested.Add(1)
+		}
+
+		return ingestErr
 	}
 
 	// The directory walk is the single producer: it owns the parse-side counters
@@ -251,6 +375,9 @@ func (importer *ArchiveImporter) importRoot(
 					ctx, sourceName, message, request, local,
 				); err != nil {
 					local.Failures = append(local.Failures, err.Error())
+					progress.failures.Add(1)
+				} else {
+					progress.ingested.Add(1)
 				}
 			}
 		}(&locals[index])
@@ -282,9 +409,12 @@ func (importer *ArchiveImporter) importRoot(
 				return nil
 			}
 			report.Scanned++
+			progress.scanned.Add(1)
+			progress.setLastPath(path)
 			if format == ArchiveImportFormatMbox {
 				parseErr := forEachMboxMessage(path, root, func(message archiveMessage) error {
 					report.Parsed++
+					progress.parsed.Add(1)
 					messages <- message
 
 					return nil
@@ -304,6 +434,7 @@ func (importer *ArchiveImporter) importRoot(
 				return nil
 			}
 			report.Parsed++
+			progress.parsed.Add(1)
 			messages <- message
 
 			return nil

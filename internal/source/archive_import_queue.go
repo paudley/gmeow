@@ -144,11 +144,43 @@ func (run ArchiveImportQueuedRun) drain(
 	state *archiveImportRunState,
 	report *ArchiveImportReport,
 ) error {
+	start := time.Now()
+	interval := request.ProgressInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	lastEmit := start
+	emit := func(force bool) {
+		if request.Progress == nil {
+			return
+		}
+		if !force && time.Since(lastEmit) < interval {
+			return
+		}
+		lastEmit = time.Now()
+		elapsed := time.Since(start)
+		rate := 0.0
+		if seconds := elapsed.Seconds(); seconds > 0 {
+			rate = float64(report.Processed) / seconds
+		}
+		request.Progress(ArchiveImportProgress{
+			Scanned:           int64(report.Scanned),
+			Parsed:            int64(report.Parsed),
+			Ingested:          int64(report.Processed),
+			Failures:          int64(state.Failures),
+			Elapsed:           elapsed,
+			MessagesPerSecond: rate,
+			LastPath:          state.LastPath,
+		})
+	}
+
 	for report.Processed < report.Enqueued {
 		if err := run.drainOne(ctx, request, sourceName, state, report); err != nil {
 			return err
 		}
+		emit(false)
 	}
+	emit(true)
 
 	return nil
 }

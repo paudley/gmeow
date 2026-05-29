@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -48,6 +49,7 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 		resume          bool
 		queueHighWater  int
 		concurrency     int
+		quiet           bool
 	)
 
 	command := &cobra.Command{
@@ -97,6 +99,21 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 				StateDir:       archiveImportStateDir(loaded, stateDir),
 				QueueHighWater: queueHighWater,
 			}
+			// Live progress goes to stderr so --json stdout stays clean.
+			if !quiet {
+				request.Progress = func(progress source.ArchiveImportProgress) {
+					fmt.Fprintf(
+						os.Stderr,
+						"\rimport: scanned=%d parsed=%d ingested=%d failures=%d %.0f msg/s elapsed=%s   ",
+						progress.Scanned,
+						progress.Parsed,
+						progress.Ingested,
+						progress.Failures,
+						progress.MessagesPerSecond,
+						progress.Elapsed.Round(time.Second),
+					)
+				}
+			}
 			var report source.ArchiveImportReport
 			if dryRun {
 				report, err = importer.Import(ctx, request)
@@ -132,6 +149,10 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 					Source:   sourceImportJobSourceAdapter{source: jobSource},
 				}.Run(ctx, request)
 			}
+			if !quiet {
+				// Terminate the in-place progress line before the report prints.
+				fmt.Fprintln(os.Stderr)
+			}
 			if printErr := printArchiveImportReport(out, report); printErr != nil {
 				return printErr
 			}
@@ -154,7 +175,9 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.Flags().
 		IntVar(&queueHighWater, "queue-high-water", 10000, "pause discovery while source import queue depth is at or above this value")
 	command.Flags().
-		IntVar(&concurrency, "concurrency", 8, "parts ingested in parallel per message (and queued-import broker prefetch)")
+		IntVar(&concurrency, "concurrency", 8, "object Puts run in parallel across messages and their parts (and queued-import broker prefetch)")
+	command.Flags().
+		BoolVar(&quiet, "quiet", false, "suppress the live progress line on stderr")
 	command.Flags().StringVar(
 		&confirmInstance,
 		"confirm-instance",
