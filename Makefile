@@ -159,7 +159,7 @@ go-check: go-format go-vet go-test go-build ## Run the Go Phase 00 quality gate.
 
 python-intel-test: ## Run gmeow-intel tests.
 	$(call section,Running gmeow-intel tests)
-	cd python && $(UV) run pytest
+	cd python && $(UV) run --extra test pytest
 
 python-intel-build: ## Build gmeow-intel distribution.
 	$(call section,Building gmeow-intel package)
