@@ -462,7 +462,7 @@ func (store *FilesystemStore) appendToActivePack(
 		return 0, 0, err
 	}
 
-	id, size, err := store.activePack(packsDir)
+	id, size, err := store.cachedActivePack(packsDir)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -479,14 +479,46 @@ func (store *FilesystemStore) appendToActivePack(
 	defer file.Close()
 
 	if _, err := file.Write(compressed); err != nil {
+		// The on-disk size is now unknown relative to our cache; force a rescan.
+		store.activePackKnown = false
+
 		return 0, 0, err
 	}
 	if err := file.Sync(); err != nil {
+		store.activePackKnown = false
+
 		return 0, 0, err
 	}
 	if err := fsyncDir(packsDir); err != nil {
+		store.activePackKnown = false
+
 		return 0, 0, err
 	}
+
+	// Commit the new active-pack state to the cache: the chunk landed at offset
+	// `size` in pack `id`, growing the pack by len(compressed).
+	store.activePackKnown = true
+	store.activePackID = id
+	store.activePackSize = size + int64(len(compressed))
+
+	return id, size, nil
+}
+
+// cachedActivePack returns the active pack id and size from the in-memory cache,
+// scanning the pack directory only on the first call (or after a write error
+// invalidated the cache). Callers must hold store.packMu.
+func (store *FilesystemStore) cachedActivePack(packsDir string) (uint64, int64, error) {
+	if store.activePackKnown {
+		return store.activePackID, store.activePackSize, nil
+	}
+
+	id, size, err := store.activePack(packsDir)
+	if err != nil {
+		return 0, 0, err
+	}
+	store.activePackKnown = true
+	store.activePackID = id
+	store.activePackSize = size
 
 	return id, size, nil
 }

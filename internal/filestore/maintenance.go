@@ -64,13 +64,43 @@ func (store *FilesystemStore) cleanupSourceLockKeys(
 	}
 
 	for _, key := range expired {
-		if err := store.metaDelete(key); err != nil {
+		removed, err := store.deleteExpiredLockKey(key)
+		if err != nil {
 			return err
 		}
-		report.RemovedFiles++
+		if removed {
+			report.RemovedFiles++
+		}
 	}
 
 	return nil
+}
+
+// deleteExpiredLockKey removes a lk/ claim only if it is still expired when
+// re-checked under the same per-key lock acquire/release use, so a claim
+// re-acquired between the scan and the sweep is not released out from under its
+// new owner.
+func (store *FilesystemStore) deleteExpiredLockKey(key string) (bool, error) {
+	unlock := store.lockKey("source-ingest:" + strings.TrimPrefix(key, "lk/"))
+	defer unlock()
+
+	present, err := store.metaHas(key)
+	if err != nil {
+		return false, err
+	}
+	if !present {
+		return false, nil
+	}
+
+	// A decodable, still-live claim was re-acquired after the scan: keep it.
+	// Expired or corrupt (undecodable) records fall through and are dropped.
+	var claim contracts.SourceIngestClaim
+	if ok, getErr := store.metaGet(key, &claim); getErr == nil && ok &&
+		sourceClaimLive(claim, time.Now().UTC()) {
+		return false, nil
+	}
+
+	return true, store.metaDelete(key)
 }
 
 func (store *FilesystemStore) CleanupSourceLocks(

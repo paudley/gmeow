@@ -20,6 +20,7 @@ func TestTrainDictionaryInstallsAndAdopts(t *testing.T) {
 
 	ctx := context.Background()
 	store := NewFilesystemStore(t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
 
 	// Store many small, similar objects — the workload a dictionary helps most.
 	for index := range 64 {

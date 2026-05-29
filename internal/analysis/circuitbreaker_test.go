@@ -71,7 +71,7 @@ func TestCircuitBreakerOpensProbesAndCloses(t *testing.T) {
 		t.Fatal("circuit should be open after threshold consecutive failures")
 	}
 
-	// Inside the backoff window it stays closed to traffic.
+	// Inside the backoff window the circuit stays open, blocking traffic.
 	clock = clock.Add(defaultBreakerBaseBackoff - time.Second)
 	if breaker.allow(key) {
 		t.Fatal("circuit should stay open inside the backoff window")

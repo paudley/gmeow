@@ -48,6 +48,18 @@ type FilesystemStore struct {
 	metaErr  error
 	dicts    dictionaryCache
 	packs    *packCache
+	// activePack* caches the newest pack's id and size so appendToActivePack does
+	// not os.ReadDir+Stat the pack directory on every chunk write. The store holds
+	// Pebble's exclusive directory lock and is the sole writer to chunk-packs/, so
+	// the cache is authoritative once populated; it is guarded by packMu (held by
+	// every appender) and lazily filled on first append.
+	activePackKnown bool
+	activePackID    uint64
+	activePackSize  int64
+	// maintenanceMu serializes whole-store maintenance passes (gc, repack,
+	// dictionary training) so they never run concurrently — e.g. repack must not
+	// race gc, and two trainings must not race the dictionary-id allocation.
+	maintenanceMu sync.Mutex
 }
 
 type filesystemKeyLock struct {
@@ -80,6 +92,12 @@ func (store *FilesystemStore) Put(
 	if err != nil {
 		return "", err
 	}
+
+	// Serialize the manifest read-merge-write so concurrent puts of the same
+	// content (or a concurrent AttachProvenance/WriteOverlays/analysis refresh on
+	// the same digest) cannot lose each other's mutations.
+	unlock := store.lockKey("manifest:" + string(digest))
+	defer unlock()
 
 	manifest := store.baseManifest(
 		digest,
@@ -150,6 +168,9 @@ func (store *FilesystemStore) AttachProvenance(
 			return err
 		}
 	}
+
+	unlock := store.lockKey("manifest:" + string(digest))
+	defer unlock()
 
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil {
@@ -481,6 +502,9 @@ func (store *FilesystemStore) WriteOverlays(
 	if overlays == nil {
 		overlays = map[string]any{}
 	}
+
+	unlock := store.lockKey("manifest:" + string(digest))
+	defer unlock()
 
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil {

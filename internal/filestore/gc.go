@@ -4,6 +4,7 @@
 package filestore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,11 @@ import (
 
 	"blackcat.ca/gmeow/internal/contracts"
 )
+
+// externalDigestJSONKey is the serialized field name of
+// packedObjectAnnotationEntry.ExternalDigest; its presence in a raw annotation
+// row gates the (relatively costly) JSON unmarshal during the GC mark scan.
+var externalDigestJSONKey = []byte(`"external_digest"`)
 
 // gcGracePeriod protects chunks and recipes written within this window of a GC
 // run from being swept, so an in-flight Put whose recipe is not yet visible to
@@ -56,8 +62,29 @@ func (store *FilesystemStore) DeleteObject(
 	if err == nil {
 		for _, provenance := range manifest.Provenance {
 			ref := sourceObjectRefFromProvenance(provenance)
-			if validateSourceObjectRef(ref) == nil {
-				keys = append(keys, "si/"+sourceObjectRefKey(ref), "sa/"+sourceAliasKey(ref))
+			if validateSourceObjectRef(ref) != nil {
+				continue
+			}
+			// Only remove source/alias index rows that still point at this object.
+			// A re-ingest under the same source ref may have repointed the row to a
+			// newer digest; deleting that would orphan the live object's lookup.
+			if indexed, ok, idxErr := store.readPackedSourceObjectIndex(
+				ctx,
+				ref,
+			); idxErr != nil {
+				return idxErr
+			} else if ok &&
+				indexed.ObjectDigest == digest {
+				keys = append(keys, "si/"+sourceObjectRefKey(ref))
+			}
+			if aliasDigest, ok, aliasErr := store.readPackedSourceAlias(
+				ctx,
+				ref,
+			); aliasErr != nil {
+				return aliasErr
+			} else if ok &&
+				aliasDigest == digest {
+				keys = append(keys, "sa/"+sourceAliasKey(ref))
 			}
 		}
 	}
@@ -96,6 +123,9 @@ func (store *FilesystemStore) gcWithGrace(
 		return GCReport{}, err
 	}
 
+	store.maintenanceMu.Lock()
+	defer store.maintenanceMu.Unlock()
+
 	gcStart := time.Now().UTC()
 	graceCutoff := gcStart.Add(-grace)
 
@@ -110,6 +140,11 @@ func (store *FilesystemStore) gcWithGrace(
 	// as reachable.
 	annotationPayloads := map[string]struct{}{}
 	if err := snapshotIterPrefix(snapshot, "a/", func(_ string, value []byte) error {
+		// external_digest is omitempty, so an annotation that externalizes nothing
+		// never carries the field; skip the unmarshal for the common inline case.
+		if !bytes.Contains(value, externalDigestJSONKey) {
+			return nil
+		}
 		var entry packedObjectAnnotationEntry
 		if err := json.Unmarshal(value, &entry); err != nil {
 			return err

@@ -106,7 +106,7 @@ include part objects unless `--no-recursive-parts` is set.
 
 Resolve an arbitrary FILESTORE path back to its owning data with:
 
-```
+```bash
 gmeow-admin --config <restore.toml> filestore path /absolute/path/inside/filestore
 gmeow-admin --config <restore.toml> filestore path chunk-packs/0000000000.pack --json
 ```

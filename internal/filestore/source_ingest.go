@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -170,8 +171,13 @@ func (store *FilesystemStore) legacyClaimHeld(
 	lockPath := store.sourceObjectLockPath(ref)
 	var existing contracts.SourceIngestClaim
 	if err := readJSON(lockPath, &existing); err != nil {
-		// Missing or unreadable legacy file: nothing live to honor.
-		return false, nil
+		if errors.Is(err, os.ErrNotExist) {
+			// No legacy lock file: nothing to honor.
+			return false, nil
+		}
+		// A present-but-unreadable lock (corrupt/permission) is ambiguous;
+		// surface it rather than silently allowing a second writer to acquire.
+		return false, fmt.Errorf("read legacy source lock %s: %w", lockPath, err)
 	}
 	if sourceClaimLive(existing, now) {
 		return true, nil

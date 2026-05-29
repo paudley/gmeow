@@ -48,6 +48,12 @@ func (store *FilesystemStore) TrainDictionary(
 	if err := ctx.Err(); err != nil {
 		return TrainDictionaryReport{}, err
 	}
+
+	// Serialize with other maintenance passes so the dictionary-id allocation and
+	// `current` marker flip cannot race a concurrent training (or a repack).
+	store.maintenanceMu.Lock()
+	defer store.maintenanceMu.Unlock()
+
 	if sampleLimit <= 0 {
 		sampleLimit = defaultDictSampleLimit
 	}
@@ -150,8 +156,9 @@ func (store *FilesystemStore) writeDictionarySamples(
 			return nil
 		}
 
+		// Samples are object content (e.g. email bodies); keep them owner-only.
 		path := filepath.Join(sampleDir, fmt.Sprintf("%06d.sample", len(samplePaths)))
-		if err := os.WriteFile(path, content, 0o640); err != nil {
+		if err := os.WriteFile(path, content, 0o600); err != nil {
 			return err
 		}
 		samplePaths = append(samplePaths, path)

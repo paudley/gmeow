@@ -768,6 +768,14 @@ func fromPBResolvePathRecords(
 			converted.SourceObject = &sourceObject
 		}
 		if recovery := record.GetRecovery(); recovery != nil {
+			createdAt, parseErr := parseTime(recovery.GetCreatedAt())
+			if parseErr != nil {
+				return nil, fmt.Errorf(
+					"parse recovery created_at %q: %w",
+					recovery.GetCreatedAt(),
+					parseErr,
+				)
+			}
 			converted.Recovery = &filestore.PathResolveRecovery{
 				Digest:             recovery.GetDigest(),
 				ObjectID:           recovery.GetObjectId(),
@@ -777,14 +785,22 @@ func fromPBResolvePathRecords(
 				CompressedSize:     recovery.GetCompressedSize(),
 				UncompressedBlake3: recovery.GetUncompressedBlake3(),
 				CompressedBlake3:   recovery.GetCompressedBlake3(),
-				CreatedAt:          mustParseTime(recovery.GetCreatedAt()),
+				CreatedAt:          createdAt,
 			}
 		}
 		for _, parent := range record.GetParents() {
+			updatedAt, parseErr := parseTime(parent.GetUpdatedAt())
+			if parseErr != nil {
+				return nil, fmt.Errorf(
+					"parse parent updated_at %q: %w",
+					parent.GetUpdatedAt(),
+					parseErr,
+				)
+			}
 			converted.Parents = append(converted.Parents, filestore.PathResolveParent{
 				ParentDigest: contracts.ObjectDigest(parent.GetParentDigest()),
 				Role:         parent.GetRole(),
-				UpdatedAt:    mustParseTime(parent.GetUpdatedAt()),
+				UpdatedAt:    updatedAt,
 			})
 		}
 		out = append(out, converted)

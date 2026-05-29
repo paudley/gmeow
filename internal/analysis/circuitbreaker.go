@@ -77,7 +77,12 @@ func (breaker *circuitBreaker) allow(key string) bool {
 	if breaker.now().Before(state.openUntil) {
 		return false
 	}
-	// Window elapsed: admit a single half-open probe.
+	// Window elapsed: admit exactly one half-open probe. Once a probe is in
+	// flight, deny the rest until its result is recorded, so a still-down
+	// analyzer is not flooded.
+	if state.halfOpen {
+		return false
+	}
 	state.halfOpen = true
 
 	return true

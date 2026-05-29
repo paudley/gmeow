@@ -39,6 +39,9 @@ func (store *FilesystemStore) Repack(ctx context.Context) (RepackReport, error) 
 		return RepackReport{}, err
 	}
 
+	store.maintenanceMu.Lock()
+	defer store.maintenanceMu.Unlock()
+
 	report := RepackReport{}
 	packsDir := filepath.Join(store.root, chunkPacksDir)
 

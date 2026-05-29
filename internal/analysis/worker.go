@@ -176,12 +176,20 @@ func (runtime *Runtime) Handle(ctx context.Context, receipt JobReceipt) error {
 		// so drop it (ack) rather than retrying, parking, or tripping the
 		// breaker — otherwise stale jobs churn forever.
 		if errors.Is(err, os.ErrNotExist) {
-			observability.DefaultMetrics().AddCounter("gmeow_dropped_bogus_jobs", 1)
-			if ackErr := receipt.Ack(ctx); ackErr != nil {
-				return fmt.Errorf("ack bogus analysis job: %w", ackErr)
-			}
+			// Confirm the object itself is gone before dropping: Process can also
+			// surface os.ErrNotExist from analyzer internals (e.g. a transiently
+			// missing pack mid-repack), and those must not be ACK-dropped.
+			if _, manifestErr := runtime.store.ReadManifest(ctx, job.ObjectDigest); errors.Is(
+				manifestErr,
+				os.ErrNotExist,
+			) {
+				observability.DefaultMetrics().AddCounter("gmeow_dropped_bogus_jobs", 1)
+				if ackErr := receipt.Ack(ctx); ackErr != nil {
+					return fmt.Errorf("ack bogus analysis job: %w", ackErr)
+				}
 
-			return nil
+				return nil
+			}
 		}
 
 		runtime.breaker.recordFailure(key)
