@@ -638,6 +638,26 @@ func (server *FilestoreServer) DeleteObject(
 	return &pb.Empty{}, nil
 }
 
+func (server *FilestoreServer) DeleteImport(
+	ctx context.Context,
+	request *pb.DeleteImportRequest,
+) (*pb.DeleteImportResponse, error) {
+	report, err := server.store.DeleteImport(
+		ctx,
+		request.GetSourceKind(),
+		request.GetSourceName(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.DeleteImportResponse{
+		ObjectsScanned:     int64(report.ObjectsScanned),
+		ObjectsDeleted:     int64(report.ObjectsDeleted),
+		ProvenanceDetached: int64(report.ProvenanceDetached),
+	}, nil
+}
+
 func (server *FilestoreServer) Gc(
 	ctx context.Context,
 	_ *pb.GcRequest,

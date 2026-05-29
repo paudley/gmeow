@@ -37,6 +37,7 @@ const (
 	FilestoreService_StorageBreakdown_FullMethodName       = "/gmeow.v1.FilestoreService/StorageBreakdown"
 	FilestoreService_ResolvePath_FullMethodName            = "/gmeow.v1.FilestoreService/ResolvePath"
 	FilestoreService_DeleteObject_FullMethodName           = "/gmeow.v1.FilestoreService/DeleteObject"
+	FilestoreService_DeleteImport_FullMethodName           = "/gmeow.v1.FilestoreService/DeleteImport"
 	FilestoreService_Gc_FullMethodName                     = "/gmeow.v1.FilestoreService/Gc"
 	FilestoreService_Repack_FullMethodName                 = "/gmeow.v1.FilestoreService/Repack"
 	FilestoreService_TrainDictionary_FullMethodName        = "/gmeow.v1.FilestoreService/TrainDictionary"
@@ -68,6 +69,7 @@ type FilestoreServiceClient interface {
 	StorageBreakdown(ctx context.Context, in *StorageBreakdownRequest, opts ...grpc.CallOption) (*StorageBreakdownResponse, error)
 	ResolvePath(ctx context.Context, in *ResolvePathRequest, opts ...grpc.CallOption) (*ResolvePathResponse, error)
 	DeleteObject(ctx context.Context, in *DeleteObjectRequest, opts ...grpc.CallOption) (*Empty, error)
+	DeleteImport(ctx context.Context, in *DeleteImportRequest, opts ...grpc.CallOption) (*DeleteImportResponse, error)
 	Gc(ctx context.Context, in *GcRequest, opts ...grpc.CallOption) (*GcResponse, error)
 	Repack(ctx context.Context, in *RepackRequest, opts ...grpc.CallOption) (*RepackResponse, error)
 	TrainDictionary(ctx context.Context, in *TrainDictionaryRequest, opts ...grpc.CallOption) (*TrainDictionaryResponse, error)
@@ -277,6 +279,16 @@ func (c *filestoreServiceClient) DeleteObject(ctx context.Context, in *DeleteObj
 	return out, nil
 }
 
+func (c *filestoreServiceClient) DeleteImport(ctx context.Context, in *DeleteImportRequest, opts ...grpc.CallOption) (*DeleteImportResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteImportResponse)
+	err := c.cc.Invoke(ctx, FilestoreService_DeleteImport_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *filestoreServiceClient) Gc(ctx context.Context, in *GcRequest, opts ...grpc.CallOption) (*GcResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GcResponse)
@@ -396,6 +408,7 @@ type FilestoreServiceServer interface {
 	StorageBreakdown(context.Context, *StorageBreakdownRequest) (*StorageBreakdownResponse, error)
 	ResolvePath(context.Context, *ResolvePathRequest) (*ResolvePathResponse, error)
 	DeleteObject(context.Context, *DeleteObjectRequest) (*Empty, error)
+	DeleteImport(context.Context, *DeleteImportRequest) (*DeleteImportResponse, error)
 	Gc(context.Context, *GcRequest) (*GcResponse, error)
 	Repack(context.Context, *RepackRequest) (*RepackResponse, error)
 	TrainDictionary(context.Context, *TrainDictionaryRequest) (*TrainDictionaryResponse, error)
@@ -466,6 +479,9 @@ func (UnimplementedFilestoreServiceServer) ResolvePath(context.Context, *Resolve
 }
 func (UnimplementedFilestoreServiceServer) DeleteObject(context.Context, *DeleteObjectRequest) (*Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteObject not implemented")
+}
+func (UnimplementedFilestoreServiceServer) DeleteImport(context.Context, *DeleteImportRequest) (*DeleteImportResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteImport not implemented")
 }
 func (UnimplementedFilestoreServiceServer) Gc(context.Context, *GcRequest) (*GcResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Gc not implemented")
@@ -815,6 +831,24 @@ func _FilestoreService_DeleteObject_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FilestoreService_DeleteImport_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteImportRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilestoreServiceServer).DeleteImport(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilestoreService_DeleteImport_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilestoreServiceServer).DeleteImport(ctx, req.(*DeleteImportRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _FilestoreService_Gc_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GcRequest)
 	if err := dec(in); err != nil {
@@ -990,6 +1024,10 @@ var FilestoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteObject",
 			Handler:    _FilestoreService_DeleteObject_Handler,
+		},
+		{
+			MethodName: "DeleteImport",
+			Handler:    _FilestoreService_DeleteImport_Handler,
 		},
 		{
 			MethodName: "Gc",

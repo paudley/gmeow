@@ -35,7 +35,99 @@ func newSourceCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newSourceBackfillCommand(out, configPath))
 	command.AddCommand(newSourceImportCommand(out, configPath))
 	command.AddCommand(newSourceListImportsCommand(out, configPath))
+	command.AddCommand(newSourceDeleteImportCommand(out, configPath))
 	command.AddCommand(newSourceServeCommand(out, configPath, "serve"))
+
+	return command
+}
+
+func newSourceDeleteImportCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		confirmInstance string
+		stateDir        string
+	)
+
+	command := &cobra.Command{
+		Use:   "delete-import <run-id>",
+		Short: "Remove an import's provenance; objects with no remaining source are reclaimable by gc",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			ctx := command.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"source delete-import",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+
+			runID := args[0]
+			dir := archiveImportStateDir(loaded, stateDir)
+			record, found, err := source.LoadImportRunRecord(dir, runID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return fmt.Errorf("import run %q not found in %s", runID, dir)
+			}
+
+			filestoreClient, err := rpc.NewFilestoreClient(
+				ctx,
+				rpcEndpoint(loaded.Resolved.RPC.Filestore),
+			)
+			if err != nil {
+				return err
+			}
+			defer filestoreClient.Close()
+
+			report, err := filestoreClient.DeleteImport(
+				ctx,
+				record.SourceKind,
+				record.SourceName,
+			)
+			if err != nil {
+				return err
+			}
+
+			record.Status = source.ImportRunStatusDeleted
+			if writeErr := source.WriteImportRunRecord(dir, record); writeErr != nil {
+				return writeErr
+			}
+
+			encoded, err := json.MarshalIndent(report, "", "  ")
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(out, string(encoded)); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(
+				out,
+				"run marked deleted; run 'gmeow-admin filestore gc' to reclaim freed chunks",
+			)
+
+			return err
+		},
+	}
+	command.Flags().StringVar(
+		&confirmInstance,
+		"confirm-instance",
+		"",
+		"required production-like instance id confirmation",
+	)
+	command.Flags().StringVar(
+		&stateDir,
+		"state-dir",
+		"",
+		"import run state directory; defaults to system.data_dir/import-runs",
+	)
 
 	return command
 }

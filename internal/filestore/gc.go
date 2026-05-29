@@ -103,6 +103,172 @@ func (store *FilesystemStore) DeleteObject(
 	return store.metaDeleteKeys(keys)
 }
 
+// DeleteImportReport summarizes a DeleteImport pass.
+type DeleteImportReport struct {
+	ObjectsScanned     int `json:"objects_scanned"`
+	ObjectsDeleted     int `json:"objects_deleted"`
+	ProvenanceDetached int `json:"provenance_detached"`
+}
+
+// DeleteImport removes the contribution of one source (an import) from the
+// store: for every object whose manifest carries provenance from the given
+// source kind+name, that provenance — and the source index rows it owns — are
+// removed. An object that has no remaining provenance after the removal had this
+// source as its only owner and is deleted entirely (its chunks are left for Gc);
+// an object still owned by another source survives with the source detached.
+//
+// This is the correct semantics for "delete an import": a part shared with other
+// live imports (e.g. an identical attachment, or the corpus-wide mime-structure
+// stub) keeps that other provenance and is preserved, while objects unique to
+// the deleted import become unreferenced and reclaimable.
+func (store *FilesystemStore) DeleteImport(
+	ctx context.Context,
+	sourceKind, sourceName string,
+) (DeleteImportReport, error) {
+	if err := ctx.Err(); err != nil {
+		return DeleteImportReport{}, err
+	}
+	if strings.TrimSpace(sourceKind) == "" || strings.TrimSpace(sourceName) == "" {
+		return DeleteImportReport{}, errors.New("source kind and name are required")
+	}
+
+	// Collect candidate digests first; mutating manifests while iterating the
+	// manifest prefix is avoided by separating the scan from the rewrite.
+	var candidates []contracts.ObjectDigest
+	report := DeleteImportReport{}
+	if err := store.metaIterPrefix("m/", func(key string, value []byte) error {
+		report.ObjectsScanned++
+		var manifest contracts.Manifest
+		if err := json.Unmarshal(value, &manifest); err != nil {
+			return err
+		}
+		if manifestHasSource(manifest, sourceKind, sourceName) {
+			candidates = append(
+				candidates,
+				contracts.ObjectDigest(strings.TrimPrefix(key, "m/")),
+			)
+		}
+
+		return nil
+	}); err != nil {
+		return DeleteImportReport{}, err
+	}
+
+	for _, digest := range candidates {
+		detached, deleted, err := store.detachSourceFromObject(
+			ctx,
+			digest,
+			sourceKind,
+			sourceName,
+		)
+		if err != nil {
+			return report, err
+		}
+		if deleted {
+			report.ObjectsDeleted++
+		} else if detached {
+			report.ProvenanceDetached++
+		}
+	}
+
+	return report, nil
+}
+
+// detachSourceFromObject removes the source's provenance from one object under
+// its manifest lock. It re-reads the manifest (the scan is racy), drops the
+// matching provenance entries and the source index rows they own, and either
+// deletes the object (no provenance left) or rewrites the trimmed manifest.
+func (store *FilesystemStore) detachSourceFromObject(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	sourceKind, sourceName string,
+) (detached, deleted bool, err error) {
+	unlock := store.lockKey("manifest:" + string(digest))
+	defer unlock()
+
+	manifest, err := store.ReadManifest(ctx, digest)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, false, nil
+		}
+
+		return false, false, err
+	}
+
+	kept := make([]contracts.Provenance, 0, len(manifest.Provenance))
+	var removed []contracts.SourceObjectRef
+	for _, provenance := range manifest.Provenance {
+		if provenance.SourceKind == sourceKind && provenance.SourceName == sourceName {
+			removed = append(removed, sourceObjectRefFromProvenance(provenance))
+
+			continue
+		}
+		kept = append(kept, provenance)
+	}
+	if len(removed) == 0 {
+		return false, false, nil
+	}
+
+	if len(kept) == 0 {
+		// This source was the object's only owner: delete the whole object.
+		if err := store.DeleteObject(ctx, digest); err != nil {
+			return false, false, err
+		}
+
+		return true, true, nil
+	}
+
+	manifest.Provenance = kept
+	manifest.UpdatedAt = time.Now().UTC()
+	if err := store.writeManifest(digest, manifest); err != nil {
+		return false, false, err
+	}
+
+	// Drop the source/alias index rows owned by the removed refs, but only when
+	// they still point at this object (a re-ingest may have repointed them).
+	var indexKeys []string
+	for _, ref := range removed {
+		if validateSourceObjectRef(ref) != nil {
+			continue
+		}
+		if indexed, ok, idxErr := store.readPackedSourceObjectIndex(ctx, ref); idxErr != nil {
+			return false, false, idxErr
+		} else if ok && indexed.ObjectDigest == digest {
+			indexKeys = append(indexKeys, "si/"+sourceObjectRefKey(ref))
+		}
+		if aliasDigest, ok, aliasErr := store.readPackedSourceAlias(
+			ctx,
+			ref,
+		); aliasErr != nil {
+			return false, false, aliasErr
+		} else if ok &&
+			aliasDigest == digest {
+			indexKeys = append(indexKeys, "sa/"+sourceAliasKey(ref))
+		}
+	}
+	if len(indexKeys) > 0 {
+		if err := store.metaDeleteKeys(indexKeys); err != nil {
+			return false, false, err
+		}
+	}
+
+	return true, false, nil
+}
+
+// manifestHasSource reports whether any provenance entry matches the source.
+func manifestHasSource(
+	manifest contracts.Manifest,
+	sourceKind, sourceName string,
+) bool {
+	for _, provenance := range manifest.Provenance {
+		if provenance.SourceKind == sourceKind && provenance.SourceName == sourceName {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Gc reclaims chunk-index entries and recipes no longer reachable from any
 // object manifest or externalized annotation. It runs online against a metadata
 // snapshot; concurrent writes are protected by a two-part guard: recipes

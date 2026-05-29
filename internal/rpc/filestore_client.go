@@ -472,6 +472,25 @@ func (client *FilestoreClient) DeleteObject(
 	return err
 }
 
+func (client *FilestoreClient) DeleteImport(
+	ctx context.Context,
+	sourceKind, sourceName string,
+) (filestore.DeleteImportReport, error) {
+	response, err := client.client.DeleteImport(ctx, &pb.DeleteImportRequest{
+		SourceKind: sourceKind,
+		SourceName: sourceName,
+	})
+	if err != nil {
+		return filestore.DeleteImportReport{}, err
+	}
+
+	return filestore.DeleteImportReport{
+		ObjectsScanned:     int(response.GetObjectsScanned()),
+		ObjectsDeleted:     int(response.GetObjectsDeleted()),
+		ProvenanceDetached: int(response.GetProvenanceDetached()),
+	}, nil
+}
+
 func (client *FilestoreClient) Gc(ctx context.Context) (filestore.GCReport, error) {
 	response, err := client.client.Gc(ctx, &pb.GcRequest{})
 	if err != nil {
