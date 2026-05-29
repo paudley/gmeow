@@ -87,6 +87,52 @@ func TestArchiveImportParallelDedupsDuplicateMessageIDs(t *testing.T) {
 	}
 }
 
+// TestArchiveImportRecordsRunForListing confirms a completed import writes a
+// listable run record (status, counts, source) into the state directory.
+func TestArchiveImportRecordsRunForListing(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	stateDir := t.TempDir()
+	writeTestFile(
+		t,
+		filepath.Join(root, "m.eml"),
+		"Message-ID: <run@example.test>\r\nSubject: s\r\n\r\nbody\r\n",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "arc",
+		Roots:      []string{root},
+		StateDir:   stateDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := ListImportRunRecords(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 run record, got %d", len(records))
+	}
+	record := records[0]
+	if record.RunID != report.RunID {
+		t.Fatalf("run id mismatch: record=%s report=%s", record.RunID, report.RunID)
+	}
+	if record.Status != ImportRunStatusCompleted {
+		t.Fatalf("expected completed status, got %q", record.Status)
+	}
+	if record.SourceName != "arc" || record.Imported != 1 {
+		t.Fatalf("unexpected record: %#v", record)
+	}
+}
+
 func TestArchiveImportMaildirReadOnlyAndGeneratedMessageID(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)

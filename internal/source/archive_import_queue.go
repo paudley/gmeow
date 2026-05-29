@@ -101,6 +101,34 @@ func (run ArchiveImportQueuedRun) Run(
 		Processed:  state.Processed,
 	}
 	request.RunID = runID
+
+	if !request.DryRun {
+		record := ImportRunRecord{
+			RunID:      runID,
+			SourceName: sourceName,
+			SourceKind: contracts.MailArchiveSourceKind,
+			Roots:      append([]string{}, request.Roots...),
+			Format:     request.Format,
+			Status:     ImportRunStatusRunning,
+			StartedAt:  time.Now().UTC(),
+			LowNoise:   request.LowNoise,
+		}
+		_ = WriteImportRunRecord(request.StateDir, record)
+		defer func() {
+			record.Status = ImportRunStatusCompleted
+			if len(report.Failures) > 0 {
+				record.Status = ImportRunStatusFailed
+			}
+			record.FinishedAt = time.Now().UTC()
+			record.Scanned = report.Scanned
+			record.Parsed = report.Parsed
+			record.Imported = report.Imported
+			record.Duplicates = report.ExactDuplicates + report.MessageIDDuplicates
+			record.Failures = len(report.Failures)
+			_ = WriteImportRunRecord(request.StateDir, record)
+		}()
+	}
+
 	request.CapacityDrainer = func(ctx context.Context) error {
 		return run.drainOne(ctx, request, sourceName, &state, &report)
 	}

@@ -248,7 +248,38 @@ func (importer *ArchiveImporter) Import(
 		sourceName = sourceNameFromRoot(request.Roots[0])
 	}
 
-	report := ArchiveImportReport{SourceName: sourceName}
+	runID := archiveImportRunID(request, sourceName)
+	report := ArchiveImportReport{SourceName: sourceName, RunID: runID}
+
+	// Record the run so it is listable and deletable later. Dry runs do not write
+	// anything, so they are not registered. Registry writes are best-effort: a
+	// failure to record must not fail the import itself.
+	if !request.DryRun {
+		record := ImportRunRecord{
+			RunID:      runID,
+			SourceName: sourceName,
+			SourceKind: contracts.MailArchiveSourceKind,
+			Roots:      append([]string{}, request.Roots...),
+			Format:     request.Format,
+			Status:     ImportRunStatusRunning,
+			StartedAt:  time.Now().UTC(),
+			LowNoise:   request.LowNoise,
+		}
+		_ = WriteImportRunRecord(request.StateDir, record)
+		defer func() {
+			record.Status = ImportRunStatusCompleted
+			if len(report.Failures) > 0 {
+				record.Status = ImportRunStatusFailed
+			}
+			record.FinishedAt = time.Now().UTC()
+			record.Scanned = report.Scanned
+			record.Parsed = report.Parsed
+			record.Imported = report.Imported
+			record.Duplicates = report.ExactDuplicates + report.MessageIDDuplicates
+			record.Failures = len(report.Failures)
+			_ = WriteImportRunRecord(request.StateDir, record)
+		}()
+	}
 
 	progress := &importProgress{start: time.Now()}
 	stopProgress := importer.startProgress(ctx, request, progress)

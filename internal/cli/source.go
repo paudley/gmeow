@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -33,7 +34,76 @@ func newSourceCommand(out io.Writer, configPath *string) *cobra.Command {
 	}
 	command.AddCommand(newSourceBackfillCommand(out, configPath))
 	command.AddCommand(newSourceImportCommand(out, configPath))
+	command.AddCommand(newSourceListImportsCommand(out, configPath))
 	command.AddCommand(newSourceServeCommand(out, configPath, "serve"))
+
+	return command
+}
+
+func newSourceListImportsCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		jsonOutput bool
+		stateDir   string
+	)
+
+	command := &cobra.Command{
+		Use:   "list-imports",
+		Short: "List recorded archive import runs",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+
+			records, err := source.ListImportRunRecords(archiveImportStateDir(loaded, stateDir))
+			if err != nil {
+				return err
+			}
+
+			if jsonOutput {
+				encoded, err := json.MarshalIndent(records, "", "  ")
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(out, string(encoded))
+
+				return err
+			}
+
+			if len(records) == 0 {
+				_, err := fmt.Fprintln(out, "no import runs recorded")
+
+				return err
+			}
+
+			writer := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(writer, "RUN ID\tSOURCE\tSTATUS\tIMPORTED\tDUP\tFAIL\tSTARTED\tROOTS")
+			for _, record := range records {
+				fmt.Fprintf(
+					writer,
+					"%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\n",
+					record.RunID,
+					record.SourceName,
+					record.Status,
+					record.Imported,
+					record.Duplicates,
+					record.Failures,
+					record.StartedAt.Local().Format("2006-01-02 15:04"),
+					strings.Join(record.Roots, ","),
+				)
+			}
+
+			return writer.Flush()
+		},
+	}
+	command.Flags().BoolVar(&jsonOutput, "json", false, "emit the import runs as JSON")
+	command.Flags().StringVar(
+		&stateDir,
+		"state-dir",
+		"",
+		"import run state directory; defaults to system.data_dir/import-runs",
+	)
 
 	return command
 }
