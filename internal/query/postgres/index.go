@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +94,9 @@ func New(
 
 func (index *Index) Close() {
 	index.pool.Close()
+	if closer, ok := index.source.(io.Closer); ok {
+		_ = closer.Close()
+	}
 }
 
 func Migrate(ctx context.Context, config Config) error {

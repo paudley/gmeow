@@ -20,7 +20,6 @@ import (
 
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
-	"blackcat.ca/gmeow/internal/filestore"
 	querypg "blackcat.ca/gmeow/internal/query/postgres"
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
@@ -38,7 +37,55 @@ func newQueryCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newQuerySearchCommand(out, configPath))
 	command.AddCommand(newQueryMailMissingGmailCommand(out, configPath))
 	command.AddCommand(newQueryAgeCommand(out, configPath))
+	command.AddCommand(newQueryTokenCommand(out, configPath))
 	command.AddCommand(newQueryServeCommand(out, configPath, "serve"))
+
+	return command
+}
+
+func newQueryTokenCommand(out io.Writer, configPath *string) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "token",
+		Short: "Manage JMAP bearer tokens",
+	}
+	command.AddCommand(newQueryTokenCreateCommand(out, configPath))
+
+	return command
+}
+
+func newQueryTokenCreateCommand(out io.Writer, configPath *string) *cobra.Command {
+	var clientID string
+
+	command := &cobra.Command{
+		Use:   "create",
+		Short: "Create a JMAP bearer token for a client",
+		RunE: func(command *cobra.Command, _ []string) error {
+			if clientID == "" {
+				return errors.New("--client-id is required")
+			}
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+
+			index, err := openQueryIndex(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer index.Close()
+
+			token, err := index.CreateBearerToken(command.Context(), clientID)
+			if err != nil {
+				return err
+			}
+
+			_, err = fmt.Fprintln(out, token)
+
+			return err
+		},
+	}
+	command.Flags().
+		StringVar(&clientID, "client-id", "", "client identifier for the token")
 
 	return command
 }
@@ -206,10 +253,11 @@ func newQueryProjectCommand(out io.Writer, configPath *string) *cobra.Command {
 			}
 			defer index.Close()
 
-			store, err := openProjectionStore(loaded)
+			store, err := openProjectionStore(command.Context(), loaded)
 			if err != nil {
 				return err
 			}
+			defer func() { _ = store.Close() }()
 
 			digest := contracts.ObjectDigest(args[0])
 			object, found, err := store.ProjectionObject(command.Context(), digest)
@@ -436,7 +484,7 @@ func openQueryIndex(
 	ctx context.Context,
 	loaded *config.Loaded,
 ) (*querypg.Index, error) {
-	store, err := openProjectionStore(loaded)
+	store, err := openProjectionStore(ctx, loaded)
 	if err != nil {
 		return nil, err
 	}
@@ -449,13 +497,15 @@ func openQueryIndex(
 	return querypg.New(ctx, config, store)
 }
 
-func openProjectionStore(loaded *config.Loaded) (*filestore.FilesystemStore, error) {
-	root, err := resolvedFilestoreRoot(loaded)
-	if err != nil {
-		return nil, err
-	}
-
-	return filestore.NewFilesystemStore(root), nil
+// openProjectionStore returns a projection source backed by the FILESTORE gRPC
+// service. QUERY must not open the FILESTORE root directly: FILESTORE owns its
+// metadata store (a single-writer Pebble LSM), so projection reads stream over
+// the typed service boundary like every other cross-service access.
+func openProjectionStore(
+	ctx context.Context,
+	loaded *config.Loaded,
+) (*rpc.FilestoreClient, error) {
+	return rpc.NewFilestoreClient(ctx, rpcEndpoint(loaded.Resolved.RPC.Filestore))
 }
 
 func queryPostgresConfig(loaded *config.Loaded) querypg.Config {

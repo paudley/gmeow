@@ -708,6 +708,10 @@ func validateInterface(iface InterfaceConfig) error {
 		if err := validateInterfaceHostPort(iface); err != nil {
 			return err
 		}
+	case "jmap":
+		if err := validateInterfaceHostPort(iface); err != nil {
+			return err
+		}
 	case "imap":
 		if err := validateInterfaceHostPort(iface); err != nil {
 			return err
@@ -1033,7 +1037,7 @@ func resolvedScheduler(raw SchedulerConfig) ResolvedScheduler {
 		DeadLetterInspectMax: raw.DeadLetterInspectMax,
 	}
 	if resolved.RetryLimit <= 0 {
-		resolved.RetryLimit = 3
+		resolved.RetryLimit = 5
 	}
 
 	if resolved.DeadLetterInspectMax <= 0 {

@@ -35,10 +35,55 @@ type CompactReport struct {
 	DryRun                bool `json:"dry_run"`
 }
 
+// cleanupSourceLockKeys sweeps expired (or undecodable) ingest claims from the
+// metadata LSM lk/ namespace, counting each into report.RemovedFiles.
+func (store *FilesystemStore) cleanupSourceLockKeys(
+	ctx context.Context,
+	report *CleanupLocksReport,
+) error {
+	now := time.Now().UTC()
+	var expired []string
+	err := store.metaIterPrefix("lk/", func(key string, value []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var claim contracts.SourceIngestClaim
+		if err := json.Unmarshal(value, &claim); err != nil {
+			expired = append(expired, key)
+
+			return nil
+		}
+		if !sourceClaimLive(claim, now) {
+			expired = append(expired, key)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, key := range expired {
+		if err := store.metaDelete(key); err != nil {
+			return err
+		}
+		report.RemovedFiles++
+	}
+
+	return nil
+}
+
 func (store *FilesystemStore) CleanupSourceLocks(
 	ctx context.Context,
 ) (CleanupLocksReport, error) {
 	report := CleanupLocksReport{}
+
+	// Sweep expired ingest claims from the metadata LSM (the live home for
+	// claims). Legacy on-disk lock files, if any, are reaped below.
+	if err := store.cleanupSourceLockKeys(ctx, &report); err != nil {
+		return report, err
+	}
+
 	base := filepath.Join(store.root, "source-locks")
 	err := filepath.WalkDir(
 		base,

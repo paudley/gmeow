@@ -215,6 +215,7 @@ func TestValidateInterfaceConfig(t *testing.T) {
 			SessionTimeout: "30m",
 		},
 		{Name: "rest", Kind: "rest", Host: "127.0.0.1", Port: 8765},
+		{Name: "jmap", Kind: "jmap", Host: "127.0.0.1", Port: 8767},
 		{
 			Name:     "imap",
 			Kind:     "imap",
@@ -229,9 +230,10 @@ func TestValidateInterfaceConfig(t *testing.T) {
 	}
 
 	cases := map[string]InterfaceConfig{
-		"unsupported kind": {Name: "bad", Kind: "smtp", Host: "127.0.0.1", Port: 2525},
-		"non-loopback":     {Name: "rest", Kind: "rest", Host: "0.0.0.0", Port: 8765},
-		"mcp non-loopback": {Name: "mcp-http", Kind: "mcp", Host: "0.0.0.0", Port: 9876},
+		"unsupported kind":  {Name: "bad", Kind: "smtp", Host: "127.0.0.1", Port: 2525},
+		"non-loopback":      {Name: "rest", Kind: "rest", Host: "0.0.0.0", Port: 8765},
+		"jmap non-loopback": {Name: "jmap", Kind: "jmap", Host: "0.0.0.0", Port: 8767},
+		"mcp non-loopback":  {Name: "mcp-http", Kind: "mcp", Host: "0.0.0.0", Port: 9876},
 		"mcp timeout": {
 			Name:           "mcp-http",
 			Kind:           "mcp",

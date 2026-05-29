@@ -1,5 +1,20 @@
 # FILESTORE Gap Analysis — `mail_import` Branch
 
+> **Status: historical (superseded).** This analysis targets the original
+> loose-object + packed-JSONL-shard layout. FILESTORE has since moved its
+> metadata into an embedded Pebble LSM (`metadata/`) and its content into
+> content-addressed chunk packs (`chunk-packs/`), with no per-object
+> directories — see `FILESTORE.md` and `OBJECT_STORE_SOTA.md` for the current
+> design. That migration resolves several gaps below by construction: the
+> torn-JSONL-tail fragility (G1) is gone because Pebble is WAL-backed; the
+> small-file/4K-block amplification and the in-object-directory staging (G-series
+> layout notes) no longer apply. The remaining backup property — "an `rsync`/
+> snapshot taken at any instant restores to a verify-repairable state" — still
+> holds: capture the FILESTORE root as a unit (packs + Pebble WAL together),
+> ideally from a stopped `filestore-serve` or a filesystem snapshot. The gap
+> reasoning is retained for historical context and for reading pre-migration
+> roots.
+
 ## Context
 
 The `mail_import` branch (3 commits ahead of `main`, ~8.1k LOC added) introduces

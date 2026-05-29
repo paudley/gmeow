@@ -38,10 +38,6 @@ const (
 	packedRecordLengthPrefixWidth = 8
 )
 
-// ErrPackedRecordTooLarge is returned when an encoded record would exceed
-// packedRecordMaxBytes (G10).
-var ErrPackedRecordTooLarge = errors.New("packed record exceeds size limit")
-
 type packedSourceObjectIndexEntry struct {
 	SourceObject contracts.SourceObjectRef `json:"source_object"`
 	ObjectDigest contracts.ObjectDigest    `json:"object_digest"`
@@ -75,11 +71,8 @@ func (store *FilesystemStore) writePackedSourceObjectIndex(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	key := sourceObjectRefKey(entry.SourceObject)
-	return store.appendPackedRecord(
-		ctx,
-		"source-index-v2:"+key,
-		store.packedSourceIndexShardPath(key),
+	return store.metaPut(
+		"si/"+sourceObjectRefKey(entry.SourceObject),
 		packedSourceObjectIndexEntry(entry),
 	)
 }
@@ -91,25 +84,17 @@ func (store *FilesystemStore) readPackedSourceObjectIndex(
 	if err := ctx.Err(); err != nil {
 		return sourceObjectIndexEntry{}, false, err
 	}
-	key := sourceObjectRefKey(ref)
-	path := store.packedSourceIndexShardPath(key)
-	var found sourceObjectIndexEntry
-	ok := false
-	err := scanPackedRecords(path, func(record packedSourceObjectIndexEntry) error {
-		if sourceObjectRefsEqual(record.SourceObject, ref) {
-			found = sourceObjectIndexEntry(record)
-			ok = true
-		}
-		return nil
-	})
-	if errors.Is(err, os.ErrNotExist) {
-		return sourceObjectIndexEntry{}, false, nil
-	}
+
+	var entry packedSourceObjectIndexEntry
+	ok, err := store.metaGet("si/"+sourceObjectRefKey(ref), &entry)
 	if err != nil {
 		return sourceObjectIndexEntry{}, false, err
 	}
+	if !ok {
+		return sourceObjectIndexEntry{}, false, nil
+	}
 
-	return found, ok, nil
+	return sourceObjectIndexEntry(entry), true, nil
 }
 
 func (store *FilesystemStore) writePackedSourceAlias(
@@ -120,19 +105,13 @@ func (store *FilesystemStore) writePackedSourceAlias(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	key := sourceAliasKey(ref)
-	return store.appendPackedRecord(
-		ctx,
-		"source-alias-index-v2:"+key,
-		store.packedSourceAliasIndexShardPath(key),
-		packedSourceAliasEntry{
-			SourceKind: ref.SourceKind,
-			SourceName: ref.SourceName,
-			ExternalID: ref.ExternalID,
-			Digest:     digest,
-			UpdatedAt:  time.Now().UTC(),
-		},
-	)
+	return store.metaPut("sa/"+sourceAliasKey(ref), packedSourceAliasEntry{
+		SourceKind: ref.SourceKind,
+		SourceName: ref.SourceName,
+		ExternalID: ref.ExternalID,
+		Digest:     digest,
+		UpdatedAt:  time.Now().UTC(),
+	})
 }
 
 func (store *FilesystemStore) readPackedSourceAlias(
@@ -142,28 +121,27 @@ func (store *FilesystemStore) readPackedSourceAlias(
 	if err := ctx.Err(); err != nil {
 		return "", false, err
 	}
-	key := sourceAliasKey(ref)
-	path := store.packedSourceAliasIndexShardPath(key)
-	var found contracts.ObjectDigest
-	ok := false
-	err := scanPackedRecords(path, func(record packedSourceAliasEntry) error {
-		if record.SourceKind == ref.SourceKind &&
-			record.SourceName == ref.SourceName &&
-			record.ExternalID == ref.ExternalID {
-			found = record.Digest
-			ok = true
-		}
-		return nil
-	})
-	if errors.Is(err, os.ErrNotExist) {
-		return "", false, nil
-	}
+
+	var entry packedSourceAliasEntry
+	ok, err := store.metaGet("sa/"+sourceAliasKey(ref), &entry)
 	if err != nil {
 		return "", false, err
 	}
-	return found, ok, nil
+	if !ok {
+		return "", false, nil
+	}
+
+	return entry.Digest, true, nil
 }
 
+func compoundParentKey(childDigest contracts.ObjectDigest) string {
+	return "cp/" + string(childDigest)
+}
+
+// writePackedCompoundParentIndex stores a child's parent edges in the metadata
+// LSM, keyed by child digest. Unlike the former append-only packed shard, a
+// write overwrites the key, so repeated refreshes (one per analysis annotation)
+// cannot grow the store without bound or force a full-shard scan on read.
 func (store *FilesystemStore) writePackedCompoundParentIndex(
 	ctx context.Context,
 	record compoundParentIndexRecord,
@@ -171,11 +149,9 @@ func (store *FilesystemStore) writePackedCompoundParentIndex(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	key := string(record.ChildDigest)
-	return store.appendPackedRecord(
-		ctx,
-		"compound-parent-index-v2:"+key,
-		store.packedCompoundParentShardPath(key),
+
+	return store.metaPut(
+		compoundParentKey(record.ChildDigest),
 		packedCompoundParentIndexEntry{
 			ChildDigest: record.ChildDigest,
 			Parents:     append([]compoundParentEdge{}, record.Parents...),
@@ -191,29 +167,21 @@ func (store *FilesystemStore) readPackedCompoundParentIndex(
 	if err := ctx.Err(); err != nil {
 		return compoundParentIndexRecord{}, false, err
 	}
-	key := string(childDigest)
-	path := store.packedCompoundParentShardPath(key)
-	var found compoundParentIndexRecord
-	ok := false
-	err := scanPackedRecords(path, func(record packedCompoundParentIndexEntry) error {
-		if record.ChildDigest == childDigest {
-			found = compoundParentIndexRecord{
-				SchemaVersion: int(contracts.SchemaVersionPhase00),
-				ChildDigest:   record.ChildDigest,
-				Parents:       append([]compoundParentEdge{}, record.Parents...),
-			}
-			ok = true
-		}
-		return nil
-	})
-	if errors.Is(err, os.ErrNotExist) {
-		return compoundParentIndexRecord{}, false, nil
-	}
+
+	var entry packedCompoundParentIndexEntry
+	ok, err := store.metaGet(compoundParentKey(childDigest), &entry)
 	if err != nil {
 		return compoundParentIndexRecord{}, false, err
 	}
+	if !ok {
+		return compoundParentIndexRecord{}, false, nil
+	}
 
-	return found, ok, nil
+	return compoundParentIndexRecord{
+		SchemaVersion: int(contracts.SchemaVersionPhase00),
+		ChildDigest:   entry.ChildDigest,
+		Parents:       append([]compoundParentEdge{}, entry.Parents...),
+	}, true, nil
 }
 
 func (store *FilesystemStore) writePackedRecovery(
@@ -224,17 +192,11 @@ func (store *FilesystemStore) writePackedRecovery(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	key := string(digest)
-	return store.appendPackedRecord(
-		ctx,
-		"recovery-v2:"+key,
-		store.packedRecoveryShardPath(key),
-		packedRecoveryEntry{
-			Digest:    digest,
-			Recovery:  recovery,
-			UpdatedAt: time.Now().UTC(),
-		},
-	)
+	return store.metaPut("rec/"+string(digest), packedRecoveryEntry{
+		Digest:    digest,
+		Recovery:  recovery,
+		UpdatedAt: time.Now().UTC(),
+	})
 }
 
 func (store *FilesystemStore) readPackedRecovery(
@@ -244,83 +206,17 @@ func (store *FilesystemStore) readPackedRecovery(
 	if err := ctx.Err(); err != nil {
 		return recoverySidecar{}, false, err
 	}
-	key := string(digest)
-	path := store.packedRecoveryShardPath(key)
-	var found recoverySidecar
-	ok := false
-	err := scanPackedRecords(path, func(record packedRecoveryEntry) error {
-		if record.Digest == digest {
-			found = record.Recovery
-			ok = true
-		}
-		return nil
-	})
-	if errors.Is(err, os.ErrNotExist) {
-		return recoverySidecar{}, false, nil
-	}
+
+	var entry packedRecoveryEntry
+	ok, err := store.metaGet("rec/"+string(digest), &entry)
 	if err != nil {
 		return recoverySidecar{}, false, err
 	}
-
-	return found, ok, nil
-}
-
-// appendPackedRecord serializes a record, enforces the per-record size cap
-// (G10), and appends it to the shard with the length-prefixed framing (G1).
-// Inter-process exclusion is provided by an advisory file lock on the shard
-// itself (G2/G3) — the kernel releases the lock on process exit, so there is
-// no on-disk lock state that could survive a backup or a crash.
-func (store *FilesystemStore) appendPackedRecord(
-	ctx context.Context,
-	lockKey string,
-	path string,
-	record any,
-) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	unlock := store.lockKey(lockKey)
-	defer unlock()
-
-	encoded, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	if len(encoded) > packedRecordMaxBytes {
-		return fmt.Errorf(
-			"%w: %d bytes exceeds %d",
-			ErrPackedRecordTooLarge, len(encoded), packedRecordMaxBytes,
-		)
-	}
-	framed := encodePackedShardLine(encoded)
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
-	if err != nil {
-		return err
-	}
-	if err := flockExclusive(ctx, file); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := file.Write(framed); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	// Closing the fd releases the advisory lock; the kernel guarantees this
-	// even if the process is killed before reaching this line, which is the
-	// property that makes flock backup-safe.
-	if err := file.Close(); err != nil {
-		return err
+	if !ok {
+		return recoverySidecar{}, false, nil
 	}
 
-	return fsyncDir(filepath.Dir(path))
+	return entry.Recovery, true, nil
 }
 
 // flockExclusive acquires an advisory exclusive lock on the file, polling
@@ -656,16 +552,6 @@ func (store *FilesystemStore) packedSourceIndexShardPath(key string) string {
 	return filepath.Join(
 		store.root,
 		packedSourceIndexDir,
-		key[:2],
-		key[2:4],
-		packedShardFilename,
-	)
-}
-
-func (store *FilesystemStore) packedSourceAliasIndexShardPath(key string) string {
-	return filepath.Join(
-		store.root,
-		packedSourceAliasIndexDir,
 		key[:2],
 		key[2:4],
 		packedShardFilename,

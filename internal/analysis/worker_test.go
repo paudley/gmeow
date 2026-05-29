@@ -262,6 +262,7 @@ type memoryReceipt struct {
 	job     contracts.AnalyzerJob
 	acked   bool
 	retried bool
+	parked  bool
 }
 
 func (receipt *memoryReceipt) Job() contracts.AnalyzerJob {
@@ -275,6 +276,11 @@ func (receipt *memoryReceipt) Ack(context.Context) error {
 
 func (receipt *memoryReceipt) Retry(context.Context, error) error {
 	receipt.retried = true
+	return nil
+}
+
+func (receipt *memoryReceipt) Park(context.Context) error {
+	receipt.parked = true
 	return nil
 }
 
@@ -366,6 +372,10 @@ func (receipt *queuedReceipt) Ack(context.Context) error {
 
 func (receipt *queuedReceipt) Retry(context.Context, error) error {
 	return errors.New("unexpected retry")
+}
+
+func (receipt *queuedReceipt) Park(context.Context) error {
+	return errors.New("unexpected park")
 }
 
 func putTextObject(

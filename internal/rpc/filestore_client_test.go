@@ -127,6 +127,71 @@ func TestFilestoreClientUsesServiceForObjectAndAnnotationAccess(t *testing.T) {
 	}
 }
 
+func TestFilestoreClientStorageVerifyAndPathOverGRPC(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader: strings.NewReader("grpc storage verify path"),
+		Facets: []contracts.Facet{{Kind: "file", Version: "1"}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "gmail", SourceName: "primary", ExternalID: "m1", ExternalVersion: "v1",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, cleanup := serveTestFilestore(t, store)
+	defer cleanup()
+	client, err := NewFilestoreClient(ctx, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	// StorageBreakdown round-trips: positive logical totals and a manifest row.
+	report, err := client.StorageBreakdown(ctx, filestore.StorageBreakdownRequest{
+		Digest:         digest,
+		RecursiveParts: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.RootDigest != digest || report.TotalLogicalBytes <= 0 ||
+		len(report.Files) == 0 {
+		t.Fatalf("unexpected storage breakdown over gRPC: %#v", report)
+	}
+	hasManifest := false
+	for _, file := range report.Files {
+		if file.Role == "manifest" {
+			hasManifest = true
+		}
+	}
+	if !hasManifest {
+		t.Fatalf("expected a manifest row over gRPC: %#v", report.Files)
+	}
+
+	// Verify round-trips clean.
+	verifyReport, err := client.Verify(ctx, filestore.VerifyRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verifyReport.Status != filestore.VerifyStatusOK {
+		t.Fatalf("expected clean verify over gRPC: %#v", verifyReport)
+	}
+
+	// ResolvePath round-trips: the content chunk packs resolve as a directory.
+	pathReport, err := client.ResolvePath(
+		ctx,
+		filestore.PathResolveRequest{Path: "chunk-packs"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pathReport.Kind != "directory" {
+		t.Fatalf("unexpected path resolve over gRPC: %#v", pathReport)
+	}
+}
+
 func TestFilestoreServerNotifiesSchedulerOnObjectAndAnnotationChanges(t *testing.T) {
 	ctx := context.Background()
 	store := filestore.NewFilesystemStore(t.TempDir())

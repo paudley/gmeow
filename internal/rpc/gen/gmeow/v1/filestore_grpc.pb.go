@@ -34,6 +34,16 @@ const (
 	FilestoreService_WriteSourceCursor_FullMethodName      = "/gmeow.v1.FilestoreService/WriteSourceCursor"
 	FilestoreService_ReadSourceCursor_FullMethodName       = "/gmeow.v1.FilestoreService/ReadSourceCursor"
 	FilestoreService_Verify_FullMethodName                 = "/gmeow.v1.FilestoreService/Verify"
+	FilestoreService_StorageBreakdown_FullMethodName       = "/gmeow.v1.FilestoreService/StorageBreakdown"
+	FilestoreService_ResolvePath_FullMethodName            = "/gmeow.v1.FilestoreService/ResolvePath"
+	FilestoreService_DeleteObject_FullMethodName           = "/gmeow.v1.FilestoreService/DeleteObject"
+	FilestoreService_Gc_FullMethodName                     = "/gmeow.v1.FilestoreService/Gc"
+	FilestoreService_Repack_FullMethodName                 = "/gmeow.v1.FilestoreService/Repack"
+	FilestoreService_TrainDictionary_FullMethodName        = "/gmeow.v1.FilestoreService/TrainDictionary"
+	FilestoreService_GetProjectionObject_FullMethodName    = "/gmeow.v1.FilestoreService/GetProjectionObject"
+	FilestoreService_WalkProjection_FullMethodName         = "/gmeow.v1.FilestoreService/WalkProjection"
+	FilestoreService_WalkChangedProjection_FullMethodName  = "/gmeow.v1.FilestoreService/WalkChangedProjection"
+	FilestoreService_WalkSourceCursors_FullMethodName      = "/gmeow.v1.FilestoreService/WalkSourceCursors"
 )
 
 // FilestoreServiceClient is the client API for FilestoreService service.
@@ -55,6 +65,16 @@ type FilestoreServiceClient interface {
 	WriteSourceCursor(ctx context.Context, in *WriteSourceCursorRequest, opts ...grpc.CallOption) (*Empty, error)
 	ReadSourceCursor(ctx context.Context, in *ReadSourceCursorRequest, opts ...grpc.CallOption) (*ReadSourceCursorResponse, error)
 	Verify(ctx context.Context, in *VerifyRequest, opts ...grpc.CallOption) (*VerifyResponse, error)
+	StorageBreakdown(ctx context.Context, in *StorageBreakdownRequest, opts ...grpc.CallOption) (*StorageBreakdownResponse, error)
+	ResolvePath(ctx context.Context, in *ResolvePathRequest, opts ...grpc.CallOption) (*ResolvePathResponse, error)
+	DeleteObject(ctx context.Context, in *DeleteObjectRequest, opts ...grpc.CallOption) (*Empty, error)
+	Gc(ctx context.Context, in *GcRequest, opts ...grpc.CallOption) (*GcResponse, error)
+	Repack(ctx context.Context, in *RepackRequest, opts ...grpc.CallOption) (*RepackResponse, error)
+	TrainDictionary(ctx context.Context, in *TrainDictionaryRequest, opts ...grpc.CallOption) (*TrainDictionaryResponse, error)
+	GetProjectionObject(ctx context.Context, in *ProjectionObjectRequest, opts ...grpc.CallOption) (*ProjectionObjectResponse, error)
+	WalkProjection(ctx context.Context, in *WalkProjectionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ProjectionObject], error)
+	WalkChangedProjection(ctx context.Context, in *WalkChangedProjectionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ProjectionObject], error)
+	WalkSourceCursors(ctx context.Context, in *WalkSourceCursorsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SourceCursor], error)
 }
 
 type filestoreServiceClient struct {
@@ -227,6 +247,133 @@ func (c *filestoreServiceClient) Verify(ctx context.Context, in *VerifyRequest, 
 	return out, nil
 }
 
+func (c *filestoreServiceClient) StorageBreakdown(ctx context.Context, in *StorageBreakdownRequest, opts ...grpc.CallOption) (*StorageBreakdownResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StorageBreakdownResponse)
+	err := c.cc.Invoke(ctx, FilestoreService_StorageBreakdown_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filestoreServiceClient) ResolvePath(ctx context.Context, in *ResolvePathRequest, opts ...grpc.CallOption) (*ResolvePathResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolvePathResponse)
+	err := c.cc.Invoke(ctx, FilestoreService_ResolvePath_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filestoreServiceClient) DeleteObject(ctx context.Context, in *DeleteObjectRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, FilestoreService_DeleteObject_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filestoreServiceClient) Gc(ctx context.Context, in *GcRequest, opts ...grpc.CallOption) (*GcResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GcResponse)
+	err := c.cc.Invoke(ctx, FilestoreService_Gc_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filestoreServiceClient) Repack(ctx context.Context, in *RepackRequest, opts ...grpc.CallOption) (*RepackResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RepackResponse)
+	err := c.cc.Invoke(ctx, FilestoreService_Repack_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filestoreServiceClient) TrainDictionary(ctx context.Context, in *TrainDictionaryRequest, opts ...grpc.CallOption) (*TrainDictionaryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TrainDictionaryResponse)
+	err := c.cc.Invoke(ctx, FilestoreService_TrainDictionary_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filestoreServiceClient) GetProjectionObject(ctx context.Context, in *ProjectionObjectRequest, opts ...grpc.CallOption) (*ProjectionObjectResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProjectionObjectResponse)
+	err := c.cc.Invoke(ctx, FilestoreService_GetProjectionObject_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filestoreServiceClient) WalkProjection(ctx context.Context, in *WalkProjectionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ProjectionObject], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &FilestoreService_ServiceDesc.Streams[2], FilestoreService_WalkProjection_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WalkProjectionRequest, ProjectionObject]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type FilestoreService_WalkProjectionClient = grpc.ServerStreamingClient[ProjectionObject]
+
+func (c *filestoreServiceClient) WalkChangedProjection(ctx context.Context, in *WalkChangedProjectionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ProjectionObject], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &FilestoreService_ServiceDesc.Streams[3], FilestoreService_WalkChangedProjection_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WalkChangedProjectionRequest, ProjectionObject]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type FilestoreService_WalkChangedProjectionClient = grpc.ServerStreamingClient[ProjectionObject]
+
+func (c *filestoreServiceClient) WalkSourceCursors(ctx context.Context, in *WalkSourceCursorsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SourceCursor], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &FilestoreService_ServiceDesc.Streams[4], FilestoreService_WalkSourceCursors_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WalkSourceCursorsRequest, SourceCursor]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type FilestoreService_WalkSourceCursorsClient = grpc.ServerStreamingClient[SourceCursor]
+
 // FilestoreServiceServer is the server API for FilestoreService service.
 // All implementations must embed UnimplementedFilestoreServiceServer
 // for forward compatibility.
@@ -246,6 +393,16 @@ type FilestoreServiceServer interface {
 	WriteSourceCursor(context.Context, *WriteSourceCursorRequest) (*Empty, error)
 	ReadSourceCursor(context.Context, *ReadSourceCursorRequest) (*ReadSourceCursorResponse, error)
 	Verify(context.Context, *VerifyRequest) (*VerifyResponse, error)
+	StorageBreakdown(context.Context, *StorageBreakdownRequest) (*StorageBreakdownResponse, error)
+	ResolvePath(context.Context, *ResolvePathRequest) (*ResolvePathResponse, error)
+	DeleteObject(context.Context, *DeleteObjectRequest) (*Empty, error)
+	Gc(context.Context, *GcRequest) (*GcResponse, error)
+	Repack(context.Context, *RepackRequest) (*RepackResponse, error)
+	TrainDictionary(context.Context, *TrainDictionaryRequest) (*TrainDictionaryResponse, error)
+	GetProjectionObject(context.Context, *ProjectionObjectRequest) (*ProjectionObjectResponse, error)
+	WalkProjection(*WalkProjectionRequest, grpc.ServerStreamingServer[ProjectionObject]) error
+	WalkChangedProjection(*WalkChangedProjectionRequest, grpc.ServerStreamingServer[ProjectionObject]) error
+	WalkSourceCursors(*WalkSourceCursorsRequest, grpc.ServerStreamingServer[SourceCursor]) error
 	mustEmbedUnimplementedFilestoreServiceServer()
 }
 
@@ -300,6 +457,36 @@ func (UnimplementedFilestoreServiceServer) ReadSourceCursor(context.Context, *Re
 }
 func (UnimplementedFilestoreServiceServer) Verify(context.Context, *VerifyRequest) (*VerifyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Verify not implemented")
+}
+func (UnimplementedFilestoreServiceServer) StorageBreakdown(context.Context, *StorageBreakdownRequest) (*StorageBreakdownResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StorageBreakdown not implemented")
+}
+func (UnimplementedFilestoreServiceServer) ResolvePath(context.Context, *ResolvePathRequest) (*ResolvePathResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolvePath not implemented")
+}
+func (UnimplementedFilestoreServiceServer) DeleteObject(context.Context, *DeleteObjectRequest) (*Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteObject not implemented")
+}
+func (UnimplementedFilestoreServiceServer) Gc(context.Context, *GcRequest) (*GcResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Gc not implemented")
+}
+func (UnimplementedFilestoreServiceServer) Repack(context.Context, *RepackRequest) (*RepackResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Repack not implemented")
+}
+func (UnimplementedFilestoreServiceServer) TrainDictionary(context.Context, *TrainDictionaryRequest) (*TrainDictionaryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TrainDictionary not implemented")
+}
+func (UnimplementedFilestoreServiceServer) GetProjectionObject(context.Context, *ProjectionObjectRequest) (*ProjectionObjectResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetProjectionObject not implemented")
+}
+func (UnimplementedFilestoreServiceServer) WalkProjection(*WalkProjectionRequest, grpc.ServerStreamingServer[ProjectionObject]) error {
+	return status.Error(codes.Unimplemented, "method WalkProjection not implemented")
+}
+func (UnimplementedFilestoreServiceServer) WalkChangedProjection(*WalkChangedProjectionRequest, grpc.ServerStreamingServer[ProjectionObject]) error {
+	return status.Error(codes.Unimplemented, "method WalkChangedProjection not implemented")
+}
+func (UnimplementedFilestoreServiceServer) WalkSourceCursors(*WalkSourceCursorsRequest, grpc.ServerStreamingServer[SourceCursor]) error {
+	return status.Error(codes.Unimplemented, "method WalkSourceCursors not implemented")
 }
 func (UnimplementedFilestoreServiceServer) mustEmbedUnimplementedFilestoreServiceServer() {}
 func (UnimplementedFilestoreServiceServer) testEmbeddedByValue()                          {}
@@ -574,6 +761,165 @@ func _FilestoreService_Verify_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FilestoreService_StorageBreakdown_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StorageBreakdownRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilestoreServiceServer).StorageBreakdown(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilestoreService_StorageBreakdown_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilestoreServiceServer).StorageBreakdown(ctx, req.(*StorageBreakdownRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilestoreService_ResolvePath_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolvePathRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilestoreServiceServer).ResolvePath(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilestoreService_ResolvePath_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilestoreServiceServer).ResolvePath(ctx, req.(*ResolvePathRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilestoreService_DeleteObject_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteObjectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilestoreServiceServer).DeleteObject(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilestoreService_DeleteObject_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilestoreServiceServer).DeleteObject(ctx, req.(*DeleteObjectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilestoreService_Gc_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GcRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilestoreServiceServer).Gc(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilestoreService_Gc_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilestoreServiceServer).Gc(ctx, req.(*GcRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilestoreService_Repack_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RepackRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilestoreServiceServer).Repack(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilestoreService_Repack_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilestoreServiceServer).Repack(ctx, req.(*RepackRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilestoreService_TrainDictionary_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TrainDictionaryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilestoreServiceServer).TrainDictionary(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilestoreService_TrainDictionary_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilestoreServiceServer).TrainDictionary(ctx, req.(*TrainDictionaryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilestoreService_GetProjectionObject_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProjectionObjectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilestoreServiceServer).GetProjectionObject(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilestoreService_GetProjectionObject_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilestoreServiceServer).GetProjectionObject(ctx, req.(*ProjectionObjectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilestoreService_WalkProjection_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WalkProjectionRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(FilestoreServiceServer).WalkProjection(m, &grpc.GenericServerStream[WalkProjectionRequest, ProjectionObject]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type FilestoreService_WalkProjectionServer = grpc.ServerStreamingServer[ProjectionObject]
+
+func _FilestoreService_WalkChangedProjection_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WalkChangedProjectionRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(FilestoreServiceServer).WalkChangedProjection(m, &grpc.GenericServerStream[WalkChangedProjectionRequest, ProjectionObject]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type FilestoreService_WalkChangedProjectionServer = grpc.ServerStreamingServer[ProjectionObject]
+
+func _FilestoreService_WalkSourceCursors_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WalkSourceCursorsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(FilestoreServiceServer).WalkSourceCursors(m, &grpc.GenericServerStream[WalkSourceCursorsRequest, SourceCursor]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type FilestoreService_WalkSourceCursorsServer = grpc.ServerStreamingServer[SourceCursor]
+
 // FilestoreService_ServiceDesc is the grpc.ServiceDesc for FilestoreService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -633,6 +979,34 @@ var FilestoreService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Verify",
 			Handler:    _FilestoreService_Verify_Handler,
 		},
+		{
+			MethodName: "StorageBreakdown",
+			Handler:    _FilestoreService_StorageBreakdown_Handler,
+		},
+		{
+			MethodName: "ResolvePath",
+			Handler:    _FilestoreService_ResolvePath_Handler,
+		},
+		{
+			MethodName: "DeleteObject",
+			Handler:    _FilestoreService_DeleteObject_Handler,
+		},
+		{
+			MethodName: "Gc",
+			Handler:    _FilestoreService_Gc_Handler,
+		},
+		{
+			MethodName: "Repack",
+			Handler:    _FilestoreService_Repack_Handler,
+		},
+		{
+			MethodName: "TrainDictionary",
+			Handler:    _FilestoreService_TrainDictionary_Handler,
+		},
+		{
+			MethodName: "GetProjectionObject",
+			Handler:    _FilestoreService_GetProjectionObject_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -643,6 +1017,21 @@ var FilestoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "Open",
 			Handler:       _FilestoreService_Open_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WalkProjection",
+			Handler:       _FilestoreService_WalkProjection_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WalkChangedProjection",
+			Handler:       _FilestoreService_WalkChangedProjection_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WalkSourceCursors",
+			Handler:       _FilestoreService_WalkSourceCursors_Handler,
 			ServerStreams: true,
 		},
 	},

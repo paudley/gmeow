@@ -5,6 +5,7 @@ package filestore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,50 +22,39 @@ func (store *FilesystemStore) Verify(
 	request VerifyRequest,
 ) (VerifyReport, error) {
 	report := VerifyReport{Status: VerifyStatusOK}
-	base := filepath.Join(store.root, "objects", "blake3")
 
-	err := filepath.WalkDir(
-		base,
-		func(path string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				if errors.Is(walkErr, os.ErrNotExist) && path == base {
-					return nil
-				}
+	// Objects are enumerated by scanning the manifest key space in the metadata
+	// LSM; they no longer have on-disk directories.
+	err := store.metaIterPrefix("m/", func(key string, value []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
-				report.addFinding("", path, "walk_error", walkErr.Error())
+		digest := contracts.ObjectDigest(strings.TrimPrefix(key, "m/"))
+		report.Checked++
+		if validateObjectDigest(digest) != nil {
+			report.addFinding(
+				digest,
+				"",
+				"object_digest_invalid",
+				"manifest key is not a valid object digest",
+			)
 
-				return nil
-			}
+			return nil
+		}
 
-			err := ctx.Err()
-			if err != nil {
-				return err
-			}
+		var manifest contracts.Manifest
+		if err := json.Unmarshal(value, &manifest); err != nil {
+			report.addFinding(digest, "", "manifest_read_failed", err.Error())
 
-			if !entry.IsDir() || !looksLikeDigest(entry.Name()) {
-				return nil
-			}
+			return nil
+		}
 
-			digest := contracts.ObjectDigest(entry.Name())
+		store.verifyObject(ctx, &report, request, digest, manifest)
 
-			report.Checked++
-			if expectedPath := store.objectDir(digest); path != expectedPath {
-				report.addFinding(
-					digest,
-					path,
-					"object_path_mismatch",
-					"expected "+expectedPath,
-				)
-
-				return filepath.SkipDir
-			}
-
-			store.verifyObject(ctx, &report, request, digest, path)
-
-			return filepath.SkipDir
-		},
-	)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil
+	})
+	if err != nil {
 		return report, err
 	}
 
@@ -92,55 +82,41 @@ func (store *FilesystemStore) verifyObject(
 	report *VerifyReport,
 	request VerifyRequest,
 	digest contracts.ObjectDigest,
-	path string,
+	manifest contracts.Manifest,
 ) {
-	blobPath := filepath.Join(path, blobFilename)
-	recoveryPath := filepath.Join(path, recoveryFilename)
-	manifestPath := filepath.Join(path, manifestFilename)
+	// objectRef is a stable identifier for findings; objects no longer have a
+	// physical directory, so it is used only as a human-readable locator.
+	objectRef := store.objectDir(digest)
 
-	compressedBlob, compressedErr := os.ReadFile(blobPath)
-	if compressedErr != nil {
-		report.addFinding(digest, blobPath, "blob_read_failed", compressedErr.Error())
-	}
-
-	blob, err := decompressZstd(blobPath, compressedBlob)
-	if err != nil {
-		report.addFinding(digest, blobPath, "blob_read_failed", err.Error())
-	}
-
-	if _, err := os.Stat(recoveryPath); err != nil {
-		if recovery, found, readErr := store.readPackedRecovery(
-			ctx,
-			digest,
-		); readErr != nil {
-			report.addFinding(digest, recoveryPath, "recovery_read_failed", readErr.Error())
-		} else if found {
-			store.verifyRecoveryRecord(
-				report,
-				digest,
-				recoveryPath,
-				recovery,
-				blob,
-				compressedBlob,
-			)
-		} else {
-			report.addFinding(digest, recoveryPath, "recovery_missing", err.Error())
-		}
+	// Content is stored as chunks reconstructed from the recipe; there is no
+	// single compressed blob, so compressed-blob checks are skipped while the
+	// reassembled content is still verified.
+	var blob []byte
+	if content, ok, contentErr := store.readBlobContent(digest); contentErr != nil {
+		report.addFinding(digest, objectRef, "blob_read_failed", contentErr.Error())
+	} else if ok {
+		blob = content
 	} else {
-		store.verifyRecovery(report, digest, recoveryPath, blob, compressedBlob)
+		report.addFinding(
+			digest,
+			objectRef,
+			"blob_read_failed",
+			"object content recipe missing",
+		)
 	}
 
-	var manifest contracts.Manifest
-	if err := store.readCompressedJSON(manifestPath, &manifest); err != nil {
-		report.addFinding(digest, manifestPath, "manifest_read_failed", err.Error())
-
-		return
+	if recovery, found, readErr := store.readPackedRecovery(ctx, digest); readErr != nil {
+		report.addFinding(digest, objectRef, "recovery_read_failed", readErr.Error())
+	} else if found {
+		store.verifyRecoveryRecord(report, digest, objectRef, recovery, blob, nil)
+	} else {
+		report.addFinding(digest, objectRef, "recovery_missing", "no recovery sidecar")
 	}
 
 	if manifest.ObjectDigest != digest {
 		report.addFinding(
 			digest,
-			manifestPath,
+			objectRef,
 			"manifest_digest_mismatch",
 			fmt.Sprintf("manifest digest %s", manifest.ObjectDigest),
 		)
@@ -155,7 +131,7 @@ func (store *FilesystemStore) verifyObject(
 			if expected != digest {
 				report.addFinding(
 					digest,
-					blobPath,
+					objectRef,
 					"compound_digest_mismatch",
 					fmt.Sprintf("expected %s", expected),
 				)
@@ -164,7 +140,7 @@ func (store *FilesystemStore) verifyObject(
 			if actual := blake3Hex(blob); actual != string(digest) {
 				report.addFinding(
 					digest,
-					blobPath,
+					objectRef,
 					"blob_digest_mismatch",
 					fmt.Sprintf("expected %s got %s", digest, actual),
 				)
@@ -175,7 +151,7 @@ func (store *FilesystemStore) verifyObject(
 	if len(manifest.Facets) == 0 {
 		report.addFinding(
 			digest,
-			manifestPath,
+			objectRef,
 			"manifest_missing_facets",
 			"manifest must have at least one facet",
 		)
@@ -184,24 +160,33 @@ func (store *FilesystemStore) verifyObject(
 	for _, part := range manifest.Compound.Parts {
 		err := validateCompoundPart(part)
 		if err != nil {
-			report.addFinding(digest, manifestPath, "compound_invalid_part", err.Error())
+			report.addFinding(digest, objectRef, "compound_invalid_part", err.Error())
 
 			continue
 		}
 
-		if _, err := os.Stat(
-			filepath.Join(store.objectDir(part.Digest), blobFilename),
-		); err != nil {
+		hasContent, recErr := store.hasRecipe(part.Digest)
+		if recErr != nil {
 			report.addFinding(
 				digest,
-				manifestPath,
+				objectRef,
 				"compound_dangling_part",
-				fmt.Sprintf("part %s: %v", part.Digest, err),
+				fmt.Sprintf("part %s: %v", part.Digest, recErr),
+			)
+
+			continue
+		}
+		if !hasContent {
+			report.addFinding(
+				digest,
+				objectRef,
+				"compound_dangling_part",
+				fmt.Sprintf("part %s: missing content", part.Digest),
 			)
 		}
 	}
 
-	store.verifyAnnotations(report, digest, path)
+	store.verifyAnnotations(report, digest)
 	store.verifySourceIndexReachability(ctx, report, request, digest, manifest)
 }
 
@@ -268,60 +253,18 @@ func (store *FilesystemStore) verifySourceIndexReachability(
 func (store *FilesystemStore) verifyAnnotations(
 	report *VerifyReport,
 	digest contracts.ObjectDigest,
-	path string,
 ) {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		report.addFinding(digest, path, "annotation_list_failed", err.Error())
-
-		return
+	// Annotations are packed by digest in the metadata LSM; resolving them also
+	// reads any externalized payloads back from the content-addressed chunk
+	// store.
+	if _, err := store.readPackedAnnotations(digest); err != nil {
+		report.addFinding(
+			digest,
+			store.objectDir(digest),
+			"annotation_read_failed",
+			err.Error(),
+		)
 	}
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
-		entryPath := filepath.Join(path, name)
-		if strings.HasPrefix(name, ".") {
-			report.addFinding(
-				digest,
-				entryPath,
-				"staged_write_leftover",
-				"interrupted atomic write left a staged file",
-			)
-
-			continue
-		}
-
-		if !isProjectionAnnotationFilename(name) {
-			continue
-		}
-
-		var annotation contracts.Annotation
-		if err := store.readCompressedJSON(entryPath, &annotation); err != nil {
-			report.addFinding(digest, entryPath, "annotation_read_failed", err.Error())
-		}
-	}
-}
-
-func (store *FilesystemStore) verifyRecovery(
-	report *VerifyReport,
-	digest contracts.ObjectDigest,
-	path string,
-	content []byte,
-	compressed []byte,
-) {
-	var recovery recoverySidecar
-	err := readJSON(path, &recovery)
-	if err != nil {
-		report.addFinding(digest, path, "recovery_read_failed", err.Error())
-
-		return
-	}
-
-	store.verifyRecoveryRecord(report, digest, path, recovery, content, compressed)
 }
 
 func (store *FilesystemStore) verifyRecoveryRecord(
@@ -413,13 +356,6 @@ func (store *FilesystemStore) verifyPackedShards(
 		request,
 		packedSourceAliasIndexDir,
 		"source_alias_index",
-	)
-	store.verifyPackedShardDir(
-		ctx,
-		report,
-		request,
-		filepath.Join(packedCompoundParentIndexDir, "blake3"),
-		"compound_parent_index",
 	)
 	store.verifyPackedShardDir(
 		ctx,

@@ -77,6 +77,10 @@ type Store interface {
 		request StorageBreakdownRequest,
 	) (StorageBreakdownReport, error)
 	ResolvePath(ctx context.Context, request PathResolveRequest) (PathResolveReport, error)
+	DeleteObject(ctx context.Context, digest contracts.ObjectDigest) error
+	Gc(ctx context.Context) (GCReport, error)
+	Repack(ctx context.Context) (RepackReport, error)
+	TrainDictionary(ctx context.Context, sampleLimit int) (TrainDictionaryReport, error)
 }
 
 type ProjectionFinding struct {

@@ -5,6 +5,7 @@ package filestore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -179,6 +180,12 @@ func (store *FilesystemStore) addObjectDirectoryFiles(
 ) error {
 	objectDir := store.objectDir(digest)
 	entries, err := os.ReadDir(objectDir)
+	if errors.Is(err, os.ErrNotExist) {
+		// Objects no longer have a per-object directory; their manifest lives in
+		// the metadata LSM and content in shared chunk packs. A missing
+		// directory is the normal case.
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -228,36 +235,8 @@ func (store *FilesystemStore) addObjectMetadataFiles(
 	compoundOrder int,
 	recursivePart bool,
 ) error {
-	if _, found, err := store.readPackedRecovery(ctx, digest); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
-	} else if found {
-		if err := store.addStorageFile(report, seenFiles, storageFileContext{
-			ObjectDigest:  digest,
-			Role:          "packed_recovery",
-			Path:          store.packedRecoveryShardPath(string(digest)),
-			ReferencedBy:  referencedBy,
-			CompoundRole:  compoundRole,
-			CompoundOrder: compoundOrder,
-			RecursivePart: recursivePart,
-		}); err != nil {
-			return err
-		}
-	}
-
-	if _, found, err := store.readPackedCompoundParentIndex(ctx, digest); err != nil {
-		return err
-	} else if found {
-		if err := store.addStorageFile(report, seenFiles, storageFileContext{
-			ObjectDigest:  digest,
-			Role:          "packed_compound_parent_index",
-			Path:          store.packedCompoundParentShardPath(string(digest)),
-			ReferencedBy:  referencedBy,
-			CompoundRole:  compoundRole,
-			CompoundOrder: compoundOrder,
-			RecursivePart: recursivePart,
-		}); err != nil {
-			return err
-		}
 	}
 
 	if legacyPath := store.compoundParentIndexPath(digest); fileExists(legacyPath) {
@@ -284,36 +263,6 @@ func (store *FilesystemStore) addObjectMetadataFiles(
 		if validateSourceObjectRef(ref) != nil {
 			continue
 		}
-		if _, found, err := store.readPackedSourceObjectIndex(ctx, ref); err != nil {
-			return err
-		} else if found {
-			if err := store.addStorageFile(report, seenFiles, storageFileContext{
-				ObjectDigest:  digest,
-				Role:          "packed_source_index",
-				Path:          store.packedSourceIndexShardPath(sourceObjectRefKey(ref)),
-				ReferencedBy:  referencedBy,
-				CompoundRole:  compoundRole,
-				CompoundOrder: compoundOrder,
-				RecursivePart: recursivePart,
-			}); err != nil {
-				return err
-			}
-		}
-		if _, found, err := store.readPackedSourceAlias(ctx, ref); err != nil {
-			return err
-		} else if found {
-			if err := store.addStorageFile(report, seenFiles, storageFileContext{
-				ObjectDigest:  digest,
-				Role:          "packed_source_alias_index",
-				Path:          store.packedSourceAliasIndexShardPath(sourceAliasKey(ref)),
-				ReferencedBy:  referencedBy,
-				CompoundRole:  compoundRole,
-				CompoundOrder: compoundOrder,
-				RecursivePart: recursivePart,
-			}); err != nil {
-				return err
-			}
-		}
 		if legacyPath := store.sourceObjectIndexPath(ref); fileExists(legacyPath) {
 			if err := store.addStorageFile(report, seenFiles, storageFileContext{
 				ObjectDigest:  digest,
@@ -329,7 +278,87 @@ func (store *FilesystemStore) addObjectMetadataFiles(
 		}
 	}
 
+	return store.addObjectLogicalEntries(
+		report,
+		digest,
+		manifest,
+		referencedBy,
+		compoundRole,
+		compoundOrder,
+		recursivePart,
+	)
+}
+
+// addObjectLogicalEntries reports the object's logical footprint, which now
+// lives in shared stores rather than per-object files: the manifest in the
+// metadata LSM and the content in the chunk packs. Bytes are logical (the
+// physical cost is shared/deduped/block-compressed across all objects), so the
+// entries are marked Estimated.
+func (store *FilesystemStore) addObjectLogicalEntries(
+	report *StorageBreakdownReport,
+	digest contracts.ObjectDigest,
+	manifest contracts.Manifest,
+	referencedBy contracts.ObjectDigest,
+	compoundRole string,
+	compoundOrder int,
+	recursivePart bool,
+) error {
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+
+	store.addLogicalEntry(report, storageFileContext{
+		ObjectDigest:  digest,
+		Role:          "manifest",
+		Path:          "metadata/" + manifestKey(digest),
+		ReferencedBy:  referencedBy,
+		CompoundRole:  compoundRole,
+		CompoundOrder: compoundOrder,
+		RecursivePart: recursivePart,
+	}, int64(len(encoded)))
+
+	recipe, ok, err := store.readRecipe(digest)
+	if err != nil {
+		return err
+	}
+	if ok {
+		store.addLogicalEntry(report, storageFileContext{
+			ObjectDigest:  digest,
+			Role:          "content",
+			Path:          chunkPacksDir,
+			ReferencedBy:  referencedBy,
+			CompoundRole:  compoundRole,
+			CompoundOrder: compoundOrder,
+			RecursivePart: recursivePart,
+		}, recipe.ContentBytes)
+	}
+
 	return nil
+}
+
+// addLogicalEntry appends a logical (non-file) storage entry whose bytes come
+// from a shared store rather than an exclusive on-disk file.
+func (store *FilesystemStore) addLogicalEntry(
+	report *StorageBreakdownReport,
+	context storageFileContext,
+	logical int64,
+) {
+	report.TotalLogicalBytes += logical
+	report.TotalAllocatedBytes += logical
+	report.EstimatedAllocated = true
+	report.Files = append(report.Files, StorageBreakdownFile{
+		ObjectDigest:   context.ObjectDigest,
+		Role:           context.Role,
+		Path:           context.Path,
+		LogicalBytes:   logical,
+		AllocatedBytes: logical,
+		Estimated:      true,
+		ReferencedBy:   context.ReferencedBy,
+		CompoundRole:   context.CompoundRole,
+		CompoundOrder:  context.CompoundOrder,
+		RecursivePart:  context.RecursivePart,
+	})
 }
 
 type storageFileContext struct {
@@ -416,6 +445,8 @@ func objectStorageRole(name string) string {
 		return "scheduler"
 	case strings.HasPrefix(name, "analysis") && strings.HasSuffix(name, ".json.zst"):
 		return "analysis"
+	case strings.HasPrefix(name, "ann-") && strings.HasSuffix(name, ".zst"):
+		return "annotation_payload"
 	case strings.HasSuffix(name, ".json.zst"):
 		return "annotation"
 	default:

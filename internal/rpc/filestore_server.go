@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -292,6 +293,10 @@ func (server *FilestoreServer) ReadManifest(
 		contracts.ObjectDigest(request.GetDigest()),
 	)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, status.Error(codes.NotFound, err.Error())
+		}
+
 		return nil, err
 	}
 
@@ -538,7 +543,183 @@ func (server *FilestoreServer) Verify(
 	}, nil
 }
 
+func (server *FilestoreServer) StorageBreakdown(
+	ctx context.Context,
+	request *pb.StorageBreakdownRequest,
+) (*pb.StorageBreakdownResponse, error) {
+	report, err := server.store.StorageBreakdown(ctx, filestore.StorageBreakdownRequest{
+		Digest:         contracts.ObjectDigest(request.GetDigest()),
+		RecursiveParts: request.GetRecursiveParts(),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return ToPBStorageBreakdown(report), nil
+}
+
+func (server *FilestoreServer) ResolvePath(
+	ctx context.Context,
+	request *pb.ResolvePathRequest,
+) (*pb.ResolvePathResponse, error) {
+	report, err := server.store.ResolvePath(ctx, filestore.PathResolveRequest{
+		Path:         request.GetPath(),
+		RecordsLimit: int(request.GetRecordsLimit()),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return ToPBResolvePath(report)
+}
+
+func (server *FilestoreServer) DeleteObject(
+	ctx context.Context,
+	request *pb.DeleteObjectRequest,
+) (*pb.Empty, error) {
+	if err := server.store.DeleteObject(
+		ctx,
+		contracts.ObjectDigest(request.GetDigest()),
+	); err != nil {
+		return nil, err
+	}
+
+	return &pb.Empty{}, nil
+}
+
+func (server *FilestoreServer) Gc(
+	ctx context.Context,
+	_ *pb.GcRequest,
+) (*pb.GcResponse, error) {
+	report, err := server.store.Gc(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.GcResponse{
+		ScannedChunks:  int32(report.ScannedChunks),
+		SweptChunks:    int32(report.SweptChunks),
+		RetainedChunks: int32(report.RetainedChunks),
+		SweptRecipes:   int32(report.SweptRecipes),
+	}, nil
+}
+
+func (server *FilestoreServer) Repack(
+	ctx context.Context,
+	_ *pb.RepackRequest,
+) (*pb.RepackResponse, error) {
+	report, err := server.store.Repack(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.RepackResponse{
+		PacksScanned:  int32(report.PacksScanned),
+		PacksRepacked: int32(report.PacksRepacked),
+		PacksRemoved:  int32(report.PacksRemoved),
+		ChunksMoved:   int32(report.ChunksMoved),
+		BytesBefore:   report.BytesBefore,
+		BytesAfter:    report.BytesAfter,
+	}, nil
+}
+
+func (server *FilestoreServer) TrainDictionary(
+	ctx context.Context,
+	request *pb.TrainDictionaryRequest,
+) (*pb.TrainDictionaryResponse, error) {
+	report, err := server.store.TrainDictionary(ctx, int(request.GetSampleLimit()))
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.TrainDictionaryResponse{
+		DictionaryId:    report.DictionaryID,
+		DictionaryBytes: report.DictionaryBytes,
+		Samples:         int32(report.Samples),
+	}, nil
+}
+
 type putResult struct {
 	err    error
 	digest contracts.ObjectDigest
+}
+
+func (server *FilestoreServer) GetProjectionObject(
+	ctx context.Context,
+	request *pb.ProjectionObjectRequest,
+) (*pb.ProjectionObjectResponse, error) {
+	object, found, err := server.store.ProjectionObject(
+		ctx,
+		contracts.ObjectDigest(request.GetDigest()),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return &pb.ProjectionObjectResponse{Found: false}, nil
+	}
+
+	converted, err := ToPBProjectionObject(object)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &pb.ProjectionObjectResponse{Object: converted, Found: true}, nil
+}
+
+func (server *FilestoreServer) WalkProjection(
+	_ *pb.WalkProjectionRequest,
+	stream pb.FilestoreService_WalkProjectionServer,
+) error {
+	return server.store.WalkProjection(
+		stream.Context(),
+		func(object filestore.ProjectionObject) error {
+			converted, err := ToPBProjectionObject(object)
+			if err != nil {
+				return status.Error(codes.Internal, err.Error())
+			}
+
+			return stream.Send(converted)
+		},
+	)
+}
+
+func (server *FilestoreServer) WalkChangedProjection(
+	request *pb.WalkChangedProjectionRequest,
+	stream pb.FilestoreService_WalkChangedProjectionServer,
+) error {
+	since, err := parseTime(request.GetSince())
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	return server.store.WalkChangedProjection(
+		stream.Context(),
+		since,
+		func(object filestore.ProjectionObject) error {
+			converted, err := ToPBProjectionObject(object)
+			if err != nil {
+				return status.Error(codes.Internal, err.Error())
+			}
+
+			return stream.Send(converted)
+		},
+	)
+}
+
+func (server *FilestoreServer) WalkSourceCursors(
+	_ *pb.WalkSourceCursorsRequest,
+	stream pb.FilestoreService_WalkSourceCursorsServer,
+) error {
+	return server.store.WalkSourceCursors(
+		stream.Context(),
+		func(cursor contracts.SourceCursor) error {
+			converted, err := ToPBSourceCursor(cursor)
+			if err != nil {
+				return status.Error(codes.Internal, err.Error())
+			}
+
+			return stream.Send(converted)
+		},
+	)
 }

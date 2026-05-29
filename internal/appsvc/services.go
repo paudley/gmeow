@@ -48,6 +48,7 @@ type Services struct {
 	sources          SourceRegistry
 	ingest           SourceIngestService
 	operations       OperationStore
+	tokens           TokenValidator
 	operationWaiters map[string]*operationWaiter
 	operationMu      sync.Mutex
 	jmapMailboxMu    sync.Mutex
@@ -60,6 +61,7 @@ type Options struct {
 	Sources    SourceRegistry
 	Ingest     SourceIngestService
 	Operations OperationStore
+	Tokens     TokenValidator
 }
 
 type SearchOptions struct {
@@ -265,8 +267,23 @@ func New(options Options) (*Services, error) {
 		sources:          options.Sources,
 		ingest:           options.Ingest,
 		operations:       operations,
+		tokens:           options.Tokens,
 		operationWaiters: map[string]*operationWaiter{},
 	}, nil
+}
+
+// ValidateBearerToken delegates interface bearer-token checks to the configured
+// token validator (QUERY-backed in production). It fails closed when no validator
+// is configured so callers cannot accidentally run unauthenticated.
+func (services *Services) ValidateBearerToken(
+	ctx context.Context,
+	token string,
+) (string, bool, error) {
+	if services.tokens == nil {
+		return "", false, errors.New("appsvc token validator is not configured")
+	}
+
+	return services.tokens.ValidateBearerToken(ctx, token)
 }
 
 func NewStaticSourceRegistry(adapters ...source.Adapter) *StaticSourceRegistry {

@@ -81,6 +81,12 @@ func (analyzer *ExternalCommandAnalyzer) Analyze(
 		return contracts.Annotation{}, err
 	}
 
+	// Failure is mutable scheduler status, not an analyzer input. Sending it
+	// would change the request between retries and, because it is absent from
+	// the external worker's job contract, turn any transient failure into a
+	// permanent one (the retried request would be rejected as an unknown field).
+	job.Failure = ""
+
 	request := ExternalCommandRequest{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		Job:           job,
@@ -107,12 +113,24 @@ func (analyzer *ExternalCommandAnalyzer) Analyze(
 
 	output, err := command.Output()
 	if err != nil {
-		return contracts.Annotation{}, fmt.Errorf(
+		wrapped := fmt.Errorf(
 			"run external analyzer %s: %w: %s",
 			analyzer.spec.Name,
 			err,
 			strings.TrimSpace(stderr.String()),
 		)
+		// A command that could not launch (binary missing, failed to start) or
+		// that timed out means the analyzer runtime is unavailable, not that the
+		// job is bad: mark it so the worker parks and waits for recovery. A clean
+		// non-zero exit (the analyzer ran and rejected the work) stays on the
+		// bounded-retry path.
+		var exitErr *exec.ExitError
+		ranAndExited := errors.As(err, &exitErr)
+		if !ranAndExited || errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return contracts.Annotation{}, fmt.Errorf("%w: %w", ErrAnalyzerUnavailable, wrapped)
+		}
+
+		return contracts.Annotation{}, wrapped
 	}
 
 	var annotation contracts.Annotation

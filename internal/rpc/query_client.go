@@ -562,6 +562,20 @@ func (client *QueryClient) Rebuild(ctx context.Context) error {
 	return err
 }
 
+func (client *QueryClient) ValidateBearerToken(
+	ctx context.Context,
+	token string,
+) (string, bool, error) {
+	response, err := client.client.ValidateBearerToken(ctx, &pb.ValidateBearerTokenRequest{
+		Token: token,
+	})
+	if err != nil {
+		return "", false, err
+	}
+
+	return response.GetClientId(), response.GetValid(), nil
+}
+
 func fromPBJMAPEmailState(state *pb.JMAPEmailState) (contracts.JMAPEmailState, error) {
 	if state == nil {
 		return contracts.JMAPEmailState{}, nil

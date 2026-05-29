@@ -47,7 +47,7 @@ define warn
 	@printf '  $(YELLOW)!$(RESET) %s\n' "$(1)"
 endef
 
-.PHONY: help advice install update lock doctor check quick-check test compile type-check build clean go-format go-vet go-test go-build go-check python-intel-test python-intel-build release-check release-audit status submodules ethos-install
+.PHONY: help advice install update lock doctor check quick-check test compile type-check build clean go-format go-vet go-test go-build go-check genproto python-intel-test python-intel-build release-check release-audit status submodules ethos-install
 
 help: ## Show this help screen.
 	@printf '\n$(BOLD)Gmeow$(RESET) $(DIM)local Gmail MCP/REST intelligence server$(RESET)\n\n'
@@ -140,6 +140,20 @@ go-build: ## Build Go binaries.
 	$(call section,Building Go binaries)
 	mkdir -p "$(BIN_DIR)"
 	$(GO) build -o "$(BIN_DIR)/" ./cmd/gmeow ./cmd/gmeow-admin ./cmd/gmeow-worker
+
+genproto: ## Regenerate Go protobuf and gRPC stubs from proto/gmeow/v1 (needs bin/ plugins).
+	$(call section,Regenerating protobuf stubs)
+	protoc \
+		--plugin=protoc-gen-go="$(BIN_DIR)/protoc-gen-go" \
+		--plugin=protoc-gen-go-grpc="$(BIN_DIR)/protoc-gen-go-grpc" \
+		--proto_path=proto \
+		--go_out=. --go_opt=module=blackcat.ca/gmeow \
+		--go-grpc_out=. --go-grpc_opt=module=blackcat.ca/gmeow \
+		proto/gmeow/v1/common.proto \
+		proto/gmeow/v1/filestore.proto \
+		proto/gmeow/v1/query.proto \
+		proto/gmeow/v1/scheduler.proto \
+		proto/gmeow/v1/source.proto
 
 go-check: go-format go-vet go-test go-build ## Run the Go Phase 00 quality gate.
 

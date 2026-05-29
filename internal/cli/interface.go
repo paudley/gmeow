@@ -171,7 +171,7 @@ func newJMAPServeCommand(out io.Writer, configPath *string) *cobra.Command {
 			server, err := jmapiface.New(
 				interfaceAddress(iface),
 				services,
-				jmapiface.Options{BearerToken: iface.Password},
+				jmapiface.Options{Validator: services},
 			)
 			if err != nil {
 				return err
@@ -249,6 +249,7 @@ func openInterfaceServicesLoaded(
 		Sources:    sourceRegistry,
 		Ingest:     sourceService,
 		Operations: queryClient,
+		Tokens:     queryClient,
 	})
 	if err != nil {
 		closeSources()

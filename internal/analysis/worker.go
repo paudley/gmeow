@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ type Runtime struct {
 	store       ObjectStore
 	registry    *Registry
 	now         func() time.Time
+	breaker     *circuitBreaker
+	parkBackoff time.Duration
 }
 
 type RuntimeOption func(*Runtime)
@@ -49,12 +52,24 @@ func NewRuntime(
 		store:       store,
 		registry:    registry,
 		now:         func() time.Time { return time.Now().UTC() },
+		parkBackoff: 5 * time.Second,
 	}
 	for _, option := range options {
 		option(runtime)
 	}
+	runtime.breaker = newCircuitBreaker(runtime.now)
 
 	return runtime, nil
+}
+
+// WithParkBackoff sets how long the worker waits before re-checking a job whose
+// analyzer circuit is open, bounding how often parked jobs are re-queued.
+func WithParkBackoff(backoff time.Duration) RuntimeOption {
+	return func(runtime *Runtime) {
+		if backoff >= 0 {
+			runtime.parkBackoff = backoff
+		}
+	}
 }
 
 func WithConcurrency(concurrency int) RuntimeOption {
@@ -141,9 +156,47 @@ func (runtime *Runtime) Handle(ctx context.Context, receipt JobReceipt) error {
 	}
 
 	job := receipt.Job()
+	key := analyzerKey(job.Analyzer)
+
+	// Circuit open and not yet time for a probe: park the job (it waits on the
+	// work queue for the analyzer to recover) rather than running it and burning
+	// retries against a known-down dependency.
+	if !runtime.breaker.allow(key) {
+		if err := runtime.sleepBeforePark(ctx); err != nil {
+			return err
+		}
+
+		return runtime.park(ctx, receipt)
+	}
 
 	err := runtime.Process(ctx, job)
 	if err != nil {
+		// Bogus job: the target object no longer exists (e.g. removed or the
+		// store was wiped). It can never succeed and is not an analyzer failure,
+		// so drop it (ack) rather than retrying, parking, or tripping the
+		// breaker — otherwise stale jobs churn forever.
+		if errors.Is(err, os.ErrNotExist) {
+			observability.DefaultMetrics().AddCounter("gmeow_dropped_bogus_jobs", 1)
+			if ackErr := receipt.Ack(ctx); ackErr != nil {
+				return fmt.Errorf("ack bogus analysis job: %w", ackErr)
+			}
+
+			return nil
+		}
+
+		runtime.breaker.recordFailure(key)
+		// Park (wait for recovery) rather than retry toward a dead-letter when the
+		// analyzer's backing service is unavailable, or when repeated failures
+		// have tripped the circuit open. Keying the park decision on the
+		// unavailability signal itself — not only on accumulated breaker state —
+		// keeps it correct across worker restarts, which reset the in-memory
+		// breaker: the very first availability failure parks. A failure that is
+		// neither an availability signal nor enough to open the circuit is treated
+		// as job-specific and follows the normal bounded-retry path.
+		if errors.Is(err, ErrAnalyzerUnavailable) || runtime.breaker.isOpen(key) {
+			return runtime.park(ctx, receipt)
+		}
+
 		retryErr := receipt.Retry(ctx, err)
 		if retryErr != nil {
 			return fmt.Errorf("route failed analysis job: %w", retryErr)
@@ -152,11 +205,36 @@ func (runtime *Runtime) Handle(ctx context.Context, receipt JobReceipt) error {
 		return nil
 	}
 
+	runtime.breaker.recordSuccess(key)
 	if err := receipt.Ack(ctx); err != nil {
 		return fmt.Errorf("ack analysis job: %w", err)
 	}
 
 	return nil
+}
+
+func (runtime *Runtime) park(ctx context.Context, receipt JobReceipt) error {
+	if err := receipt.Park(ctx); err != nil {
+		return fmt.Errorf("park analysis job: %w", err)
+	}
+
+	return nil
+}
+
+func (runtime *Runtime) sleepBeforePark(ctx context.Context) error {
+	if runtime.parkBackoff <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(runtime.parkBackoff)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (runtime *Runtime) Process(ctx context.Context, job contracts.AnalyzerJob) error {

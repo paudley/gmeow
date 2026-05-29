@@ -5,10 +5,9 @@ package filestore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -26,22 +25,29 @@ func (store *FilesystemStore) ProjectionObject(
 		return ProjectionObject{}, false, err
 	}
 
-	path := store.objectDir(digest)
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+	manifest, err := store.ReadManifest(ctx, digest)
+	if errors.Is(err, os.ErrNotExist) {
 		return ProjectionObject{}, false, nil
 	} else if err != nil {
 		return ProjectionObject{}, false, err
 	}
 
 	object := ProjectionObject{
-		Digest: digest,
-		Path:   path,
+		Digest:   digest,
+		Path:     store.objectDir(digest),
+		Manifest: manifest,
 	}
-	store.readProjectionObject(&object)
+	if object.Manifest.ObjectDigest == "" {
+		object.Manifest.ObjectDigest = digest
+	}
+	store.attachProjectionAnnotations(&object)
 
 	return object, true, nil
 }
 
+// WalkProjection enumerates every object by scanning the manifest key space in
+// the metadata LSM. Objects no longer have on-disk directories, so an ordered
+// Pebble prefix scan over m/ replaces the former objects/blake3 tree walk.
 func (store *FilesystemStore) WalkProjection(
 	ctx context.Context,
 	fn ProjectionFunc,
@@ -50,55 +56,35 @@ func (store *FilesystemStore) WalkProjection(
 		return errors.New("projection callback is required")
 	}
 
-	base := filepath.Join(store.root, "objects", "blake3")
+	return store.metaIterPrefix("m/", func(key string, value []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
-	err := filepath.WalkDir(
-		base,
-		func(path string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				if errors.Is(walkErr, os.ErrNotExist) && path == base {
-					return nil
-				}
+		digest := contracts.ObjectDigest(strings.TrimPrefix(key, "m/"))
+		object := ProjectionObject{
+			Digest: digest,
+			Path:   store.objectDir(digest),
+		}
 
-				return walkErr
-			}
+		if err := json.Unmarshal(value, &object.Manifest); err != nil {
+			object.Findings = append(object.Findings, ProjectionFinding{
+				Digest:  digest,
+				Path:    object.Path,
+				Code:    "manifest_read_failed",
+				Message: err.Error(),
+			})
 
-			if err := ctx.Err(); err != nil {
-				return err
-			}
+			return fn(object)
+		}
 
-			if !entry.IsDir() || !looksLikeDigest(entry.Name()) {
-				return nil
-			}
+		if object.Manifest.ObjectDigest == "" {
+			object.Manifest.ObjectDigest = digest
+		}
+		store.attachProjectionAnnotations(&object)
 
-			digest := contracts.ObjectDigest(entry.Name())
-			object := ProjectionObject{
-				Digest: digest,
-				Path:   path,
-			}
-			if expectedPath := store.objectDir(digest); path != expectedPath {
-				object.Findings = append(object.Findings, ProjectionFinding{
-					Digest:  digest,
-					Path:    path,
-					Code:    "object_path_mismatch",
-					Message: "expected " + expectedPath,
-				})
-			} else {
-				store.readProjectionObject(&object)
-			}
-
-			if err := fn(object); err != nil {
-				return err
-			}
-
-			return filepath.SkipDir
-		},
-	)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-
-	return err
+		return fn(object)
+	})
 }
 
 func (store *FilesystemStore) WalkChangedProjection(
@@ -119,77 +105,26 @@ func (store *FilesystemStore) WalkChangedProjection(
 	})
 }
 
-func (store *FilesystemStore) readProjectionObject(object *ProjectionObject) {
-	manifestPath := filepath.Join(object.Path, manifestFilename)
-	if err := store.readCompressedJSON(manifestPath, &object.Manifest); err != nil {
-		object.Findings = append(object.Findings, ProjectionFinding{
-			Digest:  object.Digest,
-			Path:    manifestPath,
-			Code:    "manifest_read_failed",
-			Message: err.Error(),
-		})
-
-		return
-	}
-
-	if object.Manifest.ObjectDigest == "" {
-		object.Manifest.ObjectDigest = object.Digest
-	}
-
-	entries, err := os.ReadDir(object.Path)
+// attachProjectionAnnotations loads the object's annotations from the metadata
+// LSM onto an object whose manifest is already populated.
+func (store *FilesystemStore) attachProjectionAnnotations(object *ProjectionObject) {
+	annotations, err := store.readPackedAnnotations(object.Digest)
 	if err != nil {
 		object.Findings = append(object.Findings, ProjectionFinding{
 			Digest:  object.Digest,
 			Path:    object.Path,
-			Code:    "annotation_list_failed",
+			Code:    "annotation_read_failed",
 			Message: err.Error(),
 		})
 
 		return
 	}
 
-	for _, entry := range entries {
-		if entry.IsDir() || !isProjectionAnnotationFilename(entry.Name()) {
-			continue
-		}
-
-		path := filepath.Join(object.Path, entry.Name())
-
-		var annotation contracts.Annotation
-		err := store.readCompressedJSON(path, &annotation)
-		if err != nil {
-			object.Findings = append(object.Findings, ProjectionFinding{
-				Digest:  object.Digest,
-				Path:    path,
-				Code:    "annotation_read_failed",
-				Message: err.Error(),
-			})
-
-			continue
-		}
-
+	for _, annotation := range annotations {
 		if annotation.ObjectDigest == "" {
 			annotation.ObjectDigest = object.Digest
 		}
 
-		if annotation.Kind == "" {
-			annotation.Kind = strings.TrimSuffix(entry.Name(), ".json.zst")
-		}
-
 		object.Annotations = append(object.Annotations, annotation)
 	}
-
-	sort.SliceStable(object.Annotations, func(left, right int) bool {
-		leftAnnotation := object.Annotations[left]
-		rightAnnotation := object.Annotations[right]
-		if leftAnnotation.Kind != rightAnnotation.Kind {
-			return leftAnnotation.Kind < rightAnnotation.Kind
-		}
-
-		if leftAnnotation.AnalyzerName != rightAnnotation.AnalyzerName {
-			return leftAnnotation.AnalyzerName < rightAnnotation.AnalyzerName
-		}
-
-		return leftAnnotation.AnalyzerVer < rightAnnotation.AnalyzerVer
-	})
 }

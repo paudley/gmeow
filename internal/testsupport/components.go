@@ -72,6 +72,10 @@ func StartFilestoreGRPCAt(
 			if err := <-errc; err != nil {
 				t.Fatalf("stop filestore grpc: %v", err)
 			}
+			// The server is fully stopped, so no goroutine still holds the
+			// metadata store; release the embedded Pebble DB rather than leaking
+			// an open handle for every test.
+			_ = store.Close()
 		},
 	}
 }
@@ -399,7 +403,17 @@ func quoteIdent(identifier string) string {
 func unixEndpoint(t *testing.T, name string) rpc.Endpoint {
 	t.Helper()
 
-	return rpc.Endpoint{Network: "unix", Address: filepath.Join(t.TempDir(), name)}
+	// Keep the socket path short and independent of the (possibly long) test
+	// name. t.TempDir() embeds the test name, which can push the address past
+	// the ~108-byte unix sun_path limit for long-named tests under a long
+	// TMPDIR — the server then silently fails to bind and readiness times out.
+	dir, err := os.MkdirTemp("", "gm")
+	if err != nil {
+		t.Fatalf("create socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	return rpc.Endpoint{Network: "unix", Address: filepath.Join(dir, name)}
 }
 
 func dialFilestore(

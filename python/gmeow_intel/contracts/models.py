@@ -49,6 +49,7 @@ class AnalyzerJob(BaseModel):
     created_at: str = ""
     forced: bool = False
     priority: int = 0
+    failure: str = ""
 
 
 class Annotation(BaseModel):

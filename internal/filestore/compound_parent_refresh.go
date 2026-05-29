@@ -16,21 +16,12 @@ import (
 func (store *FilesystemStore) readObjectAnnotations(
 	digest contracts.ObjectDigest,
 ) ([]contracts.Annotation, error) {
-	object := ProjectionObject{
-		Digest: digest,
-		Path:   store.objectDir(digest),
-	}
-	store.readProjectionObject(&object)
-
-	if len(object.Findings) > 0 {
-		return nil, fmt.Errorf(
-			"read annotations for %s: %s",
-			digest,
-			object.Findings[0].Message,
-		)
+	annotations, err := store.readPackedAnnotations(digest)
+	if err != nil {
+		return nil, fmt.Errorf("read annotations for %s: %w", digest, err)
 	}
 
-	return object.Annotations, nil
+	return annotations, nil
 }
 
 func (store *FilesystemStore) refreshIndexedParentsForSubobject(
@@ -123,10 +114,7 @@ func (store *FilesystemStore) refreshIndexedParentForSubobject(
 	manifest.Analysis["part_analysis"] = partAnalysis
 	manifest.UpdatedAt = time.Now().UTC()
 
-	return store.writeCompressedJSON(
-		store.objectPath(parentDigest, manifestFilename),
-		manifest,
-	)
+	return store.writeManifest(parentDigest, manifest)
 }
 
 func manifestContainsPart(
