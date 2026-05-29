@@ -141,14 +141,17 @@ func newFilestoreServeCommand(
 				return err
 			}
 
+			filestoreServer := rpc.NewFilestoreServer(
+				store,
+				rpc.WithObjectChangeNotifier(schedulerClient),
+			)
+			// Flush the change-notification batcher after the gRPC server has
+			// gracefully stopped (no handler is still enqueuing) so analysis
+			// notifications buffered during shutdown are not lost.
+			defer filestoreServer.Stop()
+
 			return rpc.Serve(command.Context(), endpoint, func(server *grpc.Server) {
-				pb.RegisterFilestoreServiceServer(
-					server,
-					rpc.NewFilestoreServer(
-						store,
-						rpc.WithObjectChangeNotifier(schedulerClient),
-					),
-				)
+				pb.RegisterFilestoreServiceServer(server, filestoreServer)
 			})
 		},
 	}

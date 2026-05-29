@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"sync"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -18,12 +20,40 @@ import (
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
 )
 
+const (
+	// notifyBatchMax flushes the change batch once it holds this many digests; a
+	// bulk import then notifies the scheduler once per ~256 objects instead of
+	// once per object, turning tens of thousands of per-write RPCs into a few
+	// hundred batched ones.
+	notifyBatchMax = 256
+	// notifyFlushInterval bounds how long a partial batch waits before flushing,
+	// so low-rate writes still notify promptly.
+	notifyFlushInterval = 250 * time.Millisecond
+	// notifyBufferSize is the change-channel depth. Enqueue blocks (bounded
+	// backpressure) only if the batcher falls this far behind — which, given the
+	// 256x RPC reduction, effectively never happens unless the scheduler is wedged.
+	notifyBufferSize = 8192
+	// notifyFlushTimeout caps a single batch RPC so a stalled scheduler cannot
+	// wedge the batcher (and thus block writes) indefinitely.
+	notifyFlushTimeout = 30 * time.Second
+)
+
 type FilestoreServer struct {
 	pb.UnimplementedFilestoreServiceServer
 
 	notifier  ObjectChangeNotifier
-	notifySem chan struct{}
+	changes   chan changeNotice
+	batcherWG sync.WaitGroup
 	store     filestore.Store
+}
+
+// changeNotice is one object-change signal awaiting batched delivery to the
+// scheduler. projectionOnly distinguishes a full analysis-eligible change from a
+// projection-only refresh (annotation/overlay writes), which the scheduler must
+// not treat as new analyzer work.
+type changeNotice struct {
+	digest         contracts.ObjectDigest
+	projectionOnly bool
 }
 
 type ObjectChangeNotifier interface {
@@ -46,14 +76,33 @@ func NewFilestoreServer(
 	options ...FilestoreServerOption,
 ) *FilestoreServer {
 	server := &FilestoreServer{
-		notifySem: make(chan struct{}, 8),
-		store:     store,
+		store: store,
 	}
 	for _, option := range options {
 		option(server)
 	}
 
+	// Only run the batcher when a notifier is wired (production filestore-serve);
+	// tests and offline tools leave it nil and enqueueChange becomes a no-op.
+	if server.notifier != nil {
+		server.changes = make(chan changeNotice, notifyBufferSize)
+		server.batcherWG.Add(1)
+		go server.runNotifyBatcher()
+	}
+
 	return server
+}
+
+// Stop flushes any buffered change notifications and waits for the batcher to
+// finish. It is safe to call after the gRPC server has gracefully stopped (no
+// handler is still enqueuing), and a no-op when no notifier is configured.
+func (server *FilestoreServer) Stop() {
+	if server.changes == nil {
+		return
+	}
+
+	close(server.changes)
+	server.batcherWG.Wait()
 }
 
 func (server *FilestoreServer) LookupSourceObject(
@@ -179,7 +228,7 @@ func (server *FilestoreServer) PutObject(
 		return put.err
 	}
 
-	server.notifyObjectChangedAsync(stream.Context(), put.digest, "object_changed")
+	server.enqueueObjectChanged(put.digest)
 
 	return stream.SendAndClose(&pb.PutObjectResponse{Digest: string(put.digest)})
 }
@@ -202,11 +251,7 @@ func (server *FilestoreServer) AttachProvenance(
 		return nil, err
 	}
 
-	server.notifyObjectChangedAsync(
-		ctx,
-		contracts.ObjectDigest(request.GetDigest()),
-		"object_changed",
-	)
+	server.enqueueObjectChanged(contracts.ObjectDigest(request.GetDigest()))
 
 	return &pb.Empty{}, nil
 }
@@ -244,7 +289,7 @@ func (server *FilestoreServer) PutCompound(
 		return nil, err
 	}
 
-	server.notifyObjectChangedAsync(ctx, digest, "object_changed")
+	server.enqueueObjectChanged(digest)
 
 	return &pb.PutCompoundResponse{Digest: string(digest)}, nil
 }
@@ -358,7 +403,7 @@ func (server *FilestoreServer) WriteAnnotation(
 		return nil, err
 	}
 
-	server.notifyProjectionRefreshAsync(ctx, annotation.ObjectDigest)
+	server.enqueueProjectionRefresh(annotation.ObjectDigest)
 
 	return &pb.Empty{}, nil
 }
@@ -382,101 +427,107 @@ func (server *FilestoreServer) WriteOverlays(
 		return nil, err
 	}
 
-	server.notifyProjectionRefreshAsync(ctx, digest)
+	server.enqueueProjectionRefresh(digest)
 
 	return &pb.Empty{}, nil
 }
 
-func (server *FilestoreServer) notifyObjectChanged(
-	ctx context.Context,
-	digest contracts.ObjectDigest,
-	reason string,
-) error {
-	if server.notifier == nil {
-		return nil
-	}
-
-	_, err := server.notifier.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
-		SchemaVersion: contracts.SchemaVersionPhase00,
-		ObjectDigests: []contracts.ObjectDigest{digest},
-		RequestedBy:   "filestore",
-		Reason:        reason,
-	})
-
-	return err
+// enqueueObjectChanged signals that an object was created or non-trivially
+// changed, so the scheduler should consider it for analysis. enqueueProjectionRefresh
+// signals an annotation/overlay-only change (no new analyzer work). Both hand
+// off to the batcher without blocking on the scheduler — the write path no
+// longer waits on a per-object RPC. The scheduler de-duplicates already-analyzed
+// objects ("only missing analyzer work"), so re-notifying a dedup hit is cheap
+// and harmless.
+func (server *FilestoreServer) enqueueObjectChanged(digest contracts.ObjectDigest) {
+	server.enqueueChange(changeNotice{digest: digest})
 }
 
-func (server *FilestoreServer) notifyProjectionRefresh(
-	ctx context.Context,
-	digest contracts.ObjectDigest,
-) error {
-	if server.notifier == nil {
-		return nil
+func (server *FilestoreServer) enqueueProjectionRefresh(digest contracts.ObjectDigest) {
+	server.enqueueChange(changeNotice{digest: digest, projectionOnly: true})
+}
+
+func (server *FilestoreServer) enqueueChange(notice changeNotice) {
+	if server.changes == nil {
+		return
+	}
+
+	// Bounded backpressure: a full buffer blocks the writer rather than dropping
+	// the notification. Because the batcher collapses ~256 changes into one RPC,
+	// it stays far ahead of ingestion unless the scheduler is wedged.
+	server.changes <- notice
+}
+
+// runNotifyBatcher coalesces buffered change notices and delivers them to the
+// scheduler in batches — one NotifyObjectsChanged per up-to-notifyBatchMax
+// digests or per notifyFlushInterval — collapsing a bulk import's tens of
+// thousands of per-object notifications into a few hundred RPCs. It exits after
+// a final flush when the channel is closed by Stop.
+func (server *FilestoreServer) runNotifyBatcher() {
+	defer server.batcherWG.Done()
+
+	ticker := time.NewTicker(notifyFlushInterval)
+	defer ticker.Stop()
+
+	var changed, projection []contracts.ObjectDigest
+	flush := func() {
+		if len(changed) > 0 {
+			server.flushChangeBatch(changed, false)
+			changed = changed[:0]
+		}
+		if len(projection) > 0 {
+			server.flushChangeBatch(projection, true)
+			projection = projection[:0]
+		}
+	}
+
+	for {
+		select {
+		case notice, ok := <-server.changes:
+			if !ok {
+				flush()
+
+				return
+			}
+			if notice.projectionOnly {
+				projection = append(projection, notice.digest)
+			} else {
+				changed = append(changed, notice.digest)
+			}
+			if len(changed) >= notifyBatchMax || len(projection) >= notifyBatchMax {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+func (server *FilestoreServer) flushChangeBatch(
+	digests []contracts.ObjectDigest,
+	projectionOnly bool,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), notifyFlushTimeout)
+	defer cancel()
+
+	reason := "object_changed"
+	if projectionOnly {
+		reason = "projection_refresh"
 	}
 
 	_, err := server.notifier.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
 		SchemaVersion:  contracts.SchemaVersionPhase00,
-		ObjectDigests:  []contracts.ObjectDigest{digest},
+		ObjectDigests:  digests,
 		RequestedBy:    "filestore",
-		Reason:         "projection_refresh",
-		ProjectionOnly: true,
+		Reason:         reason,
+		ProjectionOnly: projectionOnly,
 	})
-
-	return err
-}
-
-func (server *FilestoreServer) notifyObjectChangedAsync(
-	ctx context.Context,
-	digest contracts.ObjectDigest,
-	reason string,
-) {
-	if server.notifier == nil {
-		return
+	if err != nil {
+		log.Printf(
+			"filestore notify batch failed reason=%s count=%d error=%v",
+			reason, len(digests), err,
+		)
 	}
-
-	server.acquireNotifySlot()
-	go func() {
-		defer server.releaseNotifySlot()
-		err := server.notifyObjectChanged(context.WithoutCancel(ctx), digest, reason)
-		if err != nil {
-			log.Printf(
-				"filestore notification failed digest=%s reason=%s error=%v",
-				digest,
-				reason,
-				err,
-			)
-		}
-	}()
-}
-
-func (server *FilestoreServer) notifyProjectionRefreshAsync(
-	ctx context.Context,
-	digest contracts.ObjectDigest,
-) {
-	if server.notifier == nil {
-		return
-	}
-
-	server.acquireNotifySlot()
-	go func() {
-		defer server.releaseNotifySlot()
-		err := server.notifyProjectionRefresh(context.WithoutCancel(ctx), digest)
-		if err != nil {
-			log.Printf(
-				"filestore projection notification failed digest=%s error=%v",
-				digest,
-				err,
-			)
-		}
-	}()
-}
-
-func (server *FilestoreServer) acquireNotifySlot() {
-	server.notifySem <- struct{}{}
-}
-
-func (server *FilestoreServer) releaseNotifySlot() {
-	<-server.notifySem
 }
 
 func (server *FilestoreServer) WriteSourceCursor(
