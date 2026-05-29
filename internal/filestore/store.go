@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"maps"
 	"os"
@@ -21,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/klauspost/compress/zstd"
 	"github.com/zeebo/blake3"
 
@@ -36,16 +36,30 @@ const (
 	manifestFilename                 = "manifest.json.zst"
 	sourceCursorFilename             = "cursor.json.zst"
 	schemaVersion                    = "1"
-	stagingObjectsDir                = "staging/objects"
-	stagingIncomingDir               = "staging/incoming"
 )
-
-var errStopWalk = errors.New("stop filestore walk")
 
 type FilesystemStore struct {
 	root     string
 	locksMu  sync.Mutex
 	keyLocks map[string]*filesystemKeyLock
+	packMu   sync.Mutex
+	metaOnce sync.Once
+	metaInst *pebble.DB
+	metaErr  error
+	dicts    dictionaryCache
+	packs    *packCache
+	// activePack* caches the newest pack's id and size so appendToActivePack does
+	// not os.ReadDir+Stat the pack directory on every chunk write. The store holds
+	// Pebble's exclusive directory lock and is the sole writer to chunk-packs/, so
+	// the cache is authoritative once populated; it is guarded by packMu (held by
+	// every appender) and lazily filled on first append.
+	activePackKnown bool
+	activePackID    uint64
+	activePackSize  int64
+	// maintenanceMu serializes whole-store maintenance passes (gc, repack,
+	// dictionary training) so they never run concurrently — e.g. repack must not
+	// race gc, and two trainings must not race the dictionary-id allocation.
+	maintenanceMu sync.Mutex
 }
 
 type filesystemKeyLock struct {
@@ -54,7 +68,10 @@ type filesystemKeyLock struct {
 }
 
 func NewFilesystemStore(root string) *FilesystemStore {
-	return &FilesystemStore{root: root}
+	return &FilesystemStore{
+		root:  root,
+		packs: newPackCache(defaultPackCacheSize),
+	}
 }
 
 func (store *FilesystemStore) Put(
@@ -69,42 +86,53 @@ func (store *FilesystemStore) Put(
 		return "", err
 	}
 
-	blob, err := store.streamObjectBlob(ctx, request.Reader)
+	// Stream the content into the chunk store, computing identity in one pass —
+	// the whole object is never buffered, so multi-gigabyte media/files are safe.
+	digest, uncompressedSHA256, size, err := store.storeBlobReader(ctx, request.Reader)
 	if err != nil {
 		return "", err
 	}
 
-	cleanup := true
-
-	defer func() {
-		if cleanup {
-			_ = os.RemoveAll(blob.stageDir)
-		}
-	}()
-
-	digest := contracts.ObjectDigest(blob.uncompressedBlake3)
+	// Serialize the manifest read-merge-write so concurrent puts of the same
+	// content (or a concurrent AttachProvenance/WriteOverlays/analysis refresh on
+	// the same digest) cannot lose each other's mutations.
+	unlock := store.lockKey("manifest:" + string(digest))
+	defer unlock()
 
 	manifest := store.baseManifest(
 		digest,
 		string(digest),
 		identityStrategyFileBlake3,
 		request.MediaType,
-		blob.uncompressedSize,
+		size,
 		request.ContentRoles,
 		request.Facets,
 		request.Provenance,
 		request.Relationships,
 		contracts.Compound{IsCompound: false},
 	)
-	committedStage, err := store.commitStreamedObject(
+	if existing, manifestErr := store.ReadManifest(ctx, digest); manifestErr == nil {
+		manifest = mergeManifest(existing, manifest)
+	} else if !errors.Is(manifestErr, os.ErrNotExist) {
+		return "", fmt.Errorf("read existing manifest: %w", manifestErr)
+	}
+
+	if err := store.writeManifest(digest, manifest); err != nil {
+		return "", fmt.Errorf("write manifest: %w", err)
+	}
+	if err := store.writePackedRecovery(
 		ctx,
 		digest,
-		blob,
-		request.SourceHint,
-		manifest,
-	)
-	if err != nil {
-		return "", err
+		recoverySidecarForStreamed(
+			digest,
+			size,
+			string(digest),
+			uncompressedSHA256,
+			request.SourceHint,
+			manifest,
+		),
+	); err != nil {
+		return "", fmt.Errorf("write packed recovery sidecar: %w", err)
 	}
 	if err := store.recordSourceObjectIndexes(
 		ctx,
@@ -112,10 +140,6 @@ func (store *FilesystemStore) Put(
 		request.Provenance,
 	); err != nil {
 		return "", err
-	}
-
-	if committedStage {
-		cleanup = false
 	}
 
 	return digest, nil
@@ -145,6 +169,9 @@ func (store *FilesystemStore) AttachProvenance(
 		}
 	}
 
+	unlock := store.lockKey("manifest:" + string(digest))
+	defer unlock()
+
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil {
 		return fmt.Errorf("read provenance target manifest: %w", err)
@@ -153,10 +180,7 @@ func (store *FilesystemStore) AttachProvenance(
 	manifest.Provenance = mergeProvenance(manifest.Provenance, provenance)
 	manifest.UpdatedAt = time.Now().UTC()
 
-	if err := store.writeCompressedJSON(
-		store.objectPath(digest, manifestFilename),
-		manifest,
-	); err != nil {
+	if err := store.writeManifest(digest, manifest); err != nil {
 		return err
 	}
 
@@ -250,24 +274,50 @@ func (store *FilesystemStore) Open(
 		return nil, err
 	}
 
-	content, err := store.readBlob(digest)
-	if err != nil {
-		return nil, err
-	}
-
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 
-	if manifest.IdentityStrategy != identityStrategyCompoundStableID &&
-		blake3Hex(content) != string(digest) {
-		actual := blake3Hex(content)
+	// file_blake3 objects are verified against their content hash as they stream
+	// (the reader fails at EOF on mismatch); compound_stable_id objects carry a
+	// synthetic digest, so content verification is skipped.
+	verifyDigest := digest
+	if manifest.IdentityStrategy == identityStrategyCompoundStableID {
+		verifyDigest = ""
+	}
 
-		return nil, fmt.Errorf("CAS digest mismatch for %s: got %s", digest, actual)
+	reader, ok, err := store.openBlobReader(digest, verifyDigest)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return reader, nil
+	}
+
+	// Legacy whole-blob fallback for streamed/legacy objects not stored as chunks.
+	content, err := readZstdFile(store.objectPath(digest, blobFilename))
+	if err != nil {
+		return nil, err
 	}
 
 	return io.NopCloser(bytes.NewReader(content)), nil
+}
+
+// manifestKey is the Pebble metadata key for an object's manifest. Manifests
+// are metadata, not content, so they live in the LSM alongside recipes and
+// annotations rather than as a per-object manifest.json.zst file — eliminating
+// the 4K-block-per-object small-file amplification (and the per-object
+// directory entirely, since content is in chunk packs).
+func manifestKey(digest contracts.ObjectDigest) string {
+	return "m/" + string(digest)
+}
+
+func (store *FilesystemStore) writeManifest(
+	digest contracts.ObjectDigest,
+	manifest contracts.Manifest,
+) error {
+	return store.metaPut(manifestKey(digest), manifest)
 }
 
 func (store *FilesystemStore) ReadManifest(
@@ -285,12 +335,16 @@ func (store *FilesystemStore) ReadManifest(
 	}
 
 	var manifest contracts.Manifest
-	err = store.readCompressedJSON(
-		store.objectPath(digest, manifestFilename),
-		&manifest,
-	)
+	ok, err := store.metaGet(manifestKey(digest), &manifest)
 	if err != nil {
 		return contracts.Manifest{}, err
+	}
+	if !ok {
+		return contracts.Manifest{}, fmt.Errorf(
+			"read manifest %s: %w",
+			digest,
+			os.ErrNotExist,
+		)
 	}
 
 	return manifest, nil
@@ -361,17 +415,16 @@ func (store *FilesystemStore) HasAnalysisAnnotation(
 		return false, err
 	}
 
-	name, err := analysisAnnotationFilename(analyzerName)
-	if err != nil {
-		return false, err
+	if strings.TrimSpace(analyzerName) == "" {
+		return false, errors.New("analysis analyzer name is required")
 	}
 
-	annotation, err := store.readAnnotation(store.objectPath(digest, name))
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
+	annotation, ok, err := store.readPackedAnnotation(digest, "analysis", analyzerName)
 	if err != nil {
 		return false, err
+	}
+	if !ok {
+		return false, nil
 	}
 
 	return annotation.Kind == "analysis" &&
@@ -401,8 +454,9 @@ func (store *FilesystemStore) WriteAnnotation(
 		return fmt.Errorf("read annotation target manifest: %w", err)
 	}
 
-	name, err := annotationFilename(annotation)
-	if err != nil {
+	// annotationFilename validates the kind (charset + reserved kinds); the
+	// returned name is unused now that annotations are packed by digest.
+	if _, err := annotationFilename(annotation); err != nil {
 		return err
 	}
 
@@ -411,17 +465,17 @@ func (store *FilesystemStore) WriteAnnotation(
 		annotation.GeneratedAt = time.Now().UTC()
 	}
 
-	annotationPath := store.objectPath(annotation.ObjectDigest, name)
-	if existing, err := store.readAnnotation(annotationPath); err == nil {
-		annotation = mergeAnnotation(existing, annotation)
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if existing, ok, err := store.readPackedAnnotation(
+		annotation.ObjectDigest,
+		annotation.Kind,
+		annotation.AnalyzerName,
+	); err != nil {
 		return fmt.Errorf("read existing annotation: %w", err)
+	} else if ok {
+		annotation = mergeAnnotation(existing, annotation)
 	}
 
-	if err := store.writeCompressedJSON(
-		annotationPath,
-		annotation,
-	); err != nil {
+	if err := store.writePackedAnnotation(ctx, annotation); err != nil {
 		return err
 	}
 
@@ -449,6 +503,9 @@ func (store *FilesystemStore) WriteOverlays(
 		overlays = map[string]any{}
 	}
 
+	unlock := store.lockKey("manifest:" + string(digest))
+	defer unlock()
+
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil {
 		return fmt.Errorf("read overlay target manifest: %w", err)
@@ -457,15 +514,12 @@ func (store *FilesystemStore) WriteOverlays(
 	manifest.Overlays = mergeMaps(manifest.Overlays, overlays)
 
 	manifest.UpdatedAt = time.Now().UTC()
-	if err := store.writeCompressedJSON(
-		store.objectPath(digest, manifestFilename),
-		manifest,
-	); err != nil {
+	if err := store.writeManifest(digest, manifest); err != nil {
 		return err
 	}
 
-	return store.writeCompressedJSON(
-		store.objectPath(digest, "overlays.json.zst"),
+	return store.writePackedAnnotation(
+		ctx,
 		contracts.Annotation{
 			SchemaVersion: contracts.SchemaVersionPhase00,
 			ObjectDigest:  digest,
@@ -594,10 +648,6 @@ func (store *FilesystemStore) writeObject(
 		return err
 	}
 
-	objectDir := store.objectDir(digest)
-	blobPath := filepath.Join(objectDir, blobFilename)
-	manifestPath := filepath.Join(objectDir, manifestFilename)
-
 	manifest := incoming
 	if existing, err := store.ReadManifest(ctx, digest); err == nil {
 		manifest = mergeManifest(existing, incoming)
@@ -605,16 +655,14 @@ func (store *FilesystemStore) writeObject(
 		return fmt.Errorf("read existing manifest: %w", err)
 	}
 
-	blobExists := true
-	if _, err := os.Stat(blobPath); errors.Is(err, os.ErrNotExist) {
-		blobExists = false
-	} else if err != nil {
-		return fmt.Errorf("stat blob: %w", err)
+	// Content lives in the content-addressed chunk store; its recipe is the
+	// authoritative "object content exists" signal.
+	blobExists, err := store.hasRecipe(digest)
+	if err != nil {
+		return fmt.Errorf("check object recipe: %w", err)
 	}
 
 	if !blobExists && manifest.IdentityStrategy == identityStrategyCompoundStableID {
-		var err error
-
 		content, err = compoundEnvelopeBytes(manifest)
 		if err != nil {
 			return err
@@ -624,65 +672,18 @@ func (store *FilesystemStore) writeObject(
 	}
 
 	if !blobExists {
-		if exists, err := pathExists(objectDir); err != nil {
-			return fmt.Errorf("stat object directory: %w", err)
-		} else if exists {
-			return fmt.Errorf("object %s is incomplete: missing immutable blob", digest)
-		}
-
-		return store.commitNewObjectDirectory(ctx, digest, content, sourceHint, manifest)
+		return store.commitNewObject(ctx, digest, content, sourceHint, manifest)
 	}
 
-	return store.writeCompressedJSON(manifestPath, manifest)
+	return store.writeManifest(digest, manifest)
 }
 
-func (store *FilesystemStore) commitStreamedObject(
-	ctx context.Context,
-	digest contracts.ObjectDigest,
-	blob streamedBlob,
-	sourceHint string,
-	incoming contracts.Manifest,
-) (bool, error) {
-	err := ctx.Err()
-	if err != nil {
-		return false, err
-	}
-
-	objectDir := store.objectDir(digest)
-	blobPath := filepath.Join(objectDir, blobFilename)
-	manifestPath := filepath.Join(objectDir, manifestFilename)
-
-	manifest := incoming
-	if existing, err := store.ReadManifest(ctx, digest); err == nil {
-		manifest = mergeManifest(existing, incoming)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("read existing manifest: %w", err)
-	}
-
-	blobExists := true
-	if _, err := os.Stat(blobPath); errors.Is(err, os.ErrNotExist) {
-		blobExists = false
-	} else if err != nil {
-		return false, fmt.Errorf("stat blob: %w", err)
-	}
-
-	if blobExists {
-		return false, store.writeCompressedJSON(manifestPath, manifest)
-	}
-
-	if exists, err := pathExists(objectDir); err != nil {
-		return false, fmt.Errorf("stat object directory: %w", err)
-	} else if exists {
-		return false, fmt.Errorf(
-			"object %s is incomplete: missing immutable blob",
-			digest,
-		)
-	}
-
-	return store.commitStreamedObjectDirectory(ctx, digest, blob, sourceHint, manifest)
-}
-
-func (store *FilesystemStore) commitNewObjectDirectory(
+// commitNewObject stores content in the content-addressed chunk store, records
+// the manifest and recovery sidecar in the metadata LSM, and creates no
+// per-object directory. The recipe is written before the manifest so a crash
+// can only ever leave orphan chunks (GC-reclaimable), never a manifest that
+// points at missing content.
+func (store *FilesystemStore) commitNewObject(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 	content []byte,
@@ -693,260 +694,25 @@ func (store *FilesystemStore) commitNewObjectDirectory(
 		return err
 	}
 
-	compressed, err := compressZstd(content)
-	if err != nil {
-		return err
+	if err := store.storeBlobContent(ctx, digest, content); err != nil {
+		return fmt.Errorf("store blob content: %w", err)
 	}
 
-	objectDir := store.objectDir(digest)
-
-	parentDir := filepath.Dir(objectDir)
-	if err := os.MkdirAll(parentDir, 0o750); err != nil {
-		return fmt.Errorf("create object parent directory: %w", err)
+	if err := store.writeManifest(digest, manifest); err != nil {
+		return fmt.Errorf("write manifest: %w", err)
 	}
 
-	stagingDir := filepath.Join(store.root, stagingObjectsDir)
-	if err := os.MkdirAll(stagingDir, 0o750); err != nil {
-		return fmt.Errorf("create staging directory: %w", err)
-	}
-
-	stageDir, err := os.MkdirTemp(stagingDir, string(digest)+".")
-	if err != nil {
-		return fmt.Errorf("create staged object directory: %w", err)
-	}
-
-	cleanup := true
-
-	defer func() {
-		if cleanup {
-			_ = os.RemoveAll(stageDir)
-		}
-	}()
-
-	if err := atomicWriteFile(
-		filepath.Join(stageDir, blobFilename),
-		compressed,
-		0o640,
-	); err != nil {
-		return fmt.Errorf("stage blob: %w", err)
-	}
-
-	if err := store.writeCompressedJSON(
-		filepath.Join(stageDir, manifestFilename),
-		manifest,
-	); err != nil {
-		return fmt.Errorf("stage manifest: %w", err)
-	}
-
-	if err := fsyncDir(stageDir); err != nil {
-		return fmt.Errorf("fsync staged object directory: %w", err)
-	}
-
-	if err := os.Rename(stageDir, objectDir); err != nil {
-		return fmt.Errorf("commit object directory: %w", err)
-	}
-
-	cleanup = false
-
+	// Content lives in the chunk store, so there is no single compressed blob;
+	// the recovery sidecar records uncompressed identity only (compressed=nil).
 	if err := store.writePackedRecovery(
 		ctx,
 		digest,
-		recoverySidecarFor(digest, content, compressed, sourceHint, manifest),
+		recoverySidecarFor(digest, content, nil, sourceHint, manifest),
 	); err != nil {
 		return fmt.Errorf("write packed recovery sidecar: %w", err)
 	}
 
-	return fsyncDir(parentDir)
-}
-
-func (store *FilesystemStore) commitStreamedObjectDirectory(
-	ctx context.Context,
-	digest contracts.ObjectDigest,
-	blob streamedBlob,
-	sourceHint string,
-	manifest contracts.Manifest,
-) (bool, error) {
-	err := ctx.Err()
-	if err != nil {
-		return false, err
-	}
-
-	objectDir := store.objectDir(digest)
-
-	parentDir := filepath.Dir(objectDir)
-	err = os.MkdirAll(parentDir, 0o750)
-	if err != nil {
-		return false, fmt.Errorf("create object parent directory: %w", err)
-	}
-
-	err = store.writeCompressedJSON(
-		filepath.Join(blob.stageDir, manifestFilename),
-		manifest,
-	)
-	if err != nil {
-		return false, fmt.Errorf("stage manifest: %w", err)
-	}
-
-	err = fsyncDir(blob.stageDir)
-	if err != nil {
-		return false, fmt.Errorf("fsync staged object directory: %w", err)
-	}
-
-	err = os.Rename(blob.stageDir, objectDir)
-	if err != nil {
-		if existing, readErr := store.ReadManifest(ctx, digest); readErr == nil {
-			merged := mergeManifest(existing, manifest)
-
-			return false, store.writeCompressedJSON(
-				filepath.Join(objectDir, manifestFilename),
-				merged,
-			)
-		}
-
-		return false, fmt.Errorf("commit object directory: %w", err)
-	}
-
-	if err := store.writePackedRecovery(
-		ctx,
-		digest,
-		recoverySidecarForStream(digest, blob, sourceHint, manifest),
-	); err != nil {
-		return false, fmt.Errorf("write packed recovery sidecar: %w", err)
-	}
-
-	return true, fsyncDir(parentDir)
-}
-
-type streamedBlob struct {
-	stageDir           string
-	uncompressedSize   int64
-	compressedSize     int64
-	uncompressedBlake3 string
-	uncompressedSHA256 string
-	compressedBlake3   string
-	compressedSHA256   string
-}
-
-func (store *FilesystemStore) streamObjectBlob(
-	ctx context.Context,
-	reader io.Reader,
-) (streamedBlob, error) {
-	if err := ctx.Err(); err != nil {
-		return streamedBlob{}, err
-	}
-
-	incomingDir := filepath.Join(store.root, stagingIncomingDir)
-	if err := os.MkdirAll(incomingDir, 0o750); err != nil {
-		return streamedBlob{}, fmt.Errorf("create incoming object directory: %w", err)
-	}
-
-	stageDir, err := os.MkdirTemp(incomingDir, "object.")
-	if err != nil {
-		return streamedBlob{}, fmt.Errorf("create incoming object stage: %w", err)
-	}
-
-	cleanup := true
-
-	defer func() {
-		if cleanup {
-			_ = os.RemoveAll(stageDir)
-		}
-	}()
-
-	blobPath := filepath.Join(stageDir, blobFilename)
-
-	file, err := os.OpenFile(blobPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
-	if err != nil {
-		return streamedBlob{}, fmt.Errorf("open incoming blob: %w", err)
-	}
-
-	compressedHash := newHashingWriter(file)
-
-	encoder, err := zstd.NewWriter(compressedHash)
-	if err != nil {
-		_ = file.Close()
-
-		return streamedBlob{}, fmt.Errorf("create zstd stream: %w", err)
-	}
-
-	uncompressedHash := newHashingWriter(encoder)
-	if _, err := io.Copy(uncompressedHash, reader); err != nil {
-		encoder.Close()
-		_ = file.Close()
-
-		return streamedBlob{}, fmt.Errorf("stream object bytes: %w", err)
-	}
-
-	if err := encoder.Close(); err != nil {
-		_ = file.Close()
-
-		return streamedBlob{}, fmt.Errorf("finish zstd stream: %w", err)
-	}
-
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-
-		return streamedBlob{}, fmt.Errorf("sync incoming blob: %w", err)
-	}
-
-	if err := file.Close(); err != nil {
-		return streamedBlob{}, fmt.Errorf("close incoming blob: %w", err)
-	}
-
-	if err := fsyncDir(stageDir); err != nil {
-		return streamedBlob{}, fmt.Errorf("fsync incoming object directory: %w", err)
-	}
-
-	if err := fsyncDir(incomingDir); err != nil {
-		return streamedBlob{}, fmt.Errorf("fsync incoming parent directory: %w", err)
-	}
-
-	cleanup = false
-
-	return streamedBlob{
-		stageDir:           stageDir,
-		uncompressedSize:   uncompressedHash.size,
-		compressedSize:     compressedHash.size,
-		uncompressedBlake3: uncompressedHash.blake3Hex(),
-		uncompressedSHA256: uncompressedHash.sha256Hex(),
-		compressedBlake3:   compressedHash.blake3Hex(),
-		compressedSHA256:   compressedHash.sha256Hex(),
-	}, nil
-}
-
-type hashingWriter struct {
-	writer io.Writer
-	blake3 hash.Hash
-	sha256 hash.Hash
-	size   int64
-}
-
-func newHashingWriter(writer io.Writer) *hashingWriter {
-	return &hashingWriter{
-		writer: writer,
-		blake3: blake3.New(),
-		sha256: sha256.New(),
-	}
-}
-
-func (writer *hashingWriter) Write(content []byte) (int, error) {
-	n, err := writer.writer.Write(content)
-	if n > 0 {
-		chunk := content[:n]
-		writer.size += int64(n)
-		_, _ = writer.blake3.Write(chunk)
-		_, _ = writer.sha256.Write(chunk)
-	}
-
-	return n, err
-}
-
-func (writer *hashingWriter) blake3Hex() string {
-	return hex.EncodeToString(writer.blake3.Sum(nil))
-}
-
-func (writer *hashingWriter) sha256Hex() string {
-	return hex.EncodeToString(writer.sha256.Sum(nil))
+	return nil
 }
 
 func (store *FilesystemStore) baseManifest(
@@ -984,6 +750,13 @@ func (store *FilesystemStore) baseManifest(
 }
 
 func (store *FilesystemStore) readBlob(digest contracts.ObjectDigest) ([]byte, error) {
+	if content, ok, err := store.readBlobContent(digest); err != nil {
+		return nil, err
+	} else if ok {
+		return content, nil
+	}
+
+	// Fallback for streamed/legacy objects stored as a whole compressed blob.
 	return readZstdFile(store.objectPath(digest, blobFilename))
 }
 
@@ -1012,18 +785,6 @@ func (store *FilesystemStore) readCompressedJSON(path string, value any) error {
 	}
 
 	return nil
-}
-
-func (store *FilesystemStore) readAnnotation(
-	path string,
-) (contracts.Annotation, error) {
-	var annotation contracts.Annotation
-	err := store.readCompressedJSON(path, &annotation)
-	if err != nil {
-		return contracts.Annotation{}, err
-	}
-
-	return annotation, nil
 }
 
 func (store *FilesystemStore) objectPath(
@@ -1145,9 +906,16 @@ func recoverySidecarFor(
 	}
 }
 
-func recoverySidecarForStream(
+// recoverySidecarForStreamed builds a recovery sidecar from identity hashes
+// computed while streaming, without holding the content in memory. Chunked
+// objects have no single compressed blob, so the compressed fields carry the
+// empty-input hashes (matching recoverySidecarFor called with compressed=nil)
+// and verify skips them.
+func recoverySidecarForStreamed(
 	digest contracts.ObjectDigest,
-	blob streamedBlob,
+	size int64,
+	uncompressedBlake3 string,
+	uncompressedSHA256 string,
 	sourceHint string,
 	manifest contracts.Manifest,
 ) recoverySidecar {
@@ -1158,12 +926,12 @@ func recoverySidecarForStream(
 		IdentityStrategy:   manifest.IdentityStrategy,
 		SourceHint:         strings.TrimSpace(sourceHint),
 		MediaType:          manifest.MediaType,
-		UncompressedSize:   blob.uncompressedSize,
-		CompressedSize:     blob.compressedSize,
-		UncompressedBlake3: blob.uncompressedBlake3,
-		UncompressedSHA256: blob.uncompressedSHA256,
-		CompressedBlake3:   blob.compressedBlake3,
-		CompressedSHA256:   blob.compressedSHA256,
+		UncompressedSize:   size,
+		CompressedSize:     0,
+		UncompressedBlake3: uncompressedBlake3,
+		UncompressedSHA256: uncompressedSHA256,
+		CompressedBlake3:   blake3Hex(nil),
+		CompressedSHA256:   sha256Hex(nil),
 		Compression:        compressionZstd,
 		CreatedAt:          manifest.CreatedAt,
 		FilestoreVersion:   schemaVersion,
@@ -1559,15 +1327,6 @@ func isReservedAnnotationKind(kind string) bool {
 	}
 }
 
-func isProjectionAnnotationFilename(name string) bool {
-	switch name {
-	case blobFilename, recoveryFilename, manifestFilename:
-		return false
-	default:
-		return strings.HasSuffix(name, ".json.zst")
-	}
-}
-
 func compressZstd(content []byte) ([]byte, error) {
 	encoder, err := zstd.NewWriter(nil)
 	if err != nil {
@@ -1603,15 +1362,6 @@ func decompressZstd(path string, content []byte) ([]byte, error) {
 	}
 
 	return decoded, nil
-}
-
-func atomicWriteJSON(path string, value any) error {
-	encoded, err := canonicalJSON(value)
-	if err != nil {
-		return err
-	}
-
-	return atomicWriteFile(path, encoded, 0o640)
 }
 
 func atomicWriteFile(path string, content []byte, perm os.FileMode) error {
@@ -1672,19 +1422,6 @@ func fsyncDir(path string) error {
 	defer dir.Close()
 
 	return dir.Sync()
-}
-
-func pathExists(path string) (bool, error) {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true, nil
-	}
-
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-
-	return false, err
 }
 
 func canonicalJSON(value any) ([]byte, error) {

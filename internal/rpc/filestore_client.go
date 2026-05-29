@@ -10,11 +10,16 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
 )
 
@@ -44,6 +49,110 @@ func (client *FilestoreClient) Close() error {
 	}
 
 	return client.connection.Close()
+}
+
+func (client *FilestoreClient) ProjectionObject(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) (filestore.ProjectionObject, bool, error) {
+	response, err := client.client.GetProjectionObject(
+		ctx,
+		&pb.ProjectionObjectRequest{Digest: string(digest)},
+	)
+	if err != nil {
+		return filestore.ProjectionObject{}, false, err
+	}
+	if !response.GetFound() {
+		return filestore.ProjectionObject{}, false, nil
+	}
+
+	object, err := FromPBProjectionObject(response.GetObject())
+	if err != nil {
+		return filestore.ProjectionObject{}, false, err
+	}
+
+	return object, true, nil
+}
+
+// WalkProjection streams every object's projection from the FILESTORE service,
+// letting QUERY rebuild without opening the FILESTORE root directly (the
+// FILESTORE service is the sole owner of its metadata store).
+func (client *FilestoreClient) WalkProjection(
+	ctx context.Context,
+	fn filestore.ProjectionFunc,
+) error {
+	stream, err := client.client.WalkProjection(ctx, &pb.WalkProjectionRequest{})
+	if err != nil {
+		return err
+	}
+
+	return receiveProjection(stream, fn)
+}
+
+func (client *FilestoreClient) WalkChangedProjection(
+	ctx context.Context,
+	since time.Time,
+	fn filestore.ProjectionFunc,
+) error {
+	stream, err := client.client.WalkChangedProjection(
+		ctx,
+		&pb.WalkChangedProjectionRequest{Since: formatTime(since)},
+	)
+	if err != nil {
+		return err
+	}
+
+	return receiveProjection(stream, fn)
+}
+
+func (client *FilestoreClient) WalkSourceCursors(
+	ctx context.Context,
+	fn filestore.SourceCursorProjectionFunc,
+) error {
+	stream, err := client.client.WalkSourceCursors(ctx, &pb.WalkSourceCursorsRequest{})
+	if err != nil {
+		return err
+	}
+
+	for {
+		message, recvErr := stream.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			return nil
+		}
+		if recvErr != nil {
+			return recvErr
+		}
+		cursor, convErr := FromPBSourceCursor(message)
+		if convErr != nil {
+			return convErr
+		}
+		if err := fn(cursor); err != nil {
+			return err
+		}
+	}
+}
+
+type projectionStream interface {
+	Recv() (*pb.ProjectionObject, error)
+}
+
+func receiveProjection(stream projectionStream, fn filestore.ProjectionFunc) error {
+	for {
+		message, recvErr := stream.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			return nil
+		}
+		if recvErr != nil {
+			return recvErr
+		}
+		object, convErr := FromPBProjectionObject(message)
+		if convErr != nil {
+			return convErr
+		}
+		if err := fn(object); err != nil {
+			return err
+		}
+	}
 }
 
 func (client *FilestoreClient) Open(
@@ -281,10 +390,136 @@ func (client *FilestoreClient) ReadManifest(
 		&pb.ReadManifestRequest{Digest: string(digest)},
 	)
 	if err != nil {
+		// Translate a missing object into os.ErrNotExist so callers can detect
+		// it uniformly regardless of whether the store is local or gRPC-backed.
+		if status.Code(err) == codes.NotFound {
+			return contracts.Manifest{}, fmt.Errorf("%w: %s", os.ErrNotExist, err.Error())
+		}
+
 		return contracts.Manifest{}, err
 	}
 
 	return FromPBManifest(response.GetManifest())
+}
+
+func (client *FilestoreClient) Verify(
+	ctx context.Context,
+	_ filestore.VerifyRequest,
+) (filestore.VerifyReport, error) {
+	// The gRPC Verify is read-only; --repair stays an offline command since it
+	// mutates the store.
+	response, err := client.client.Verify(ctx, &pb.VerifyRequest{})
+	if err != nil {
+		return filestore.VerifyReport{}, err
+	}
+
+	findings := make([]filestore.VerifyFinding, 0, len(response.GetFindings()))
+	for _, finding := range response.GetFindings() {
+		findings = append(findings, filestore.VerifyFinding{
+			Digest:  contracts.ObjectDigest(finding.GetDigest()),
+			Path:    finding.GetPath(),
+			Code:    finding.GetCode(),
+			Message: finding.GetMessage(),
+		})
+	}
+
+	return filestore.VerifyReport{
+		Status:   filestore.VerifyStatus(response.GetStatus()),
+		Checked:  int(response.GetChecked()),
+		Findings: findings,
+	}, nil
+}
+
+func (client *FilestoreClient) StorageBreakdown(
+	ctx context.Context,
+	request filestore.StorageBreakdownRequest,
+) (filestore.StorageBreakdownReport, error) {
+	response, err := client.client.StorageBreakdown(ctx, &pb.StorageBreakdownRequest{
+		Digest:         string(request.Digest),
+		RecursiveParts: request.RecursiveParts,
+	})
+	if err != nil {
+		return filestore.StorageBreakdownReport{}, err
+	}
+
+	return FromPBStorageBreakdown(response), nil
+}
+
+func (client *FilestoreClient) ResolvePath(
+	ctx context.Context,
+	request filestore.PathResolveRequest,
+) (filestore.PathResolveReport, error) {
+	response, err := client.client.ResolvePath(ctx, &pb.ResolvePathRequest{
+		Path:         request.Path,
+		RecordsLimit: int32(request.RecordsLimit),
+	})
+	if err != nil {
+		return filestore.PathResolveReport{}, err
+	}
+
+	return FromPBResolvePath(response)
+}
+
+func (client *FilestoreClient) DeleteObject(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) error {
+	_, err := client.client.DeleteObject(
+		ctx,
+		&pb.DeleteObjectRequest{Digest: string(digest)},
+	)
+
+	return err
+}
+
+func (client *FilestoreClient) Gc(ctx context.Context) (filestore.GCReport, error) {
+	response, err := client.client.Gc(ctx, &pb.GcRequest{})
+	if err != nil {
+		return filestore.GCReport{}, err
+	}
+
+	return filestore.GCReport{
+		ScannedChunks:  int(response.GetScannedChunks()),
+		SweptChunks:    int(response.GetSweptChunks()),
+		RetainedChunks: int(response.GetRetainedChunks()),
+		SweptRecipes:   int(response.GetSweptRecipes()),
+	}, nil
+}
+
+func (client *FilestoreClient) Repack(
+	ctx context.Context,
+) (filestore.RepackReport, error) {
+	response, err := client.client.Repack(ctx, &pb.RepackRequest{})
+	if err != nil {
+		return filestore.RepackReport{}, err
+	}
+
+	return filestore.RepackReport{
+		PacksScanned:  int(response.GetPacksScanned()),
+		PacksRepacked: int(response.GetPacksRepacked()),
+		PacksRemoved:  int(response.GetPacksRemoved()),
+		ChunksMoved:   int(response.GetChunksMoved()),
+		BytesBefore:   response.GetBytesBefore(),
+		BytesAfter:    response.GetBytesAfter(),
+	}, nil
+}
+
+func (client *FilestoreClient) TrainDictionary(
+	ctx context.Context,
+	sampleLimit int,
+) (filestore.TrainDictionaryReport, error) {
+	response, err := client.client.TrainDictionary(ctx, &pb.TrainDictionaryRequest{
+		SampleLimit: int32(sampleLimit),
+	})
+	if err != nil {
+		return filestore.TrainDictionaryReport{}, err
+	}
+
+	return filestore.TrainDictionaryReport{
+		DictionaryID:    response.GetDictionaryId(),
+		DictionaryBytes: response.GetDictionaryBytes(),
+		Samples:         int(response.GetSamples()),
+	}, nil
 }
 
 func (client *FilestoreClient) GetStructure(

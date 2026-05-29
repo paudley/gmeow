@@ -116,4 +116,5 @@ type Index interface {
 	) (contracts.OperationRecord, bool, error)
 	Rebuild(ctx context.Context) error
 	ProjectChanged(ctx context.Context, since time.Time) error
+	ValidateBearerToken(ctx context.Context, token string) (string, bool, error)
 }

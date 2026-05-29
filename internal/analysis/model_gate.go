@@ -45,6 +45,14 @@ func (gate modelGate) withLock(
 	return nil
 }
 
+// ErrAnalyzerUnavailable marks a failure caused by the analyzer's backing
+// service being unavailable (endpoint unreachable, timed out, or saturated)
+// rather than by the job itself. The worker parks such jobs to wait for the
+// dependency to recover instead of retrying them toward a dead-letter. Parking
+// on this signal — not on accumulated circuit-breaker state — keeps the
+// behavior correct across worker restarts, which reset the in-memory breaker.
+var ErrAnalyzerUnavailable = errors.New("analyzer temporarily unavailable")
+
 type modelEndpointError struct {
 	Err error
 }
@@ -55,4 +63,10 @@ func (err modelEndpointError) Error() string {
 
 func (err modelEndpointError) Unwrap() error {
 	return err.Err
+}
+
+// Is reports modelEndpointError as an availability failure so callers can
+// uniformly detect "analyzer down" via errors.Is(err, ErrAnalyzerUnavailable).
+func (err modelEndpointError) Is(target error) bool {
+	return target == ErrAnalyzerUnavailable
 }

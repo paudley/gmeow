@@ -667,6 +667,21 @@ func (server *QueryServer) GetOperationByRequestHash(
 	}, nil
 }
 
+func (server *QueryServer) ValidateBearerToken(
+	ctx context.Context,
+	request *pb.ValidateBearerTokenRequest,
+) (*pb.ValidateBearerTokenResponse, error) {
+	clientID, valid, err := server.index.ValidateBearerToken(ctx, request.GetToken())
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.ValidateBearerTokenResponse{
+		Valid:    valid,
+		ClientId: clientID,
+	}, nil
+}
+
 func fromPBRelationshipFilter(
 	filter *pb.RelationshipFilter,
 ) contracts.RelationshipFilter {

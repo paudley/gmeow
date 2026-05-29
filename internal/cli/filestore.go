@@ -17,6 +17,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
@@ -24,6 +26,58 @@ import (
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
 )
+
+// filestoreReader is the read-only FILESTORE surface the inspection commands
+// need. Both the local *filestore.FilesystemStore and the gRPC
+// *rpc.FilestoreClient satisfy it, so inspection works whether or not
+// filestore-serve is running.
+type filestoreReader interface {
+	LookupSourceObject(
+		context.Context,
+		contracts.SourceObjectRef,
+	) (contracts.ObjectDigest, bool, error)
+	Verify(context.Context, filestore.VerifyRequest) (filestore.VerifyReport, error)
+	StorageBreakdown(
+		context.Context,
+		filestore.StorageBreakdownRequest,
+	) (filestore.StorageBreakdownReport, error)
+	ResolvePath(
+		context.Context,
+		filestore.PathResolveRequest,
+	) (filestore.PathResolveReport, error)
+	DeleteObject(context.Context, contracts.ObjectDigest) error
+	Gc(context.Context) (filestore.GCReport, error)
+	Repack(context.Context) (filestore.RepackReport, error)
+	TrainDictionary(context.Context, int) (filestore.TrainDictionaryReport, error)
+	io.Closer
+}
+
+// openFilestoreReader returns a read-only FILESTORE handle. When filestore-serve
+// is running it holds the metadata store's exclusive lock, so the gRPC service
+// is preferred; otherwise the store is opened locally for offline use.
+func openFilestoreReader(
+	ctx context.Context,
+	loaded *config.Loaded,
+) (filestoreReader, error) {
+	endpoint := rpcEndpoint(loaded.Resolved.RPC.Filestore)
+	client, err := rpc.NewFilestoreClient(ctx, endpoint)
+	if err == nil {
+		_, _, probeErr := client.LookupSourceObject(ctx, contracts.SourceObjectRef{
+			SourceKind: "cli", SourceName: "readiness", ExternalID: "readiness",
+		})
+		if probeErr == nil || status.Code(probeErr) != codes.Unavailable {
+			return client, nil
+		}
+		_ = client.Close()
+	}
+
+	root, err := resolvedFilestoreRoot(loaded)
+	if err != nil {
+		return nil, err
+	}
+
+	return filestore.NewFilesystemStore(root), nil
+}
 
 func newFilestoreCommand(out io.Writer, configPath *string) *cobra.Command {
 	command := &cobra.Command{
@@ -36,6 +90,10 @@ func newFilestoreCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newFilestoreExportRecoveryCommand(out, configPath))
 	command.AddCommand(newFilestoreStorageCommand(out, configPath))
 	command.AddCommand(newFilestorePathCommand(out, configPath))
+	command.AddCommand(newFilestoreDeleteCommand(out, configPath))
+	command.AddCommand(newFilestoreGcCommand(out, configPath))
+	command.AddCommand(newFilestoreRepackCommand(out, configPath))
+	command.AddCommand(newFilestoreTrainDictionaryCommand(out, configPath))
 	command.AddCommand(newFilestoreServeCommand(out, configPath, "serve"))
 	command.AddCommand(newFilestoreBackupCommand(out, configPath))
 	command.AddCommand(newFilestoreRestoreCommand(out, configPath))
@@ -63,6 +121,7 @@ func newFilestoreServeCommand(
 			}
 
 			store := filestore.NewFilesystemStore(root)
+			defer func() { _ = store.Close() }()
 			schedulerClient, err := rpc.NewSchedulerClient(
 				command.Context(),
 				rpcEndpoint(loaded.Resolved.RPC.Scheduler),
@@ -110,11 +169,12 @@ func newFilestorePathCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			root, err := resolvedFilestoreRoot(loaded)
+			store, err := openFilestoreReader(command.Context(), loaded)
 			if err != nil {
 				return err
 			}
-			report, err := filestore.NewFilesystemStore(root).ResolvePath(
+			defer func() { _ = store.Close() }()
+			report, err := store.ResolvePath(
 				command.Context(),
 				filestore.PathResolveRequest{
 					Path:         args[0],
@@ -302,11 +362,11 @@ func newFilestoreStorageCommand(out io.Writer, configPath *string) *cobra.Comman
 			if err != nil {
 				return err
 			}
-			root, err := resolvedFilestoreRoot(loaded)
+			store, err := openFilestoreReader(command.Context(), loaded)
 			if err != nil {
 				return err
 			}
-			store := filestore.NewFilesystemStore(root)
+			defer func() { _ = store.Close() }()
 			digest, err := resolveFilestoreStorageTarget(
 				command.Context(),
 				loaded,
@@ -378,7 +438,7 @@ type storageTargetOptions struct {
 func resolveFilestoreStorageTarget(
 	ctx context.Context,
 	loaded *config.Loaded,
-	store *filestore.FilesystemStore,
+	store filestoreReader,
 	options storageTargetOptions,
 ) (contracts.ObjectDigest, error) {
 	digestSet := strings.TrimSpace(options.Digest) != ""
@@ -563,6 +623,193 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
+func newFilestoreDeleteCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		digestValue     string
+		confirmInstance string
+	)
+
+	command := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete a FILESTORE object's metadata (chunks reclaimed by gc)",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"filestore delete",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+			digest := contracts.ObjectDigest(strings.TrimSpace(digestValue))
+			if err := validateCLIDigest(digest); err != nil {
+				return err
+			}
+			store, err := openFilestoreReader(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = store.Close() }()
+			if err := store.DeleteObject(command.Context(), digest); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(out, "filestore delete: digest=%s deleted\n", digest)
+
+			return err
+		},
+	}
+	command.Flags().StringVar(&digestValue, "digest", "", "object digest to delete")
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "required production-like instance id confirmation")
+
+	return command
+}
+
+func newFilestoreGcCommand(out io.Writer, configPath *string) *cobra.Command {
+	var confirmInstance string
+
+	command := &cobra.Command{
+		Use:   "gc",
+		Short: "Reclaim chunk-index entries no longer referenced by any object",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"filestore gc",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+			store, err := openFilestoreReader(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = store.Close() }()
+			report, err := store.Gc(command.Context())
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(
+				out,
+				"filestore gc: scanned_chunks=%d swept_chunks=%d retained_chunks=%d swept_recipes=%d\n",
+				report.ScannedChunks,
+				report.SweptChunks,
+				report.RetainedChunks,
+				report.SweptRecipes,
+			)
+
+			return err
+		},
+	}
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "required production-like instance id confirmation")
+
+	return command
+}
+
+func newFilestoreRepackCommand(out io.Writer, configPath *string) *cobra.Command {
+	var confirmInstance string
+
+	command := &cobra.Command{
+		Use:   "repack",
+		Short: "Rewrite sealed packs to reclaim bytes left by gc",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"filestore repack",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+			store, err := openFilestoreReader(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = store.Close() }()
+			report, err := store.Repack(command.Context())
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(
+				out,
+				"filestore repack: packs_scanned=%d packs_repacked=%d packs_removed=%d chunks_moved=%d bytes_before=%d bytes_after=%d\n",
+				report.PacksScanned,
+				report.PacksRepacked,
+				report.PacksRemoved,
+				report.ChunksMoved,
+				report.BytesBefore,
+				report.BytesAfter,
+			)
+
+			return err
+		},
+	}
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "required production-like instance id confirmation")
+
+	return command
+}
+
+func newFilestoreTrainDictionaryCommand(
+	out io.Writer,
+	configPath *string,
+) *cobra.Command {
+	var (
+		confirmInstance string
+		sampleLimit     int
+	)
+
+	command := &cobra.Command{
+		Use:   "train-dictionary",
+		Short: "Train and install a zstd dictionary from a sample of small objects",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"filestore train-dictionary",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+			store, err := openFilestoreReader(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = store.Close() }()
+			report, err := store.TrainDictionary(command.Context(), sampleLimit)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(
+				out,
+				"filestore train-dictionary: dictionary_id=%s dictionary_bytes=%d samples=%d\n",
+				report.DictionaryID, report.DictionaryBytes, report.Samples,
+			)
+
+			return err
+		},
+	}
+	command.Flags().
+		IntVar(&sampleLimit, "sample-limit", 0, "maximum objects to sample (0 = default)")
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "required production-like instance id confirmation")
+
+	return command
+}
+
 func newFilestoreCleanupLocksCommand(out io.Writer, configPath *string) *cobra.Command {
 	var confirmInstance string
 
@@ -696,23 +943,33 @@ func newFilestoreVerifyCommand(out io.Writer, configPath *string) *cobra.Command
 
 	command := &cobra.Command{
 		Use:   "verify",
-		Short: "Verify FILESTORE object directories and packed metadata shards",
+		Short: "Verify FILESTORE objects, content chunks, and metadata",
 		RunE: func(command *cobra.Command, _ []string) error {
 			loaded, err := config.Load(config.Options{Path: *configPath})
 			if err != nil {
 				return err
 			}
 
-			root, err := resolvedFilestoreRoot(loaded)
-			if err != nil {
-				return err
+			// Read-only verification can run against the live gRPC service;
+			// --repair mutates the store, so it requires exclusive local access
+			// (run it with filestore-serve stopped).
+			var report filestore.VerifyReport
+			if repair {
+				root, rootErr := resolvedFilestoreRoot(loaded)
+				if rootErr != nil {
+					return rootErr
+				}
+				store := filestore.NewFilesystemStore(root)
+				defer func() { _ = store.Close() }()
+				report, err = store.Verify(command.Context(), filestore.VerifyRequest{Repair: true})
+			} else {
+				store, openErr := openFilestoreReader(command.Context(), loaded)
+				if openErr != nil {
+					return openErr
+				}
+				defer func() { _ = store.Close() }()
+				report, err = store.Verify(command.Context(), filestore.VerifyRequest{})
 			}
-
-			store := filestore.NewFilesystemStore(root)
-
-			report, err := store.Verify(command.Context(), filestore.VerifyRequest{
-				Repair: repair,
-			})
 			if err != nil {
 				return err
 			}

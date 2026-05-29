@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -95,6 +96,25 @@ func (store *FilesystemStore) lookupSourceObjectViaAlias(
 	return "", false, nil
 }
 
+func sourceLockKey(ref contracts.SourceObjectRef) string {
+	return "lk/" + sourceObjectRefKey(ref)
+}
+
+// sourceClaimLive reports whether a claim is still within its TTL. A zero
+// AcquiredAt (legacy/unknown age) is treated conservatively as live.
+func sourceClaimLive(claim contracts.SourceIngestClaim, now time.Time) bool {
+	if claim.AcquiredAt.IsZero() {
+		return true
+	}
+
+	return now.Sub(claim.AcquiredAt) <= sourceIngestClaimTTL
+}
+
+// TryAcquireSourceIngest claims exclusive ingest rights for a source object.
+// Claims live in the metadata LSM (lk/). FILESTORE is the sole writer of that
+// store, so an in-process key lock plus a Pebble read/modify/write is an atomic
+// test-and-set — it replaces the former O_EXCL lock file, which only guarded
+// against multiple processes that the exclusive Pebble lock already prevents.
 func (store *FilesystemStore) TryAcquireSourceIngest(
 	ctx context.Context,
 	ref contracts.SourceObjectRef,
@@ -114,138 +134,68 @@ func (store *FilesystemStore) TryAcquireSourceIngest(
 		AcquiredAt:   acquiredAt,
 	}
 
-	lockPath := store.sourceObjectLockPath(ref)
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
-		return contracts.SourceIngestClaim{}, false, err
-	}
+	unlock := store.lockKey("source-ingest:" + sourceObjectRefKey(ref))
+	defer unlock()
 
-	file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
-	if errors.Is(err, os.ErrExist) {
-		removed, removeErr := store.removeExpiredSourceIngestClaim(lockPath, ref, acquiredAt)
-		if removeErr != nil {
-			return contracts.SourceIngestClaim{}, false, removeErr
-		}
-		if removed {
-			file, err = os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
-			if errors.Is(err, os.ErrExist) {
-				return contracts.SourceIngestClaim{}, false, nil
-			}
-		}
-	}
-	if errors.Is(err, os.ErrExist) {
-		return contracts.SourceIngestClaim{}, false, nil
-	}
-
+	key := sourceLockKey(ref)
+	var existing contracts.SourceIngestClaim
+	found, err := store.metaGet(key, &existing)
 	if err != nil {
 		return contracts.SourceIngestClaim{}, false, err
 	}
-
-	encoded, encodeErr := canonicalJSON(claim)
-	if encodeErr != nil {
-		_ = file.Close()
-		_ = os.Remove(lockPath)
-
-		return contracts.SourceIngestClaim{}, false, encodeErr
+	if found && sourceClaimLive(existing, acquiredAt) {
+		return contracts.SourceIngestClaim{}, false, nil
+	}
+	if !found {
+		// Honor a live legacy on-disk lock on a pre-migration root.
+		if held, legacyErr := store.legacyClaimHeld(ref, acquiredAt); legacyErr != nil {
+			return contracts.SourceIngestClaim{}, false, legacyErr
+		} else if held {
+			return contracts.SourceIngestClaim{}, false, nil
+		}
 	}
 
-	if _, err := file.Write(encoded); err != nil {
-		_ = file.Close()
-		_ = os.Remove(lockPath)
-
-		return contracts.SourceIngestClaim{}, false, err
-	}
-
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(lockPath)
-
-		return contracts.SourceIngestClaim{}, false, err
-	}
-
-	if err := file.Close(); err != nil {
-		_ = os.Remove(lockPath)
-
-		return contracts.SourceIngestClaim{}, false, err
-	}
-
-	if err := fsyncDir(filepath.Dir(lockPath)); err != nil {
-		_ = os.Remove(lockPath)
-
+	if err := store.metaPut(key, claim); err != nil {
 		return contracts.SourceIngestClaim{}, false, err
 	}
 
 	return claim, true, nil
 }
 
-func (store *FilesystemStore) removeExpiredSourceIngestClaim(
-	lockPath string,
+// legacyClaimHeld reports whether a pre-migration on-disk lock file holds a live
+// claim; expired legacy files are removed best-effort.
+func (store *FilesystemStore) legacyClaimHeld(
 	ref contracts.SourceObjectRef,
 	now time.Time,
 ) (bool, error) {
+	lockPath := store.sourceObjectLockPath(ref)
 	var existing contracts.SourceIngestClaim
 	if err := readJSON(lockPath, &existing); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return true, nil
-		}
-		info, statErr := os.Stat(lockPath)
-		if statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				return true, nil
-			}
-
-			return false, statErr
-		}
-		if now.Sub(info.ModTime()) <= sourceIngestClaimTTL {
+			// No legacy lock file: nothing to honor.
 			return false, nil
 		}
-		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return false, err
-		}
-		if err := fsyncDir(filepath.Dir(lockPath)); err != nil {
-			return false, err
-		}
-
+		// A present-but-unreadable lock (corrupt/permission) is ambiguous;
+		// surface it rather than silently allowing a second writer to acquire.
+		return false, fmt.Errorf("read legacy source lock %s: %w", lockPath, err)
+	}
+	if sourceClaimLive(existing, now) {
 		return true, nil
 	}
-	if !sourceObjectRefsEqual(existing.SourceObject, ref) {
-		return false, errors.New("source ingest claim references a different source object")
-	}
-	acquiredAt := existing.AcquiredAt
-	if acquiredAt.IsZero() {
-		info, statErr := os.Stat(lockPath)
-		if statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				return true, nil
-			}
+	_ = os.Remove(lockPath)
 
-			return false, statErr
-		}
-		acquiredAt = info.ModTime()
-	}
-	if now.Sub(acquiredAt) <= sourceIngestClaimTTL {
-		return false, nil
-	}
-	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, err
-	}
-	if err := fsyncDir(filepath.Dir(lockPath)); err != nil {
-		return false, err
-	}
-
-	return true, nil
+	return false, nil
 }
 
 func (store *FilesystemStore) ReleaseSourceIngest(
 	ctx context.Context,
 	claim contracts.SourceIngestClaim,
 ) error {
-	err := ctx.Err()
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	err = validateSourceObjectRef(claim.SourceObject)
-	if err != nil {
+	if err := validateSourceObjectRef(claim.SourceObject); err != nil {
 		return err
 	}
 
@@ -253,24 +203,37 @@ func (store *FilesystemStore) ReleaseSourceIngest(
 		return errors.New("source ingest claim_id is required")
 	}
 
-	lockPath := store.sourceObjectLockPath(claim.SourceObject)
+	unlock := store.lockKey("source-ingest:" + sourceObjectRefKey(claim.SourceObject))
+	defer unlock()
 
+	key := sourceLockKey(claim.SourceObject)
 	var existing contracts.SourceIngestClaim
-	err = readJSON(lockPath, &existing)
+	found, err := store.metaGet(key, &existing)
 	if err != nil {
+		return err
+	}
+	if found {
+		if existing.ClaimID != claim.ClaimID {
+			return errors.New("source ingest claim is owned by another writer")
+		}
+
+		return store.metaDelete(key)
+	}
+
+	// Legacy on-disk lock fallback for a pre-migration root.
+	lockPath := store.sourceObjectLockPath(claim.SourceObject)
+	var legacy contracts.SourceIngestClaim
+	if err := readJSON(lockPath, &legacy); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 
 		return err
 	}
-
-	if existing.ClaimID != claim.ClaimID {
+	if legacy.ClaimID != claim.ClaimID {
 		return errors.New("source ingest claim is owned by another writer")
 	}
-
-	err = os.Remove(lockPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 

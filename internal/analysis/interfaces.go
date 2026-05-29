@@ -35,6 +35,10 @@ type JobReceipt interface {
 	Job() contracts.AnalyzerJob
 	Ack(ctx context.Context) error
 	Retry(ctx context.Context, cause error) error
+	// Park returns the job to the work queue without consuming a retry or
+	// dead-lettering it. Used when an analyzer's circuit breaker is open so the
+	// job waits for the analyzer to recover instead of failing.
+	Park(ctx context.Context) error
 }
 
 type JobSource interface {

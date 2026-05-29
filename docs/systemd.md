@@ -19,7 +19,8 @@ RabbitMQ access, and analyzers only read and write FILESTORE.
 - `gmeow-workers.target` groups analysis workers such as
   `gmeow-worker@1.service`.
 - `gmeow-interfaces.target` groups user-facing interfaces:
-  `gmeow-mcp.service`, `gmeow-rest.service`, and `gmeow-imap.service`.
+  `gmeow-mcp.service`, `gmeow-rest.service`, `gmeow-imap.service`, and
+  `gmeow-jmap.service`.
 - `gmeow.slice` provides a shared resource-control cgroup for accounting and
   operator overrides.
 
@@ -53,8 +54,14 @@ is `gmeow.slice`, all `gmeow*.target` files, and all `gmeow*.service` files.
 
 Enable and start `gmeow.target`, then enable and start the desired instance
 units. A typical email deployment enables `gmeow-source@primary.service`,
-`gmeow-worker@1.service`, `gmeow-mcp.service`, `gmeow-rest.service`, and
-`gmeow-imap.service`.
+`gmeow-worker@1.service`, `gmeow-mcp.service`, `gmeow-rest.service`,
+`gmeow-imap.service`, and `gmeow-jmap.service`.
+
+The JMAP interface authenticates clients with QUERY-backed bearer tokens rather
+than a configured password. Mint a token for each client with
+`gmeow-admin --config <config> query token create --client-id <id>`; the command
+prints a 128-character token once and stores only its hash in PostgreSQL. Clients
+present it as `Authorization: Bearer <token>`.
 
 Add more source or worker instances with additional template instances such as
 `gmeow-source@archive.service` or `gmeow-worker@2.service`.

@@ -34,6 +34,7 @@ service QueryService {
   rpc GetOperationByRequestHash(OperationByRequestHashRequest) returns (OperationLookupResponse);
   rpc Rebuild(Empty) returns (Empty);
   rpc ProjectChanged(ProjectChangedRequest) returns (Empty);
+  rpc ValidateBearerToken(ValidateBearerTokenRequest) returns (ValidateBearerTokenResponse);
 }
 
 message ProjectRequest {
@@ -343,3 +344,10 @@ message OperationLookupResponse {
 }
 
 message ProjectChangedRequest { string since = 1; }
+
+message ValidateBearerTokenRequest { string token = 1; }
+
+message ValidateBearerTokenResponse {
+  bool valid = 1;
+  string client_id = 2;
+}

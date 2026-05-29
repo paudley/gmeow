@@ -4,6 +4,12 @@ This document describes the current Go runtime that replaces the old Python
 application. It is the detailed architecture guide for the branch being prepared
 to become the main Gmeow implementation.
 
+The state-of-the-art target for the FILESTORE object store — content-addressed
+packs with chunk-level dedup, content-aware compression, a DAG/permanode
+versioning model, and the recovery model — is described in
+`docs/architecture/OBJECT_STORE_SOTA.md`, with the phased path in
+`docs/architecture/OBJECT_STORE_ROADMAP.md`.
+
 The only retained Python code is `python/`, published as `gmeow-intel`, an
 external ANALYSIS adapter package. It is not the application runtime, does not
 load `gmeow.toml`, does not own scheduling, and does not talk to PostgreSQL,

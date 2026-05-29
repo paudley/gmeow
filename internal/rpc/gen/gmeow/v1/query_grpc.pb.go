@@ -46,6 +46,7 @@ const (
 	QueryService_GetOperationByRequestHash_FullMethodName = "/gmeow.v1.QueryService/GetOperationByRequestHash"
 	QueryService_Rebuild_FullMethodName                   = "/gmeow.v1.QueryService/Rebuild"
 	QueryService_ProjectChanged_FullMethodName            = "/gmeow.v1.QueryService/ProjectChanged"
+	QueryService_ValidateBearerToken_FullMethodName       = "/gmeow.v1.QueryService/ValidateBearerToken"
 )
 
 // QueryServiceClient is the client API for QueryService service.
@@ -79,6 +80,7 @@ type QueryServiceClient interface {
 	GetOperationByRequestHash(ctx context.Context, in *OperationByRequestHashRequest, opts ...grpc.CallOption) (*OperationLookupResponse, error)
 	Rebuild(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 	ProjectChanged(ctx context.Context, in *ProjectChangedRequest, opts ...grpc.CallOption) (*Empty, error)
+	ValidateBearerToken(ctx context.Context, in *ValidateBearerTokenRequest, opts ...grpc.CallOption) (*ValidateBearerTokenResponse, error)
 }
 
 type queryServiceClient struct {
@@ -359,6 +361,16 @@ func (c *queryServiceClient) ProjectChanged(ctx context.Context, in *ProjectChan
 	return out, nil
 }
 
+func (c *queryServiceClient) ValidateBearerToken(ctx context.Context, in *ValidateBearerTokenRequest, opts ...grpc.CallOption) (*ValidateBearerTokenResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ValidateBearerTokenResponse)
+	err := c.cc.Invoke(ctx, QueryService_ValidateBearerToken_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // QueryServiceServer is the server API for QueryService service.
 // All implementations must embed UnimplementedQueryServiceServer
 // for forward compatibility.
@@ -390,6 +402,7 @@ type QueryServiceServer interface {
 	GetOperationByRequestHash(context.Context, *OperationByRequestHashRequest) (*OperationLookupResponse, error)
 	Rebuild(context.Context, *Empty) (*Empty, error)
 	ProjectChanged(context.Context, *ProjectChangedRequest) (*Empty, error)
+	ValidateBearerToken(context.Context, *ValidateBearerTokenRequest) (*ValidateBearerTokenResponse, error)
 	mustEmbedUnimplementedQueryServiceServer()
 }
 
@@ -480,6 +493,9 @@ func (UnimplementedQueryServiceServer) Rebuild(context.Context, *Empty) (*Empty,
 }
 func (UnimplementedQueryServiceServer) ProjectChanged(context.Context, *ProjectChangedRequest) (*Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProjectChanged not implemented")
+}
+func (UnimplementedQueryServiceServer) ValidateBearerToken(context.Context, *ValidateBearerTokenRequest) (*ValidateBearerTokenResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ValidateBearerToken not implemented")
 }
 func (UnimplementedQueryServiceServer) mustEmbedUnimplementedQueryServiceServer() {}
 func (UnimplementedQueryServiceServer) testEmbeddedByValue()                      {}
@@ -988,6 +1004,24 @@ func _QueryService_ProjectChanged_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _QueryService_ValidateBearerToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ValidateBearerTokenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ValidateBearerToken(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ValidateBearerToken_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ValidateBearerToken(ctx, req.(*ValidateBearerTokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // QueryService_ServiceDesc is the grpc.ServiceDesc for QueryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1102,6 +1136,10 @@ var QueryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ProjectChanged",
 			Handler:    _QueryService_ProjectChanged_Handler,
+		},
+		{
+			MethodName: "ValidateBearerToken",
+			Handler:    _QueryService_ValidateBearerToken_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

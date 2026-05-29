@@ -21,6 +21,7 @@ exports/
 .mypy_cache/
 .coverage
 htmlcov/
+.go-build-cache/
 
 # coding-ethos generated runtime output
 .code-ethos/cache/

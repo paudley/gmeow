@@ -51,13 +51,14 @@ func TestPutSameBytesDedupesToOneObjectDirectory(t *testing.T) {
 	if second != first {
 		t.Fatalf("duplicate bytes produced different digest: %s != %s", second, first)
 	}
-	if count := countObjectDirs(t, store.root); count != 1 {
-		t.Fatalf("expected one object directory, got %d", count)
+	if count := countObjects(t, store); count != 1 {
+		t.Fatalf("expected one object, got %d", count)
 	}
-	for _, name := range []string{blobFilename, manifestFilename} {
-		if _, err := os.Stat(store.objectPath(first, name)); err != nil {
-			t.Fatalf("missing %s: %v", name, err)
-		}
+	if ok, err := store.metaHas(manifestKey(first)); err != nil || !ok {
+		t.Fatalf("expected manifest in metadata store: ok=%t err=%v", ok, err)
+	}
+	if ok, err := store.hasRecipe(first); err != nil || !ok {
+		t.Fatalf("expected content recipe: ok=%t err=%v", ok, err)
 	}
 	if recovery, err := store.ExportRecoveryJSON(
 		ctx,
@@ -169,14 +170,12 @@ func TestLookupSourceObjectDoesNotWalkUnindexedFilestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(
-		store.packedSourceIndexShardPath(sourceObjectRefKey(ref)),
-	); err != nil {
+	// The source object/alias indexes live in Pebble now; drop their keys so the
+	// lookup has no index entry to find.
+	if err := store.metaDelete("si/" + sourceObjectRefKey(ref)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(
-		store.packedSourceAliasIndexShardPath(sourceAliasKey(ref)),
-	); err != nil {
+	if err := store.metaDelete("sa/" + sourceAliasKey(ref)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -223,7 +222,7 @@ func TestAttachProvenanceEnablesZeroPayloadLookup(t *testing.T) {
 	if !ok || found != digest {
 		t.Fatalf("expected attached provenance lookup hit, ok=%t digest=%s", ok, found)
 	}
-	if count := countObjectDirs(t, store.root); count != 1 {
+	if count := countObjects(t, store); count != 1 {
 		t.Fatalf("metadata-only provenance attach wrote payload object: %d", count)
 	}
 }
@@ -281,20 +280,10 @@ func TestSourceIngestClaimReclaimsExpiredLock(t *testing.T) {
 	if !acquired {
 		t.Fatal("expected first claim to acquire")
 	}
-	lockPath := store.sourceObjectLockPath(ref)
-	expired := time.Now().Add(-(sourceIngestClaimTTL + time.Minute))
-	if err := os.Chtimes(lockPath, expired, expired); err != nil {
-		t.Fatal(err)
-	}
-	claim.AcquiredAt = expired
-	encoded, err := canonicalJSON(claim)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(lockPath, encoded, 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(lockPath, expired, expired); err != nil {
+	// Age the claim past its TTL in the metadata store; the next acquire
+	// reclaims it.
+	claim.AcquiredAt = time.Now().Add(-(sourceIngestClaimTTL + time.Minute)).UTC()
+	if err := store.metaPut(sourceLockKey(ref), claim); err != nil {
 		t.Fatal(err)
 	}
 
@@ -310,7 +299,7 @@ func TestSourceIngestClaimReclaimsExpiredLock(t *testing.T) {
 	}
 }
 
-func TestSourceIngestClaimReclaimsZeroTimestampLockByModTime(t *testing.T) {
+func TestSourceIngestClaimZeroTimestampTreatedAsLive(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	ref := contracts.SourceObjectRef{
@@ -326,29 +315,17 @@ func TestSourceIngestClaimReclaimsZeroTimestampLockByModTime(t *testing.T) {
 	if !acquired {
 		t.Fatal("expected first claim to acquire")
 	}
-	lockPath := store.sourceObjectLockPath(ref)
+	// A claim with no AcquiredAt has unknown age; it is treated conservatively as
+	// live and must not be reclaimed out from under an in-flight writer.
 	claim.AcquiredAt = time.Time{}
-	encoded, err := canonicalJSON(claim)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(lockPath, encoded, 0o640); err != nil {
-		t.Fatal(err)
-	}
-	expired := time.Now().Add(-(sourceIngestClaimTTL + time.Minute))
-	if err := os.Chtimes(lockPath, expired, expired); err != nil {
+	if err := store.metaPut(sourceLockKey(ref), claim); err != nil {
 		t.Fatal(err)
 	}
 
-	nextClaim, acquired, err := store.TryAcquireSourceIngest(ctx, ref)
-	if err != nil {
+	if _, acquired, err := store.TryAcquireSourceIngest(ctx, ref); err != nil {
 		t.Fatal(err)
-	}
-	if !acquired {
-		t.Fatal("expected zero timestamp claim to be reclaimed by mtime")
-	}
-	if nextClaim.ClaimID == claim.ClaimID {
-		t.Fatal("expected replacement claim")
+	} else if acquired {
+		t.Fatal("expected zero-timestamp claim to be treated as live (not reclaimed)")
 	}
 }
 
@@ -362,7 +339,7 @@ func TestPutRejectsObjectWithoutFacet(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing facet error")
 	}
-	if count := countObjectDirs(t, store.root); count != 0 {
+	if count := countObjects(t, store); count != 0 {
 		t.Fatalf("object was written before validation failed: %d dirs", count)
 	}
 }
@@ -401,7 +378,7 @@ func TestPutDoesNotCreateLegacyRecoverySidecarOnExistingObject(t *testing.T) {
 	}
 }
 
-func TestPutRefusesToRepairIncompleteObjectDirectory(t *testing.T) {
+func TestPutSelfHealsIncompleteObject(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	request := PutRequest{
@@ -412,26 +389,41 @@ func TestPutRefusesToRepairIncompleteObjectDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(store.objectPath(digest, blobFilename)); err != nil {
+	// Remove the content recipe, leaving a manifest in the metadata LSM without
+	// retrievable content: an incomplete object.
+	if err := store.metaDelete(objectRecipeKey(digest)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Open(ctx, digest); err == nil {
+		t.Fatal("expected read to fail while content recipe is missing")
+	}
 
-	_, err = store.Put(ctx, PutRequest{
+	// Re-putting the same bytes self-heals the object: the missing recipe is
+	// re-derived and the content becomes retrievable again, with no error and
+	// no duplicate object.
+	healed, err := store.Put(ctx, PutRequest{
 		Reader: strings.NewReader("hello"),
 		Facets: []contracts.Facet{{Kind: "file"}},
 	})
-
-	if err == nil {
-		t.Fatal("expected incomplete object directory error")
-	}
-	if !strings.Contains(err.Error(), "missing immutable blob") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	report, err := store.Verify(ctx, VerifyRequest{})
 	if err != nil {
+		t.Fatalf("re-put should self-heal incomplete object: %v", err)
+	}
+	if healed != digest {
+		t.Fatalf("re-put produced a different digest: %s != %s", healed, digest)
+	}
+	if has, err := store.hasRecipe(digest); err != nil || !has {
+		t.Fatalf("content recipe was not restored: has=%t err=%v", has, err)
+	}
+	reader, err := store.Open(ctx, digest)
+	if err != nil {
+		t.Fatalf("object did not become readable after self-heal: %v", err)
+	}
+	if err := reader.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertFinding(t, report, "blob_read_failed")
+	if count := countObjects(t, store); count != 1 {
+		t.Fatalf("self-heal must not duplicate the object: %d", count)
+	}
 }
 
 func TestPutCommitsNoStagedObjectDirectories(t *testing.T) {
@@ -444,15 +436,29 @@ func TestPutCommitsNoStagedObjectDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parent := filepath.Dir(store.objectDir(digest))
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		t.Fatal(err)
+
+	// Objects carry no per-object directory at all: the manifest is in the
+	// metadata LSM and content in shared chunk packs. Neither a committed nor a
+	// staged object directory should exist on disk.
+	if _, err := os.Stat(store.objectDir(digest)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a per-object directory was created, stat err=%v", err)
 	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "."+string(digest)+".") {
-			t.Fatalf("staged object directory was left behind: %s", entry.Name())
-		}
+	if _, err := os.Stat(
+		filepath.Join(store.root, "objects"),
+	); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
+		t.Fatalf("objects/ tree was created, stat err=%v", err)
+	}
+
+	// The object remains fully retrievable.
+	reader, err := store.Open(ctx, digest)
+	if err != nil {
+		t.Fatalf("object not readable: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -525,12 +531,12 @@ func TestWriteAnnotationWritesIndependentCompressedJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var annotation contracts.Annotation
-	if err := store.readCompressedJSON(
-		store.objectPath(digest, "analysis.json.zst"),
-		&annotation,
-	); err != nil {
+	annotation, ok, err := store.readPackedAnnotation(digest, "analysis", "")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected packed analysis annotation to be retrievable")
 	}
 	if annotation.Data["summary"] != "ok" {
 		t.Fatalf("annotation was not round-tripped: %#v", annotation)
@@ -567,12 +573,12 @@ func TestWriteOverlaysUpdatesManifestAndAnnotation(t *testing.T) {
 	if manifest.Overlays["category"] != "review" || manifest.Overlays["visible"] != true {
 		t.Fatalf("overlays were not merged into manifest: %#v", manifest.Overlays)
 	}
-	var overlay contracts.Annotation
-	if err := store.readCompressedJSON(
-		store.objectPath(digest, "overlays.json.zst"),
-		&overlay,
-	); err != nil {
+	overlay, ok, err := store.readPackedAnnotation(digest, "overlays", "")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected packed overlays annotation to be retrievable")
 	}
 	if overlay.Kind != "overlays" || overlay.Data["category"] != "review" {
 		t.Fatalf("overlay annotation was not written: %#v", overlay)
@@ -826,13 +832,6 @@ func TestWalkProjectionReadsAnnotationsAndIgnoresRecovery(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(
-		store.objectPath(digest, recoveryFilename),
-		[]byte("not json"),
-		0o640,
-	); err != nil {
-		t.Fatal(err)
-	}
 	objects := []ProjectionObject{}
 	if err := store.WalkProjection(ctx, func(object ProjectionObject) error {
 		objects = append(objects, object)
@@ -946,7 +945,7 @@ func TestWriteAnnotationRejectsMissingObject(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing target object error")
 	}
-	if count := countObjectDirs(t, store.root); count != 0 {
+	if count := countObjects(t, store); count != 0 {
 		t.Fatalf("annotation created an orphan object directory: %d dirs", count)
 	}
 }
@@ -978,42 +977,6 @@ func TestWriteAnnotationRejectsReservedKinds(t *testing.T) {
 	}
 }
 
-func TestVerifyReportsCompressedRecoveryHashMismatch(t *testing.T) {
-	store := NewFilesystemStore(t.TempDir())
-	ctx := context.Background()
-	digest, err := store.Put(ctx, PutRequest{
-		Reader: strings.NewReader("hello"),
-		Facets: []contracts.Facet{{Kind: "file"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var recovery recoverySidecar
-	recoveryContent, err := store.ExportRecoveryJSON(ctx, digest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(recoveryContent, &recovery); err != nil {
-		t.Fatal(err)
-	}
-	recovery.CompressedBlake3 = strings.Repeat("0", 64)
-	recovery.CompressedSHA256 = strings.Repeat("1", 64)
-	recovery.CompressedSize++
-	recoveryPath := store.objectPath(digest, recoveryFilename)
-	if err := atomicWriteJSON(recoveryPath, recovery); err != nil {
-		t.Fatal(err)
-	}
-	report, err := store.Verify(ctx, VerifyRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.Status != VerifyStatusError {
-		t.Fatalf("expected recovery mismatch report: %#v", report)
-	}
-	assertFinding(t, report, "recovery_compressed_hash_mismatch")
-	assertFinding(t, report, "recovery_compressed_size_mismatch")
-}
-
 func TestVerifyReportsPackedRecoveryHashMismatch(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
@@ -1032,9 +995,8 @@ func TestVerifyReportsPackedRecoveryHashMismatch(t *testing.T) {
 	if err := json.Unmarshal(recoveryContent, &recovery); err != nil {
 		t.Fatal(err)
 	}
-	recovery.CompressedBlake3 = strings.Repeat("0", 64)
-	recovery.CompressedSHA256 = strings.Repeat("1", 64)
-	recovery.CompressedSize++
+	recovery.UncompressedBlake3 = strings.Repeat("0", 64)
+	recovery.UncompressedSHA256 = strings.Repeat("1", 64)
 	if err := store.writePackedRecovery(ctx, digest, recovery); err != nil {
 		t.Fatal(err)
 	}
@@ -1045,11 +1007,10 @@ func TestVerifyReportsPackedRecoveryHashMismatch(t *testing.T) {
 	if report.Status != VerifyStatusError {
 		t.Fatalf("expected packed recovery mismatch report: %#v", report)
 	}
-	assertFinding(t, report, "recovery_compressed_hash_mismatch")
-	assertFinding(t, report, "recovery_compressed_size_mismatch")
+	assertFinding(t, report, "recovery_uncompressed_hash_mismatch")
 }
 
-func TestVerifyReportsInterruptedAnnotationWrites(t *testing.T) {
+func TestVerifyReportsUnreadableExternalAnnotation(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	digest, err := store.Put(ctx, PutRequest{
@@ -1059,18 +1020,29 @@ func TestVerifyReportsInterruptedAnnotationWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(
-		store.objectPath(digest, "analysis.summary.json.zst"),
-		[]byte("not zstd"),
-		0o640,
-	); err != nil {
+	// A large annotation externalizes its payload into the content-addressed
+	// chunk store; dropping that payload's recipe simulates lost content that
+	// verify must surface when it resolves the object's annotations.
+	if err := store.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest: digest,
+		Kind:         "analysis",
+		AnalyzerName: "summary",
+		Data: map[string]any{
+			"summary": strings.Repeat("x", annotationInlineMaxBytes*2),
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(
-		store.objectPath(digest, ".analysis.summary.json.zst.interrupted"),
-		[]byte("partial"),
-		0o640,
-	); err != nil {
+
+	var entry packedObjectAnnotationEntry
+	ok, err := store.metaGet(annotationKey(digest, "analysis", "summary"), &entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || entry.ExternalDigest == "" {
+		t.Fatalf("expected large annotation to externalize: ok=%t %#v", ok, entry)
+	}
+	if err := store.metaDelete(objectRecipeKey(entry.ExternalDigest)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1078,39 +1050,10 @@ func TestVerifyReportsInterruptedAnnotationWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	if report.Status != VerifyStatusError {
-		t.Fatalf("expected interrupted annotation write report: %#v", report)
+		t.Fatalf("expected unreadable annotation report: %#v", report)
 	}
 	assertFinding(t, report, "annotation_read_failed")
-	assertFinding(t, report, "staged_write_leftover")
-}
-
-func TestVerifyReportsObjectDirectoryUnderWrongPrefix(t *testing.T) {
-	store := NewFilesystemStore(t.TempDir())
-	ctx := context.Background()
-	digest, err := store.Put(ctx, PutRequest{
-		Reader: strings.NewReader("hello"),
-		Facets: []contracts.Facet{{Kind: "file"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrongDir := filepath.Join(store.root, "objects", "blake3", "ff", "ff", string(digest))
-	if err := os.MkdirAll(filepath.Dir(wrongDir), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(store.objectDir(digest), wrongDir); err != nil {
-		t.Fatal(err)
-	}
-	report, err := store.Verify(ctx, VerifyRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.Status != VerifyStatusError {
-		t.Fatalf("expected wrong prefix report: %#v", report)
-	}
-	assertFinding(t, report, "object_path_mismatch")
 }
 
 func TestCompoundStableIdentityAndStructure(t *testing.T) {
@@ -1278,7 +1221,7 @@ func TestCompoundMergePreservesBlobAndRecoverySidecar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	originalBlob, err := os.ReadFile(store.objectPath(compound, blobFilename))
+	originalBlob, err := store.readBlob(compound)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1297,7 +1240,7 @@ func TestCompoundMergePreservesBlobAndRecoverySidecar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	currentBlob, err := os.ReadFile(store.objectPath(compound, blobFilename))
+	currentBlob, err := store.readBlob(compound)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1350,7 +1293,7 @@ func TestCompoundWithoutStableObjectIDFailsBeforeWriting(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing object ID error")
 	}
-	if count := countObjectDirs(t, store.root); count != 0 {
+	if count := countObjects(t, store); count != 0 {
 		t.Fatalf("compound was written before validation failed: %d dirs", count)
 	}
 }
@@ -1386,7 +1329,7 @@ func TestCompoundRejectsInvalidPartsBeforeWriting(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected invalid compound part error")
 			}
-			if count := countObjectDirs(t, store.root); count != 0 {
+			if count := countObjects(t, store); count != 0 {
 				t.Fatalf("compound was written before validation failed: %d dirs", count)
 			}
 		})
@@ -1414,14 +1357,13 @@ func TestVerifyReportsCorruptBytesMissingRecoveryAndDanglingPart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(store.packedRecoveryShardPath(string(compound))); err != nil {
+	// Recovery sidecars live in Pebble now; drop the compound's key so verify
+	// reports it missing.
+	if err := store.metaDelete("rec/" + string(compound)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(
-		store.objectPath(digest, blobFilename),
-		[]byte("not zstd"),
-		0o640,
-	); err != nil {
+	// Drop the content recipe so reads and verify fail on unreadable content.
+	if err := store.metaDelete(objectRecipeKey(digest)); err != nil {
 		t.Fatal(err)
 	}
 	healthy, err := store.Put(ctx, PutRequest{
@@ -1624,11 +1566,9 @@ func TestCleanupSourceLocksRemovesOnlyExpiredLocks(t *testing.T) {
 	if _, ok, err := store.TryAcquireSourceIngest(ctx, freshRef); err != nil || !ok {
 		t.Fatalf("acquire fresh lock: ok=%t err=%v", ok, err)
 	}
-	if err := os.Chtimes(
-		store.sourceObjectLockPath(expiredRef),
-		expiredClaim.AcquiredAt.Add(-sourceIngestClaimTTL),
-		time.Now().Add(-2*sourceIngestClaimTTL),
-	); err != nil {
+	// Age only the expired claim past its TTL in the metadata store.
+	expiredClaim.AcquiredAt = time.Now().Add(-2 * sourceIngestClaimTTL).UTC()
+	if err := store.metaPut(sourceLockKey(expiredRef), expiredClaim); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1639,16 +1579,11 @@ func TestCleanupSourceLocksRemovesOnlyExpiredLocks(t *testing.T) {
 	if report.RemovedFiles != 1 {
 		t.Fatalf("expected one expired lock removed: %#v", report)
 	}
-	if _, err := os.Stat(
-		store.sourceObjectLockPath(expiredRef),
-	); !errors.Is(
-		err,
-		os.ErrNotExist,
-	) {
-		t.Fatalf("expired lock still exists: %v", err)
+	if has, err := store.metaHas(sourceLockKey(expiredRef)); err != nil || has {
+		t.Fatalf("expired lock still present: has=%t err=%v", has, err)
 	}
-	if _, err := os.Stat(store.sourceObjectLockPath(freshRef)); err != nil {
-		t.Fatalf("fresh lock was removed: %v", err)
+	if has, err := store.metaHas(sourceLockKey(freshRef)); err != nil || !has {
+		t.Fatalf("fresh lock was removed: has=%t err=%v", has, err)
 	}
 }
 
@@ -1688,9 +1623,10 @@ func TestStorageBreakdownIncludesObjectAndPackedMetadataFiles(t *testing.T) {
 	if report.TotalAllocatedBytes <= 0 || report.TotalLogicalBytes <= 0 {
 		t.Fatalf("expected positive totals: %#v", report)
 	}
-	for _, role := range []string{"blob", "manifest", "packed_recovery", "packed_source_index", "packed_source_alias_index"} {
-		assertStorageRole(t, report, role)
-	}
+	// The source/alias/recovery indexes are now shared Pebble metadata rather
+	// than per-object sidecar files, so a per-object breakdown only surfaces the
+	// object's own directory files.
+	assertStorageRole(t, report, "manifest")
 }
 
 func TestStorageBreakdownRecursesCompoundPartsByRequest(t *testing.T) {
@@ -1756,7 +1692,7 @@ func TestStorageBreakdownRecursesCompoundPartsByRequest(t *testing.T) {
 	}
 }
 
-func TestResolvePathIdentifiesObjectFileAndPackedShard(t *testing.T) {
+func TestResolvePathIdentifiesPackedShard(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	ref := contracts.SourceObjectRef{
@@ -1779,20 +1715,9 @@ func TestResolvePathIdentifiesObjectFileAndPackedShard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	blobReport, err := store.ResolvePath(ctx, PathResolveRequest{
-		Path: store.objectPath(digest, blobFilename),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if blobReport.Kind != "object" ||
-		blobReport.Role != "blob" ||
-		blobReport.ObjectDigest != digest ||
-		blobReport.Manifest == nil ||
-		blobReport.Manifest.ObjectDigest != digest {
-		t.Fatalf("unexpected object path report: %#v", blobReport)
-	}
-
+	// Source indexes write through Pebble now; ResolvePath still inspects legacy
+	// on-disk shards, so build one to resolve.
+	writeLegacySourceIndexShard(t, store, ref, digest)
 	shardReport, err := store.ResolvePath(ctx, PathResolveRequest{
 		Path:         store.packedSourceIndexShardPath(sourceObjectRefKey(ref)),
 		RecordsLimit: 1,
@@ -1808,7 +1733,7 @@ func TestResolvePathIdentifiesObjectFileAndPackedShard(t *testing.T) {
 	}
 }
 
-func TestResolvePathIdentifiesSourceCursorAndLock(t *testing.T) {
+func TestResolvePathIdentifiesSourceCursor(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	cursor := contracts.SourceCursor{
@@ -1831,27 +1756,6 @@ func TestResolvePathIdentifiesSourceCursorAndLock(t *testing.T) {
 		cursorReport.SourceCursor.SourceName != cursor.SourceName {
 		t.Fatalf("unexpected cursor report: %#v", cursorReport)
 	}
-
-	ref := contracts.SourceObjectRef{
-		SourceKind: "gmail",
-		SourceName: "primary",
-		ExternalID: "message-1",
-	}
-	claim, acquired, err := store.TryAcquireSourceIngest(ctx, ref)
-	if err != nil || !acquired {
-		t.Fatalf("acquire lock: acquired=%t err=%v", acquired, err)
-	}
-	lockReport, err := store.ResolvePath(ctx, PathResolveRequest{
-		Path: store.sourceObjectLockPath(ref),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lockReport.Kind != "source_lock" ||
-		lockReport.IngestClaim == nil ||
-		lockReport.IngestClaim.ClaimID != claim.ClaimID {
-		t.Fatalf("unexpected lock report: %#v", lockReport)
-	}
 }
 
 func TestResolvePathRejectsOutsideAndSymlinkEscape(t *testing.T) {
@@ -1873,26 +1777,20 @@ func TestResolvePathRejectsOutsideAndSymlinkEscape(t *testing.T) {
 	}
 }
 
-func countObjectDirs(t *testing.T, root string) int {
+// countObjects returns the number of stored objects by counting manifest keys
+// in the metadata LSM. Objects no longer have per-object directories, so the
+// manifest key space is the authoritative object inventory.
+func countObjects(t *testing.T, store *FilesystemStore) int {
 	t.Helper()
 	count := 0
-	base := filepath.Join(root, "objects", "blake3")
-	err := filepath.WalkDir(base, func(_ string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() && looksLikeDigest(entry.Name()) {
-			count++
-			return filepath.SkipDir
-		}
+	if err := store.metaIterPrefix("m/", func(_ string, _ []byte) error {
+		count++
+
 		return nil
-	})
-	if errors.Is(err, os.ErrNotExist) {
-		return 0
-	}
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
+
 	return count
 }
 

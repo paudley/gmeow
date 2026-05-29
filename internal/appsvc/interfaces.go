@@ -67,6 +67,10 @@ type JMAPQueryReader interface {
 	) (contracts.JMAPEmailState, error)
 }
 
+type TokenValidator interface {
+	ValidateBearerToken(ctx context.Context, token string) (string, bool, error)
+}
+
 type ObjectReader interface {
 	ReadManifest(
 		ctx context.Context,

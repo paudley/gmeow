@@ -5,6 +5,7 @@ package filestore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -20,7 +21,6 @@ import (
 // preceding intact records, and that scanPackedShard reports the torn span
 // for repair.
 func TestPackedShardReaderSkipsTornTail(t *testing.T) {
-	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()
 	ref := contracts.SourceObjectRef{
 		SourceKind:      "test",
@@ -29,19 +29,17 @@ func TestPackedShardReaderSkipsTornTail(t *testing.T) {
 		ExternalVersion: "v1",
 	}
 	digest := contracts.ObjectDigest(strings.Repeat("a", 64))
-	if err := store.writePackedSourceObjectIndex(ctx, sourceObjectIndexEntry{
-		SourceObject: ref,
-		ObjectDigest: digest,
-		UpdatedAt:    time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("write first record: %v", err)
-	}
-	path := store.packedSourceIndexShardPath(sourceObjectRefKey(ref))
+	// The four packed indexes now write through Pebble; the JSONL shard format
+	// remains only for reading legacy on-disk shards (verify/compact/resolve).
+	// Build a legacy shard directly to exercise the still-live torn-tail
+	// detect-and-repair machinery.
+	path := filepath.Join(t.TempDir(), packedShardFilename)
+	writeLegacyPackedShard(t, path, legacySourceIndexPayload(t, ref, digest))
 	intactSize := fileSize(t, path)
 
 	// Append a torn record: a length prefix that promises 100 bytes followed
-	// by 30 bytes of junk and no terminating newline. This is what a crashed
-	// or backup-interrupted write looks like on disk.
+	// by junk and no terminating newline. This is what a crashed or
+	// backup-interrupted write looks like on disk.
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o640)
 	if err != nil {
 		t.Fatal(err)
@@ -51,18 +49,6 @@ func TestPackedShardReaderSkipsTornTail(t *testing.T) {
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
-	}
-
-	// Reads must still return the intact record without an error.
-	entry, found, err := store.readPackedSourceObjectIndex(ctx, ref)
-	if err != nil {
-		t.Fatalf("read packed index after torn tail: %v", err)
-	}
-	if !found {
-		t.Fatal("intact record was hidden by the torn tail")
-	}
-	if entry.ObjectDigest != digest {
-		t.Fatalf("got digest %q, want %q", entry.ObjectDigest, digest)
 	}
 
 	// scanPackedShard must report the torn span so verify --repair can truncate.
@@ -136,22 +122,6 @@ func TestPackedShardReaderAcceptsRecordsLargerThanReadBuffer(t *testing.T) {
 	}
 }
 
-// TestPackedShardRejectsOversizedRecord exercises the G10 size cap.
-func TestPackedShardRejectsOversizedRecord(t *testing.T) {
-	store := NewFilesystemStore(t.TempDir())
-	ctx := context.Background()
-	hugeHints := map[string]any{"blob": strings.Repeat("X", packedRecordMaxBytes)}
-	digest := contracts.ObjectDigest(strings.Repeat("c", 64))
-	err := store.writePackedRecovery(ctx, digest, recoverySidecar{
-		SchemaVersion:       "1",
-		Digest:              string(digest),
-		ManifestSourceHints: hugeHints,
-	})
-	if !errors.Is(err, ErrPackedRecordTooLarge) {
-		t.Fatalf("got %v, want ErrPackedRecordTooLarge", err)
-	}
-}
-
 // TestPackedShardFlockReleasesOnClose confirms that closing a shard file
 // releases the advisory lock, so a second writer can immediately proceed.
 // The previous .locks/ directory-mutex did not have this property — it
@@ -197,4 +167,57 @@ func fileSize(t *testing.T, path string) int64 {
 		t.Fatal(err)
 	}
 	return info.Size()
+}
+
+// writeLegacyPackedShard writes the given payloads into a length-prefixed JSONL
+// shard at path, creating parent directories. The packed indexes now write
+// through Pebble, so this is the way tests construct the legacy on-disk shards
+// that the read/verify/compact/resolve machinery still consumes.
+func writeLegacyPackedShard(t *testing.T, path string, payloads ...[]byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	var content []byte
+	for _, payload := range payloads {
+		content = append(content, encodePackedShardLine(payload)...)
+	}
+	if err := os.WriteFile(path, content, 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// legacySourceIndexPayload marshals a source-object index entry as it would
+// appear inside a legacy packed shard.
+func legacySourceIndexPayload(
+	t *testing.T,
+	ref contracts.SourceObjectRef,
+	digest contracts.ObjectDigest,
+) []byte {
+	t.Helper()
+	payload, err := json.Marshal(packedSourceObjectIndexEntry{
+		SourceObject: ref,
+		ObjectDigest: digest,
+		UpdatedAt:    time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+// writeLegacySourceIndexShard builds a single-record legacy source-index shard
+// at the location the store's resolver/verify code expects for ref.
+func writeLegacySourceIndexShard(
+	t *testing.T,
+	store *FilesystemStore,
+	ref contracts.SourceObjectRef,
+	digest contracts.ObjectDigest,
+) {
+	t.Helper()
+	writeLegacyPackedShard(
+		t,
+		store.packedSourceIndexShardPath(sourceObjectRefKey(ref)),
+		legacySourceIndexPayload(t, ref, digest),
+	)
 }

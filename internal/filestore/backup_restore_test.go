@@ -64,24 +64,11 @@ func TestTornTailRepair(t *testing.T) {
 		SourceKind: "test", SourceName: "torn", ExternalID: "id-1", ExternalVersion: "v1",
 	}
 	digest := contracts.ObjectDigest(strings.Repeat("b", 64))
-	if err := store.writePackedSourceObjectIndex(ctx, sourceObjectIndexEntry{
-		SourceObject: ref,
-		ObjectDigest: digest,
-		UpdatedAt:    time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.writePackedSourceObjectIndex(ctx, sourceObjectIndexEntry{
-		SourceObject: contracts.SourceObjectRef{
-			SourceKind: "test", SourceName: "torn", ExternalID: "id-2", ExternalVersion: "v1",
-		},
-		ObjectDigest: digest,
-		UpdatedAt:    time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
+	// The packed indexes write through Pebble now; the JSONL shard format is
+	// retained only for reading and repairing legacy on-disk shards. Build one
+	// directly so verify --repair exercises the torn-tail truncation path.
 	shardPath := store.packedSourceIndexShardPath(sourceObjectRefKey(ref))
+	writeLegacyPackedShard(t, shardPath, legacySourceIndexPayload(t, ref, digest))
 	intactSize := fileSize(t, shardPath)
 
 	file, err := os.OpenFile(shardPath, os.O_WRONLY|os.O_APPEND, 0o640)
@@ -139,12 +126,12 @@ func TestOrphanBlobRepair(t *testing.T) {
 		SourceKind: "test", SourceName: "orphan",
 		ExternalID: "msg-orphan", ExternalVersion: "v1",
 	}
-	shardPath := store.packedSourceIndexShardPath(sourceObjectRefKey(ref))
-	if err := os.Remove(shardPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	// The source object/alias indexes live in Pebble now; drop their keys to
+	// simulate a lost index that verify --repair must rebuild from the manifest.
+	if err := store.metaDelete("si/" + sourceObjectRefKey(ref)); err != nil {
 		t.Fatal(err)
 	}
-	aliasShardPath := store.packedSourceAliasIndexShardPath(sourceAliasKey(ref))
-	if err := os.Remove(aliasShardPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := store.metaDelete("sa/" + sourceAliasKey(ref)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -209,17 +196,13 @@ func TestCompactDeduplicatesShards(t *testing.T) {
 	ref := contracts.SourceObjectRef{
 		SourceKind: "test", SourceName: "dup", ExternalID: "id-dup", ExternalVersion: "v1",
 	}
-	for range 5 {
-		if err := store.writePackedSourceObjectIndex(ctx, sourceObjectIndexEntry{
-			SourceObject: ref,
-			ObjectDigest: contracts.ObjectDigest(strings.Repeat("d", 64)),
-			UpdatedAt:    time.Now().UTC(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
+	wantDigest := contracts.ObjectDigest(strings.Repeat("d", 64))
+	// Compaction operates on the legacy on-disk shards (the live write path is
+	// Pebble). Build a shard holding five duplicate records for one key so the
+	// dedup machinery has something to collapse.
 	shardPath := store.packedSourceIndexShardPath(sourceObjectRefKey(ref))
+	dup := legacySourceIndexPayload(t, ref, wantDigest)
+	writeLegacyPackedShard(t, shardPath, dup, dup, dup, dup, dup)
 	beforeSize := fileSize(t, shardPath)
 
 	report, err := store.Compact(ctx, false)
@@ -238,15 +221,21 @@ func TestCompactDeduplicatesShards(t *testing.T) {
 		t.Fatalf("shard did not shrink: before=%d after=%d", beforeSize, afterSize)
 	}
 
-	entry, found, err := store.readPackedSourceObjectIndex(ctx, ref)
-	if err != nil {
+	var kept []packedSourceObjectIndexEntry
+	if err := scanPackedRecords(
+		shardPath,
+		func(entry packedSourceObjectIndexEntry) error {
+			kept = append(kept, entry)
+			return nil
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
-	if !found {
-		t.Fatal("record lost after compaction")
+	if len(kept) != 1 {
+		t.Fatalf("expected one record after compaction, got %d", len(kept))
 	}
-	if entry.ObjectDigest != contracts.ObjectDigest(strings.Repeat("d", 64)) {
-		t.Fatalf("wrong digest after compaction: %s", entry.ObjectDigest)
+	if kept[0].ObjectDigest != wantDigest {
+		t.Fatalf("wrong digest after compaction: %s", kept[0].ObjectDigest)
 	}
 }
 

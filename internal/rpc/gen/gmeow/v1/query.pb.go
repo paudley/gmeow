@@ -3277,6 +3277,102 @@ func (x *ProjectChangedRequest) GetSince() string {
 	return ""
 }
 
+type ValidateBearerTokenRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidateBearerTokenRequest) Reset() {
+	*x = ValidateBearerTokenRequest{}
+	mi := &file_gmeow_v1_query_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidateBearerTokenRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidateBearerTokenRequest) ProtoMessage() {}
+
+func (x *ValidateBearerTokenRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gmeow_v1_query_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidateBearerTokenRequest.ProtoReflect.Descriptor instead.
+func (*ValidateBearerTokenRequest) Descriptor() ([]byte, []int) {
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *ValidateBearerTokenRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+type ValidateBearerTokenResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Valid         bool                   `protobuf:"varint,1,opt,name=valid,proto3" json:"valid,omitempty"`
+	ClientId      string                 `protobuf:"bytes,2,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidateBearerTokenResponse) Reset() {
+	*x = ValidateBearerTokenResponse{}
+	mi := &file_gmeow_v1_query_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidateBearerTokenResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidateBearerTokenResponse) ProtoMessage() {}
+
+func (x *ValidateBearerTokenResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gmeow_v1_query_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidateBearerTokenResponse.ProtoReflect.Descriptor instead.
+func (*ValidateBearerTokenResponse) Descriptor() ([]byte, []int) {
+	return file_gmeow_v1_query_proto_rawDescGZIP(), []int{55}
+}
+
+func (x *ValidateBearerTokenResponse) GetValid() bool {
+	if x != nil {
+		return x.Valid
+	}
+	return false
+}
+
+func (x *ValidateBearerTokenResponse) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
 var File_gmeow_v1_query_proto protoreflect.FileDescriptor
 
 const file_gmeow_v1_query_proto_rawDesc = "" +
@@ -3529,7 +3625,12 @@ const file_gmeow_v1_query_proto_rawDesc = "" +
 	"\toperation\x18\x01 \x01(\v2\x19.gmeow.v1.OperationRecordR\toperation\x12\x14\n" +
 	"\x05found\x18\x02 \x01(\bR\x05found\"-\n" +
 	"\x15ProjectChangedRequest\x12\x14\n" +
-	"\x05since\x18\x01 \x01(\tR\x05since2\xee\x10\n" +
+	"\x05since\x18\x01 \x01(\tR\x05since\"2\n" +
+	"\x1aValidateBearerTokenRequest\x12\x14\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\"P\n" +
+	"\x1bValidateBearerTokenResponse\x12\x14\n" +
+	"\x05valid\x18\x01 \x01(\bR\x05valid\x12\x1b\n" +
+	"\tclient_id\x18\x02 \x01(\tR\bclientId2\xd2\x11\n" +
 	"\fQueryService\x124\n" +
 	"\aProject\x12\x18.gmeow.v1.ProjectRequest\x1a\x0f.gmeow.v1.Empty\x12@\n" +
 	"\rProjectObject\x12\x1e.gmeow.v1.ProjectObjectRequest\x1a\x0f.gmeow.v1.Empty\x12L\n" +
@@ -3557,7 +3658,8 @@ const file_gmeow_v1_query_proto_rawDesc = "" +
 	"\fGetOperation\x12 .gmeow.v1.OperationLookupRequest\x1a!.gmeow.v1.OperationLookupResponse\x12g\n" +
 	"\x19GetOperationByRequestHash\x12'.gmeow.v1.OperationByRequestHashRequest\x1a!.gmeow.v1.OperationLookupResponse\x12+\n" +
 	"\aRebuild\x12\x0f.gmeow.v1.Empty\x1a\x0f.gmeow.v1.Empty\x12B\n" +
-	"\x0eProjectChanged\x12\x1f.gmeow.v1.ProjectChangedRequest\x1a\x0f.gmeow.v1.EmptyB5Z3blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1;gmeowv1b\x06proto3"
+	"\x0eProjectChanged\x12\x1f.gmeow.v1.ProjectChangedRequest\x1a\x0f.gmeow.v1.Empty\x12b\n" +
+	"\x13ValidateBearerToken\x12$.gmeow.v1.ValidateBearerTokenRequest\x1a%.gmeow.v1.ValidateBearerTokenResponseB5Z3blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1;gmeowv1b\x06proto3"
 
 var (
 	file_gmeow_v1_query_proto_rawDescOnce sync.Once
@@ -3571,7 +3673,7 @@ func file_gmeow_v1_query_proto_rawDescGZIP() []byte {
 	return file_gmeow_v1_query_proto_rawDescData
 }
 
-var file_gmeow_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 54)
+var file_gmeow_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 56)
 var file_gmeow_v1_query_proto_goTypes = []any{
 	(*ProjectRequest)(nil),                  // 0: gmeow.v1.ProjectRequest
 	(*ProjectObjectRequest)(nil),            // 1: gmeow.v1.ProjectObjectRequest
@@ -3627,32 +3729,34 @@ var file_gmeow_v1_query_proto_goTypes = []any{
 	(*OperationByRequestHashRequest)(nil),   // 51: gmeow.v1.OperationByRequestHashRequest
 	(*OperationLookupResponse)(nil),         // 52: gmeow.v1.OperationLookupResponse
 	(*ProjectChangedRequest)(nil),           // 53: gmeow.v1.ProjectChangedRequest
-	(*Manifest)(nil),                        // 54: gmeow.v1.Manifest
-	(*Annotation)(nil),                      // 55: gmeow.v1.Annotation
-	(*ProjectionObject)(nil),                // 56: gmeow.v1.ProjectionObject
-	(*SourceCursor)(nil),                    // 57: gmeow.v1.SourceCursor
-	(*Structure)(nil),                       // 58: gmeow.v1.Structure
-	(*Relationship)(nil),                    // 59: gmeow.v1.Relationship
-	(*GraphFact)(nil),                       // 60: gmeow.v1.GraphFact
-	(*AnalyzerSpec)(nil),                    // 61: gmeow.v1.AnalyzerSpec
-	(*Empty)(nil),                           // 62: gmeow.v1.Empty
+	(*ValidateBearerTokenRequest)(nil),      // 54: gmeow.v1.ValidateBearerTokenRequest
+	(*ValidateBearerTokenResponse)(nil),     // 55: gmeow.v1.ValidateBearerTokenResponse
+	(*Manifest)(nil),                        // 56: gmeow.v1.Manifest
+	(*Annotation)(nil),                      // 57: gmeow.v1.Annotation
+	(*ProjectionObject)(nil),                // 58: gmeow.v1.ProjectionObject
+	(*SourceCursor)(nil),                    // 59: gmeow.v1.SourceCursor
+	(*Structure)(nil),                       // 60: gmeow.v1.Structure
+	(*Relationship)(nil),                    // 61: gmeow.v1.Relationship
+	(*GraphFact)(nil),                       // 62: gmeow.v1.GraphFact
+	(*AnalyzerSpec)(nil),                    // 63: gmeow.v1.AnalyzerSpec
+	(*Empty)(nil),                           // 64: gmeow.v1.Empty
 }
 var file_gmeow_v1_query_proto_depIdxs = []int32{
-	54, // 0: gmeow.v1.ProjectRequest.manifest:type_name -> gmeow.v1.Manifest
-	55, // 1: gmeow.v1.ProjectRequest.annotations:type_name -> gmeow.v1.Annotation
-	56, // 2: gmeow.v1.ProjectObjectRequest.object:type_name -> gmeow.v1.ProjectionObject
-	57, // 3: gmeow.v1.ProjectSourceCursorRequest.cursor:type_name -> gmeow.v1.SourceCursor
+	56, // 0: gmeow.v1.ProjectRequest.manifest:type_name -> gmeow.v1.Manifest
+	57, // 1: gmeow.v1.ProjectRequest.annotations:type_name -> gmeow.v1.Annotation
+	58, // 2: gmeow.v1.ProjectObjectRequest.object:type_name -> gmeow.v1.ProjectionObject
+	59, // 3: gmeow.v1.ProjectSourceCursorRequest.cursor:type_name -> gmeow.v1.SourceCursor
 	3,  // 4: gmeow.v1.SearchRequest.provenance:type_name -> gmeow.v1.ProvenanceFilter
 	4,  // 5: gmeow.v1.SearchRequest.relationships:type_name -> gmeow.v1.RelationshipFilter
 	6,  // 6: gmeow.v1.SearchResponse.results:type_name -> gmeow.v1.SearchResult
-	58, // 7: gmeow.v1.StructureResponse.structure:type_name -> gmeow.v1.Structure
+	60, // 7: gmeow.v1.StructureResponse.structure:type_name -> gmeow.v1.Structure
 	4,  // 8: gmeow.v1.RelationshipRequest.filter:type_name -> gmeow.v1.RelationshipFilter
-	59, // 9: gmeow.v1.RelationshipResponse.relationships:type_name -> gmeow.v1.Relationship
-	60, // 10: gmeow.v1.GraphResponse.facts:type_name -> gmeow.v1.GraphFact
-	61, // 11: gmeow.v1.AnalysisStatusRequest.analyzers:type_name -> gmeow.v1.AnalyzerSpec
+	61, // 9: gmeow.v1.RelationshipResponse.relationships:type_name -> gmeow.v1.Relationship
+	62, // 10: gmeow.v1.GraphResponse.facts:type_name -> gmeow.v1.GraphFact
+	63, // 11: gmeow.v1.AnalysisStatusRequest.analyzers:type_name -> gmeow.v1.AnalyzerSpec
 	17, // 12: gmeow.v1.AnalysisStatusResponse.statuses:type_name -> gmeow.v1.AnalysisStatus
 	20, // 13: gmeow.v1.VectorSearchResponse.results:type_name -> gmeow.v1.VectorSearchResult
-	57, // 14: gmeow.v1.SourceCursorResponse.cursors:type_name -> gmeow.v1.SourceCursor
+	59, // 14: gmeow.v1.SourceCursorResponse.cursors:type_name -> gmeow.v1.SourceCursor
 	25, // 15: gmeow.v1.JMAPMailboxResponse.mailboxes:type_name -> gmeow.v1.JMAPMailbox
 	25, // 16: gmeow.v1.UpdateJMAPMailboxCatalogRequest.mailboxes:type_name -> gmeow.v1.JMAPMailbox
 	29, // 17: gmeow.v1.JMAPMailboxEmailCountResponse.counts:type_name -> gmeow.v1.JMAPMailboxEmailCount
@@ -3688,37 +3792,39 @@ var file_gmeow_v1_query_proto_depIdxs = []int32{
 	49, // 47: gmeow.v1.QueryService.FailOperation:input_type -> gmeow.v1.FailOperationRequest
 	50, // 48: gmeow.v1.QueryService.GetOperation:input_type -> gmeow.v1.OperationLookupRequest
 	51, // 49: gmeow.v1.QueryService.GetOperationByRequestHash:input_type -> gmeow.v1.OperationByRequestHashRequest
-	62, // 50: gmeow.v1.QueryService.Rebuild:input_type -> gmeow.v1.Empty
+	64, // 50: gmeow.v1.QueryService.Rebuild:input_type -> gmeow.v1.Empty
 	53, // 51: gmeow.v1.QueryService.ProjectChanged:input_type -> gmeow.v1.ProjectChangedRequest
-	62, // 52: gmeow.v1.QueryService.Project:output_type -> gmeow.v1.Empty
-	62, // 53: gmeow.v1.QueryService.ProjectObject:output_type -> gmeow.v1.Empty
-	62, // 54: gmeow.v1.QueryService.ProjectSourceCursor:output_type -> gmeow.v1.Empty
-	7,  // 55: gmeow.v1.QueryService.Search:output_type -> gmeow.v1.SearchResponse
-	9,  // 56: gmeow.v1.QueryService.ResolveMailIdentity:output_type -> gmeow.v1.MailIdentityResolveResponse
-	11, // 57: gmeow.v1.QueryService.Structure:output_type -> gmeow.v1.StructureResponse
-	13, // 58: gmeow.v1.QueryService.Relationships:output_type -> gmeow.v1.RelationshipResponse
-	15, // 59: gmeow.v1.QueryService.Graph:output_type -> gmeow.v1.GraphResponse
-	18, // 60: gmeow.v1.QueryService.AnalysisStatus:output_type -> gmeow.v1.AnalysisStatusResponse
-	21, // 61: gmeow.v1.QueryService.VectorSearch:output_type -> gmeow.v1.VectorSearchResponse
-	23, // 62: gmeow.v1.QueryService.SourceCursors:output_type -> gmeow.v1.SourceCursorResponse
-	26, // 63: gmeow.v1.QueryService.JMAPMailboxes:output_type -> gmeow.v1.JMAPMailboxResponse
-	33, // 64: gmeow.v1.QueryService.JMAPEmailStates:output_type -> gmeow.v1.JMAPEmailStateResponse
-	35, // 65: gmeow.v1.QueryService.JMAPEmailQuery:output_type -> gmeow.v1.JMAPEmailQueryResponse
-	38, // 66: gmeow.v1.QueryService.JMAPThreads:output_type -> gmeow.v1.JMAPThreadResponse
-	41, // 67: gmeow.v1.QueryService.JMAPBlobLookup:output_type -> gmeow.v1.JMAPBlobLookupResponse
-	26, // 68: gmeow.v1.QueryService.UpdateJMAPMailboxCatalog:output_type -> gmeow.v1.JMAPMailboxResponse
-	30, // 69: gmeow.v1.QueryService.JMAPMailboxEmailCounts:output_type -> gmeow.v1.JMAPMailboxEmailCountResponse
-	32, // 70: gmeow.v1.QueryService.UpdateJMAPEmailState:output_type -> gmeow.v1.JMAPEmailState
-	46, // 71: gmeow.v1.QueryService.CreateOrGetOperation:output_type -> gmeow.v1.CreateOrGetOperationResponse
-	62, // 72: gmeow.v1.QueryService.AppendOperationProgress:output_type -> gmeow.v1.Empty
-	62, // 73: gmeow.v1.QueryService.CompleteOperation:output_type -> gmeow.v1.Empty
-	62, // 74: gmeow.v1.QueryService.FailOperation:output_type -> gmeow.v1.Empty
-	52, // 75: gmeow.v1.QueryService.GetOperation:output_type -> gmeow.v1.OperationLookupResponse
-	52, // 76: gmeow.v1.QueryService.GetOperationByRequestHash:output_type -> gmeow.v1.OperationLookupResponse
-	62, // 77: gmeow.v1.QueryService.Rebuild:output_type -> gmeow.v1.Empty
-	62, // 78: gmeow.v1.QueryService.ProjectChanged:output_type -> gmeow.v1.Empty
-	52, // [52:79] is the sub-list for method output_type
-	25, // [25:52] is the sub-list for method input_type
+	54, // 52: gmeow.v1.QueryService.ValidateBearerToken:input_type -> gmeow.v1.ValidateBearerTokenRequest
+	64, // 53: gmeow.v1.QueryService.Project:output_type -> gmeow.v1.Empty
+	64, // 54: gmeow.v1.QueryService.ProjectObject:output_type -> gmeow.v1.Empty
+	64, // 55: gmeow.v1.QueryService.ProjectSourceCursor:output_type -> gmeow.v1.Empty
+	7,  // 56: gmeow.v1.QueryService.Search:output_type -> gmeow.v1.SearchResponse
+	9,  // 57: gmeow.v1.QueryService.ResolveMailIdentity:output_type -> gmeow.v1.MailIdentityResolveResponse
+	11, // 58: gmeow.v1.QueryService.Structure:output_type -> gmeow.v1.StructureResponse
+	13, // 59: gmeow.v1.QueryService.Relationships:output_type -> gmeow.v1.RelationshipResponse
+	15, // 60: gmeow.v1.QueryService.Graph:output_type -> gmeow.v1.GraphResponse
+	18, // 61: gmeow.v1.QueryService.AnalysisStatus:output_type -> gmeow.v1.AnalysisStatusResponse
+	21, // 62: gmeow.v1.QueryService.VectorSearch:output_type -> gmeow.v1.VectorSearchResponse
+	23, // 63: gmeow.v1.QueryService.SourceCursors:output_type -> gmeow.v1.SourceCursorResponse
+	26, // 64: gmeow.v1.QueryService.JMAPMailboxes:output_type -> gmeow.v1.JMAPMailboxResponse
+	33, // 65: gmeow.v1.QueryService.JMAPEmailStates:output_type -> gmeow.v1.JMAPEmailStateResponse
+	35, // 66: gmeow.v1.QueryService.JMAPEmailQuery:output_type -> gmeow.v1.JMAPEmailQueryResponse
+	38, // 67: gmeow.v1.QueryService.JMAPThreads:output_type -> gmeow.v1.JMAPThreadResponse
+	41, // 68: gmeow.v1.QueryService.JMAPBlobLookup:output_type -> gmeow.v1.JMAPBlobLookupResponse
+	26, // 69: gmeow.v1.QueryService.UpdateJMAPMailboxCatalog:output_type -> gmeow.v1.JMAPMailboxResponse
+	30, // 70: gmeow.v1.QueryService.JMAPMailboxEmailCounts:output_type -> gmeow.v1.JMAPMailboxEmailCountResponse
+	32, // 71: gmeow.v1.QueryService.UpdateJMAPEmailState:output_type -> gmeow.v1.JMAPEmailState
+	46, // 72: gmeow.v1.QueryService.CreateOrGetOperation:output_type -> gmeow.v1.CreateOrGetOperationResponse
+	64, // 73: gmeow.v1.QueryService.AppendOperationProgress:output_type -> gmeow.v1.Empty
+	64, // 74: gmeow.v1.QueryService.CompleteOperation:output_type -> gmeow.v1.Empty
+	64, // 75: gmeow.v1.QueryService.FailOperation:output_type -> gmeow.v1.Empty
+	52, // 76: gmeow.v1.QueryService.GetOperation:output_type -> gmeow.v1.OperationLookupResponse
+	52, // 77: gmeow.v1.QueryService.GetOperationByRequestHash:output_type -> gmeow.v1.OperationLookupResponse
+	64, // 78: gmeow.v1.QueryService.Rebuild:output_type -> gmeow.v1.Empty
+	64, // 79: gmeow.v1.QueryService.ProjectChanged:output_type -> gmeow.v1.Empty
+	55, // 80: gmeow.v1.QueryService.ValidateBearerToken:output_type -> gmeow.v1.ValidateBearerTokenResponse
+	53, // [53:81] is the sub-list for method output_type
+	25, // [25:53] is the sub-list for method input_type
 	25, // [25:25] is the sub-list for extension type_name
 	25, // [25:25] is the sub-list for extension extendee
 	0,  // [0:25] is the sub-list for field type_name
@@ -3736,7 +3842,7 @@ func file_gmeow_v1_query_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gmeow_v1_query_proto_rawDesc), len(file_gmeow_v1_query_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   54,
+			NumMessages:   56,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

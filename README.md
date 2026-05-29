@@ -13,7 +13,7 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 ## Current Go Runtime
 
 - Validates one shared `gmeow.toml` config path for all Go binaries.
-- Stores authoritative content and annotations in FILESTORE object directories.
+- Stores authoritative content as deduplicated, content-addressed chunks and keeps manifests, annotations, and indexes in an embedded metadata key-value store (no per-object directories).
 - Projects FILESTORE manifests into PostgreSQL QUERY tables, pgvector rows, and Apache AGE graph state.
 - Derives analysis work through SCHEDULER and publishes durable RabbitMQ jobs with retry and dead-letter handling.
 - Runs typed gRPC service endpoints for FILESTORE, QUERY, and SCHEDULER over Unix sockets by default.
@@ -26,7 +26,7 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 
 ## Features
 
-- BLAKE3 content identity with zstd-compressed FILESTORE blobs and immutable packed recovery records.
+- BLAKE3 content-addressed chunk storage with zstd (dictionary) compression, an embedded Pebble metadata LSM, and immutable recovery records.
 - Atomic manifest, analysis, overlay, and source-cursor annotations.
 - Rebuildable PostgreSQL projection for facets, provenance, relationships, compound parts, analysis status, graph facts, keywords, embeddings, overlays, and source cursors.
 - Read-only Apache AGE graph inspection over projected graph facts.
@@ -34,6 +34,53 @@ Gmeow is designed for trusted single-user local systems. By default it binds to 
 - Go SOURCE adapters submit normalized content to FILESTORE and use source lookup/ingest claims before payload streaming.
 - Read-only archive import ingests Maildir, mbox, Evolution, Gnus NNML/MH, Thunderbird/Mozilla, and RFC822/EML directories as `mail_message` compounds with Message-ID dedupe.
 - The old Python runtime code is retired. The remaining `python/` package is the explicit ANALYSIS external adapter package.
+
+## FILESTORE Storage Engine
+
+FILESTORE is a content-addressed object store tuned for a workload of many
+small, similar records (email) alongside large immutable media and files. It
+splits into two tiers:
+
+- **Content → content-defined chunks in append-only packs.** Object bytes are
+  split with FastCDC (content-defined chunking), each chunk is addressed by its
+  BLAKE3 hash and zstd-compressed (with a trained dictionary for small similar
+  records), then appended into large sealed segments under `chunk-packs/`.
+  Identical chunks are stored once.
+- **Metadata → an embedded Pebble LSM (`metadata/`).** Manifests, content
+  recipes, annotations, recovery sidecars, and the source/alias/compound-parent
+  indexes are keyed records in one log-structured key-value store. Objects have
+  no per-object directory and no per-object files.
+
+**Why it is useful.** A naive "directory of small files per object" layout
+rounds every ~600-byte manifest up to a 4K filesystem block and spends another
+block on the directory itself — roughly 12 KB on disk for under 1 KB of data
+(~15× space amplification), which at 15M emails is ~175 GB of pure overhead.
+Packing metadata into an LSM (hundreds of records per block-compressed table
+block, near-zero per-record overhead) and content into shared dedup packs
+collapses that back to the actual logical size. Content-defined chunking adds
+cross-object dedup — quoted email threads, repeated attachments, and document
+revisions share chunks — and the store stays fully rebuildable: every chunk is
+self-verifying by its hash, and the metadata store is reconstructable by
+scanning pack contents. See `docs/architecture/FILESTORE.md` and
+`docs/architecture/OBJECT_STORE_SOTA.md`.
+
+**Operating at scale.** The engine is built for the full ~45 TB target:
+
+- **Streaming I/O** — objects are written and read as chunk streams (single-pass
+  chunk-and-hash on put, lazy verify-on-read), so multi-gigabyte media and Drive
+  files are never buffered whole in memory. A read-side pack-descriptor cache
+  avoids reopening a pack per chunk.
+- **Space reclamation** — `delete` removes an object's metadata; online `gc`
+  (mark-and-sweep over a metadata snapshot, with a grace window so concurrent
+  writes are safe) reclaims unreferenced chunk-index entries; `repack` rewrites
+  sealed packs to free the bytes on disk. Reclamation runs while the store keeps
+  serving.
+- **Content-aware compression** — `train-dictionary` trains a zstd dictionary on
+  a sample of small objects and installs it; new chunks adopt it immediately and
+  existing chunks on the next `repack`.
+- **Live operability** — inspection and reclamation commands run against a
+  running `filestore-serve` over gRPC (the metadata store is single-writer), so
+  integrity checks and space reclamation need no downtime.
 
 ## Install
 
@@ -130,9 +177,15 @@ by default. Override `BIN_DIR` only when packaging or deploying to an explicit
 operator-owned path.
 
 Operational commands include `gmeow-admin filestore verify`, `gmeow-admin filestore storage`,
-`gmeow-admin filestore path`, `gmeow-admin filestore compact`, `gmeow-admin filestore cleanup-locks`,
+`gmeow-admin filestore path`, `gmeow-admin filestore delete`, `gmeow-admin filestore gc`,
+`gmeow-admin filestore repack`, `gmeow-admin filestore train-dictionary`,
+`gmeow-admin filestore compact`, `gmeow-admin filestore cleanup-locks`,
 `gmeow-admin query rebuild`, and `gmeow-admin query project-changed --since <RFC3339>` for
-FILESTORE verification, object storage inspection, metadata maintenance, and QUERY projection work.
+FILESTORE verification, object storage inspection, space reclamation (delete → gc → repack),
+dictionary training, metadata maintenance, and QUERY projection work. Inspection and
+reclamation commands run against a live `filestore-serve` over gRPC and fall back to local
+access when it is stopped; `verify --repair`, `compact`, `cleanup-locks`, and `export-recovery`
+require `filestore-serve` stopped.
 Broad or destructive production-like operations require explicit instance confirmation.
 Historical archive mail import is available through
 `gmeow-admin source import --source-name <name> <root...>`. Import roots are
@@ -209,12 +262,12 @@ code does not talk directly to PostgreSQL. See `docs/architecture/JMAP.md`.
 By default, local data is ignored by git and stored under `data/`:
 
 - `data/filestore/` is the Go FILESTORE root.
-- `data/filestore/source-index-v2/` stores packed source identity lookup records so SOURCE
-  hydrate/search paths do not walk object directories.
-- `data/filestore/compound-parent-index-v2/` stores packed reverse child-to-parent references so
-  annotation refresh can update compound parents without scanning the filestore.
-- `data/filestore/recovery-v2/` stores packed object recovery records for emergency operator
-  export.
+- `data/filestore/chunk-packs/` holds append-only, BLAKE3-addressed, zstd-compressed content chunks
+  in large sealed pack segments.
+- `data/filestore/metadata/` is the embedded Pebble LSM holding manifests, content recipes,
+  annotations, recovery sidecars, ingest claims, and the source/alias/compound-parent indexes
+  (key namespaces `m/`, `r/`, `c/`, `a/`, `si/`, `sa/`, `cp/`, `rec/`, `lk/`).
+- `data/filestore/dictionaries/` holds trained zstd dictionaries and the `current` marker.
 - PostgreSQL, RabbitMQ, object storage, query indexes, analysis annotations, and source state are
   runtime data.
 
@@ -243,6 +296,10 @@ Before publishing, run the checklist in `docs/PUBLIC_RELEASE_CHECKLIST.md`.
 
 The detailed runtime architecture lives in `docs/RUNTIME_ARCHITECTURE.md`.
 Subsystem architecture docs live under `docs/architecture/`.
+The state-of-the-art object-store target (content-addressed packs, DAG/permanode
+versioning, recovery model) and its phased path live in
+`docs/architecture/OBJECT_STORE_SOTA.md` and
+`docs/architecture/OBJECT_STORE_ROADMAP.md`.
 FILESTORE backup and restore procedures live in `docs/FILESTORE_BACKUP_RESTORE.md`.
 Component ownership and service boundary rules live in `docs/ARCHITECTURE.md`.
 Testing architecture and mock-minimization rules live in `docs/TESTING.md`.

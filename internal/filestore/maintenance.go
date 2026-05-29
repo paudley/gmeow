@@ -35,10 +35,85 @@ type CompactReport struct {
 	DryRun                bool `json:"dry_run"`
 }
 
+// cleanupSourceLockKeys sweeps expired (or undecodable) ingest claims from the
+// metadata LSM lk/ namespace, counting each into report.RemovedFiles.
+func (store *FilesystemStore) cleanupSourceLockKeys(
+	ctx context.Context,
+	report *CleanupLocksReport,
+) error {
+	now := time.Now().UTC()
+	var expired []string
+	err := store.metaIterPrefix("lk/", func(key string, value []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var claim contracts.SourceIngestClaim
+		if err := json.Unmarshal(value, &claim); err != nil {
+			expired = append(expired, key)
+
+			return nil
+		}
+		if !sourceClaimLive(claim, now) {
+			expired = append(expired, key)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, key := range expired {
+		removed, err := store.deleteExpiredLockKey(key)
+		if err != nil {
+			return err
+		}
+		if removed {
+			report.RemovedFiles++
+		}
+	}
+
+	return nil
+}
+
+// deleteExpiredLockKey removes a lk/ claim only if it is still expired when
+// re-checked under the same per-key lock acquire/release use, so a claim
+// re-acquired between the scan and the sweep is not released out from under its
+// new owner.
+func (store *FilesystemStore) deleteExpiredLockKey(key string) (bool, error) {
+	unlock := store.lockKey("source-ingest:" + strings.TrimPrefix(key, "lk/"))
+	defer unlock()
+
+	present, err := store.metaHas(key)
+	if err != nil {
+		return false, err
+	}
+	if !present {
+		return false, nil
+	}
+
+	// A decodable, still-live claim was re-acquired after the scan: keep it.
+	// Expired or corrupt (undecodable) records fall through and are dropped.
+	var claim contracts.SourceIngestClaim
+	if ok, getErr := store.metaGet(key, &claim); getErr == nil && ok &&
+		sourceClaimLive(claim, time.Now().UTC()) {
+		return false, nil
+	}
+
+	return true, store.metaDelete(key)
+}
+
 func (store *FilesystemStore) CleanupSourceLocks(
 	ctx context.Context,
 ) (CleanupLocksReport, error) {
 	report := CleanupLocksReport{}
+
+	// Sweep expired ingest claims from the metadata LSM (the live home for
+	// claims). Legacy on-disk lock files, if any, are reaped below.
+	if err := store.cleanupSourceLockKeys(ctx, &report); err != nil {
+		return report, err
+	}
+
 	base := filepath.Join(store.root, "source-locks")
 	err := filepath.WalkDir(
 		base,

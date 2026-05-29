@@ -38,6 +38,14 @@ type Server struct {
 
 type Options struct {
 	BearerToken string
+	Validator   TokenValidator
+}
+
+// TokenValidator authenticates JMAP bearer tokens against an external store
+// (QUERY-backed in production). Returning ok=false denies the request; a
+// non-nil error is treated as a denial so authentication fails closed.
+type TokenValidator interface {
+	ValidateBearerToken(ctx context.Context, token string) (string, bool, error)
 }
 
 type sessionResource struct {
@@ -336,8 +344,8 @@ func New(
 	if services == nil {
 		return nil, errors.New("JMAP app services are required")
 	}
-	if strings.TrimSpace(options.BearerToken) == "" {
-		return nil, errors.New("JMAP bearer token is required")
+	if strings.TrimSpace(options.BearerToken) == "" && options.Validator == nil {
+		return nil, errors.New("JMAP requires a bearer token or token validator")
 	}
 
 	return &Server{
@@ -353,6 +361,7 @@ func NewHandler(services *appsvc.Services, options Options) http.Handler {
 	server := handler{
 		services:    services,
 		bearerToken: strings.TrimSpace(options.BearerToken),
+		validator:   options.Validator,
 	}
 	mux.HandleFunc("GET /.well-known/jmap", server.requireBearer(server.handleSession))
 	mux.HandleFunc("GET /jmap/session", server.requireBearer(server.handleSession))
@@ -406,12 +415,13 @@ func (server *Server) Addr() string {
 
 type handler struct {
 	services    *appsvc.Services
+	validator   TokenValidator
 	bearerToken string
 }
 
 func (handler handler) requireBearer(next http.HandlerFunc) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		if handler.bearerToken == "" || bearerToken(request) != handler.bearerToken {
+		if !handler.authorized(request) {
 			writer.Header().Set("WWW-Authenticate", `Bearer realm="gmeow-jmap"`)
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
 
@@ -420,6 +430,23 @@ func (handler handler) requireBearer(next http.HandlerFunc) http.HandlerFunc {
 
 		next(writer, request)
 	}
+}
+
+func (handler handler) authorized(request *http.Request) bool {
+	token := bearerToken(request)
+	if token == "" {
+		return false
+	}
+	if handler.validator != nil {
+		_, ok, err := handler.validator.ValidateBearerToken(request.Context(), token)
+		if err != nil {
+			return false
+		}
+
+		return ok
+	}
+
+	return handler.bearerToken != "" && token == handler.bearerToken
 }
 
 func (handler handler) handleSession(

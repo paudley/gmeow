@@ -22,7 +22,8 @@ rsync -aH --delete --exclude=staging/ --exclude='*.next' <filestore.root>/ <dest
 ```
 
 Also back up `gmeow.toml`, SOPS age identity material, and keep file
-permissions intact for config, secret material, and object directories.
+permissions intact for config, secret material, and the FILESTORE root (the
+`chunk-packs/` and `metadata/` stores).
 
 A backup snapshot is indistinguishable from a hard power-loss snapshot of the
 live process. If the store survives a hard kill, it survives a backup.
@@ -45,26 +46,39 @@ FILESTORE. Do not use recovery records for normal rebuilds; they are emergency h
 only. Export one record with `gmeow-admin --config <restore.toml> filestore export-recovery
 --digest <digest>`.
 
-Normal runtime paths must not walk FILESTORE. Whole-tree walks belong to these
-explicit operator workflows: backup verification, restore verification, QUERY
-rebuild, changed-projection repair, and scheduler scan/repair. SOURCE lookup
-uses packed `source-index-v2/` shards, and compound parent refresh uses packed
-`compound-parent-index-v2/` shards; if either index is missing for historical
-data, normal ingest or an explicit repair workflow recreates it.
+Normal runtime paths must not enumerate FILESTORE. Whole-store scans belong to
+these explicit operator workflows: backup verification, restore verification,
+QUERY rebuild, changed-projection repair, and scheduler scan/repair. SOURCE
+lookup and compound parent refresh read the source-index (`si/`/`sa/`) and
+compound-parent (`cp/`) records from the metadata LSM; if an index record is
+missing for historical data, normal ingest or an explicit repair workflow
+recreates it.
+
+## On-Disk Layout
+
+A current FILESTORE root has two stores plus operational scratch:
+
+- `chunk-packs/` — append-only, BLAKE3-addressed, zstd-compressed content
+  chunks in large sealed pack segments (the data tier).
+- `metadata/` — the embedded Pebble LSM holding manifests (`m/`), content
+  recipes (`r/`), chunk index (`c/`), annotations (`a/`), and the
+  source/alias/compound-parent/recovery indexes (`si/`, `sa/`, `cp/`, `rec/`).
+- `source-cursors/`, `source-locks/`, `staging/` — cursors, ingest claims, and
+  in-flight upload scratch.
+
+Back up the entire FILESTORE root as a unit: a chunk pack is only meaningful
+together with the metadata LSM that indexes it. Take a consistent snapshot
+(stop `filestore-serve`, or use a filesystem/volume snapshot) so the Pebble WAL
+and the packs are captured at the same point.
 
 ## Metadata Maintenance
 
-Current FILESTORE roots write packed v2 metadata:
-
-- `source-index-v2/<hh>/<hh>/records.jsonl`
-- `source-alias-index-v2/<hh>/<hh>/records.jsonl`
-- `compound-parent-index-v2/blake3/<hh>/<hh>/records.jsonl`
-- `recovery-v2/blake3/<hh>/<hh>/records.jsonl`
-
-Legacy roots may still contain `source-index/`, `compound-parent-index/`, and
-per-object `recovery.json` files. Readers fall back to those files, but they can
-be migrated into packed shards. Compact also deduplicates v2 shards, keeping
-only the last record per key:
+A pre-migration root may still contain legacy on-disk metadata: per-object
+directories (`objects/blake3/.../manifest.json.zst`, `blob.zstd`,
+`recovery.json`), the v1 `source-index/` and `compound-parent-index/` trees, and
+the `*-index-v2`/`recovery-v2` packed JSONL shards. Readers still understand
+these, and `compact` migrates them into the metadata LSM (and deduplicates
+legacy shards, keeping only the last record per key):
 
 ```
 gmeow-admin --config <restore.toml> filestore compact --dry-run
@@ -84,17 +98,19 @@ gmeow-admin --config <restore.toml> filestore storage --digest <digest>
 gmeow-admin --config <restore.toml> filestore storage --message-id '<message-id>' --json
 ```
 
-The storage report uses filesystem-allocated bytes as the primary total and
-also shows logical file sizes. Compound objects include part objects unless
-`--no-recursive-parts` is set.
+The storage report shows each object's logical footprint — manifest bytes in
+the metadata LSM and content bytes in the chunk packs — plus any legacy on-disk
+files still present. Because metadata and content are shared/deduped, these are
+logical bytes rather than exclusive per-object allocations. Compound objects
+include part objects unless `--no-recursive-parts` is set.
 
 Resolve an arbitrary FILESTORE path back to its owning data with:
 
-```
+```bash
 gmeow-admin --config <restore.toml> filestore path /absolute/path/inside/filestore
-gmeow-admin --config <restore.toml> filestore path source-index-v2/aa/bb/records.jsonl --json
+gmeow-admin --config <restore.toml> filestore path chunk-packs/0000000000.pack --json
 ```
 
 The path resolver accepts absolute or FILESTORE-relative paths, rejects paths
-outside the configured root, and summarizes packed shard records with a bounded
-sample controlled by `--records-limit`.
+outside the configured root, and (for legacy packed shards) summarizes records
+with a bounded sample controlled by `--records-limit`.

@@ -235,6 +235,15 @@ func (receipt *analysisJobReceipt) Ack(context.Context) error {
 	return receipt.delivery.Ack(false)
 }
 
+func (receipt *analysisJobReceipt) Park(context.Context) error {
+	receipt.source.mutex.Lock()
+	defer receipt.source.mutex.Unlock()
+
+	// Requeue onto the work queue without publishing to the failed queue, so the
+	// job waits for the analyzer to recover instead of consuming retries.
+	return receipt.delivery.Nack(false, true)
+}
+
 func (receipt *analysisJobReceipt) Retry(ctx context.Context, cause error) error {
 	err := receipt.source.publishFailure(ctx, receipt.job, cause)
 	if err != nil {

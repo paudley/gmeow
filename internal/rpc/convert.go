@@ -526,6 +526,318 @@ func FromPBProjectionObject(
 	}, nil
 }
 
+func ToPBStorageBreakdown(
+	report filestore.StorageBreakdownReport,
+) *pb.StorageBreakdownResponse {
+	files := make([]*pb.StorageBreakdownFile, 0, len(report.Files))
+	for _, file := range report.Files {
+		files = append(files, &pb.StorageBreakdownFile{
+			ObjectDigest:   string(file.ObjectDigest),
+			Role:           file.Role,
+			Path:           file.Path,
+			LogicalBytes:   file.LogicalBytes,
+			AllocatedBytes: file.AllocatedBytes,
+			Estimated:      file.Estimated,
+			ReferencedBy:   string(file.ReferencedBy),
+			CompoundRole:   file.CompoundRole,
+			CompoundOrder:  int32(file.CompoundOrder),
+			RecursivePart:  file.RecursivePart,
+		})
+	}
+
+	return &pb.StorageBreakdownResponse{
+		RootDigest:            string(report.RootDigest),
+		Files:                 files,
+		TotalAllocatedBytes:   report.TotalAllocatedBytes,
+		TotalLogicalBytes:     report.TotalLogicalBytes,
+		EstimatedAllocated:    report.EstimatedAllocated,
+		FileCount:             int32(report.FileCount),
+		ReferencedObjectCount: int32(report.ReferencedObjectCount),
+		RecursiveParts:        report.RecursiveParts,
+	}
+}
+
+func FromPBStorageBreakdown(
+	response *pb.StorageBreakdownResponse,
+) filestore.StorageBreakdownReport {
+	files := make([]filestore.StorageBreakdownFile, 0, len(response.GetFiles()))
+	for _, file := range response.GetFiles() {
+		files = append(files, filestore.StorageBreakdownFile{
+			ObjectDigest:   contracts.ObjectDigest(file.GetObjectDigest()),
+			Role:           file.GetRole(),
+			Path:           file.GetPath(),
+			LogicalBytes:   file.GetLogicalBytes(),
+			AllocatedBytes: file.GetAllocatedBytes(),
+			Estimated:      file.GetEstimated(),
+			ReferencedBy:   contracts.ObjectDigest(file.GetReferencedBy()),
+			CompoundRole:   file.GetCompoundRole(),
+			CompoundOrder:  int(file.GetCompoundOrder()),
+			RecursivePart:  file.GetRecursivePart(),
+		})
+	}
+
+	return filestore.StorageBreakdownReport{
+		Files:                 files,
+		RootDigest:            contracts.ObjectDigest(response.GetRootDigest()),
+		TotalAllocatedBytes:   response.GetTotalAllocatedBytes(),
+		TotalLogicalBytes:     response.GetTotalLogicalBytes(),
+		EstimatedAllocated:    response.GetEstimatedAllocated(),
+		FileCount:             int(response.GetFileCount()),
+		ReferencedObjectCount: int(response.GetReferencedObjectCount()),
+		RecursiveParts:        response.GetRecursiveParts(),
+	}
+}
+
+func ToPBResolvePath(
+	report filestore.PathResolveReport,
+) (*pb.ResolvePathResponse, error) {
+	records, err := toPBResolvePathRecords(report.Records)
+	if err != nil {
+		return nil, err
+	}
+
+	manifest, err := toPBResolvePathManifest(report.Manifest)
+	if err != nil {
+		return nil, err
+	}
+
+	response := &pb.ResolvePathResponse{
+		Records:        records,
+		Manifest:       manifest,
+		Kind:           report.Kind,
+		Role:           report.Role,
+		InputPath:      report.InputPath,
+		Path:           report.Path,
+		PhysicalPath:   report.PhysicalPath,
+		ObjectDigest:   string(report.ObjectDigest),
+		LogicalBytes:   report.LogicalBytes,
+		AllocatedBytes: report.AllocatedBytes,
+		Estimated:      report.Estimated,
+		RecordCount:    int32(report.RecordCount),
+		RecordsLimit:   int32(report.RecordsLimit),
+		Truncated:      report.Truncated,
+	}
+	if report.SourceObject != nil {
+		response.SourceObject = ToPBSourceObjectRef(*report.SourceObject)
+	}
+	if report.SourceCursor != nil {
+		cursor, cursorErr := ToPBSourceCursor(*report.SourceCursor)
+		if cursorErr != nil {
+			return nil, cursorErr
+		}
+		response.SourceCursor = cursor
+	}
+	if report.IngestClaim != nil {
+		response.IngestClaim = ToPBSourceIngestClaim(*report.IngestClaim)
+	}
+
+	return response, nil
+}
+
+func toPBResolvePathRecords(
+	records []filestore.PathResolveRecord,
+) ([]*pb.ResolvePathRecord, error) {
+	out := make([]*pb.ResolvePathRecord, 0, len(records))
+	for _, record := range records {
+		pbRecord := &pb.ResolvePathRecord{
+			ObjectDigest: string(record.ObjectDigest),
+			ChildDigest:  string(record.ChildDigest),
+			UpdatedAt:    record.UpdatedAt,
+		}
+		if record.SourceObject != nil {
+			pbRecord.SourceObject = ToPBSourceObjectRef(*record.SourceObject)
+		}
+		if record.Recovery != nil {
+			pbRecord.Recovery = &pb.ResolvePathRecovery{
+				Digest:             record.Recovery.Digest,
+				ObjectId:           record.Recovery.ObjectID,
+				IdentityStrategy:   record.Recovery.IdentityStrategy,
+				MediaType:          record.Recovery.MediaType,
+				UncompressedSize:   record.Recovery.UncompressedSize,
+				CompressedSize:     record.Recovery.CompressedSize,
+				UncompressedBlake3: record.Recovery.UncompressedBlake3,
+				CompressedBlake3:   record.Recovery.CompressedBlake3,
+				CreatedAt:          formatTime(record.Recovery.CreatedAt),
+			}
+		}
+		for _, parent := range record.Parents {
+			pbRecord.Parents = append(pbRecord.Parents, &pb.ResolvePathParent{
+				ParentDigest: string(parent.ParentDigest),
+				Role:         parent.Role,
+				UpdatedAt:    formatTime(parent.UpdatedAt),
+			})
+		}
+		out = append(out, pbRecord)
+	}
+
+	return out, nil
+}
+
+func toPBResolvePathManifest(
+	manifest *filestore.PathResolveManifest,
+) (*pb.ResolvePathManifest, error) {
+	if manifest == nil {
+		return nil, nil
+	}
+
+	provenance, err := ToPBProvenance(manifest.Provenance)
+	if err != nil {
+		return nil, err
+	}
+
+	parts, err := ToPBCompoundParts(manifest.Parts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.ResolvePathManifest{
+		Facets:       manifest.Facets,
+		Provenance:   provenance,
+		Parts:        parts,
+		ObjectDigest: string(manifest.ObjectDigest),
+		ObjectId:     manifest.ObjectID,
+		MediaType:    manifest.MediaType,
+		Size:         manifest.Size,
+		Compound:     manifest.Compound,
+	}, nil
+}
+
+func FromPBResolvePath(
+	response *pb.ResolvePathResponse,
+) (filestore.PathResolveReport, error) {
+	records, err := fromPBResolvePathRecords(response.GetRecords())
+	if err != nil {
+		return filestore.PathResolveReport{}, err
+	}
+
+	manifest, err := fromPBResolvePathManifest(response.GetManifest())
+	if err != nil {
+		return filestore.PathResolveReport{}, err
+	}
+
+	report := filestore.PathResolveReport{
+		Records:        records,
+		Manifest:       manifest,
+		Kind:           response.GetKind(),
+		Role:           response.GetRole(),
+		InputPath:      response.GetInputPath(),
+		Path:           response.GetPath(),
+		PhysicalPath:   response.GetPhysicalPath(),
+		ObjectDigest:   contracts.ObjectDigest(response.GetObjectDigest()),
+		LogicalBytes:   response.GetLogicalBytes(),
+		AllocatedBytes: response.GetAllocatedBytes(),
+		Estimated:      response.GetEstimated(),
+		RecordCount:    int(response.GetRecordCount()),
+		RecordsLimit:   int(response.GetRecordsLimit()),
+		Truncated:      response.GetTruncated(),
+	}
+	if ref := response.GetSourceObject(); ref != nil {
+		sourceObject := FromPBSourceObjectRef(ref)
+		report.SourceObject = &sourceObject
+	}
+	if response.GetSourceCursor() != nil {
+		cursor, cursorErr := FromPBSourceCursor(response.GetSourceCursor())
+		if cursorErr != nil {
+			return filestore.PathResolveReport{}, cursorErr
+		}
+		report.SourceCursor = &cursor
+	}
+	if response.GetIngestClaim() != nil {
+		claim, claimErr := FromPBSourceIngestClaim(response.GetIngestClaim())
+		if claimErr != nil {
+			return filestore.PathResolveReport{}, claimErr
+		}
+		report.IngestClaim = &claim
+	}
+
+	return report, nil
+}
+
+func fromPBResolvePathRecords(
+	records []*pb.ResolvePathRecord,
+) ([]filestore.PathResolveRecord, error) {
+	out := make([]filestore.PathResolveRecord, 0, len(records))
+	for _, record := range records {
+		converted := filestore.PathResolveRecord{
+			ObjectDigest: contracts.ObjectDigest(record.GetObjectDigest()),
+			ChildDigest:  contracts.ObjectDigest(record.GetChildDigest()),
+			UpdatedAt:    record.GetUpdatedAt(),
+		}
+		if ref := record.GetSourceObject(); ref != nil {
+			sourceObject := FromPBSourceObjectRef(ref)
+			converted.SourceObject = &sourceObject
+		}
+		if recovery := record.GetRecovery(); recovery != nil {
+			createdAt, parseErr := parseTime(recovery.GetCreatedAt())
+			if parseErr != nil {
+				return nil, fmt.Errorf(
+					"parse recovery created_at %q: %w",
+					recovery.GetCreatedAt(),
+					parseErr,
+				)
+			}
+			converted.Recovery = &filestore.PathResolveRecovery{
+				Digest:             recovery.GetDigest(),
+				ObjectID:           recovery.GetObjectId(),
+				IdentityStrategy:   recovery.GetIdentityStrategy(),
+				MediaType:          recovery.GetMediaType(),
+				UncompressedSize:   recovery.GetUncompressedSize(),
+				CompressedSize:     recovery.GetCompressedSize(),
+				UncompressedBlake3: recovery.GetUncompressedBlake3(),
+				CompressedBlake3:   recovery.GetCompressedBlake3(),
+				CreatedAt:          createdAt,
+			}
+		}
+		for _, parent := range record.GetParents() {
+			updatedAt, parseErr := parseTime(parent.GetUpdatedAt())
+			if parseErr != nil {
+				return nil, fmt.Errorf(
+					"parse parent updated_at %q: %w",
+					parent.GetUpdatedAt(),
+					parseErr,
+				)
+			}
+			converted.Parents = append(converted.Parents, filestore.PathResolveParent{
+				ParentDigest: contracts.ObjectDigest(parent.GetParentDigest()),
+				Role:         parent.GetRole(),
+				UpdatedAt:    updatedAt,
+			})
+		}
+		out = append(out, converted)
+	}
+
+	return out, nil
+}
+
+func fromPBResolvePathManifest(
+	manifest *pb.ResolvePathManifest,
+) (*filestore.PathResolveManifest, error) {
+	if manifest == nil {
+		return nil, nil
+	}
+
+	provenance, err := FromPBProvenance(manifest.GetProvenance())
+	if err != nil {
+		return nil, err
+	}
+
+	parts, err := FromPBCompoundParts(manifest.GetParts())
+	if err != nil {
+		return nil, err
+	}
+
+	return &filestore.PathResolveManifest{
+		Facets:       manifest.GetFacets(),
+		Provenance:   provenance,
+		Parts:        parts,
+		ObjectDigest: contracts.ObjectDigest(manifest.GetObjectDigest()),
+		ObjectID:     manifest.GetObjectId(),
+		MediaType:    manifest.GetMediaType(),
+		Size:         manifest.GetSize(),
+		Compound:     manifest.GetCompound(),
+	}, nil
+}
+
 func ToPBStructure(structure contracts.Structure) (*pb.Structure, error) {
 	roles := make([]*pb.StructureRoleParts, 0, len(structure.PartsByRole))
 	for role, parts := range structure.PartsByRole {
