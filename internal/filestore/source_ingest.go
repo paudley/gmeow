@@ -337,6 +337,15 @@ func (store *FilesystemStore) recordSourceObjectIndexes(
 	digest contracts.ObjectDigest,
 	provenance []contracts.Provenance,
 ) error {
+	return store.recordSourceObjectIndexesTo(ctx, store.syncSink(), digest, provenance)
+}
+
+func (store *FilesystemStore) recordSourceObjectIndexesTo(
+	ctx context.Context,
+	sink metaSink,
+	digest contracts.ObjectDigest,
+	provenance []contracts.Provenance,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -364,10 +373,10 @@ func (store *FilesystemStore) recordSourceObjectIndexes(
 			ObjectDigest: digest,
 			UpdatedAt:    updatedAt,
 		}
-		if err := store.writePackedSourceObjectIndex(ctx, entry); err != nil {
+		if err := store.writePackedSourceObjectIndexTo(ctx, sink, entry); err != nil {
 			return err
 		}
-		if err := store.writePackedSourceAlias(ctx, ref, digest); err != nil {
+		if err := store.writePackedSourceAliasTo(ctx, sink, ref, digest); err != nil {
 			return err
 		}
 	}

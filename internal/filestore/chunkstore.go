@@ -113,6 +113,38 @@ func (store *FilesystemStore) storeBlobContent(
 	return store.metaPut(objectRecipeKey(digest), recipe)
 }
 
+// storeBlobContentBatched is storeBlobContent for in-memory content that buffers
+// every chunk-index write and the recipe into the supplied commitBatch (and
+// defers their fsync) instead of committing each with pebble.Sync. It is the
+// write path for compound envelopes during a batched PutCompound.
+func (store *FilesystemStore) storeBlobContentBatched(
+	ctx context.Context,
+	cb *commitBatch,
+	digest contracts.ObjectDigest,
+	content []byte,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	recipe := objectRecipeEntry{
+		UpdatedAt:    time.Now().UTC(),
+		Digest:       digest,
+		ContentBytes: int64(len(content)),
+		ChunkHashes:  []string{},
+	}
+
+	for _, chunk := range chunkContent(content) {
+		hash, err := store.storeChunkBatched(ctx, cb, chunk)
+		if err != nil {
+			return err
+		}
+		recipe.ChunkHashes = append(recipe.ChunkHashes, hash)
+	}
+
+	return cb.set(objectRecipeKey(digest), recipe)
+}
+
 // streamChunks splits content read from r into content-defined chunks — the
 // same FastCDC boundaries chunkContent produces, since both only ever consider
 // the first chunkMaxSize bytes when choosing a cut — and calls fn for each. It
@@ -188,6 +220,51 @@ func (store *FilesystemStore) storeBlobReader(
 
 	digest := contracts.ObjectDigest(hex.EncodeToString(blakeHash.Sum(nil)))
 	if err := store.metaPut(objectRecipeKey(digest), objectRecipeEntry{
+		UpdatedAt:    time.Now().UTC(),
+		Digest:       digest,
+		ChunkHashes:  chunkHashes,
+		ContentBytes: contentBytes,
+	}); err != nil {
+		return "", "", 0, err
+	}
+
+	return digest, hex.EncodeToString(shaHash.Sum(nil)), contentBytes, nil
+}
+
+// storeBlobReaderBatched is storeBlobReader that buffers every chunk-index write
+// and the recipe into the supplied commitBatch (deferring their fsync) instead
+// of committing each with pebble.Sync. It is the streaming write path for a
+// batched Put: the caller adds the manifest, recovery sidecar, and source
+// indexes to the same batch, then commits once. Content is never fully buffered.
+func (store *FilesystemStore) storeBlobReaderBatched(
+	ctx context.Context,
+	cb *commitBatch,
+	reader io.Reader,
+) (contracts.ObjectDigest, string, int64, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", 0, err
+	}
+
+	blakeHash := blake3.New()
+	shaHash := sha256.New()
+	teed := io.TeeReader(reader, io.MultiWriter(blakeHash, shaHash))
+
+	chunkHashes := []string{}
+	contentBytes, err := streamChunks(teed, func(chunk []byte) error {
+		hash, storeErr := store.storeChunkBatched(ctx, cb, chunk)
+		if storeErr != nil {
+			return storeErr
+		}
+		chunkHashes = append(chunkHashes, hash)
+
+		return nil
+	})
+	if err != nil {
+		return "", "", 0, err
+	}
+
+	digest := contracts.ObjectDigest(hex.EncodeToString(blakeHash.Sum(nil)))
+	if err := cb.set(objectRecipeKey(digest), objectRecipeEntry{
 		UpdatedAt:    time.Now().UTC(),
 		Digest:       digest,
 		ChunkHashes:  chunkHashes,
@@ -358,6 +435,79 @@ func (store *FilesystemStore) storeChunk(
 	return hash, nil
 }
 
+// storeChunkBatched stores a single chunk if not already present, buffering its
+// index entry into cb (committed later with the rest of the object) and
+// recording the touched pack so cb.commit can fsync it once. The pack append is
+// not fsynced here. Dedup has three tiers: the committed chunk index (the common
+// case — the chunk already exists store-wide), this object's own seen set
+// (identical chunks within one Put), and the under-lock re-check against the
+// committed index. Two concurrent Puts of an identical brand-new chunk may each
+// append a copy; that is reclaimable dead space, never a dangling reference,
+// because each Put commits its own index entry for the bytes it wrote.
+func (store *FilesystemStore) storeChunkBatched(
+	ctx context.Context,
+	cb *commitBatch,
+	chunk []byte,
+) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	sum := blake3.Sum256(chunk)
+	hash := hex.EncodeToString(sum[:])
+
+	// Already referenced earlier in this same object — reuse it.
+	if _, ok := cb.seen[hash]; ok {
+		return hash, nil
+	}
+
+	// Fast path: the chunk is already committed store-wide (dedup hit).
+	if _, ok, err := store.lookupChunk(hash); err != nil {
+		return "", err
+	} else if ok {
+		cb.seen[hash] = struct{}{}
+
+		return hash, nil
+	}
+
+	compressed, dictID, err := store.compressChunkContent(chunk)
+	if err != nil {
+		return "", err
+	}
+
+	store.packMu.Lock()
+	defer store.packMu.Unlock()
+
+	// Re-check under the lock: a concurrent writer may have committed it.
+	if _, ok, err := store.lookupChunk(hash); err != nil {
+		return "", err
+	} else if ok {
+		cb.seen[hash] = struct{}{}
+
+		return hash, nil
+	}
+
+	packID, offset, err := store.appendToActivePackNoSync(compressed)
+	if err != nil {
+		return "", err
+	}
+
+	if err := cb.set(chunkIndexKey(hash), chunkIndexEntry{
+		UpdatedAt: time.Now().UTC(),
+		ChunkHash: hash,
+		DictID:    dictID,
+		PackID:    packID,
+		Offset:    offset,
+		Length:    int64(len(compressed)),
+	}); err != nil {
+		return "", err
+	}
+	cb.touchedPacks[packID] = struct{}{}
+	cb.seen[hash] = struct{}{}
+
+	return hash, nil
+}
+
 func (store *FilesystemStore) lookupChunk(hash string) (chunkIndexEntry, bool, error) {
 	var entry chunkIndexEntry
 	ok, err := store.metaGet(chunkIndexKey(hash), &entry)
@@ -450,11 +600,36 @@ func (store *FilesystemStore) readPackBytes(
 	return raw, nil
 }
 
-// appendToActivePack appends compressed chunk bytes to the active (newest,
-// not-yet-full) pack, sealing and rotating when it reaches packTargetBytes.
-// Callers must hold store.packMu. It returns the pack id and the byte offset
-// the chunk was written at.
+// appendToActivePack appends compressed chunk bytes to the active pack and
+// fsyncs the pack file and directory before returning, so the bytes are durable
+// on return. Callers must hold store.packMu. It returns the pack id and the byte
+// offset the chunk was written at. The batched Put path uses
+// appendToActivePackNoSync + syncTouchedPacks instead to amortize the fsync over
+// a whole object; this synchronous form is kept for repack's per-chunk relocate.
 func (store *FilesystemStore) appendToActivePack(
+	compressed []byte,
+) (uint64, int64, error) {
+	id, offset, err := store.appendToActivePackNoSync(compressed)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := store.syncTouchedPacks(map[uint64]struct{}{id: {}}); err != nil {
+		// The bytes may not be durable; force a cache rescan on the next append.
+		store.activePackKnown = false
+
+		return 0, 0, err
+	}
+
+	return id, offset, nil
+}
+
+// appendToActivePackNoSync appends compressed chunk bytes to the active (newest,
+// not-yet-full) pack, sealing and rotating when it reaches packTargetBytes, and
+// returns the pack id and the byte offset the chunk was written at WITHOUT
+// fsyncing. Callers must hold store.packMu and must fsync the returned pack
+// (syncTouchedPacks) before treating the bytes — or any index entry that points
+// at them — as durable.
+func (store *FilesystemStore) appendToActivePackNoSync(
 	compressed []byte,
 ) (uint64, int64, error) {
 	packsDir := filepath.Join(store.root, chunkPacksDir)
@@ -484,16 +659,6 @@ func (store *FilesystemStore) appendToActivePack(
 
 		return 0, 0, err
 	}
-	if err := file.Sync(); err != nil {
-		store.activePackKnown = false
-
-		return 0, 0, err
-	}
-	if err := fsyncDir(packsDir); err != nil {
-		store.activePackKnown = false
-
-		return 0, 0, err
-	}
 
 	// Commit the new active-pack state to the cache: the chunk landed at offset
 	// `size` in pack `id`, growing the pack by len(compressed).
@@ -502,6 +667,37 @@ func (store *FilesystemStore) appendToActivePack(
 	store.activePackSize = size + int64(len(compressed))
 
 	return id, size, nil
+}
+
+// syncTouchedPacks fsyncs each pack the caller wrote to and then fsyncs the pack
+// directory once, making the appended bytes durable. It reopens each pack
+// read-write to flush it (the append handle from appendToActivePackNoSync is
+// already closed); fsync on Linux flushes the whole file regardless of which
+// handle issues it, so a concurrent appender's bytes are flushed too — which is
+// harmless. A missing pack (ENOENT) means a concurrent repack relocated and
+// removed it mid-Put; that surfaces as an error so the Put fails cleanly without
+// committing a dangling reference.
+func (store *FilesystemStore) syncTouchedPacks(packs map[uint64]struct{}) error {
+	if len(packs) == 0 {
+		return nil
+	}
+
+	for id := range packs {
+		file, err := os.OpenFile(store.packPath(id), os.O_WRONLY, 0o640)
+		if err != nil {
+			return err
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+	}
+
+	return fsyncDir(filepath.Join(store.root, chunkPacksDir))
 }
 
 // cachedActivePack returns the active pack id and size from the in-memory cache,

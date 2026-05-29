@@ -68,10 +68,18 @@ func (store *FilesystemStore) writePackedSourceObjectIndex(
 	ctx context.Context,
 	entry sourceObjectIndexEntry,
 ) error {
+	return store.writePackedSourceObjectIndexTo(ctx, store.syncSink(), entry)
+}
+
+func (store *FilesystemStore) writePackedSourceObjectIndexTo(
+	ctx context.Context,
+	sink metaSink,
+	entry sourceObjectIndexEntry,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return store.metaPut(
+	return sink.set(
 		"si/"+sourceObjectRefKey(entry.SourceObject),
 		packedSourceObjectIndexEntry(entry),
 	)
@@ -97,15 +105,16 @@ func (store *FilesystemStore) readPackedSourceObjectIndex(
 	return sourceObjectIndexEntry(entry), true, nil
 }
 
-func (store *FilesystemStore) writePackedSourceAlias(
+func (store *FilesystemStore) writePackedSourceAliasTo(
 	ctx context.Context,
+	sink metaSink,
 	ref contracts.SourceObjectRef,
 	digest contracts.ObjectDigest,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return store.metaPut("sa/"+sourceAliasKey(ref), packedSourceAliasEntry{
+	return sink.set("sa/"+sourceAliasKey(ref), packedSourceAliasEntry{
 		SourceKind: ref.SourceKind,
 		SourceName: ref.SourceName,
 		ExternalID: ref.ExternalID,
@@ -189,10 +198,19 @@ func (store *FilesystemStore) writePackedRecovery(
 	digest contracts.ObjectDigest,
 	recovery recoverySidecar,
 ) error {
+	return store.writePackedRecoveryTo(ctx, store.syncSink(), digest, recovery)
+}
+
+func (store *FilesystemStore) writePackedRecoveryTo(
+	ctx context.Context,
+	sink metaSink,
+	digest contracts.ObjectDigest,
+	recovery recoverySidecar,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return store.metaPut("rec/"+string(digest), packedRecoveryEntry{
+	return sink.set("rec/"+string(digest), packedRecoveryEntry{
 		Digest:    digest,
 		Recovery:  recovery,
 		UpdatedAt: time.Now().UTC(),

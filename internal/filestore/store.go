@@ -86,9 +86,23 @@ func (store *FilesystemStore) Put(
 		return "", err
 	}
 
+	// One commit batch buffers the whole object's metadata (chunk index, recipe,
+	// manifest, recovery sidecar, source indexes) so it commits with a single
+	// pack fsync + a single Pebble Sync instead of one fsync per chunk and per
+	// key — the dominant cost when bulk-importing millions of small mail objects.
+	cb, err := store.newCommitBatch()
+	if err != nil {
+		return "", err
+	}
+	defer cb.close()
+
 	// Stream the content into the chunk store, computing identity in one pass —
 	// the whole object is never buffered, so multi-gigabyte media/files are safe.
-	digest, uncompressedSHA256, size, err := store.storeBlobReader(ctx, request.Reader)
+	digest, uncompressedSHA256, size, err := store.storeBlobReaderBatched(
+		ctx,
+		cb,
+		request.Reader,
+	)
 	if err != nil {
 		return "", err
 	}
@@ -117,11 +131,12 @@ func (store *FilesystemStore) Put(
 		return "", fmt.Errorf("read existing manifest: %w", manifestErr)
 	}
 
-	if err := store.writeManifest(digest, manifest); err != nil {
+	if err := store.writeManifestTo(cb, digest, manifest); err != nil {
 		return "", fmt.Errorf("write manifest: %w", err)
 	}
-	if err := store.writePackedRecovery(
+	if err := store.writePackedRecoveryTo(
 		ctx,
+		cb,
 		digest,
 		recoverySidecarForStreamed(
 			digest,
@@ -134,12 +149,17 @@ func (store *FilesystemStore) Put(
 	); err != nil {
 		return "", fmt.Errorf("write packed recovery sidecar: %w", err)
 	}
-	if err := store.recordSourceObjectIndexes(
+	if err := store.recordSourceObjectIndexesTo(
 		ctx,
+		cb,
 		digest,
 		request.Provenance,
 	); err != nil {
 		return "", err
+	}
+
+	if err := cb.commit(); err != nil {
+		return "", fmt.Errorf("commit object %s: %w", digest, err)
 	}
 
 	return digest, nil
@@ -239,8 +259,20 @@ func (store *FilesystemStore) PutCompound(
 		relationships,
 		contracts.Compound{IsCompound: true, Parts: parts},
 	)
+	// Batch the compound object's content envelope, manifest, recovery sidecar,
+	// and source indexes into one synced commit. The compound-parent index is a
+	// guarded read-merge-write per child part, so it stays a separate write after
+	// the object commits (its non-atomicity relative to the object is unchanged
+	// from the pre-batch code, which also wrote it last).
+	cb, err := store.newCommitBatch()
+	if err != nil {
+		return "", err
+	}
+	defer cb.close()
+
 	if err := store.writeObject(
 		ctx,
+		cb,
 		digest,
 		envelope,
 		request.SourceHint,
@@ -248,13 +280,18 @@ func (store *FilesystemStore) PutCompound(
 	); err != nil {
 		return "", err
 	}
-	if err := store.recordSourceObjectIndexes(
+	if err := store.recordSourceObjectIndexesTo(
 		ctx,
+		cb,
 		digest,
 		request.Provenance,
 	); err != nil {
 		return "", err
 	}
+	if err := cb.commit(); err != nil {
+		return "", fmt.Errorf("commit compound object %s: %w", digest, err)
+	}
+
 	if err := store.recordCompoundParentIndexes(ctx, digest, parts); err != nil {
 		return "", err
 	}
@@ -317,7 +354,15 @@ func (store *FilesystemStore) writeManifest(
 	digest contracts.ObjectDigest,
 	manifest contracts.Manifest,
 ) error {
-	return store.metaPut(manifestKey(digest), manifest)
+	return store.writeManifestTo(store.syncSink(), digest, manifest)
+}
+
+func (store *FilesystemStore) writeManifestTo(
+	sink metaSink,
+	digest contracts.ObjectDigest,
+	manifest contracts.Manifest,
+) error {
+	return sink.set(manifestKey(digest), manifest)
 }
 
 func (store *FilesystemStore) ReadManifest(
@@ -638,6 +683,7 @@ func (store *FilesystemStore) WalkSourceCursors(
 
 func (store *FilesystemStore) writeObject(
 	ctx context.Context,
+	cb *commitBatch,
 	digest contracts.ObjectDigest,
 	content []byte,
 	sourceHint string,
@@ -672,10 +718,10 @@ func (store *FilesystemStore) writeObject(
 	}
 
 	if !blobExists {
-		return store.commitNewObject(ctx, digest, content, sourceHint, manifest)
+		return store.commitNewObject(ctx, cb, digest, content, sourceHint, manifest)
 	}
 
-	return store.writeManifest(digest, manifest)
+	return store.writeManifestTo(cb, digest, manifest)
 }
 
 // commitNewObject stores content in the content-addressed chunk store, records
@@ -685,6 +731,7 @@ func (store *FilesystemStore) writeObject(
 // points at missing content.
 func (store *FilesystemStore) commitNewObject(
 	ctx context.Context,
+	cb *commitBatch,
 	digest contracts.ObjectDigest,
 	content []byte,
 	sourceHint string,
@@ -694,18 +741,19 @@ func (store *FilesystemStore) commitNewObject(
 		return err
 	}
 
-	if err := store.storeBlobContent(ctx, digest, content); err != nil {
+	if err := store.storeBlobContentBatched(ctx, cb, digest, content); err != nil {
 		return fmt.Errorf("store blob content: %w", err)
 	}
 
-	if err := store.writeManifest(digest, manifest); err != nil {
+	if err := store.writeManifestTo(cb, digest, manifest); err != nil {
 		return fmt.Errorf("write manifest: %w", err)
 	}
 
 	// Content lives in the chunk store, so there is no single compressed blob;
 	// the recovery sidecar records uncompressed identity only (compressed=nil).
-	if err := store.writePackedRecovery(
+	if err := store.writePackedRecoveryTo(
 		ctx,
+		cb,
 		digest,
 		recoverySidecarFor(digest, content, nil, sourceHint, manifest),
 	); err != nil {
