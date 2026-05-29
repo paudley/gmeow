@@ -155,7 +155,11 @@ func (store *FilesystemStore) TryAcquireSourceIngest(
 		}
 	}
 
-	if err := store.metaPut(key, claim); err != nil {
+	// Claims are ephemeral TTL'd coordination, not durable object state, so they
+	// are written without an fsync (see metaPutNoSync) — the dominant per-object
+	// fsync cost during a bulk import once the object writes themselves are
+	// batched.
+	if err := store.metaPutNoSync(key, claim); err != nil {
 		return contracts.SourceIngestClaim{}, false, err
 	}
 
@@ -217,7 +221,8 @@ func (store *FilesystemStore) ReleaseSourceIngest(
 			return errors.New("source ingest claim is owned by another writer")
 		}
 
-		return store.metaDelete(key)
+		// Ephemeral coordination state: released without an fsync (see acquire).
+		return store.metaDeleteNoSync(key)
 	}
 
 	// Legacy on-disk lock fallback for a pre-migration root.

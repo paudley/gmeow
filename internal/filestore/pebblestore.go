@@ -104,6 +104,40 @@ func (store *FilesystemStore) metaDelete(key string) error {
 	return db.Delete([]byte(key), pebble.Sync)
 }
 
+// metaPutNoSync and metaDeleteNoSync write without fsyncing the WAL. They are
+// reserved for ephemeral, crash-tolerant coordination state — currently only
+// the source ingest claims (lk/). The write is still immediately visible to
+// later reads in this process (NoSync skips only the WAL fsync, not the
+// memtable insert), which is all the claim's in-memory key lock relies on; and
+// because the store holds Pebble's exclusive directory lock, a claim never needs
+// to be durable across processes. Losing a claim on a crash is harmless — the
+// abandoned ingest is simply re-run, and re-ingest is idempotent (content
+// dedup + provenance merge) — and is in fact preferable to resurrecting a stale
+// claim that would block its source object until the TTL expires. Object data
+// (chunks, recipes, manifests, recovery, indexes) is never written this way.
+func (store *FilesystemStore) metaPutNoSync(key string, value any) error {
+	db, err := store.meta()
+	if err != nil {
+		return err
+	}
+
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+
+	return db.Set([]byte(key), encoded, pebble.NoSync)
+}
+
+func (store *FilesystemStore) metaDeleteNoSync(key string) error {
+	db, err := store.meta()
+	if err != nil {
+		return err
+	}
+
+	return db.Delete([]byte(key), pebble.NoSync)
+}
+
 // metaDeleteKeys atomically deletes a set of keys in one batch.
 func (store *FilesystemStore) metaDeleteKeys(keys []string) error {
 	db, err := store.meta()
