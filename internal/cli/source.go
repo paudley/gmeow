@@ -47,6 +47,7 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 		lowNoise        bool
 		resume          bool
 		queueHighWater  int
+		concurrency     int
 	)
 
 	command := &cobra.Command{
@@ -85,6 +86,7 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			importer.SetPartConcurrency(concurrency)
 			request := source.ArchiveImportRequest{
 				SourceName:     sourceName,
 				Format:         format,
@@ -116,7 +118,7 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 					schedmq.SourceImportJobSourceConfig{
 						URL:         loaded.Resolved.RabbitMQ.URL,
 						QueuePrefix: loaded.Resolved.Scheduler.QueuePrefix,
-						Prefetch:    1,
+						Prefetch:    concurrency,
 					},
 				)
 				if sourceErr != nil {
@@ -151,6 +153,8 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 		StringVar(&stateDir, "state-dir", "", "local import run state directory; defaults to system.data_dir/import-runs")
 	command.Flags().
 		IntVar(&queueHighWater, "queue-high-water", 10000, "pause discovery while source import queue depth is at or above this value")
+	command.Flags().
+		IntVar(&concurrency, "concurrency", 8, "parts ingested in parallel per message (and queued-import broker prefetch)")
 	command.Flags().StringVar(
 		&confirmInstance,
 		"confirm-instance",

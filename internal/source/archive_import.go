@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -83,9 +84,28 @@ type ArchiveImportPublisher interface {
 
 type ArchiveImportQueueStatusFunc func(context.Context) (contracts.SourceImportQueueStatus, error)
 
+// defaultPartIngestConcurrency bounds how many parts of a single message
+// (headers, body, metadata, mime-structure, and one per attachment) are ingested
+// in parallel. The parts are independent content-addressed objects with no
+// ordering dependency, so overlapping their Puts — especially byte-heavy
+// attachments — is the safe parallelism point in archive import (unlike
+// inter-message parallelism, which must serialize same-Message-ID dedup).
+const defaultPartIngestConcurrency = 8
+
 type ArchiveImporter struct {
-	service *Service
-	store   FilestoreClient
+	service         *Service
+	store           FilestoreClient
+	partConcurrency int
+}
+
+// SetPartConcurrency overrides how many of a message's parts ingest in parallel.
+// A value <= 0 restores the default. It is not safe to call concurrently with
+// Import.
+func (importer *ArchiveImporter) SetPartConcurrency(workers int) {
+	if workers <= 0 {
+		workers = defaultPartIngestConcurrency
+	}
+	importer.partConcurrency = workers
 }
 
 type archiveMessage struct {
@@ -122,7 +142,11 @@ func NewArchiveImporter(store FilestoreClient) (*ArchiveImporter, error) {
 		return nil, err
 	}
 
-	return &ArchiveImporter{service: service, store: store}, nil
+	return &ArchiveImporter{
+		service:         service,
+		store:           store,
+		partConcurrency: defaultPartIngestConcurrency,
+	}, nil
 }
 
 func (importer *ArchiveImporter) Import(
@@ -671,58 +695,105 @@ func (importer *ArchiveImporter) writeArchiveMessageParts(
 		},
 	}
 
-	parts := make([]contracts.CompoundPart, 0, len(inputs)+len(message.Attachments))
+	jobs := make([]partIngestJob, 0, len(inputs)+len(message.Attachments))
 	for _, input := range inputs {
-		digest, _, err := importer.service.Ingest(ctx, IngestObject{
-			ObservedAt:   message.ObservedAt,
-			Reader:       bytes.NewReader(input.payload),
-			MediaType:    input.mediaType,
-			SourceKind:   contracts.MailArchiveSourceKind,
-			SourceName:   sourceName,
-			ExternalID:   message.ExternalID + ":" + input.role,
-			ExternalVer:  message.ExternalVersion,
-			SourceHint:   input.role,
-			ContentRoles: []string{input.role},
-			Facets:       input.facets,
+		jobs = append(jobs, partIngestJob{
+			object: IngestObject{
+				ObservedAt:   message.ObservedAt,
+				Reader:       bytes.NewReader(input.payload),
+				MediaType:    input.mediaType,
+				SourceKind:   contracts.MailArchiveSourceKind,
+				SourceName:   sourceName,
+				ExternalID:   message.ExternalID + ":" + input.role,
+				ExternalVer:  message.ExternalVersion,
+				SourceHint:   input.role,
+				ContentRoles: []string{input.role},
+				Facets:       input.facets,
+			},
+			part: contracts.CompoundPart{Role: input.role, Order: input.order},
 		})
-		if err != nil {
-			return nil, err
-		}
-		parts = append(
-			parts,
-			contracts.CompoundPart{Digest: digest, Role: input.role, Order: input.order},
-		)
 	}
 	for index, attachment := range message.Attachments {
 		attachmentID := firstNonEmpty(attachment.FileName, fmt.Sprintf("%d", index))
-		digest, _, err := importer.service.Ingest(ctx, IngestObject{
-			ObservedAt:   message.ObservedAt,
-			Reader:       bytes.NewReader(attachment.Content),
-			MediaType:    firstNonEmpty(attachment.MediaType, "application/octet-stream"),
-			SourceKind:   contracts.MailArchiveSourceKind,
-			SourceName:   sourceName,
-			ExternalID:   fmt.Sprintf("%s:attachment:%s", message.ExternalID, attachmentID),
-			ExternalVer:  message.ExternalVersion,
-			SourceHint:   attachment.FileName,
-			ContentRoles: []string{contracts.MailAttachmentRole},
-			Facets: []contracts.Facet{{
-				Kind: "file",
+		jobs = append(jobs, partIngestJob{
+			object: IngestObject{
+				ObservedAt:   message.ObservedAt,
+				Reader:       bytes.NewReader(attachment.Content),
+				MediaType:    firstNonEmpty(attachment.MediaType, "application/octet-stream"),
+				SourceKind:   contracts.MailArchiveSourceKind,
+				SourceName:   sourceName,
+				ExternalID:   fmt.Sprintf("%s:attachment:%s", message.ExternalID, attachmentID),
+				ExternalVer:  message.ExternalVersion,
+				SourceHint:   attachment.FileName,
+				ContentRoles: []string{contracts.MailAttachmentRole},
+				Facets: []contracts.Facet{{
+					Kind: "file",
+					Metadata: map[string]any{
+						"display_name": attachment.FileName,
+					},
+				}},
+			},
+			part: contracts.CompoundPart{
+				Role:  contracts.MailAttachmentRole,
+				Order: 10 + index,
 				Metadata: map[string]any{
-					"display_name": attachment.FileName,
+					"filename": attachment.FileName,
 				},
-			}},
+			},
 		})
+	}
+
+	return importer.ingestMessageParts(ctx, jobs)
+}
+
+type partIngestJob struct {
+	object IngestObject
+	part   contracts.CompoundPart
+}
+
+// ingestMessageParts ingests a message's parts concurrently (bounded by
+// partConcurrency) and returns them in their original order. The parts are
+// independent content-addressed objects with no inter-part ordering dependency,
+// so overlapping their Puts — especially byte-heavy attachments — is safe; only
+// the resulting slice order matters, so each result is written back by index.
+func (importer *ArchiveImporter) ingestMessageParts(
+	ctx context.Context,
+	jobs []partIngestJob,
+) ([]contracts.CompoundPart, error) {
+	workers := importer.partConcurrency
+	if workers <= 0 {
+		workers = defaultPartIngestConcurrency
+	}
+
+	parts := make([]contracts.CompoundPart, len(jobs))
+	errs := make([]error, len(jobs))
+	semaphore := make(chan struct{}, workers)
+	var waitGroup sync.WaitGroup
+
+	for index := range jobs {
+		waitGroup.Add(1)
+		semaphore <- struct{}{}
+		go func(index int) {
+			defer waitGroup.Done()
+			defer func() { <-semaphore }()
+
+			digest, _, err := importer.service.Ingest(ctx, jobs[index].object)
+			if err != nil {
+				errs[index] = err
+
+				return
+			}
+			part := jobs[index].part
+			part.Digest = digest
+			parts[index] = part
+		}(index)
+	}
+	waitGroup.Wait()
+
+	for _, err := range errs {
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, contracts.CompoundPart{
-			Digest: digest,
-			Role:   contracts.MailAttachmentRole,
-			Order:  10 + index,
-			Metadata: map[string]any{
-				"filename": attachment.FileName,
-			},
-		})
 	}
 
 	return parts, nil
