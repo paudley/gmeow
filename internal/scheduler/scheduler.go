@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -24,8 +25,28 @@ type Config struct {
 	Priorities   config.SchedulerPriority
 }
 
+// Store is the narrow slice of the filestore the scheduler depends on: reading
+// projections and writing analysis annotations. Both the in-process
+// FilesystemStore and the filestore gRPC client satisfy it, so the scheduler can
+// run against the filestore server (the only safe option while filestore-serve
+// holds Pebble's exclusive lock) without depending on the whole Store surface.
+type Store interface {
+	WalkProjection(ctx context.Context, fn filestore.ProjectionFunc) error
+	ProjectionObject(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+	) (filestore.ProjectionObject, bool, error)
+	HasAnalysisAnnotation(
+		ctx context.Context,
+		digest contracts.ObjectDigest,
+		analyzerName string,
+		analyzerVersion string,
+	) (bool, error)
+	WriteAnnotation(ctx context.Context, annotation contracts.Annotation) error
+}
+
 type Service struct {
-	store     filestore.Store
+	store     Store
 	broker    Broker
 	projector ProjectionRefresher
 	now       func() time.Time
@@ -36,7 +57,7 @@ type Service struct {
 type Option func(*Service)
 
 func NewService(
-	store filestore.Store,
+	store Store,
 	broker Broker,
 	specs []contracts.AnalyzerSpec,
 	cfg Config,
@@ -677,6 +698,22 @@ func (service *Service) Run(ctx context.Context) error {
 			); err != nil {
 				return err
 			}
+		}
+
+		// Self-healing reconciliation: sweep the projection and enqueue analyzer
+		// work for every object still missing it. This is what makes analysis
+		// converge without operator intervention — an object whose change
+		// notification was dropped (e.g. a notify failure during a bulk import)
+		// is picked up on the next sweep. Scan only enqueues missing work and
+		// dedups against in-flight jobs, so re-running it is cheap and idempotent.
+		// A transient scan error is logged, not fatal, so reconciliation keeps
+		// running.
+		if _, err := service.Scan(ctx, contracts.SchedulerScanRequest{
+			SchemaVersion: contracts.SchemaVersionPhase00,
+			RequestedBy:   "scheduler",
+			Reason:        "periodic_reconcile",
+		}); err != nil {
+			slog.Error("scheduler reconcile scan failed", "error", err)
 		}
 
 		select {

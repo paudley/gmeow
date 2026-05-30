@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -171,6 +172,15 @@ func (runtime *Runtime) Handle(ctx context.Context, receipt JobReceipt) error {
 
 	err := runtime.Process(ctx, job)
 	if err != nil {
+		// Make the failure visible: a silently parking worker is indistinguishable
+		// from an idle one. Log the analyzer, object, and underlying error so an
+		// operator can see why analysis is not progressing.
+		slog.Warn(
+			"analysis job failed",
+			"analyzer", job.Analyzer,
+			"digest", job.ObjectDigest,
+			"error", err,
+		)
 		// Bogus job: the target object no longer exists (e.g. removed or the
 		// store was wiped). It can never succeed and is not an analyzer failure,
 		// so drop it (ack) rather than retrying, parking, or tripping the
