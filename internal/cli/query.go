@@ -200,13 +200,21 @@ func newQueryBreakdownCommand(out io.Writer, configPath *string) *cobra.Command 
 		Short: "Detailed aggregate breakdown of projected objects (facets, sources, media types, analysis)",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
+			loaded, err := config.Load(config.Options{Path: *configPath})
 			if err != nil {
 				return err
 			}
-			defer index.Close()
 
-			breakdown, err := index.ObjectBreakdown(command.Context())
+			client, err := rpc.NewQueryClient(
+				command.Context(),
+				rpcEndpoint(loaded.Resolved.RPC.Query),
+			)
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+
+			breakdown, err := client.ObjectBreakdown(command.Context())
 			if err != nil {
 				return err
 			}
@@ -229,7 +237,7 @@ func newQueryBreakdownCommand(out io.Writer, configPath *string) *cobra.Command 
 	return command
 }
 
-func printObjectBreakdown(out io.Writer, breakdown querypg.ObjectBreakdown) error {
+func printObjectBreakdown(out io.Writer, breakdown contracts.ObjectBreakdown) error {
 	analyzedPct := 0.0
 	if breakdown.TotalObjects > 0 {
 		analyzedPct = 100 * float64(
@@ -251,7 +259,7 @@ func printObjectBreakdown(out io.Writer, breakdown querypg.ObjectBreakdown) erro
 	)
 
 	writer := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-	section := func(title string, rows []querypg.CountRow) {
+	section := func(title string, rows []contracts.BreakdownCount) {
 		fmt.Fprintf(writer, "\n%s\t\n", title)
 		for _, row := range rows {
 			label := row.Label

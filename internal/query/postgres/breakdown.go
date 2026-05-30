@@ -6,35 +6,9 @@ package postgres
 import (
 	"context"
 	"fmt"
+
+	"blackcat.ca/gmeow/internal/contracts"
 )
-
-// CountRow is one labelled count in an object breakdown (a facet kind, media
-// type, identity strategy, or analyzer name).
-type CountRow struct {
-	Label string `json:"label"`
-	Count int64  `json:"count"`
-}
-
-// SourceRow is the count of distinct objects provenanced to one source.
-type SourceRow struct {
-	SourceKind string `json:"source_kind"`
-	SourceName string `json:"source_name"`
-	Objects    int64  `json:"objects"`
-}
-
-// ObjectBreakdown is a detailed aggregate view of the projected object corpus.
-type ObjectBreakdown struct {
-	TotalObjects        int64       `json:"total_objects"`
-	TotalSizeBytes      int64       `json:"total_size_bytes"`
-	CompoundObjects     int64       `json:"compound_objects"`
-	SimpleObjects       int64       `json:"simple_objects"`
-	ObjectsWithAnalysis int64       `json:"objects_with_analysis"`
-	ByFacet             []CountRow  `json:"by_facet"`
-	BySource            []SourceRow `json:"by_source"`
-	ByMediaType         []CountRow  `json:"by_media_type"`
-	ByIdentityStrategy  []CountRow  `json:"by_identity_strategy"`
-	ByAnalyzer          []CountRow  `json:"by_analyzer"`
-}
 
 const compoundIdentityStrategy = "compound_stable_id"
 
@@ -42,8 +16,10 @@ const compoundIdentityStrategy = "compound_stable_id"
 // types, identity strategies, and analysis coverage. It reads only the query
 // projection (no FILESTORE access), so it reflects what has been projected so
 // far — run `query rebuild` or let projection catch up for a complete picture.
-func (index *Index) ObjectBreakdown(ctx context.Context) (ObjectBreakdown, error) {
-	breakdown := ObjectBreakdown{}
+func (index *Index) ObjectBreakdown(
+	ctx context.Context,
+) (contracts.ObjectBreakdown, error) {
+	breakdown := contracts.ObjectBreakdown{}
 
 	if err := index.pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -57,57 +33,63 @@ func (index *Index) ObjectBreakdown(ctx context.Context) (ObjectBreakdown, error
 		&breakdown.CompoundObjects,
 		&breakdown.SimpleObjects,
 	); err != nil {
-		return ObjectBreakdown{}, fmt.Errorf("query object totals: %w", err)
+		return contracts.ObjectBreakdown{}, fmt.Errorf("query object totals: %w", err)
 	}
 
 	if err := index.pool.QueryRow(ctx, `
 		SELECT count(DISTINCT object_digest) FROM query_object_analysis`,
 	).Scan(&breakdown.ObjectsWithAnalysis); err != nil {
-		return ObjectBreakdown{}, fmt.Errorf("query analysis coverage: %w", err)
+		return contracts.ObjectBreakdown{}, fmt.Errorf("query analysis coverage: %w", err)
 	}
 
 	var err error
 	if breakdown.ByFacet, err = index.countRows(ctx, `
 		SELECT kind, count(*) FROM query_object_facets
 		 GROUP BY kind ORDER BY count(*) DESC, kind`); err != nil {
-		return ObjectBreakdown{}, fmt.Errorf("query facet breakdown: %w", err)
+		return contracts.ObjectBreakdown{}, fmt.Errorf("query facet breakdown: %w", err)
 	}
 
 	if breakdown.ByMediaType, err = index.countRows(ctx, `
 		SELECT media_type, count(*) FROM query_objects
 		 GROUP BY media_type ORDER BY count(*) DESC, media_type`); err != nil {
-		return ObjectBreakdown{}, fmt.Errorf("query media-type breakdown: %w", err)
+		return contracts.ObjectBreakdown{}, fmt.Errorf("query media-type breakdown: %w", err)
 	}
 
 	if breakdown.ByIdentityStrategy, err = index.countRows(ctx, `
 		SELECT identity_strategy, count(*) FROM query_objects
 		 GROUP BY identity_strategy ORDER BY count(*) DESC, identity_strategy`); err != nil {
-		return ObjectBreakdown{}, fmt.Errorf("query identity-strategy breakdown: %w", err)
+		return contracts.ObjectBreakdown{}, fmt.Errorf(
+			"query identity-strategy breakdown: %w",
+			err,
+		)
 	}
 
 	if breakdown.ByAnalyzer, err = index.countRows(ctx, `
 		SELECT analyzer_name, count(DISTINCT object_digest) FROM query_object_analysis
 		 GROUP BY analyzer_name ORDER BY count(DISTINCT object_digest) DESC, analyzer_name`); err != nil {
-		return ObjectBreakdown{}, fmt.Errorf("query analyzer breakdown: %w", err)
+		return contracts.ObjectBreakdown{}, fmt.Errorf("query analyzer breakdown: %w", err)
 	}
 
 	if breakdown.BySource, err = index.sourceRows(ctx); err != nil {
-		return ObjectBreakdown{}, err
+		return contracts.ObjectBreakdown{}, err
 	}
 
 	return breakdown, nil
 }
 
-func (index *Index) countRows(ctx context.Context, sql string) ([]CountRow, error) {
+func (index *Index) countRows(
+	ctx context.Context,
+	sql string,
+) ([]contracts.BreakdownCount, error) {
 	rows, err := index.pool.Query(ctx, sql)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	out := []CountRow{}
+	out := []contracts.BreakdownCount{}
 	for rows.Next() {
-		var row CountRow
+		var row contracts.BreakdownCount
 		if err := rows.Scan(&row.Label, &row.Count); err != nil {
 			return nil, err
 		}
@@ -117,7 +99,9 @@ func (index *Index) countRows(ctx context.Context, sql string) ([]CountRow, erro
 	return out, rows.Err()
 }
 
-func (index *Index) sourceRows(ctx context.Context) ([]SourceRow, error) {
+func (index *Index) sourceRows(
+	ctx context.Context,
+) ([]contracts.BreakdownSource, error) {
 	rows, err := index.pool.Query(ctx, `
 		SELECT source_kind, source_name, count(DISTINCT object_digest)
 		  FROM query_object_provenance
@@ -128,9 +112,9 @@ func (index *Index) sourceRows(ctx context.Context) ([]SourceRow, error) {
 	}
 	defer rows.Close()
 
-	out := []SourceRow{}
+	out := []contracts.BreakdownSource{}
 	for rows.Next() {
-		var row SourceRow
+		var row contracts.BreakdownSource
 		if err := rows.Scan(&row.SourceKind, &row.SourceName, &row.Objects); err != nil {
 			return nil, err
 		}

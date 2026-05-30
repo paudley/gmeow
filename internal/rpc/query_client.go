@@ -141,6 +141,53 @@ func (client *QueryClient) Search(
 	}, nil
 }
 
+func (client *QueryClient) ObjectBreakdown(
+	ctx context.Context,
+) (contracts.ObjectBreakdown, error) {
+	response, err := client.client.ObjectBreakdown(ctx, &pb.ObjectBreakdownRequest{})
+	if err != nil {
+		return contracts.ObjectBreakdown{}, err
+	}
+
+	return contracts.ObjectBreakdown{
+		TotalObjects:        response.GetTotalObjects(),
+		TotalSizeBytes:      response.GetTotalSizeBytes(),
+		CompoundObjects:     response.GetCompoundObjects(),
+		SimpleObjects:       response.GetSimpleObjects(),
+		ObjectsWithAnalysis: response.GetObjectsWithAnalysis(),
+		ByFacet:             fromPBBreakdownCounts(response.GetByFacet()),
+		BySource:            fromPBBreakdownSources(response.GetBySource()),
+		ByMediaType:         fromPBBreakdownCounts(response.GetByMediaType()),
+		ByIdentityStrategy:  fromPBBreakdownCounts(response.GetByIdentityStrategy()),
+		ByAnalyzer:          fromPBBreakdownCounts(response.GetByAnalyzer()),
+	}, nil
+}
+
+func fromPBBreakdownCounts(rows []*pb.BreakdownCount) []contracts.BreakdownCount {
+	out := make([]contracts.BreakdownCount, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, contracts.BreakdownCount{
+			Label: row.GetLabel(),
+			Count: row.GetCount(),
+		})
+	}
+
+	return out
+}
+
+func fromPBBreakdownSources(rows []*pb.BreakdownSource) []contracts.BreakdownSource {
+	out := make([]contracts.BreakdownSource, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, contracts.BreakdownSource{
+			SourceKind: row.GetSourceKind(),
+			SourceName: row.GetSourceName(),
+			Objects:    row.GetObjects(),
+		})
+	}
+
+	return out
+}
+
 func (client *QueryClient) ResolveMailIdentity(
 	ctx context.Context,
 	request contracts.MailIdentityResolveRequest,

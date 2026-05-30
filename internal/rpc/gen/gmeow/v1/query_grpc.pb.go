@@ -23,6 +23,7 @@ const (
 	QueryService_ProjectObject_FullMethodName             = "/gmeow.v1.QueryService/ProjectObject"
 	QueryService_ProjectSourceCursor_FullMethodName       = "/gmeow.v1.QueryService/ProjectSourceCursor"
 	QueryService_Search_FullMethodName                    = "/gmeow.v1.QueryService/Search"
+	QueryService_ObjectBreakdown_FullMethodName           = "/gmeow.v1.QueryService/ObjectBreakdown"
 	QueryService_ResolveMailIdentity_FullMethodName       = "/gmeow.v1.QueryService/ResolveMailIdentity"
 	QueryService_Structure_FullMethodName                 = "/gmeow.v1.QueryService/Structure"
 	QueryService_Relationships_FullMethodName             = "/gmeow.v1.QueryService/Relationships"
@@ -57,6 +58,7 @@ type QueryServiceClient interface {
 	ProjectObject(ctx context.Context, in *ProjectObjectRequest, opts ...grpc.CallOption) (*Empty, error)
 	ProjectSourceCursor(ctx context.Context, in *ProjectSourceCursorRequest, opts ...grpc.CallOption) (*Empty, error)
 	Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error)
+	ObjectBreakdown(ctx context.Context, in *ObjectBreakdownRequest, opts ...grpc.CallOption) (*ObjectBreakdownResponse, error)
 	ResolveMailIdentity(ctx context.Context, in *MailIdentityResolveRequest, opts ...grpc.CallOption) (*MailIdentityResolveResponse, error)
 	Structure(ctx context.Context, in *StructureRequest, opts ...grpc.CallOption) (*StructureResponse, error)
 	Relationships(ctx context.Context, in *RelationshipRequest, opts ...grpc.CallOption) (*RelationshipResponse, error)
@@ -125,6 +127,16 @@ func (c *queryServiceClient) Search(ctx context.Context, in *SearchRequest, opts
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SearchResponse)
 	err := c.cc.Invoke(ctx, QueryService_Search_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ObjectBreakdown(ctx context.Context, in *ObjectBreakdownRequest, opts ...grpc.CallOption) (*ObjectBreakdownResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ObjectBreakdownResponse)
+	err := c.cc.Invoke(ctx, QueryService_ObjectBreakdown_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -379,6 +391,7 @@ type QueryServiceServer interface {
 	ProjectObject(context.Context, *ProjectObjectRequest) (*Empty, error)
 	ProjectSourceCursor(context.Context, *ProjectSourceCursorRequest) (*Empty, error)
 	Search(context.Context, *SearchRequest) (*SearchResponse, error)
+	ObjectBreakdown(context.Context, *ObjectBreakdownRequest) (*ObjectBreakdownResponse, error)
 	ResolveMailIdentity(context.Context, *MailIdentityResolveRequest) (*MailIdentityResolveResponse, error)
 	Structure(context.Context, *StructureRequest) (*StructureResponse, error)
 	Relationships(context.Context, *RelationshipRequest) (*RelationshipResponse, error)
@@ -424,6 +437,9 @@ func (UnimplementedQueryServiceServer) ProjectSourceCursor(context.Context, *Pro
 }
 func (UnimplementedQueryServiceServer) Search(context.Context, *SearchRequest) (*SearchResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Search not implemented")
+}
+func (UnimplementedQueryServiceServer) ObjectBreakdown(context.Context, *ObjectBreakdownRequest) (*ObjectBreakdownResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ObjectBreakdown not implemented")
 }
 func (UnimplementedQueryServiceServer) ResolveMailIdentity(context.Context, *MailIdentityResolveRequest) (*MailIdentityResolveResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveMailIdentity not implemented")
@@ -586,6 +602,24 @@ func _QueryService_Search_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(QueryServiceServer).Search(ctx, req.(*SearchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ObjectBreakdown_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ObjectBreakdownRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ObjectBreakdown(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ObjectBreakdown_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ObjectBreakdown(ctx, req.(*ObjectBreakdownRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1044,6 +1078,10 @@ var QueryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Search",
 			Handler:    _QueryService_Search_Handler,
+		},
+		{
+			MethodName: "ObjectBreakdown",
+			Handler:    _QueryService_ObjectBreakdown_Handler,
 		},
 		{
 			MethodName: "ResolveMailIdentity",
