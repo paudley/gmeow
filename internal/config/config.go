@@ -26,6 +26,7 @@ import (
 const (
 	currentConfigVersion = 1
 	defaultConfigPath    = "gmeow.toml"
+	systemConfigPath     = "/etc/gmeow/gmeow.toml"
 	unlockEnvName        = "GMEOW_SOPS_UNLOCK_KEY"
 	configEnvName        = "GMEOW_CONFIG"
 	postgresPasswordName = "postgres_password"
@@ -347,7 +348,32 @@ func selectedPath(path string) string {
 		return envPath
 	}
 
-	return defaultConfigPath
+	// With no explicit --config or GMEOW_CONFIG, search the standard locations in
+	// precedence order and use the first that exists: the system config, then the
+	// per-user config, then a gmeow.toml in the working directory.
+	candidates := defaultConfigSearchPaths()
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+
+	// None present: return the last candidate (./gmeow.toml) so the read error
+	// names the conventional working-directory path.
+	return candidates[len(candidates)-1]
+}
+
+// defaultConfigSearchPaths returns the config locations searched when no path is
+// given, in precedence order: /etc/gmeow/gmeow.toml, then
+// <user-config-dir>/gmeow/gmeow.toml (XDG_CONFIG_HOME or ~/.config), then
+// ./gmeow.toml.
+func defaultConfigSearchPaths() []string {
+	paths := []string{systemConfigPath}
+	if dir, err := os.UserConfigDir(); err == nil && strings.TrimSpace(dir) != "" {
+		paths = append(paths, filepath.Join(dir, "gmeow", "gmeow.toml"))
+	}
+
+	return append(paths, defaultConfigPath)
 }
 
 func readUnlockKey() (string, string, error) {
