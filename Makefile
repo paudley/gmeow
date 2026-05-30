@@ -47,7 +47,7 @@ define warn
 	@printf '  $(YELLOW)!$(RESET) %s\n' "$(1)"
 endef
 
-.PHONY: help advice install update lock doctor check quick-check test compile type-check build clean go-format go-vet go-test go-build go-check genproto python-intel-test python-intel-build release-check release-audit status submodules ethos-install
+.PHONY: help advice install update lock doctor check quick-check test compile type-check build clean go-format go-vet go-test go-build go-check genproto python-intel-test python-intel-build release-check release-audit status submodules ethos-install restart deploy
 
 help: ## Show this help screen.
 	@printf '\n$(BOLD)Gmeow$(RESET) $(DIM)local Gmail MCP/REST intelligence server$(RESET)\n\n'
@@ -140,6 +140,14 @@ go-build: ## Build Go binaries.
 	$(call section,Building Go binaries)
 	mkdir -p "$(BIN_DIR)"
 	$(GO) build -o "$(BIN_DIR)/" ./cmd/gmeow ./cmd/gmeow-admin ./cmd/gmeow-worker
+
+restart: ## Restart the running gmeow systemd services (no rebuild).
+	$(call section,Restarting gmeow services)
+	sudo -n systemctl restart gmeow.target
+
+deploy: go-build ## Rebuild Go binaries and restart the running gmeow services.
+	$(call section,Restarting gmeow services)
+	sudo -n systemctl restart gmeow.target
 
 genproto: ## Regenerate Go protobuf and gRPC stubs from proto/gmeow/v1 (needs bin/ plugins).
 	$(call section,Regenerating protobuf stubs)
