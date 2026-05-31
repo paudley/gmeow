@@ -11,12 +11,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"blackcat.ca/gmeow/internal/appsvc"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
 )
@@ -109,6 +111,123 @@ func TestPostgresProjectsFilestoreWithSourceCursorRebuild(t *testing.T) {
 	}
 	if !hasMailbox(mailboxes, "mbox-apollo") {
 		t.Fatalf("rebuild did not project JMAP mailbox catalog: %#v", mailboxes)
+	}
+}
+
+func TestJMAPMutableMailStateRecoversFromFilestoreRebuild(t *testing.T) {
+	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	migrationsDir := queryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
+
+	store := filestore.NewFilesystemStore(t.TempDir())
+	messageDate := "Wed, 27 May 2026 09:15:00 -0600"
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("hello apollo"),
+		MediaType: "message/rfc822",
+		Facets: []contracts.Facet{{
+			Kind: contracts.MailMessageFacetKind,
+			Metadata: map[string]any{
+				"rfc_message_id": "<apollo@example.test>",
+				"thread_id":      "thread-apollo",
+				"subject":        "Apollo update",
+				"date":           messageDate,
+				"label_ids":      []string{"INBOX", "UNREAD"},
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "fixture",
+			SourceName: "jmap",
+			ExternalID: "apollo-1",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstIndex := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
+	projectStoredObject(t, ctx, firstIndex, store, digest)
+	services, err := appsvc.New(appsvc.Options{
+		Query:   firstIndex,
+		Objects: store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailboxResult, err := services.UpdateJMAPMailboxes(ctx, appsvc.JMAPMailboxMutation{
+		Create: map[string]appsvc.JMAPMailboxCreate{
+			"client-1": {Name: "Apollo"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	customMailbox := mailboxResult.Created["client-1"].MailboxID
+	if customMailbox == "" {
+		t.Fatalf("missing custom mailbox in result: %#v", mailboxResult)
+	}
+	if _, err := services.UpdateJMAPEmailState(ctx, appsvc.JMAPEmailMutation{
+		ObjectDigest: digest,
+		MailboxIDs: map[string]bool{
+			"inbox":       false,
+			customMailbox: true,
+		},
+		Keywords: map[string]bool{
+			"$seen":    true,
+			"$flagged": true,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	secondIndex := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
+	if err := secondIndex.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mailboxes, err := secondIndex.JMAPMailboxes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasMailbox(mailboxes, customMailbox) {
+		t.Fatalf("rebuild did not recover custom mailbox %q: %#v", customMailbox, mailboxes)
+	}
+	states, err := secondIndex.JMAPEmailStates(ctx, []contracts.ObjectDigest{digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, ok := states[digest]
+	if !ok {
+		t.Fatalf("rebuild did not recover JMAP email state for %s", digest)
+	}
+	if !sameStrings(state.MailboxIDs, []string{"all", customMailbox}) ||
+		!sameStrings(state.Keywords, []string{"$flagged", "$seen"}) {
+		t.Fatalf("unexpected recovered JMAP state: %#v", state)
+	}
+
+	query, err := secondIndex.JMAPEmailQuery(ctx, contracts.JMAPEmailQueryRequest{
+		After: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameDigests(query.IDs, []contracts.ObjectDigest{digest}) {
+		t.Fatalf("date-filtered JMAP query did not return recovered message: %#v", query)
+	}
+	exactAfter, ok := parseJMAPTime(messageDate)
+	if !ok {
+		t.Fatalf("test message date did not parse: %q", messageDate)
+	}
+	query, err = secondIndex.JMAPEmailQuery(ctx, contracts.JMAPEmailQueryRequest{
+		After: exactAfter,
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameDigests(query.IDs, []contracts.ObjectDigest{digest}) {
+		t.Fatalf("inclusive after filter did not return boundary message: %#v", query)
 	}
 }
 
@@ -412,6 +531,50 @@ func dsnWithSearchPath(dsn, schema string) string {
 	return parsed.String()
 }
 
+func newMigratedTestIndex(
+	t *testing.T,
+	ctx context.Context,
+	dsn string,
+	migrationsDir string,
+	store *filestore.FilesystemStore,
+) *Index {
+	t.Helper()
+	schema := createQueryTestSchema(t, ctx, dsn)
+	t.Cleanup(func() { dropQueryTestSchema(t, dsn, schema) })
+	config := Config{
+		ConnString:     dsnWithSearchPath(dsn, schema),
+		MigrationsDir:  migrationsDir,
+		MigrationTable: schema + ".goose_db_version",
+	}
+	if err := Migrate(ctx, config); err != nil {
+		t.Fatal(err)
+	}
+	index, err := New(ctx, config, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(index.Close)
+
+	return index
+}
+
+func projectStoredObject(
+	t *testing.T,
+	ctx context.Context,
+	index *Index,
+	store *filestore.FilesystemStore,
+	digest contracts.ObjectDigest,
+) {
+	t.Helper()
+	manifest, err := store.ReadManifest(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Project(ctx, manifest, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func acquireQueryIntegrationLock(
 	t *testing.T,
 	ctx context.Context,
@@ -474,4 +637,22 @@ func hasMailbox(mailboxes []contracts.JMAPMailbox, mailboxID string) bool {
 	}
 
 	return false
+}
+
+func sameStrings(left, right []string) bool {
+	leftCopy := slices.Clone(left)
+	rightCopy := slices.Clone(right)
+	slices.Sort(leftCopy)
+	slices.Sort(rightCopy)
+
+	return slices.Equal(leftCopy, rightCopy)
+}
+
+func sameDigests(left, right []contracts.ObjectDigest) bool {
+	leftCopy := slices.Clone(left)
+	rightCopy := slices.Clone(right)
+	slices.Sort(leftCopy)
+	slices.Sort(rightCopy)
+
+	return slices.Equal(leftCopy, rightCopy)
 }

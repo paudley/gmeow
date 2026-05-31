@@ -6,6 +6,7 @@ package postgres
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
 )
@@ -88,6 +89,17 @@ func TestLabelIDsFromMetadataAcceptsJSONShape(t *testing.T) {
 	expected := []string{"INBOX", "UNREAD"}
 	if !slices.Equal(labels, expected) {
 		t.Fatalf("expected %#v, got %#v", expected, labels)
+	}
+}
+
+func TestParseJMAPTimeUsesMailDateParser(t *testing.T) {
+	parsed, ok := parseJMAPTime("Wed, 27 May 2026 09:15:00 -0600 (MDT)")
+	if !ok {
+		t.Fatal("expected mail date with timezone comment to parse")
+	}
+	expected := time.Date(2026, 5, 27, 15, 15, 0, 0, time.UTC)
+	if !parsed.Equal(expected) {
+		t.Fatalf("parsed = %s, want %s", parsed, expected)
 	}
 }
 

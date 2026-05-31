@@ -125,6 +125,8 @@ type emailQueryFilter struct {
 	InMailbox  string `json:"inMailbox"`
 	HasKeyword string `json:"hasKeyword"`
 	NotKeyword string `json:"notKeyword"`
+	After      string `json:"after"`
+	Before     string `json:"before"`
 }
 
 type mailboxGetResponse struct {
@@ -244,7 +246,7 @@ type jmapQuota struct {
 	Name         string   `json:"name"`
 	Types        []string `json:"types"`
 	Used         uint64   `json:"used"`
-	HardLimit    uint64   `json:"hardLimit"`
+	HardLimit    uint64   `json:"hardLimit,omitempty"`
 }
 
 type searchSnippetGetResponse struct {
@@ -576,9 +578,9 @@ func (handler handler) dispatch(ctx context.Context, call methodCall) methodResp
 	case "Blob/lookup":
 		return handler.handleBlobLookup(ctx, call)
 	case "Quota/get":
-		return handler.handleQuotaGet(call)
+		return handler.handleQuotaGet(ctx, call)
 	case "Quota/query":
-		return handler.handleQuotaQuery(call)
+		return handler.handleQuotaQuery(ctx, call)
 	case "Quota/changes":
 		return handler.handleQuotaChanges(call)
 	case "Quota/queryChanges":
@@ -671,7 +673,10 @@ func (handler handler) handleBlobLookup(
 	}
 }
 
-func (handler handler) handleQuotaGet(call methodCall) methodResponse {
+func (handler handler) handleQuotaGet(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
 	var arguments getArguments
 	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
 		return invalidArguments(call.ClientID, err)
@@ -679,33 +684,49 @@ func (handler handler) handleQuotaGet(call methodCall) methodResponse {
 	if err := validateAccountID(arguments.AccountID); err != nil {
 		return invalidArguments(call.ClientID, err)
 	}
-
-	notFound := []string{}
-	for _, id := range arguments.IDs {
-		if strings.TrimSpace(id) != "" {
-			notFound = append(notFound, id)
-		}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
 	}
+
+	quotas, err := handler.services.JMAPQuotas(ctx)
+	if err != nil {
+		return serverFail(call.ClientID, err.Error())
+	}
+	list, notFound := selectedJMAPQuotas(quotas, arguments.IDs)
 
 	return methodResponse{
 		Name: "Quota/get",
 		Arguments: quotaGetResponse{
 			AccountID: "gmeow",
 			State:     "0",
-			List:      []jmapQuota{},
+			List:      list,
 			NotFound:  notFound,
 		},
 		ClientID: call.ClientID,
 	}
 }
 
-func (handler handler) handleQuotaQuery(call methodCall) methodResponse {
+func (handler handler) handleQuotaQuery(
+	ctx context.Context,
+	call methodCall,
+) methodResponse {
 	var arguments queryArguments
 	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
 		return invalidArguments(call.ClientID, err)
 	}
 	if err := validateAccountID(arguments.AccountID); err != nil {
 		return invalidArguments(call.ClientID, err)
+	}
+	if handler.services == nil {
+		return serverFail(call.ClientID, "JMAP app services are not configured")
+	}
+	quotas, err := handler.services.JMAPQuotas(ctx)
+	if err != nil {
+		return serverFail(call.ClientID, err.Error())
+	}
+	ids := make([]string, 0, len(quotas))
+	for _, quota := range quotas {
+		ids = append(ids, quota.ID)
 	}
 
 	return methodResponse{
@@ -714,9 +735,9 @@ func (handler handler) handleQuotaQuery(call methodCall) methodResponse {
 			AccountID:           "gmeow",
 			QueryState:          "0",
 			CanCalculateChanges: false,
-			IDs:                 []string{},
+			IDs:                 ids,
 			Position:            arguments.Position,
-			Total:               0,
+			Total:               len(ids),
 		},
 		ClientID: call.ClientID,
 	}
@@ -1100,17 +1121,16 @@ func (handler handler) handleEmailQuery(
 	if handler.services == nil {
 		return serverFail(call.ClientID, "JMAP app services are not configured")
 	}
+	filter, err := emailQueryRequest(arguments.Filter)
+	if err != nil {
+		return invalidArguments(call.ClientID, err)
+	}
+	filter.Offset = arguments.Position
+	filter.Limit = arguments.Limit
 
 	response, err := handler.services.JMAPEmailQuery(
 		ctx,
-		appsvc.JMAPEmailQueryRequest{
-			Text:       arguments.Filter.Text,
-			InMailbox:  arguments.Filter.InMailbox,
-			HasKeyword: arguments.Filter.HasKeyword,
-			NotKeyword: arguments.Filter.NotKeyword,
-			Offset:     arguments.Position,
-			Limit:      arguments.Limit,
-		},
+		filter,
 	)
 	if err != nil {
 		return serverFail(call.ClientID, err.Error())
@@ -1267,6 +1287,82 @@ func toJMAPBlob(blob appsvc.JMAPBlob) jmapBlob {
 		Type: blob.Type,
 		Size: blob.Size,
 	}
+}
+
+func toJMAPQuota(quota appsvc.JMAPQuota) jmapQuota {
+	return jmapQuota{
+		ID:           quota.ID,
+		ResourceType: quota.ResourceType,
+		Scope:        quota.Scope,
+		Name:         quota.Name,
+		Types:        append([]string{}, quota.Types...),
+		Used:         quota.Used,
+	}
+}
+
+func selectedJMAPQuotas(
+	quotas []appsvc.JMAPQuota,
+	ids []string,
+) ([]jmapQuota, []string) {
+	byID := map[string]appsvc.JMAPQuota{}
+	for _, quota := range quotas {
+		byID[quota.ID] = quota
+	}
+
+	if len(ids) == 0 {
+		list := make([]jmapQuota, 0, len(quotas))
+		for _, quota := range quotas {
+			list = append(list, toJMAPQuota(quota))
+		}
+
+		return list, nil
+	}
+
+	list := make([]jmapQuota, 0, len(ids))
+	notFound := []string{}
+	for _, id := range ids {
+		quota, ok := byID[id]
+		if !ok {
+			notFound = append(notFound, id)
+			continue
+		}
+		list = append(list, toJMAPQuota(quota))
+	}
+
+	return list, notFound
+}
+
+func emailQueryRequest(filter emailQueryFilter) (appsvc.JMAPEmailQueryRequest, error) {
+	after, err := parseJMAPUTCDate(filter.After)
+	if err != nil {
+		return appsvc.JMAPEmailQueryRequest{}, err
+	}
+	before, err := parseJMAPUTCDate(filter.Before)
+	if err != nil {
+		return appsvc.JMAPEmailQueryRequest{}, err
+	}
+
+	return appsvc.JMAPEmailQueryRequest{
+		After:      after,
+		Before:     before,
+		Text:       filter.Text,
+		InMailbox:  filter.InMailbox,
+		HasKeyword: filter.HasKeyword,
+		NotKeyword: filter.NotKeyword,
+	}, nil
+}
+
+func parseJMAPUTCDate(value string) (time.Time, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, trimmed)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid UTCDate %q", value)
+	}
+
+	return parsed.UTC(), nil
 }
 
 func toJMAPBlobInfo(
