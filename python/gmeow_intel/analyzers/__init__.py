@@ -3,8 +3,8 @@
 
 """Analyzer namespace for Python-native external adapters.
 
-The Go ANALYSIS worker invokes these modules through the `gmeow-intel analyze <name>` command
-only when an analyzer is explicitly configured as an external Python/model adapter.
+The Go ANALYSIS worker invokes these modules through the `gmeow-intel serve <name>` command
+only when an analyzer is explicitly configured as a persistent external Python/model adapter.
 
 See Also:
     MODULE.md: Analyzer namespace contract for external ANALYSIS adapters.

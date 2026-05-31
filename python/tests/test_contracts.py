@@ -7,8 +7,13 @@ The tests exercise the Pydantic models and analyzer command functions used by th
 external adapter path. Queue consumption and FILESTORE writes remain owned by Go tests.
 """
 
+import io
+import json
+import sys
 from typing import cast
 
+import pytest
+from gmeow_intel import worker
 from gmeow_intel.analyzers import categories, ner
 from gmeow_intel.contracts import AnalyzerJob, AnalyzerSpec, Annotation, ExternalCommandRequest
 
@@ -159,3 +164,63 @@ def test_category_discovery_uses_sklearn_clusters() -> None:
 
     _require_equal(run["messages"], expected=4)
     _require_truthy(run["clusters"])
+
+
+def test_persistent_serve_protocol_reuses_warm_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify serve mode is a resident request loop, not one process per object."""
+    calls: list[str] = []
+    warmups: list[str] = []
+
+    def fake_warmup() -> None:
+        warmups.append("warm")
+
+    def fake_analyzer(request: ExternalCommandRequest) -> Annotation:
+        calls.append(request.job.object_digest)
+
+        return Annotation(
+            schema_version=1,
+            object_digest=request.job.object_digest,
+            kind="analysis",
+            analyzer_name=request.job.analyzer.name,
+            analyzer_version=request.job.analyzer.version,
+            data={"call": len(calls)},
+        )
+
+    first = ExternalCommandRequest(
+        schema_version=1,
+        job=AnalyzerJob(
+            schema_version=1,
+            job_id="job-1",
+            analyzer=AnalyzerSpec(name="fake.persist", version="test-v1"),
+            object_digest="digest-1",
+        ),
+        manifest={"digest": "digest-1"},
+    )
+    second = ExternalCommandRequest(
+        schema_version=1,
+        job=AnalyzerJob(
+            schema_version=1,
+            job_id="job-2",
+            analyzer=AnalyzerSpec(name="fake.persist", version="test-v1"),
+            object_digest="digest-2",
+        ),
+        manifest={"digest": "digest-2"},
+    )
+
+    stdin = io.StringIO(first.model_dump_json() + "\n" + second.model_dump_json() + "\n")
+    stdout = io.StringIO()
+    monkeypatch.setitem(worker.ANALYZERS, "fake.persist", fake_analyzer)
+    monkeypatch.setitem(worker.WARMUPS, "fake.persist", fake_warmup)
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    worker._serve("fake.persist")
+
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    _require_equal(lines[0], expected={"ready": True})
+    _require_equal(lines[1]["annotation"]["object_digest"], expected="digest-1")
+    _require_equal(lines[2]["annotation"]["object_digest"], expected="digest-2")
+    _require_equal(warmups, expected=["warm"])
+    _require_equal(calls, expected=["digest-1", "digest-2"])
