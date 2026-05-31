@@ -923,6 +923,7 @@ func refreshContactProjectionForContactsTx(
 	}
 
 	contactSet := contactentity.ContactSubjects(statements)
+
 	facts := contactentity.FactsForContacts(statements, annotations, contactSet)
 	for _, fact := range facts {
 		err := insertContactFact(ctx, transaction, fact)

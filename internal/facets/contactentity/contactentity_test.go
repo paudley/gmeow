@@ -52,7 +52,7 @@ func TestContactEntityTypeRecognizesNonPersonSubjects(t *testing.T) {
 		{
 			Subject:   "https://example.test/#org",
 			Predicate: rdfTypePredicate,
-			Object:    "https://schema.org/Organization",
+			Object:    "http://schema.org/Organization",
 		},
 		{
 			Subject:   "https://example.test/#person",
@@ -77,13 +77,13 @@ func TestFactsFromStatementsClassifiesAndNormalizesContactFacts(t *testing.T) {
 			StatementHash: "type",
 			Subject:       "https://example.test/#org",
 			Predicate:     rdfTypePredicate,
-			Object:        "https://schema.org/Organization",
+			Object:        "http://schema.org/Organization",
 		},
 		{
 			SourceDigest:  "sha256:source",
 			StatementHash: "email",
 			Subject:       "https://example.test/#org",
-			Predicate:     "https://schema.org/email",
+			Predicate:     "http://schema.org/email",
 			Object:        "mailto:Admin@Example.Test",
 			ObjectKind:    "iri",
 		},
@@ -133,6 +133,11 @@ func TestNormalizeIdentityHandlesMailtoAndDisplayNames(t *testing.T) {
 	got := NormalizeIdentity(`Pat <MAILTO:Pat@Example.Test>`)
 	if got != "pat@example.test" {
 		t.Fatalf("NormalizeIdentity = %q, want pat@example.test", got)
+	}
+
+	got = NormalizeIdentity(`mailto.support@example.test`)
+	if got != "mailto.support@example.test" {
+		t.Fatalf("NormalizeIdentity = %q, want mailto.support@example.test", got)
 	}
 }
 

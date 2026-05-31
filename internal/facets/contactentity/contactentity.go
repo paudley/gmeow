@@ -24,6 +24,14 @@ const (
 	FactKindURL          = "url"
 )
 
+const (
+	mailtoPrefix          = "mailto:"
+	schemaOrgHTTPPrefix   = "http://schema.org/"
+	schemaOrgHTTPSPrefix  = "https://schema.org/"
+	schemaOrgOrganization = schemaOrgHTTPSPrefix + "Organization"
+	schemaOrgPerson       = schemaOrgHTTPSPrefix + "Person"
+)
+
 type Statement struct {
 	SourceDigest  contracts.ObjectDigest
 	StatementHash string
@@ -113,11 +121,11 @@ func ContactSubjects(statements []Statement) map[string]bool {
 }
 
 func IsContactEntityType(value string) bool {
-	switch strings.TrimSpace(value) {
+	switch canonicalSchemaIRI(value) {
 	case "http://xmlns.com/foaf/0.1/Person",
 		"http://xmlns.com/foaf/0.1/Organization",
-		"https://schema.org/Person",
-		"https://schema.org/Organization",
+		schemaOrgPerson,
+		schemaOrgOrganization,
 		"http://www.w3.org/2000/10/swap/pim/gedcom#Individual",
 		"http://www.w3.org/2006/vcard/ns#Individual",
 		"http://www.w3.org/2006/vcard/ns#Organization",
@@ -224,21 +232,18 @@ func FactValue(value, objectKind, factKind string) string {
 		return NormalizeIdentity(value)
 	}
 
-	if objectKind == "literal" {
-		return strings.TrimSpace(value)
-	}
-
 	return strings.TrimSpace(value)
 }
 
 func NormalizeIdentity(value string) string {
-	value = strings.TrimSpace(value)
-	value = removeMailtoSchemes(value)
+	value = trimMailtoAddressPrefix(value)
 
 	address, err := mail.ParseAddress(value)
 	if err == nil {
-		value = removeMailtoSchemes(address.Address)
+		value = address.Address
 	}
+
+	value = trimMailtoPrefix(value)
 
 	return strings.ToLower(strings.TrimSpace(value))
 }
@@ -359,6 +364,8 @@ func patrickAudleyContactFactKind(predicate string) (string, bool, bool) {
 }
 
 func schemaContactFactKind(predicate string) (string, bool) {
+	predicate = canonicalSchemaIRI(predicate)
+
 	if kind, found := schemaContactFactKindEarly(predicate); found {
 		return kind, true
 	}
@@ -368,17 +375,17 @@ func schemaContactFactKind(predicate string) (string, bool) {
 
 func schemaContactFactKindEarly(predicate string) (string, bool) {
 	switch predicate {
-	case "https://schema.org/address":
+	case schemaOrgHTTPSPrefix + "address":
 		return FactKindAddress, true
-	case "https://schema.org/affiliation":
+	case schemaOrgHTTPSPrefix + "affiliation":
 		return FactKindAffiliation, true
-	case "https://schema.org/alternateName":
+	case schemaOrgHTTPSPrefix + "alternateName":
 		return FactKindAlias, true
-	case "https://schema.org/email":
+	case schemaOrgHTTPSPrefix + "email":
 		return FactKindEmail, true
-	case "https://schema.org/identifier":
+	case schemaOrgHTTPSPrefix + "identifier":
 		return FactKindIdentifier, true
-	case "https://schema.org/jobTitle":
+	case schemaOrgHTTPSPrefix + "jobTitle":
 		return FactKindTitle, true
 	default:
 		return "", false
@@ -387,19 +394,19 @@ func schemaContactFactKindEarly(predicate string) (string, bool) {
 
 func schemaContactFactKindLate(predicate string) (string, bool) {
 	switch predicate {
-	case "https://schema.org/knows":
+	case schemaOrgHTTPSPrefix + "knows":
 		return FactKindRelationship, true
-	case "https://schema.org/memberOf":
+	case schemaOrgHTTPSPrefix + "memberOf":
 		return FactKindAffiliation, true
-	case "https://schema.org/name":
+	case schemaOrgHTTPSPrefix + "name":
 		return FactKindName, true
-	case "https://schema.org/sameAs":
+	case schemaOrgHTTPSPrefix + "sameAs":
 		return FactKindIdentifier, true
-	case "https://schema.org/telephone":
+	case schemaOrgHTTPSPrefix + "telephone":
 		return FactKindPhone, true
-	case "https://schema.org/url":
+	case schemaOrgHTTPSPrefix + "url":
 		return FactKindURL, true
-	case "https://schema.org/worksFor":
+	case schemaOrgHTTPSPrefix + "worksFor":
 		return FactKindAffiliation, true
 	default:
 		return "", false
@@ -439,13 +446,38 @@ func stringMetadata(metadata map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-func removeMailtoSchemes(value string) string {
-	for {
-		index := strings.Index(strings.ToLower(value), "mailto:")
-		if index < 0 {
-			return strings.TrimSpace(value)
-		}
-
-		value = value[:index] + value[index+len("mailto:"):]
+func canonicalSchemaIRI(value string) string {
+	value = strings.TrimSpace(value)
+	if suffix, found := strings.CutPrefix(value, schemaOrgHTTPPrefix); found {
+		return schemaOrgHTTPSPrefix + suffix
 	}
+
+	return value
+}
+
+func trimMailtoPrefix(value string) string {
+	value = strings.TrimSpace(value)
+
+	for strings.HasPrefix(strings.ToLower(value), mailtoPrefix) {
+		value = strings.TrimSpace(value[len(mailtoPrefix):])
+	}
+
+	return value
+}
+
+func trimMailtoAddressPrefix(value string) string {
+	value = strings.TrimSpace(value)
+
+	start := strings.LastIndex(value, "<")
+	if start < 0 {
+		return trimMailtoPrefix(value)
+	}
+
+	address := value[start+1:]
+	trimmedAddress := trimMailtoPrefix(address)
+	if trimmedAddress == address {
+		return value
+	}
+
+	return value[:start+1] + trimmedAddress
 }
