@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1221,33 +1222,65 @@ func insertContactIdentityBinding(
 func refreshContactRollupsTx(ctx context.Context, transaction pgx.Tx) error {
 	_, err := transaction.Exec(
 		ctx,
-		`INSERT INTO query_contact_rollups(
-		   contact_id, display_name, primary_email, fact_count, search_text, updated_at
-		 )
-		 SELECT f.contact_id,
-		        COALESCE(
-		          min(f.value) FILTER (WHERE f.fact_kind = 'name'),
-		          min(f.value) FILTER (WHERE f.fact_kind = 'alias'),
-		          f.contact_id
-		        ) AS display_name,
-		        COALESCE(
-		          min(f.value) FILTER (
-		            WHERE f.fact_kind = 'email' AND f.historical = false
-		          ),
-		          min(f.value) FILTER (WHERE f.fact_kind = 'email'),
-		          ''
-		        ) AS primary_email,
-		        count(*)::integer AS fact_count,
-		        string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text,
-		        now()
-		   FROM query_contact_facts f
-		  GROUP BY f.contact_id
-		 ON CONFLICT(contact_id) DO UPDATE SET
-		   display_name = excluded.display_name,
-		   primary_email = excluded.primary_email,
-		   fact_count = excluded.fact_count,
-		   search_text = excluded.search_text,
-		   updated_at = now()`,
+		`WITH fact_rollups AS (
+		SELECT f.contact_id,
+		COALESCE(
+		min(f.value) FILTER (WHERE f.fact_kind = 'name'),
+		min(f.value) FILTER (WHERE f.fact_kind = 'alias'),
+		f.contact_id
+		) AS display_name,
+		COALESCE(
+		min(f.value) FILTER (
+		WHERE f.fact_kind = 'email' AND f.historical = false
+		),
+		min(f.value) FILTER (WHERE f.fact_kind = 'email'),
+		''
+		) AS primary_email,
+		count(*)::integer AS fact_count,
+		string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text
+		FROM query_contact_facts f
+		GROUP BY f.contact_id
+		),
+		observation_rollups AS (
+		SELECT b.contact_id,
+		min(p.message_time) FILTER (WHERE p.message_time IS NOT NULL) AS first_seen_at,
+		max(p.message_time) FILTER (WHERE p.message_time IS NOT NULL) AS last_seen_at,
+		count(DISTINCT p.message_digest)::integer AS message_count,
+		count(*)::integer AS participant_count
+		FROM (
+		SELECT DISTINCT contact_id, token_hash, token
+		FROM query_contact_identity_bindings
+		) b
+		JOIN query_mail_participants p
+		ON p.token_hash = b.token_hash AND p.token = b.token
+		GROUP BY b.contact_id
+		)
+		INSERT INTO query_contact_rollups(
+		contact_id, display_name, primary_email, fact_count, search_text,
+		first_seen_at, last_seen_at, message_count, participant_count, updated_at
+		)
+		SELECT f.contact_id,
+		f.display_name,
+		f.primary_email,
+		f.fact_count,
+		f.search_text,
+		o.first_seen_at,
+		o.last_seen_at,
+		COALESCE(o.message_count, 0),
+		COALESCE(o.participant_count, 0),
+		now()
+		FROM fact_rollups f
+		LEFT JOIN observation_rollups o ON o.contact_id = f.contact_id
+		ON CONFLICT(contact_id) DO UPDATE SET
+		display_name = excluded.display_name,
+		primary_email = excluded.primary_email,
+		fact_count = excluded.fact_count,
+		search_text = excluded.search_text,
+		first_seen_at = excluded.first_seen_at,
+		last_seen_at = excluded.last_seen_at,
+		message_count = excluded.message_count,
+		participant_count = excluded.participant_count,
+		updated_at = now()`,
 	)
 	if err != nil {
 		return fmt.Errorf("refresh contact rollups: %w", err)
@@ -1263,9 +1296,7 @@ func refreshContactRollupsForContactsTx(
 ) error {
 	_, err := transaction.Exec(
 		ctx,
-		`INSERT INTO query_contact_rollups(
-		contact_id, display_name, primary_email, fact_count, search_text, updated_at
-		)
+		`WITH fact_rollups AS (
 		SELECT f.contact_id,
 		COALESCE(
 		min(f.value) FILTER (WHERE f.fact_kind = 'name'),
@@ -1280,16 +1311,51 @@ func refreshContactRollupsForContactsTx(
 		''
 		) AS primary_email,
 		count(*)::integer AS fact_count,
-		string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text,
-		now()
+		string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text
 		FROM query_contact_facts f
 		WHERE f.contact_id = ANY($1)
 		GROUP BY f.contact_id
+		),
+		observation_rollups AS (
+		SELECT b.contact_id,
+		min(p.message_time) FILTER (WHERE p.message_time IS NOT NULL) AS first_seen_at,
+		max(p.message_time) FILTER (WHERE p.message_time IS NOT NULL) AS last_seen_at,
+		count(DISTINCT p.message_digest)::integer AS message_count,
+		count(*)::integer AS participant_count
+		FROM (
+		SELECT DISTINCT contact_id, token_hash, token
+		FROM query_contact_identity_bindings
+		WHERE contact_id = ANY($1)
+		) b
+		JOIN query_mail_participants p
+		ON p.token_hash = b.token_hash AND p.token = b.token
+		GROUP BY b.contact_id
+		)
+		INSERT INTO query_contact_rollups(
+		contact_id, display_name, primary_email, fact_count, search_text,
+		first_seen_at, last_seen_at, message_count, participant_count, updated_at
+		)
+		SELECT f.contact_id,
+		f.display_name,
+		f.primary_email,
+		f.fact_count,
+		f.search_text,
+		o.first_seen_at,
+		o.last_seen_at,
+		COALESCE(o.message_count, 0),
+		COALESCE(o.participant_count, 0),
+		now()
+		FROM fact_rollups f
+		LEFT JOIN observation_rollups o ON o.contact_id = f.contact_id
 		ON CONFLICT(contact_id) DO UPDATE SET
 		display_name = excluded.display_name,
 		primary_email = excluded.primary_email,
 		fact_count = excluded.fact_count,
 		search_text = excluded.search_text,
+		first_seen_at = excluded.first_seen_at,
+		last_seen_at = excluded.last_seen_at,
+		message_count = excluded.message_count,
+		participant_count = excluded.participant_count,
 		updated_at = now()`,
 		contacts,
 	)
@@ -1306,11 +1372,16 @@ func (index *Index) ContactAggregate(
 ) (contracts.ContactAggregate, error) {
 	contactID := strings.TrimSpace(request.ContactID)
 
-	var aggregate contracts.ContactAggregate
+	var (
+		aggregate contracts.ContactAggregate
+		firstSeen sql.NullTime
+		lastSeen  sql.NullTime
+	)
 
 	err := index.pool.QueryRow(
 		ctx,
-		`SELECT contact_id, display_name, primary_email, fact_count
+		`SELECT contact_id, display_name, primary_email, fact_count,
+		first_seen_at, last_seen_at, message_count, participant_count
 		   FROM query_contact_rollups
 		  WHERE contact_id = $1`,
 		contactID,
@@ -1319,6 +1390,10 @@ func (index *Index) ContactAggregate(
 		&aggregate.DisplayName,
 		&aggregate.PrimaryEmail,
 		&aggregate.FactCount,
+		&firstSeen,
+		&lastSeen,
+		&aggregate.MessageCount,
+		&aggregate.ParticipantCount,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1374,6 +1449,13 @@ func (index *Index) ContactAggregate(
 	}
 
 	aggregate.SchemaVersion = contracts.SchemaVersionPhase00
+	if firstSeen.Valid {
+		aggregate.FirstSeenAt = firstSeen.Time
+	}
+
+	if lastSeen.Valid {
+		aggregate.LastSeenAt = lastSeen.Time
+	}
 
 	return aggregate, nil
 }
@@ -1406,7 +1488,8 @@ func (index *Index) ContactSearch(
 	args = append(args, limit, offset)
 
 	rows, err := index.pool.Query(ctx, fmt.Sprintf(
-		`SELECT contact_id, display_name, primary_email, fact_count
+		`SELECT contact_id, display_name, primary_email, fact_count,
+		first_seen_at, last_seen_at, message_count, participant_count
 		   FROM query_contact_rollups
 		  WHERE %s
 		  ORDER BY display_name, contact_id
@@ -1423,19 +1506,35 @@ func (index *Index) ContactSearch(
 	results := []contracts.ContactSearchResult{}
 
 	for rows.Next() {
-		var result contracts.ContactSearchResult
+		var (
+			result    contracts.ContactSearchResult
+			firstSeen sql.NullTime
+			lastSeen  sql.NullTime
+		)
 
 		err = rows.Scan(
 			&result.ContactID,
 			&result.DisplayName,
 			&result.PrimaryEmail,
 			&result.FactCount,
+			&firstSeen,
+			&lastSeen,
+			&result.MessageCount,
+			&result.ParticipantCount,
 		)
 		if err != nil {
 			return contracts.ContactSearchResponse{}, fmt.Errorf("scan contact search: %w", err)
 		}
 
 		result.Score = 1
+		if firstSeen.Valid {
+			result.FirstSeenAt = firstSeen.Time
+		}
+
+		if lastSeen.Valid {
+			result.LastSeenAt = lastSeen.Time
+		}
+
 		results = append(results, result)
 	}
 

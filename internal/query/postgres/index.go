@@ -1220,6 +1220,15 @@ func projectObjectTx(
 		return err
 	}
 
+	mailParticipantContacts, err := contactIDsForMailParticipantsTx(
+		ctx,
+		tx,
+		object.Manifest.ObjectDigest,
+	)
+	if err != nil {
+		return err
+	}
+
 	rdfProjectionChanged = rdfProjectionChanged ||
 		manifestHasFacetKind(object.Manifest, contracts.RDFSourceBundleFacetKind) ||
 		manifestHasFacetKind(object.Manifest, contracts.RDFClaimBundleFacetKind)
@@ -1277,6 +1286,7 @@ func projectObjectTx(
 		"query_object_overlays",
 		"query_summaries",
 		"query_mail_identities",
+		"query_mail_participants",
 		"query_rdf_statement_annotations",
 		"query_rdf_statements",
 	} {
@@ -1300,6 +1310,25 @@ func projectObjectTx(
 	if err := insertMailIdentityRows(ctx, tx, object.Manifest); err != nil {
 		return err
 	}
+
+	err = insertMailParticipantRows(ctx, tx, object.Manifest)
+	if err != nil {
+		return err
+	}
+
+	newMailParticipantContacts, err := contactIDsForMailParticipantsTx(
+		ctx,
+		tx,
+		object.Manifest.ObjectDigest,
+	)
+	if err != nil {
+		return err
+	}
+
+	mailParticipantContacts = append(
+		mailParticipantContacts,
+		newMailParticipantContacts...,
+	)
 
 	if err := insertRelationshipRows(ctx, tx, object.Manifest); err != nil {
 		return err
@@ -1362,6 +1391,17 @@ func projectObjectTx(
 		}
 	}
 
+	if len(mailParticipantContacts) > 0 {
+		err = refreshContactRollupsForContactsTx(
+			ctx,
+			tx,
+			mailParticipantContacts,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
 	if err := seedJMAPEmailStateTx(
 		ctx,
 		tx,
@@ -1380,6 +1420,7 @@ func truncateProjectionTablesSQL() string {
 		"query_projection_state,",
 		"query_summaries,",
 		"query_source_cursors,",
+		"query_mail_participants,",
 		"query_contact_rollups,",
 		"query_contact_identity_bindings,",
 		"query_contact_facts,",
@@ -1415,6 +1456,8 @@ func deleteProjectionRowsSQL(table string) string {
 		return "DELETE FROM query_summaries WHERE object_digest = $1"
 	case "query_mail_identities":
 		return "DELETE FROM query_mail_identities WHERE object_digest = $1"
+	case "query_mail_participants":
+		return "DELETE FROM query_mail_participants WHERE message_digest = $1"
 	case "query_rdf_statement_annotations":
 		return "DELETE FROM query_rdf_statement_annotations WHERE source_digest = $1"
 	case "query_rdf_statements":

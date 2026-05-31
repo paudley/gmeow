@@ -46,6 +46,14 @@ type Attachment struct {
 	Content   []byte
 }
 
+type Participant struct {
+	Role        string
+	DisplayName string
+	Address     string
+	RawValue    string
+	Ordinal     int
+}
+
 func Parse(raw []byte, sourceHint string) (Message, error) {
 	parsed, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
@@ -100,7 +108,11 @@ func Metadata(
 		"subject":                  message.Subject,
 		"date":                     message.Date,
 		"from":                     message.From,
+		"sender":                   message.Headers["sender"],
+		"reply_to":                 message.Headers["reply-to"],
 		"to":                       message.To,
+		"cc":                       message.Headers["cc"],
+		"bcc":                      message.Headers["bcc"],
 		"generated_message_id":     message.GeneratedMessage,
 		"canonical_fingerprint":    message.Fingerprint,
 		"body_line_fingerprint":    message.BodyLineHash,
@@ -111,6 +123,75 @@ func Metadata(
 		"analysis_scope":           contracts.AnalysisScopeCanonical,
 		"analysis_input_body_line": message.BodyLineHash,
 	}
+}
+
+func ParticipantsFromMetadata(metadata map[string]any) []Participant {
+	if metadata == nil {
+		return nil
+	}
+
+	participants := []Participant{}
+	for _, header := range []struct {
+		key  string
+		role string
+	}{
+		{key: "from", role: "from"},
+		{key: "sender", role: "sender"},
+		{key: "reply_to", role: "reply_to"},
+		{key: "to", role: "to"},
+		{key: "cc", role: "cc"},
+		{key: "bcc", role: "bcc"},
+	} {
+		participants = append(
+			participants,
+			participantsFromHeader(header.role, stringMetadata(metadata, header.key))...,
+		)
+	}
+
+	return participants
+}
+
+func participantsFromHeader(role, value string) []Participant {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	addresses, err := mail.ParseAddressList(value)
+	if err != nil {
+		address, singleErr := mail.ParseAddress(value)
+		if singleErr != nil {
+			return nil
+		}
+
+		addresses = []*mail.Address{address}
+	}
+
+	participants := make([]Participant, 0, len(addresses))
+	for index, address := range addresses {
+		if strings.TrimSpace(address.Address) == "" {
+			continue
+		}
+
+		participants = append(participants, Participant{
+			Role:        role,
+			DisplayName: strings.TrimSpace(address.Name),
+			Address:     strings.TrimSpace(address.Address),
+			RawValue:    strings.TrimSpace(address.String()),
+			Ordinal:     index,
+		})
+	}
+
+	return participants
+}
+
+func stringMetadata(metadata map[string]any, key string) string {
+	value, ok := metadata[key].(string)
+	if !ok {
+		return ""
+	}
+
+	return value
 }
 
 func MIMEStructure(bodyMediaType string, attachments []Attachment) map[string]any {
