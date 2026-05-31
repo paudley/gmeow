@@ -19,16 +19,27 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/observability"
 	"blackcat.ca/gmeow/internal/query"
 )
 
 const (
-	contactFactEmail      = "email"
-	prefixFieldCount      = 3
-	rdfScannerBufferSize  = 4096
-	rdfScannerMaxCapacity = 1024 * 1024
-	rdfTypePredicate      = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
-	splitQuoteOffset      = 2
+	contactFactAffiliation  = "affiliation"
+	contactFactAlias        = "alias"
+	contactFactAddress      = "address"
+	contactFactAccount      = "account"
+	contactFactEmail        = "email"
+	contactFactIdentifier   = "identifier"
+	contactFactName         = "name"
+	contactFactPhone        = "phone"
+	contactFactRelationship = "relationship"
+	contactFactTitle        = "title"
+	contactFactURL          = "url"
+	prefixFieldCount        = 3
+	rdfScannerBufferSize    = 4096
+	rdfScannerMaxCapacity   = 1024 * 1024
+	rdfTypePredicate        = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+	splitQuoteOffset        = 2
 )
 
 type rdfTerm struct {
@@ -705,7 +716,7 @@ func parseRDFTerm(token string, prefixes map[string]string) (rdfTerm, bool) {
 	}
 
 	if strings.HasPrefix(token, "\"") {
-		return parseLiteralTerm(token), true
+		return parseLiteralTerm(token, prefixes), true
 	}
 
 	if prefix, suffix, ok := strings.Cut(token, ":"); ok {
@@ -717,7 +728,7 @@ func parseRDFTerm(token string, prefixes map[string]string) (rdfTerm, bool) {
 	return rdfTerm{}, false
 }
 
-func parseLiteralTerm(token string) rdfTerm {
+func parseLiteralTerm(token string, prefixes map[string]string) rdfTerm {
 	value, suffix := splitLiteralValue(token)
 
 	term := rdfTerm{kind: "literal", value: value}
@@ -726,10 +737,19 @@ func parseLiteralTerm(token string) rdfTerm {
 	}
 
 	if after, ok := strings.CutPrefix(suffix, "^^"); ok {
-		term.datatype = after
+		term.datatype = parseDatatypeIRI(after, prefixes)
 	}
 
 	return term
+}
+
+func parseDatatypeIRI(token string, prefixes map[string]string) string {
+	term, ok := parseRDFTerm(token, prefixes)
+	if ok && term.kind == "iri" {
+		return term.value
+	}
+
+	return strings.Trim(token, "<>")
 }
 
 func splitLiteralValue(token string) (string, string) {
@@ -942,9 +962,6 @@ func refreshContactProjectionForContactsTx(
 	}
 
 	contactSet := contactSubjects(statements)
-	for _, contact := range contacts {
-		contactSet[contact] = true
-	}
 
 	facts := contactFactsFromStatements(statements, annotations, contactSet)
 	for _, fact := range facts {
@@ -981,7 +998,11 @@ func refreshContactProjection(ctx context.Context, beginner transactionBeginner)
 func rollbackProjectionTx(ctx context.Context, transaction pgx.Tx) {
 	err := transaction.Rollback(ctx)
 	if err != nil && !errors.Is(err, pgx.ErrTxClosed) {
-		return
+		observability.Logger(ctx).Warn(
+			"rollback contact projection refresh failed",
+			"error",
+			err,
+		)
 	}
 }
 
@@ -1046,13 +1067,13 @@ func contactProjectionStatementsForContacts(
 	rows, err := transaction.Query(
 		ctx,
 		`SELECT s.source_digest, s.statement_hash,
-subj.term_value, pred.term_value, obj.term_value, obj.term_kind
-FROM query_rdf_statements s
-JOIN query_rdf_terms subj ON subj.term_id = s.subject_term_id
-JOIN query_rdf_terms pred ON pred.term_id = s.predicate_term_id
-JOIN query_rdf_terms obj ON obj.term_id = s.object_term_id
-WHERE subj.term_value = ANY($1)
-ORDER BY s.statement_order, s.statement_hash`,
+		subj.term_value, pred.term_value, obj.term_value, obj.term_kind
+		FROM query_rdf_statements s
+		JOIN query_rdf_terms subj ON subj.term_id = s.subject_term_id
+		JOIN query_rdf_terms pred ON pred.term_id = s.predicate_term_id
+		JOIN query_rdf_terms obj ON obj.term_id = s.object_term_id
+		WHERE subj.term_value = ANY($1)
+		ORDER BY s.statement_order, s.statement_hash`,
 		contacts,
 	)
 	if err != nil {
@@ -1218,50 +1239,172 @@ func contactFactsFromStatements(
 }
 
 func contactFactKind(predicate string) (string, bool, bool) {
-	kinds := map[string]string{
-		"http://purl.org/vocab/relationship/childOf":     "relationship",
-		"http://purl.org/vocab/relationship/parentOf":    "relationship",
-		"http://purl.org/vocab/relationship/spouseOf":    "relationship",
-		"http://www.w3.org/2002/07/owl#sameAs":           "identifier",
-		"http://www.w3.org/2004/02/skos/core#exactMatch": "identifier",
-		"http://www.w3.org/2006/vcard/ns#fn":             "name",
-		"http://www.w3.org/2006/vcard/ns#hasAddress":     "address",
-		"http://www.w3.org/2006/vcard/ns#hasEmail":       contactFactEmail,
-		"http://www.w3.org/2006/vcard/ns#hasTelephone":   "phone",
-		"http://www.w3.org/2006/vcard/ns#hasURL":         "url",
-		"http://www.w3.org/2006/vcard/ns#nickname":       "alias",
-		"http://www.w3.org/ns/org#member":                "affiliation",
-		"http://xmlns.com/foaf/0.1/account":              "account",
-		"http://xmlns.com/foaf/0.1/homepage":             "url",
-		"http://xmlns.com/foaf/0.1/knows":                "relationship",
-		"http://xmlns.com/foaf/0.1/mbox":                 contactFactEmail,
-		"http://xmlns.com/foaf/0.1/name":                 "name",
-		"http://xmlns.com/foaf/0.1/nick":                 "alias",
-		"http://xmlns.com/foaf/0.1/phone":                "phone",
-		"http://xmlns.com/foaf/0.1/title":                "title",
-		"https://patrickaudley.com/lod#emailIdentity":    contactFactEmail,
-		"https://patrickaudley.com/lod#historicalEmail":  contactFactEmail,
-		"https://schema.org/address":                     "address",
-		"https://schema.org/affiliation":                 "affiliation",
-		"https://schema.org/alternateName":               "alias",
-		"https://schema.org/email":                       contactFactEmail,
-		"https://schema.org/identifier":                  "identifier",
-		"https://schema.org/jobTitle":                    "title",
-		"https://schema.org/knows":                       "relationship",
-		"https://schema.org/memberOf":                    "affiliation",
-		"https://schema.org/name":                        "name",
-		"https://schema.org/sameAs":                      "identifier",
-		"https://schema.org/telephone":                   "phone",
-		"https://schema.org/url":                         "url",
-		"https://schema.org/worksFor":                    "affiliation",
+	kind, found := relationshipContactFactKind(predicate)
+	if found {
+		return kind, false, true
 	}
 
-	kind, found := kinds[predicate]
-	if !found {
+	kind, found = owlContactFactKind(predicate)
+	if found {
+		return kind, false, true
+	}
+
+	kind, found = vcardContactFactKind(predicate)
+	if found {
+		return kind, false, true
+	}
+
+	kind, found = orgContactFactKind(predicate)
+	if found {
+		return kind, false, true
+	}
+
+	kind, found = foafContactFactKind(predicate)
+	if found {
+		return kind, false, true
+	}
+
+	kind, historical, found := patrickAudleyContactFactKind(predicate)
+	if found {
+		return kind, historical, true
+	}
+
+	kind, found = schemaContactFactKind(predicate)
+	if found {
+		return kind, false, true
+	}
+
+	return "", false, false
+}
+
+func relationshipContactFactKind(predicate string) (string, bool) {
+	switch predicate {
+	case "http://purl.org/vocab/relationship/childOf",
+		"http://purl.org/vocab/relationship/parentOf",
+		"http://purl.org/vocab/relationship/spouseOf":
+		return contactFactRelationship, true
+	default:
+		return "", false
+	}
+}
+
+func owlContactFactKind(predicate string) (string, bool) {
+	switch predicate {
+	case "http://www.w3.org/2002/07/owl#sameAs",
+		"http://www.w3.org/2004/02/skos/core#exactMatch":
+		return contactFactIdentifier, true
+	default:
+		return "", false
+	}
+}
+
+func vcardContactFactKind(predicate string) (string, bool) {
+	switch predicate {
+	case "http://www.w3.org/2006/vcard/ns#fn":
+		return contactFactName, true
+	case "http://www.w3.org/2006/vcard/ns#hasAddress":
+		return contactFactAddress, true
+	case "http://www.w3.org/2006/vcard/ns#hasEmail":
+		return contactFactEmail, true
+	case "http://www.w3.org/2006/vcard/ns#hasTelephone":
+		return contactFactPhone, true
+	case "http://www.w3.org/2006/vcard/ns#hasURL":
+		return contactFactURL, true
+	case "http://www.w3.org/2006/vcard/ns#nickname":
+		return contactFactAlias, true
+	default:
+		return "", false
+	}
+}
+
+func orgContactFactKind(predicate string) (string, bool) {
+	if predicate == "http://www.w3.org/ns/org#member" {
+		return contactFactAffiliation, true
+	}
+
+	return "", false
+}
+
+func foafContactFactKind(predicate string) (string, bool) {
+	switch predicate {
+	case "http://xmlns.com/foaf/0.1/account":
+		return contactFactAccount, true
+	case "http://xmlns.com/foaf/0.1/homepage":
+		return contactFactURL, true
+	case "http://xmlns.com/foaf/0.1/knows":
+		return contactFactRelationship, true
+	case "http://xmlns.com/foaf/0.1/mbox":
+		return contactFactEmail, true
+	case "http://xmlns.com/foaf/0.1/name":
+		return contactFactName, true
+	case "http://xmlns.com/foaf/0.1/nick":
+		return contactFactAlias, true
+	case "http://xmlns.com/foaf/0.1/phone":
+		return contactFactPhone, true
+	case "http://xmlns.com/foaf/0.1/title":
+		return contactFactTitle, true
+	default:
+		return "", false
+	}
+}
+
+func patrickAudleyContactFactKind(predicate string) (string, bool, bool) {
+	switch predicate {
+	case "https://patrickaudley.com/lod#emailIdentity":
+		return contactFactEmail, false, true
+	case "https://patrickaudley.com/lod#historicalEmail":
+		return contactFactEmail, true, true
+	default:
 		return "", false, false
 	}
+}
 
-	return kind, predicate == "https://patrickaudley.com/lod#historicalEmail", true
+func schemaContactFactKind(predicate string) (string, bool) {
+	if kind, found := schemaContactFactKindEarly(predicate); found {
+		return kind, true
+	}
+
+	return schemaContactFactKindLate(predicate)
+}
+
+func schemaContactFactKindEarly(predicate string) (string, bool) {
+	switch predicate {
+	case "https://schema.org/address":
+		return contactFactAddress, true
+	case "https://schema.org/affiliation":
+		return contactFactAffiliation, true
+	case "https://schema.org/alternateName":
+		return contactFactAlias, true
+	case "https://schema.org/email":
+		return contactFactEmail, true
+	case "https://schema.org/identifier":
+		return contactFactIdentifier, true
+	case "https://schema.org/jobTitle":
+		return contactFactTitle, true
+	default:
+		return "", false
+	}
+}
+
+func schemaContactFactKindLate(predicate string) (string, bool) {
+	switch predicate {
+	case "https://schema.org/knows":
+		return contactFactRelationship, true
+	case "https://schema.org/memberOf":
+		return contactFactAffiliation, true
+	case "https://schema.org/name":
+		return contactFactName, true
+	case "https://schema.org/sameAs":
+		return contactFactIdentifier, true
+	case "https://schema.org/telephone":
+		return contactFactPhone, true
+	case "https://schema.org/url":
+		return contactFactURL, true
+	case "https://schema.org/worksFor":
+		return contactFactAffiliation, true
+	default:
+		return "", false
+	}
 }
 
 func contactFactValue(value, objectKind, factKind string) string {
@@ -1421,33 +1564,33 @@ func refreshContactRollupsForContactsTx(
 	_, err := transaction.Exec(
 		ctx,
 		`INSERT INTO query_contact_rollups(
-contact_id, display_name, primary_email, fact_count, search_text, updated_at
-)
-SELECT f.contact_id,
-COALESCE(
-min(f.value) FILTER (WHERE f.fact_kind = 'name'),
-min(f.value) FILTER (WHERE f.fact_kind = 'alias'),
-f.contact_id
-) AS display_name,
-COALESCE(
-min(f.value) FILTER (
-WHERE f.fact_kind = 'email' AND f.historical = false
-),
-min(f.value) FILTER (WHERE f.fact_kind = 'email'),
-''
-) AS primary_email,
-count(*)::integer AS fact_count,
-string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text,
-now()
-FROM query_contact_facts f
-WHERE f.contact_id = ANY($1)
-GROUP BY f.contact_id
-ON CONFLICT(contact_id) DO UPDATE SET
-display_name = excluded.display_name,
-primary_email = excluded.primary_email,
-fact_count = excluded.fact_count,
-search_text = excluded.search_text,
-updated_at = now()`,
+		contact_id, display_name, primary_email, fact_count, search_text, updated_at
+		)
+		SELECT f.contact_id,
+		COALESCE(
+		min(f.value) FILTER (WHERE f.fact_kind = 'name'),
+		min(f.value) FILTER (WHERE f.fact_kind = 'alias'),
+		f.contact_id
+		) AS display_name,
+		COALESCE(
+		min(f.value) FILTER (
+		WHERE f.fact_kind = 'email' AND f.historical = false
+		),
+		min(f.value) FILTER (WHERE f.fact_kind = 'email'),
+		''
+		) AS primary_email,
+		count(*)::integer AS fact_count,
+		string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text,
+		now()
+		FROM query_contact_facts f
+		WHERE f.contact_id = ANY($1)
+		GROUP BY f.contact_id
+		ON CONFLICT(contact_id) DO UPDATE SET
+		display_name = excluded.display_name,
+		primary_email = excluded.primary_email,
+		fact_count = excluded.fact_count,
+		search_text = excluded.search_text,
+		updated_at = now()`,
 		contacts,
 	)
 	if err != nil {

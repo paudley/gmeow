@@ -55,12 +55,27 @@ func TestParseRDFBundlePreservesUnknownAndRDFStarAnnotations(t *testing.T) {
 }
 
 func TestParseLiteralTermPreservesEscapedQuotes(t *testing.T) {
-	term := parseLiteralTerm(`"Patrick \"Pat\" Audley"@en`)
+	term := parseLiteralTerm(`"Patrick \"Pat\" Audley"@en`, nil)
 	if term.value != `Patrick \"Pat\" Audley` {
 		t.Fatalf("escaped literal was not preserved: %#v", term)
 	}
 	if term.language != "en" {
 		t.Fatalf("language tag was not preserved: %#v", term)
+	}
+}
+
+func TestParseLiteralTermNormalizesDatatypeIRI(t *testing.T) {
+	prefixes := map[string]string{
+		"xsd": "http://www.w3.org/2001/XMLSchema#",
+	}
+	angle := parseLiteralTerm(
+		`"2004-06-30"^^<http://www.w3.org/2001/XMLSchema#date>`,
+		prefixes,
+	)
+	prefixed := parseLiteralTerm(`"2004-06-30"^^xsd:date`, prefixes)
+	if angle.datatype != "http://www.w3.org/2001/XMLSchema#date" ||
+		prefixed.datatype != angle.datatype {
+		t.Fatalf("datatype IRIs were not normalized: angle=%#v prefixed=%#v", angle, prefixed)
 	}
 }
 
