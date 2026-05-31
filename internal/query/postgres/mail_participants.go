@@ -123,10 +123,10 @@ func insertMailParticipantRows(
 		_, err := transaction.Exec(
 			ctx,
 			`INSERT INTO query_mail_participants(
-			   message_digest, message_id, message_date, message_time, role, ordinal,
+			   message_digest, message_id, message_date, message_time, participant_role, ordinal,
 			   token_hash, token, display_name, raw_value
 			 ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-			 ON CONFLICT(message_digest, role, ordinal, token_hash) DO UPDATE SET
+			 ON CONFLICT(message_digest, participant_role, ordinal, token_hash) DO UPDATE SET
 			   message_id = excluded.message_id,
 			   message_date = excluded.message_date,
 			   message_time = excluded.message_time,
@@ -282,7 +282,7 @@ func contactMessageFilterArgs(
 
 	if role := strings.TrimSpace(request.Role); role != "" {
 		args = append(args, role)
-		where = append(where, fmt.Sprintf("p.role = $%d", len(args)))
+		where = append(where, fmt.Sprintf("p.participant_role = $%d", len(args)))
 	}
 
 	return args, strings.Join(where, " AND ")
@@ -333,12 +333,12 @@ func queryContactMessages(
 		    WHERE b.contact_id = $1
 		 )
 		 SELECT p.message_digest, p.message_id, p.message_date, p.message_time,
-		        p.role, p.token, p.display_name, p.raw_value
+		p.participant_role, p.token, p.display_name, p.raw_value
 		   FROM query_mail_participants p
 		   JOIN identities i ON i.token_hash = p.token_hash AND i.token = p.token
 		  WHERE %s
 		  ORDER BY p.message_time DESC NULLS LAST,
-		           p.message_digest, p.role, p.ordinal
+		p.message_digest, p.participant_role, p.ordinal
 		  LIMIT $%d OFFSET $%d`,
 		whereSQL,
 		len(args)-1,

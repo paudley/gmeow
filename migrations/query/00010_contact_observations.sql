@@ -4,21 +4,21 @@ CREATE TABLE IF NOT EXISTS query_mail_participants (
   message_id TEXT NOT NULL DEFAULT '',
   message_date TEXT NOT NULL DEFAULT '',
   message_time TIMESTAMPTZ,
-  role TEXT NOT NULL,
+  participant_role TEXT NOT NULL,
   ordinal INTEGER NOT NULL DEFAULT 0,
   token_hash TEXT NOT NULL,
   token TEXT NOT NULL,
   display_name TEXT NOT NULL DEFAULT '',
   raw_value TEXT NOT NULL DEFAULT '',
   projected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (message_digest, role, ordinal, token_hash)
+  PRIMARY KEY (message_digest, participant_role, ordinal, token_hash)
 );
 
 CREATE INDEX IF NOT EXISTS query_mail_participants_token_time_idx
   ON query_mail_participants(token_hash, message_time DESC NULLS LAST);
 
 CREATE INDEX IF NOT EXISTS query_mail_participants_role_token_idx
-  ON query_mail_participants(role, token_hash);
+  ON query_mail_participants(participant_role, token_hash);
 
 ALTER TABLE query_contact_rollups
   ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ,
