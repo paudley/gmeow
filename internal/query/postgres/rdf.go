@@ -1,0 +1,1367 @@
+// SPDX-FileCopyrightText: 2026 Blackcat Informatics Inc.
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package postgres
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/mail"
+	"strings"
+	"unicode"
+
+	"github.com/jackc/pgx/v5"
+
+	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/query"
+)
+
+const (
+	contactFactEmail      = "email"
+	prefixFieldCount      = 3
+	rdfScannerBufferSize  = 4096
+	rdfScannerMaxCapacity = 1024 * 1024
+	rdfTypePredicate      = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+	splitQuoteOffset      = 2
+)
+
+type rdfTerm struct {
+	kind     string
+	value    string
+	language string
+	datatype string
+}
+
+type rdfStatement struct {
+	subject   rdfTerm
+	predicate rdfTerm
+	object    rdfTerm
+	hash      string
+}
+
+type rdfAnnotation struct {
+	predicate rdfTerm
+	object    rdfTerm
+	hash      string
+}
+
+type contactProjectionStatement struct {
+	sourceDigest  contracts.ObjectDigest
+	statementHash string
+	subject       string
+	predicate     string
+	object        string
+	objectKind    string
+}
+
+type contactProjectionFact struct {
+	sourceDigest  contracts.ObjectDigest
+	statementHash string
+	contactID     string
+	factKind      string
+	value         string
+	predicate     string
+	validFrom     string
+	validUntil    string
+	historical    bool
+}
+
+type rdfBundleParser struct {
+	currentPredicate  rdfTerm
+	currentSubject    rdfTerm
+	prefixes          map[string]string
+	currentAnnotation string
+	annotations       []rdfAnnotation
+	statements        []rdfStatement
+	continuingObjects bool
+}
+
+func insertRDFRows(
+	ctx context.Context,
+	transaction pgx.Tx,
+	manifest contracts.Manifest,
+	source query.ProjectionSource,
+) (bool, error) {
+	if !manifestHasFacetKind(manifest, contracts.RDFSourceBundleFacetKind) &&
+		!manifestHasFacetKind(manifest, contracts.RDFClaimBundleFacetKind) {
+		return false, nil
+	}
+
+	reader, ok := source.(embeddingObjectReader)
+	if !ok {
+		return true, nil
+	}
+
+	opened, err := reader.Open(ctx, manifest.ObjectDigest)
+	if err != nil {
+		return true, fmt.Errorf("open RDF bundle %s: %w", manifest.ObjectDigest, err)
+	}
+	defer opened.Close()
+
+	content, err := io.ReadAll(opened)
+	if err != nil {
+		return true, fmt.Errorf("read RDF bundle %s: %w", manifest.ObjectDigest, err)
+	}
+
+	statements, annotations := parseRDFBundle(string(content))
+	for index, statement := range statements {
+		err := insertRDFStatement(
+			ctx,
+			transaction,
+			manifest.ObjectDigest,
+			statement,
+			index,
+		)
+		if err != nil {
+			return true, err
+		}
+	}
+
+	for _, annotation := range annotations {
+		err := insertRDFAnnotation(
+			ctx,
+			transaction,
+			manifest.ObjectDigest,
+			annotation,
+		)
+		if err != nil {
+			return true, err
+		}
+	}
+
+	return true, refreshContactProjectionTx(ctx, transaction)
+}
+
+func objectHadRDFRowsTx(
+	ctx context.Context,
+	transaction pgx.Tx,
+	digest contracts.ObjectDigest,
+) (bool, error) {
+	var exists bool
+
+	err := transaction.QueryRow(
+		ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM query_rdf_statements WHERE source_digest = $1
+		   UNION ALL
+		   SELECT 1 FROM query_rdf_statement_annotations WHERE source_digest = $1
+		 )`,
+		digest,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check stale RDF projection rows: %w", err)
+	}
+
+	return exists, nil
+}
+
+func insertRDFStatement(
+	ctx context.Context,
+	transaction pgx.Tx,
+	sourceDigest contracts.ObjectDigest,
+	statement rdfStatement,
+	order int,
+) error {
+	subjectID, err := upsertRDFTerm(ctx, transaction, statement.subject)
+	if err != nil {
+		return err
+	}
+
+	predicateID, err := upsertRDFTerm(ctx, transaction, statement.predicate)
+	if err != nil {
+		return err
+	}
+
+	objectID, err := upsertRDFTerm(ctx, transaction, statement.object)
+	if err != nil {
+		return err
+	}
+
+	_, err = transaction.Exec(
+		ctx,
+		`INSERT INTO query_rdf_statements(
+		   statement_hash, source_digest, subject_term_id, predicate_term_id,
+		   object_term_id, statement_order, projected_at
+		 ) VALUES($1,$2,$3,$4,$5,$6,now())
+		 ON CONFLICT(statement_hash) DO UPDATE SET
+		   source_digest = excluded.source_digest,
+		   subject_term_id = excluded.subject_term_id,
+		   predicate_term_id = excluded.predicate_term_id,
+		   object_term_id = excluded.object_term_id,
+		   statement_order = excluded.statement_order,
+		   projected_at = now()`,
+		statement.hash,
+		sourceDigest,
+		subjectID,
+		predicateID,
+		objectID,
+		order,
+	)
+	if err != nil {
+		return fmt.Errorf("insert RDF statement projection: %w", err)
+	}
+
+	return nil
+}
+
+func insertRDFAnnotation(
+	ctx context.Context,
+	transaction pgx.Tx,
+	sourceDigest contracts.ObjectDigest,
+	annotation rdfAnnotation,
+) error {
+	predicateID, err := upsertRDFTerm(ctx, transaction, annotation.predicate)
+	if err != nil {
+		return err
+	}
+
+	objectID, err := upsertRDFTerm(ctx, transaction, annotation.object)
+	if err != nil {
+		return err
+	}
+
+	_, err = transaction.Exec(
+		ctx,
+		`INSERT INTO query_rdf_statement_annotations(
+		   source_digest, statement_hash, annotation_predicate_term_id,
+		   annotation_object_term_id, projected_at
+		 ) VALUES($1,$2,$3,$4,now())
+		 ON CONFLICT DO NOTHING`,
+		sourceDigest,
+		annotation.hash,
+		predicateID,
+		objectID,
+	)
+	if err != nil {
+		return fmt.Errorf("insert RDF statement annotation projection: %w", err)
+	}
+
+	return nil
+}
+
+func upsertRDFTerm(
+	ctx context.Context,
+	transaction pgx.Tx,
+	term rdfTerm,
+) (int64, error) {
+	var termID int64
+
+	err := transaction.QueryRow(
+		ctx,
+		`INSERT INTO query_rdf_terms(term_kind, term_value, language, datatype)
+		 VALUES($1,$2,$3,$4)
+		 ON CONFLICT(term_kind, term_value, language, datatype) DO UPDATE SET
+		   term_value = excluded.term_value
+		 RETURNING term_id`,
+		term.kind,
+		term.value,
+		term.language,
+		term.datatype,
+	).Scan(&termID)
+	if err != nil {
+		return 0, fmt.Errorf("upsert RDF term: %w", err)
+	}
+
+	return termID, nil
+}
+
+func parseRDFBundle(content string) ([]rdfStatement, []rdfAnnotation) {
+	parser := rdfBundleParser{
+		prefixes: map[string]string{
+			"rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+		},
+	}
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, rdfScannerBufferSize), rdfScannerMaxCapacity)
+
+	for scanner.Scan() {
+		parser.consume(scanner.Text())
+	}
+
+	return parser.statements, parser.annotations
+}
+
+func (parser *rdfBundleParser) consume(raw string) {
+	indented := raw != "" && unicode.IsSpace(rune(raw[0]))
+
+	line := strings.TrimSpace(raw)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return
+	}
+
+	if parsePrefix(line, parser.prefixes) {
+		return
+	}
+
+	if parser.consumeAnnotationContinuation(line, indented) ||
+		parser.consumeRDFStar(line) ||
+		parser.consumeObjectContinuation(line) ||
+		parser.consumeIndentedPredicate(line, indented) ||
+		parser.consumeSubject(line) {
+		return
+	}
+
+	parser.consumePredicate(line)
+}
+
+func (parser *rdfBundleParser) consumeAnnotationContinuation(
+	line string,
+	indented bool,
+) bool {
+	if parser.currentAnnotation == "" || !indented {
+		return false
+	}
+
+	next := parseRDFAnnotationLine(parser.currentAnnotation, line, parser.prefixes)
+	parser.annotations = append(parser.annotations, next...)
+
+	if strings.HasSuffix(line, ".") {
+		parser.currentAnnotation = ""
+	}
+
+	return true
+}
+
+func (parser *rdfBundleParser) consumeRDFStar(line string) bool {
+	if !strings.HasPrefix(line, "<<") {
+		return false
+	}
+
+	annotation, found := parseRDFStarAnnotation(line, parser.prefixes)
+	if found {
+		parser.annotations = append(parser.annotations, annotation)
+
+		return true
+	}
+
+	hash, found := parseRDFStarSubjectHash(line, parser.prefixes)
+	if found {
+		parser.currentAnnotation = hash
+	}
+
+	return true
+}
+
+func (parser *rdfBundleParser) consumeObjectContinuation(line string) bool {
+	if !parser.continuingObjects {
+		return false
+	}
+
+	next, found := parseObjectList(
+		parser.currentSubject,
+		parser.currentPredicate,
+		line,
+		parser.prefixes,
+	)
+	if !found {
+		return false
+	}
+
+	parser.statements = append(parser.statements, next...)
+	parser.continuingObjects = strings.HasSuffix(line, ",")
+
+	if strings.HasSuffix(line, ".") || strings.HasSuffix(line, ";") {
+		parser.continuingObjects = false
+	}
+
+	return true
+}
+
+func (parser *rdfBundleParser) consumeIndentedPredicate(
+	line string,
+	indented bool,
+) bool {
+	if parser.currentSubject.value == "" || !indented {
+		return false
+	}
+
+	return parser.consumePredicate(line)
+}
+
+func (parser *rdfBundleParser) consumeSubject(line string) bool {
+	subject, rest, found := parseSubjectLine(line, parser.prefixes)
+	if !found {
+		return false
+	}
+
+	parser.currentSubject = subject
+	parser.currentPredicate = rdfTerm{}
+	parser.continuingObjects = false
+
+	if strings.TrimSpace(rest) == "" {
+		return true
+	}
+
+	parser.consumePredicate(rest)
+
+	return true
+}
+
+func (parser *rdfBundleParser) consumePredicate(line string) bool {
+	if parser.currentSubject.value == "" {
+		return false
+	}
+
+	predicate, next, found := parsePredicateObjectLine(
+		parser.currentSubject,
+		line,
+		parser.prefixes,
+	)
+	if !found {
+		return false
+	}
+
+	parser.currentPredicate = predicate
+	parser.statements = append(parser.statements, next...)
+	parser.continuingObjects = strings.HasSuffix(line, ",")
+
+	return true
+}
+
+func parsePrefix(line string, prefixes map[string]string) bool {
+	if !strings.HasPrefix(line, "@prefix ") {
+		return false
+	}
+
+	fields := strings.Fields(line)
+	if len(fields) < prefixFieldCount {
+		return true
+	}
+
+	name := strings.TrimSuffix(fields[1], ":")
+
+	value := strings.Trim(fields[2], "<>")
+	if name != "" && value != "" {
+		prefixes[name] = value
+	}
+
+	return true
+}
+
+func parseSubjectLine(
+	line string,
+	prefixes map[string]string,
+) (rdfTerm, string, bool) {
+	first, rest := splitFirstToken(line)
+	if first == "" {
+		return rdfTerm{}, "", false
+	}
+
+	if !looksLikeRDFTerm(first) {
+		return rdfTerm{}, "", false
+	}
+
+	subject, ok := parseRDFTerm(first, prefixes)
+	if !ok || subject.kind == "literal" {
+		return rdfTerm{}, "", false
+	}
+
+	return subject, rest, true
+}
+
+func parsePredicateObjectLine(
+	subject rdfTerm,
+	line string,
+	prefixes map[string]string,
+) (rdfTerm, []rdfStatement, bool) {
+	predicateToken, rest := splitFirstToken(line)
+
+	predicate, parsed := parsePredicateTerm(predicateToken, prefixes)
+	if !parsed {
+		return rdfTerm{}, nil, false
+	}
+
+	statements, parsed := parseObjectList(subject, predicate, rest, prefixes)
+	if !parsed {
+		return rdfTerm{}, nil, false
+	}
+
+	return predicate, statements, true
+}
+
+func parseObjectList(
+	subject rdfTerm,
+	predicate rdfTerm,
+	line string,
+	prefixes map[string]string,
+) ([]rdfStatement, bool) {
+	line = strings.TrimSpace(line)
+	line = strings.TrimSuffix(line, ";")
+	line = strings.TrimSuffix(line, ".")
+	items := splitRDFObjects(line)
+	statements := []rdfStatement{}
+
+	for _, item := range items {
+		object, ok := parseRDFTerm(item, prefixes)
+		if !ok {
+			continue
+		}
+
+		statement := rdfStatement{
+			subject:   subject,
+			predicate: predicate,
+			object:    object,
+		}
+		statement.hash = rdfStatementHash(statement)
+		statements = append(statements, statement)
+	}
+
+	return statements, len(statements) > 0
+}
+
+func parseRDFStarAnnotation(
+	line string,
+	prefixes map[string]string,
+) (rdfAnnotation, bool) {
+	inner, rest, cutFound := strings.Cut(strings.TrimPrefix(line, "<<"), ">>")
+	if !cutFound {
+		return rdfAnnotation{}, false
+	}
+
+	subjectToken, restInner := splitFirstToken(inner)
+	predicateToken, objectText := splitFirstToken(restInner)
+
+	subject, parsed := parseRDFTerm(subjectToken, prefixes)
+	if !parsed {
+		return rdfAnnotation{}, false
+	}
+
+	predicate, parsed := parsePredicateTerm(predicateToken, prefixes)
+	if !parsed {
+		return rdfAnnotation{}, false
+	}
+
+	object, parsed := parseRDFTerm(objectText, prefixes)
+	if !parsed {
+		return rdfAnnotation{}, false
+	}
+
+	statement := rdfStatement{
+		subject:   subject,
+		predicate: predicate,
+		object:    object,
+	}
+	annotationPredicateToken, annotationObjectText := splitFirstToken(rest)
+
+	annotationPredicate, parsed := parsePredicateTerm(annotationPredicateToken, prefixes)
+	if !parsed {
+		return rdfAnnotation{}, false
+	}
+
+	annotationObject, parsed := parseRDFTerm(annotationObjectText, prefixes)
+	if !parsed {
+		return rdfAnnotation{}, false
+	}
+
+	return rdfAnnotation{
+		hash:      rdfStatementHash(statement),
+		predicate: annotationPredicate,
+		object:    annotationObject,
+	}, true
+}
+
+func parseRDFStarSubjectHash(line string, prefixes map[string]string) (string, bool) {
+	inner, rest, cutFound := strings.Cut(strings.TrimPrefix(line, "<<"), ">>")
+	if !cutFound || strings.TrimSpace(strings.TrimSuffix(rest, ";")) != "" {
+		return "", false
+	}
+
+	subjectToken, restInner := splitFirstToken(inner)
+	predicateToken, objectText := splitFirstToken(restInner)
+
+	subject, parsed := parseRDFTerm(subjectToken, prefixes)
+	if !parsed {
+		return "", false
+	}
+
+	predicate, parsed := parsePredicateTerm(predicateToken, prefixes)
+	if !parsed {
+		return "", false
+	}
+
+	object, parsed := parseRDFTerm(objectText, prefixes)
+	if !parsed {
+		return "", false
+	}
+
+	return rdfStatementHash(rdfStatement{
+		subject:   subject,
+		predicate: predicate,
+		object:    object,
+	}), true
+}
+
+func parseRDFAnnotationLine(
+	statementHash string,
+	line string,
+	prefixes map[string]string,
+) []rdfAnnotation {
+	predicateToken, rest := splitFirstToken(line)
+
+	predicate, ok := parsePredicateTerm(predicateToken, prefixes)
+	if !ok {
+		return nil
+	}
+
+	rest = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(rest), ";"), ".")
+	annotations := []rdfAnnotation{}
+
+	for _, item := range splitRDFObjects(rest) {
+		object, ok := parseRDFTerm(item, prefixes)
+		if !ok {
+			continue
+		}
+
+		annotations = append(annotations, rdfAnnotation{
+			hash:      statementHash,
+			predicate: predicate,
+			object:    object,
+		})
+	}
+
+	return annotations
+}
+
+func parsePredicateTerm(token string, prefixes map[string]string) (rdfTerm, bool) {
+	if token == "a" {
+		return rdfTerm{kind: "iri", value: rdfTypePredicate}, true
+	}
+
+	return parseRDFTerm(token, prefixes)
+}
+
+func parseRDFTerm(token string, prefixes map[string]string) (rdfTerm, bool) {
+	token = cleanRDFToken(token)
+	if token == "" || strings.HasPrefix(token, "[") {
+		return rdfTerm{}, false
+	}
+
+	if strings.HasPrefix(token, "<") && strings.Contains(token, ">") {
+		value, _, _ := strings.Cut(strings.TrimPrefix(token, "<"), ">")
+
+		return rdfTerm{kind: "iri", value: value}, true
+	}
+
+	if strings.HasPrefix(token, "\"") {
+		return parseLiteralTerm(token), true
+	}
+
+	if prefix, suffix, ok := strings.Cut(token, ":"); ok {
+		if base := prefixes[prefix]; base != "" {
+			return rdfTerm{kind: "iri", value: base + suffix}, true
+		}
+	}
+
+	return rdfTerm{}, false
+}
+
+func parseLiteralTerm(token string) rdfTerm {
+	value := strings.TrimPrefix(token, "\"")
+	value, suffix, _ := strings.Cut(value, "\"")
+
+	term := rdfTerm{kind: "literal", value: value}
+	if after, ok := strings.CutPrefix(suffix, "@"); ok {
+		term.language = after
+	}
+
+	if after, ok := strings.CutPrefix(suffix, "^^"); ok {
+		term.datatype = after
+	}
+
+	return term
+}
+
+func cleanRDFToken(token string) string {
+	token = strings.TrimSpace(token)
+	token = strings.TrimSuffix(token, ",")
+	token = strings.TrimSuffix(token, ";")
+	token = strings.TrimSuffix(token, ".")
+
+	return strings.TrimSpace(token)
+}
+
+func splitFirstToken(line string) (string, string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", ""
+	}
+
+	if strings.HasPrefix(line, "\"") {
+		return splitQuotedToken(line)
+	}
+
+	for index, char := range line {
+		if unicode.IsSpace(char) {
+			return line[:index], strings.TrimSpace(line[index:])
+		}
+	}
+
+	return line, ""
+}
+
+func splitQuotedToken(line string) (string, string) {
+	escaped := false
+
+	for index, char := range line[1:] {
+		if escaped {
+			escaped = false
+
+			continue
+		}
+
+		if char == '\\' {
+			escaped = true
+
+			continue
+		}
+
+		if char != '"' {
+			continue
+		}
+
+		end := index + splitQuoteOffset
+		for end < len(line) && !unicode.IsSpace(rune(line[end])) {
+			end++
+		}
+
+		return line[:end], strings.TrimSpace(line[end:])
+	}
+
+	return line, ""
+}
+
+func splitRDFObjects(line string) []string {
+	items := []string{}
+	start := 0
+	inString := false
+	escaped := false
+
+	for index, char := range line {
+		switch {
+		case escaped:
+			escaped = false
+		case char == '\\':
+			escaped = true
+		case char == '"':
+			inString = !inString
+		case char == ',' && !inString:
+			items = append(items, strings.TrimSpace(line[start:index]))
+			start = index + 1
+		}
+	}
+
+	items = append(items, strings.TrimSpace(line[start:]))
+
+	return items
+}
+
+func looksLikeRDFTerm(token string) bool {
+	return strings.HasPrefix(token, "<") ||
+		strings.HasPrefix(token, "_:") ||
+		strings.Contains(token, ":")
+}
+
+func rdfStatementHash(statement rdfStatement) string {
+	parts := []string{
+		statement.subject.kind,
+		statement.subject.value,
+		statement.predicate.value,
+		statement.object.kind,
+		statement.object.value,
+		statement.object.language,
+		statement.object.datatype,
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+
+	return hex.EncodeToString(sum[:])
+}
+
+func refreshContactProjectionTx(ctx context.Context, transaction pgx.Tx) error {
+	for _, table := range []string{
+		"query_contact_identity_bindings",
+		"query_contact_facts",
+		"query_contact_rollups",
+	} {
+		_, err := transaction.Exec(ctx, "DELETE FROM "+table)
+		if err != nil {
+			return fmt.Errorf("clear %s: %w", table, err)
+		}
+	}
+
+	statements, err := contactProjectionStatements(ctx, transaction)
+	if err != nil {
+		return err
+	}
+
+	annotations, err := contactProjectionAnnotations(ctx, transaction)
+	if err != nil {
+		return err
+	}
+
+	contacts := contactSubjects(statements)
+
+	facts := contactFactsFromStatements(statements, annotations, contacts)
+	for _, fact := range facts {
+		err := insertContactFact(ctx, transaction, fact)
+		if err != nil {
+			return err
+		}
+	}
+
+	return refreshContactRollupsTx(ctx, transaction)
+}
+
+func contactProjectionStatements(
+	ctx context.Context,
+	transaction pgx.Tx,
+) ([]contactProjectionStatement, error) {
+	rows, err := transaction.Query(
+		ctx,
+		`SELECT s.source_digest, s.statement_hash,
+		        subj.term_value, pred.term_value, obj.term_value, obj.term_kind
+		   FROM query_rdf_statements s
+		   JOIN query_rdf_terms subj ON subj.term_id = s.subject_term_id
+		   JOIN query_rdf_terms pred ON pred.term_id = s.predicate_term_id
+		   JOIN query_rdf_terms obj ON obj.term_id = s.object_term_id
+		  ORDER BY s.statement_order, s.statement_hash`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query RDF statements for contact projection: %w", err)
+	}
+	defer rows.Close()
+
+	statements := []contactProjectionStatement{}
+
+	for rows.Next() {
+		var statement contactProjectionStatement
+
+		err = rows.Scan(
+			&statement.sourceDigest,
+			&statement.statementHash,
+			&statement.subject,
+			&statement.predicate,
+			&statement.object,
+			&statement.objectKind,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan RDF statement for contact projection: %w", err)
+		}
+
+		statements = append(statements, statement)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return nil, fmt.Errorf("iterate RDF statements for contact projection: %w", err)
+	}
+
+	return statements, nil
+}
+
+func contactProjectionAnnotations(
+	ctx context.Context,
+	transaction pgx.Tx,
+) (map[string]map[string]string, error) {
+	rows, err := transaction.Query(
+		ctx,
+		`SELECT a.statement_hash, pred.term_value, obj.term_value
+		   FROM query_rdf_statement_annotations a
+		   JOIN query_rdf_terms pred ON pred.term_id = a.annotation_predicate_term_id
+		   JOIN query_rdf_terms obj ON obj.term_id = a.annotation_object_term_id`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query RDF annotations for contact projection: %w", err)
+	}
+	defer rows.Close()
+
+	annotations := map[string]map[string]string{}
+
+	for rows.Next() {
+		var hash, predicate, object string
+
+		err = rows.Scan(&hash, &predicate, &object)
+		if err != nil {
+			return nil, fmt.Errorf("scan RDF annotation for contact projection: %w", err)
+		}
+
+		if annotations[hash] == nil {
+			annotations[hash] = map[string]string{}
+		}
+
+		annotations[hash][predicate] = object
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return nil, fmt.Errorf("iterate RDF annotations for contact projection: %w", err)
+	}
+
+	return annotations, nil
+}
+
+func contactSubjects(statements []contactProjectionStatement) map[string]bool {
+	contacts := map[string]bool{}
+
+	for _, statement := range statements {
+		if statement.predicate != rdfTypePredicate {
+			continue
+		}
+
+		if contactTypeObject(statement.object) {
+			contacts[statement.subject] = true
+		}
+	}
+
+	return contacts
+}
+
+func contactTypeObject(value string) bool {
+	return value == "http://xmlns.com/foaf/0.1/Person" ||
+		value == "https://schema.org/Person" ||
+		value == "http://www.w3.org/2000/10/swap/pim/gedcom#Individual"
+}
+
+func contactFactsFromStatements(
+	statements []contactProjectionStatement,
+	annotations map[string]map[string]string,
+	contacts map[string]bool,
+) []contactProjectionFact {
+	facts := []contactProjectionFact{}
+
+	for _, statement := range statements {
+		if !contacts[statement.subject] {
+			continue
+		}
+
+		factKind, historical, ok := contactFactKind(statement.predicate)
+		if !ok {
+			continue
+		}
+
+		value := contactFactValue(statement.object, statement.objectKind, factKind)
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+
+		fact := contactProjectionFact{
+			sourceDigest:  statement.sourceDigest,
+			statementHash: statement.statementHash,
+			contactID:     statement.subject,
+			factKind:      factKind,
+			value:         value,
+			predicate:     statement.predicate,
+			historical:    historical,
+		}
+		for predicate, object := range annotations[statement.statementHash] {
+			switch {
+			case strings.HasSuffix(predicate, "hasBeginning") ||
+				strings.HasSuffix(predicate, "validFrom"):
+				fact.validFrom = object
+			case strings.HasSuffix(predicate, "hasEnd") ||
+				strings.HasSuffix(predicate, "validUntil"):
+				fact.validUntil = object
+			}
+		}
+
+		facts = append(facts, fact)
+	}
+
+	return facts
+}
+
+func contactFactKind(predicate string) (string, bool, bool) {
+	kinds := map[string]string{
+		"http://purl.org/vocab/relationship/childOf":     "relationship",
+		"http://purl.org/vocab/relationship/parentOf":    "relationship",
+		"http://purl.org/vocab/relationship/spouseOf":    "relationship",
+		"http://www.w3.org/2002/07/owl#sameAs":           "identifier",
+		"http://www.w3.org/2004/02/skos/core#exactMatch": "identifier",
+		"http://www.w3.org/2006/vcard/ns#fn":             "name",
+		"http://www.w3.org/2006/vcard/ns#hasAddress":     "address",
+		"http://www.w3.org/2006/vcard/ns#hasEmail":       contactFactEmail,
+		"http://www.w3.org/2006/vcard/ns#hasTelephone":   "phone",
+		"http://www.w3.org/2006/vcard/ns#hasURL":         "url",
+		"http://www.w3.org/2006/vcard/ns#nickname":       "alias",
+		"http://www.w3.org/ns/org#member":                "affiliation",
+		"http://xmlns.com/foaf/0.1/account":              "account",
+		"http://xmlns.com/foaf/0.1/homepage":             "url",
+		"http://xmlns.com/foaf/0.1/knows":                "relationship",
+		"http://xmlns.com/foaf/0.1/mbox":                 contactFactEmail,
+		"http://xmlns.com/foaf/0.1/name":                 "name",
+		"http://xmlns.com/foaf/0.1/nick":                 "alias",
+		"http://xmlns.com/foaf/0.1/phone":                "phone",
+		"http://xmlns.com/foaf/0.1/title":                "title",
+		"https://patrickaudley.com/lod#emailIdentity":    contactFactEmail,
+		"https://patrickaudley.com/lod#historicalEmail":  contactFactEmail,
+		"https://schema.org/address":                     "address",
+		"https://schema.org/affiliation":                 "affiliation",
+		"https://schema.org/alternateName":               "alias",
+		"https://schema.org/email":                       contactFactEmail,
+		"https://schema.org/identifier":                  "identifier",
+		"https://schema.org/jobTitle":                    "title",
+		"https://schema.org/knows":                       "relationship",
+		"https://schema.org/memberOf":                    "affiliation",
+		"https://schema.org/name":                        "name",
+		"https://schema.org/sameAs":                      "identifier",
+		"https://schema.org/telephone":                   "phone",
+		"https://schema.org/url":                         "url",
+		"https://schema.org/worksFor":                    "affiliation",
+	}
+
+	kind, found := kinds[predicate]
+	if !found {
+		return "", false, false
+	}
+
+	return kind, predicate == "https://patrickaudley.com/lod#historicalEmail", true
+}
+
+func contactFactValue(value, objectKind, factKind string) string {
+	if factKind == contactFactEmail {
+		return normalizeContactEmail(value)
+	}
+
+	if objectKind == "literal" {
+		return strings.TrimSpace(value)
+	}
+
+	return strings.TrimSpace(value)
+}
+
+func insertContactFact(
+	ctx context.Context,
+	transaction pgx.Tx,
+	fact contactProjectionFact,
+) error {
+	metadata, err := json.Marshal(map[string]any{
+		"historical": fact.historical,
+	})
+	if err != nil {
+		return fmt.Errorf("encode contact fact metadata: %w", err)
+	}
+
+	_, err = transaction.Exec(
+		ctx,
+		`INSERT INTO query_contact_facts(
+		   contact_id, fact_kind, value, value_hash, predicate, source_digest,
+		   statement_hash, valid_from, valid_until, historical, metadata_json
+		 ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		 ON CONFLICT(contact_id, fact_kind, value_hash, statement_hash) DO UPDATE SET
+		   value = excluded.value,
+		   predicate = excluded.predicate,
+		   source_digest = excluded.source_digest,
+		   valid_from = excluded.valid_from,
+		   valid_until = excluded.valid_until,
+		   historical = excluded.historical,
+		   metadata_json = excluded.metadata_json`,
+		fact.contactID,
+		fact.factKind,
+		fact.value,
+		hashString(fact.value),
+		fact.predicate,
+		fact.sourceDigest,
+		fact.statementHash,
+		fact.validFrom,
+		fact.validUntil,
+		fact.historical,
+		metadata,
+	)
+	if err != nil {
+		return fmt.Errorf("insert contact fact projection: %w", err)
+	}
+
+	if fact.factKind == contactFactEmail {
+		token := normalizeContactEmail(fact.value)
+		if token != "" {
+			_, err = transaction.Exec(
+				ctx,
+				`INSERT INTO query_contact_identity_bindings(
+				   token_hash, token, contact_id, statement_hash, valid_from,
+				   valid_until, source_digest
+				 ) VALUES($1,$2,$3,$4,$5,$6,$7)
+				 ON CONFLICT(token_hash, contact_id, statement_hash) DO UPDATE SET
+				   token = excluded.token,
+				   valid_from = excluded.valid_from,
+				   valid_until = excluded.valid_until,
+				   source_digest = excluded.source_digest`,
+				hashString(token),
+				token,
+				fact.contactID,
+				fact.statementHash,
+				fact.validFrom,
+				fact.validUntil,
+				fact.sourceDigest,
+			)
+			if err != nil {
+				return fmt.Errorf("insert contact identity binding projection: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func refreshContactRollupsTx(ctx context.Context, transaction pgx.Tx) error {
+	_, err := transaction.Exec(
+		ctx,
+		`INSERT INTO query_contact_rollups(
+		   contact_id, display_name, primary_email, fact_count, search_text, updated_at
+		 )
+		 SELECT f.contact_id,
+		        COALESCE(
+		          min(f.value) FILTER (WHERE f.fact_kind = 'name'),
+		          min(f.value) FILTER (WHERE f.fact_kind = 'alias'),
+		          f.contact_id
+		        ) AS display_name,
+		        COALESCE(
+		          min(f.value) FILTER (
+		            WHERE f.fact_kind = 'email' AND f.historical = false
+		          ),
+		          min(f.value) FILTER (WHERE f.fact_kind = 'email'),
+		          ''
+		        ) AS primary_email,
+		        count(*)::integer AS fact_count,
+		        string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text,
+		        now()
+		   FROM query_contact_facts f
+		  GROUP BY f.contact_id
+		 ON CONFLICT(contact_id) DO UPDATE SET
+		   display_name = excluded.display_name,
+		   primary_email = excluded.primary_email,
+		   fact_count = excluded.fact_count,
+		   search_text = excluded.search_text,
+		   updated_at = now()`,
+	)
+	if err != nil {
+		return fmt.Errorf("refresh contact rollups: %w", err)
+	}
+
+	return nil
+}
+
+func (index *Index) ContactAggregate(
+	ctx context.Context,
+	request contracts.ContactAggregateRequest,
+) (contracts.ContactAggregate, error) {
+	contactID := strings.TrimSpace(request.ContactID)
+
+	var aggregate contracts.ContactAggregate
+
+	err := index.pool.QueryRow(
+		ctx,
+		`SELECT contact_id, display_name, primary_email, fact_count
+		   FROM query_contact_rollups
+		  WHERE contact_id = $1`,
+		contactID,
+	).Scan(
+		&aggregate.ContactID,
+		&aggregate.DisplayName,
+		&aggregate.PrimaryEmail,
+		&aggregate.FactCount,
+	)
+	if err != nil {
+		return contracts.ContactAggregate{}, fmt.Errorf("read contact aggregate: %w", err)
+	}
+
+	rows, err := index.pool.Query(
+		ctx,
+		`SELECT source_digest, statement_hash, fact_kind, value, predicate,
+		        valid_from, valid_until, historical
+		   FROM query_contact_facts
+		  WHERE contact_id = $1
+		  ORDER BY fact_kind, value, statement_hash`,
+		contactID,
+	)
+	if err != nil {
+		return contracts.ContactAggregate{}, fmt.Errorf("query contact facts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var fact contracts.ContactFact
+
+		fact.ContactID = contactID
+
+		err = rows.Scan(
+			&fact.SourceDigest,
+			&fact.StatementHash,
+			&fact.FactKind,
+			&fact.Value,
+			&fact.Predicate,
+			&fact.ValidFrom,
+			&fact.ValidUntil,
+			&fact.Historical,
+		)
+		if err != nil {
+			return contracts.ContactAggregate{}, fmt.Errorf("scan contact fact: %w", err)
+		}
+
+		aggregate.Facts = append(aggregate.Facts, fact)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return contracts.ContactAggregate{}, fmt.Errorf("iterate contact facts: %w", err)
+	}
+
+	aggregate.SchemaVersion = contracts.SchemaVersionPhase00
+
+	return aggregate, nil
+}
+
+func (index *Index) ContactSearch(
+	ctx context.Context,
+	request contracts.ContactSearchRequest,
+) (contracts.ContactSearchResponse, error) {
+	args := []any{}
+	where := []string{"true"}
+
+	if queryText := strings.TrimSpace(request.Query); queryText != "" {
+		args = append(args, queryText)
+		where = append(
+			where,
+			fmt.Sprintf("search_tsv @@ websearch_to_tsquery('simple', $%d)", len(args)),
+		)
+	}
+
+	limit := normalizedLimit(request.Limit)
+
+	offset := max(request.Offset, 0)
+
+	args = append(args, limit, offset)
+
+	rows, err := index.pool.Query(ctx, fmt.Sprintf(
+		`SELECT contact_id, display_name, primary_email, fact_count,
+		        count(*) OVER() AS total
+		   FROM query_contact_rollups
+		  WHERE %s
+		  ORDER BY display_name, contact_id
+		  LIMIT $%d OFFSET $%d`,
+		strings.Join(where, " AND "),
+		len(args)-1,
+		len(args),
+	), args...)
+	if err != nil {
+		return contracts.ContactSearchResponse{}, fmt.Errorf("search contacts: %w", err)
+	}
+	defer rows.Close()
+
+	results := []contracts.ContactSearchResult{}
+	total := 0
+
+	for rows.Next() {
+		var result contracts.ContactSearchResult
+
+		err = rows.Scan(
+			&result.ContactID,
+			&result.DisplayName,
+			&result.PrimaryEmail,
+			&result.FactCount,
+			&total,
+		)
+		if err != nil {
+			return contracts.ContactSearchResponse{}, fmt.Errorf("scan contact search: %w", err)
+		}
+
+		result.Score = 1
+		results = append(results, result)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return contracts.ContactSearchResponse{}, fmt.Errorf(
+			"iterate contact search: %w",
+			err,
+		)
+	}
+
+	response := contracts.ContactSearchResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Results:       results,
+		Total:         total,
+		Limit:         limit,
+		Offset:        offset,
+	}
+
+	return response, nil
+}
+
+func (index *Index) ResolveContactIdentity(
+	ctx context.Context,
+	request contracts.ContactIdentityResolveRequest,
+) (contracts.ContactIdentityResolveResponse, error) {
+	token := normalizeContactEmail(request.Identity)
+	if token == "" {
+		return contracts.ContactIdentityResolveResponse{
+			SchemaVersion: contracts.SchemaVersionPhase00,
+		}, nil
+	}
+
+	rows, err := index.pool.Query(
+		ctx,
+		`SELECT DISTINCT contact_id
+		   FROM query_contact_identity_bindings
+		  WHERE token_hash = $1
+		  ORDER BY contact_id`,
+		hashString(token),
+	)
+	if err != nil {
+		return contracts.ContactIdentityResolveResponse{}, fmt.Errorf(
+			"resolve contact identity: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	response := contracts.ContactIdentityResolveResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+	}
+
+	for rows.Next() {
+		var contactID string
+
+		err = rows.Scan(&contactID)
+		if err != nil {
+			return contracts.ContactIdentityResolveResponse{}, fmt.Errorf(
+				"scan contact identity resolution: %w",
+				err,
+			)
+		}
+
+		response.ContactIDs = append(response.ContactIDs, contactID)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return contracts.ContactIdentityResolveResponse{}, fmt.Errorf(
+			"iterate contact identity resolution: %w",
+			err,
+		)
+	}
+
+	return response, nil
+}
+
+func normalizeContactEmail(value string) string {
+	value = strings.TrimSpace(value)
+
+	value = strings.TrimPrefix(value, "mailto:")
+
+	address, err := mail.ParseAddress(value)
+	if err == nil {
+		value = address.Address
+	}
+
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func hashString(value string) string {
+	sum := sha256.Sum256([]byte(value))
+
+	return hex.EncodeToString(sum[:])
+}
