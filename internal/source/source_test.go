@@ -5,6 +5,7 @@ package source
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -309,6 +310,100 @@ func TestGmailRawMessageCollapsesOntoArchiveMailMessage(t *testing.T) {
 	if labels := stringSliceValue(metadata["label_ids"]); len(labels) != 1 ||
 		labels[0] != "INBOX" {
 		t.Fatalf("expected Gmail labels in canonical mail facet, got %#v", metadata)
+	}
+}
+
+func TestGmailRawMessageUsesCanonicalSubjectAndMIMEStructure(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	service, err := NewService(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	adapter, err := NewGmailAdapter("primary", gmailExternalBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw := []byte(strings.Join([]string{
+		"Message-ID: <multipart@example.test>",
+		"Subject: Canonical subject",
+		"Content-Type: multipart/mixed; boundary=\"gmeow-boundary\"",
+		"",
+		"--gmeow-boundary",
+		"Content-Type: text/plain",
+		"",
+		"hello body",
+		"--gmeow-boundary",
+		"Content-Type: text/plain; name=\"note.txt\"",
+		"Content-Disposition: attachment; filename=\"note.txt\"",
+		"",
+		"attached text",
+		"--gmeow-boundary--",
+	}, "\r\n"))
+	message := GmailMessage{
+		MessageID:  "gmail-multipart",
+		Version:    "h1",
+		RawMessage: raw,
+	}
+
+	object, err := adapter.messageObject(ctx, nil, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object.Compound.SourceHint != "Canonical subject" {
+		t.Fatalf("expected canonical subject hint, got %q", object.Compound.SourceHint)
+	}
+
+	digest, _, err := adapter.IngestMessage(ctx, service, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	structure, err := filestoreService.Client.GetStructure(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mimeParts := structure.PartsByRole["mime_structure"]
+	if len(mimeParts) != 1 {
+		t.Fatalf("expected one mime_structure part, got %#v", mimeParts)
+	}
+
+	reader, err := filestoreService.Client.Open(ctx, mimeParts[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mimeStructure struct {
+		BodyMediaType string `json:"body_media_type"`
+		Attachments   []struct {
+			ID        string `json:"id"`
+			FileName  string `json:"filename"`
+			MediaType string `json:"media_type"`
+			Size      int    `json:"size"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal(payload, &mimeStructure); err != nil {
+		t.Fatal(err)
+	}
+	if mimeStructure.BodyMediaType != "text/plain" {
+		t.Fatalf("expected canonical body media type, got %#v", mimeStructure)
+	}
+	if len(mimeStructure.Attachments) != 1 {
+		t.Fatalf("expected canonical attachment in MIME structure, got %#v", mimeStructure)
+	}
+	attachment := mimeStructure.Attachments[0]
+	if attachment.ID != "raw:0" ||
+		attachment.FileName != "note.txt" ||
+		attachment.MediaType != "text/plain" ||
+		attachment.Size == 0 {
+		t.Fatalf("expected canonical attachment metadata, got %#v", attachment)
 	}
 }
 

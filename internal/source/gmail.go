@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/facets/mailmessage"
 )
 
 type GmailBackend interface {
@@ -504,7 +505,7 @@ func (adapter *GmailAdapter) messageObject(
 		Compound: &CompoundObject{
 			ObjectID:   objectID,
 			MediaType:  "application/vnd.gmeow.mail-message+json",
-			SourceHint: message.Subject,
+			SourceHint: firstNonEmpty(canonical.Subject, message.Subject),
 			ContentRoles: []string{
 				contracts.MailMessageContentRole,
 				contracts.MailMessageContainerRole,
@@ -521,11 +522,11 @@ func (adapter *GmailAdapter) messageObject(
 	}, nil
 }
 
-func gmailCanonicalMessage(message GmailMessage) (archiveMessage, error) {
+func gmailCanonicalMessage(message GmailMessage) (mailmessage.Message, error) {
 	if len(message.RawMessage) > 0 {
-		canonical, err := parseMailMessage(message.RawMessage, "gmail:"+message.MessageID)
+		canonical, err := mailmessage.Parse(message.RawMessage, "gmail:"+message.MessageID)
 		if err != nil {
-			return archiveMessage{}, err
+			return mailmessage.Message{}, fmt.Errorf("parse gmail mail message: %w", err)
 		}
 
 		return canonical, nil
@@ -536,7 +537,7 @@ func gmailCanonicalMessage(message GmailMessage) (archiveMessage, error) {
 		headers[strings.ToLower(key)] = value
 	}
 
-	canonical := archiveMessage{
+	canonical := mailmessage.Message{
 		Headers:       headers,
 		Body:          append([]byte{}, message.Body...),
 		BodyMediaType: firstNonEmpty(message.BodyMediaTyp, "text/plain"),
@@ -548,12 +549,12 @@ func gmailCanonicalMessage(message GmailMessage) (archiveMessage, error) {
 		From: headerValue(message.Headers, "from"),
 		To:   headerValue(message.Headers, "to"),
 	}
-	canonical.MessageID = normalizeArchiveMessageID(
+	canonical.MessageID = mailmessage.NormalizeMessageID(
 		headerValue(message.Headers, "message-id"),
 	)
-	canonical.BodyLineHash = canonicalBodyLineFingerprint(canonical.Body)
+	canonical.BodyLineHash = mailmessage.BodyLineFingerprint(canonical.Body)
 
-	canonical.Fingerprint = canonicalFingerprint(canonical)
+	canonical.Fingerprint = mailmessage.Fingerprint(canonical)
 	if canonical.MessageID == "" {
 		canonical.GeneratedMessage = true
 		canonical.MessageID = fmt.Sprintf(
@@ -566,27 +567,17 @@ func gmailCanonicalMessage(message GmailMessage) (archiveMessage, error) {
 	return canonical, nil
 }
 
-func canonicalMailMetadata(message archiveMessage) map[string]any {
-	return map[string]any{
-		"rfc_message_id":           message.MessageID,
-		"subject":                  message.Subject,
-		"date":                     message.Date,
-		"from":                     message.From,
-		"to":                       message.To,
-		"generated_message_id":     message.GeneratedMessage,
-		"canonical_fingerprint":    message.Fingerprint,
-		"body_line_fingerprint":    message.BodyLineHash,
-		"canonical_version_id":     message.Fingerprint,
-		"version_count":            1,
-		"max_scale":                contracts.VersionScaleMinor,
-		"message_id_collision":     false,
-		"analysis_scope":           contracts.AnalysisScopeCanonical,
-		"analysis_input_body_line": message.BodyLineHash,
-	}
-}
-
-func gmailMailMetadata(message GmailMessage, canonical archiveMessage) map[string]any {
-	metadata := canonicalMailMetadata(canonical)
+func gmailMailMetadata(
+	message GmailMessage,
+	canonical mailmessage.Message,
+) map[string]any {
+	metadata := mailmessage.Metadata(
+		canonical,
+		false,
+		contracts.VersionScaleMinor,
+		1,
+		canonical.Fingerprint,
+	)
 
 	metadata["gmail_message_id"] = message.MessageID
 	if message.ThreadID != "" {
@@ -602,15 +593,18 @@ func (adapter *GmailAdapter) writeMessageParts(
 	ctx context.Context,
 	service IngestService,
 	message GmailMessage,
-	canonical archiveMessage,
+	canonical mailmessage.Message,
 	observed time.Time,
 ) ([]contracts.CompoundPart, error) {
-	headers, err := json.Marshal(sortedHeaderRows(canonical.Headers))
+	headers, err := json.Marshal(mailmessage.SortedHeaderRows(canonical.Headers))
 	if err != nil {
 		return nil, fmt.Errorf("marshal gmail message headers: %w", err)
 	}
 
-	mimeStructure, err := json.Marshal(gmailMIMEStructure(message))
+	mimeStructure, err := json.Marshal(mailmessage.MIMEStructure(
+		firstNonEmpty(canonical.BodyMediaType, message.BodyMediaTyp),
+		gmailMailMessageAttachments(message, canonical),
+	))
 	if err != nil {
 		return nil, fmt.Errorf("marshal gmail MIME structure: %w", err)
 	}
@@ -730,7 +724,7 @@ func (adapter *GmailAdapter) writeMessageParts(
 
 func gmailAttachments(
 	message GmailMessage,
-	canonical archiveMessage,
+	canonical mailmessage.Message,
 ) []GmailAttachment {
 	if len(canonical.Attachments) == 0 {
 		return message.Attachments
@@ -760,21 +754,25 @@ func headerValue(headers map[string]string, name string) string {
 	return ""
 }
 
-func gmailMIMEStructure(message GmailMessage) map[string]any {
-	attachments := make([]map[string]any, 0, len(message.Attachments))
+func gmailMailMessageAttachments(
+	message GmailMessage,
+	canonical mailmessage.Message,
+) []mailmessage.Attachment {
+	if len(canonical.Attachments) > 0 {
+		return canonical.Attachments
+	}
+
+	attachments := make([]mailmessage.Attachment, 0, len(message.Attachments))
 	for _, attachment := range message.Attachments {
-		attachments = append(attachments, map[string]any{
-			"id":         attachment.ID,
-			"filename":   attachment.FileName,
-			"media_type": attachment.MediaType,
-			"size":       len(attachment.Content),
+		attachments = append(attachments, mailmessage.Attachment{
+			Content:   attachment.Content,
+			ID:        attachment.ID,
+			FileName:  attachment.FileName,
+			MediaType: attachment.MediaType,
 		})
 	}
 
-	return map[string]any{
-		"body_media_type": firstNonEmpty(message.BodyMediaTyp, "text/plain"),
-		"attachments":     attachments,
-	}
+	return attachments
 }
 
 func nonNilMap(input map[string]any) map[string]any {
