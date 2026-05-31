@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -228,6 +229,103 @@ func TestJMAPMutableMailStateRecoversFromFilestoreRebuild(t *testing.T) {
 	}
 	if !sameDigests(query.IDs, []contracts.ObjectDigest{digest}) {
 		t.Fatalf("inclusive after filter did not return boundary message: %#v", query)
+	}
+}
+
+func TestMailMessageMetadataProjectsIntoQuery(t *testing.T) {
+	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	migrationsDir := queryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
+
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("hello apollo"),
+		MediaType: "message/rfc822",
+		Facets: []contracts.Facet{{
+			Kind: contracts.MailMessageFacetKind,
+			Metadata: map[string]any{
+				"rfc_message_id":      "<apollo@example.test>",
+				"gmail_message_id":    "gmail-apollo",
+				"thread_id":           "thread-apollo",
+				"subject":             "Apollo update",
+				"date":                "Wed, 27 May 2026 09:15:00 -0600",
+				"received_at":         "2023-11-14T22:13:20Z",
+				"label_ids":           []string{"INBOX", "STARRED"},
+				"history_id":          uint64(12345),
+				"internal_date":       int64(1700000000000),
+				"size_estimate":       int64(2048),
+				"archive_mailbox":     "cur",
+				"archive_source_path": "/mail/archive/cur/message.eml",
+				"classification_label_values": []map[string]any{{
+					"label_id": "smart-label",
+					"fields": []map[string]any{{
+						"field_id":  "category",
+						"selection": "important",
+					}},
+				}},
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "fixture",
+			SourceName: "mail-message",
+			ExternalID: "apollo",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	index := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
+	projectStoredObject(t, ctx, index, store, digest)
+
+	var metadataJSON []byte
+	if err := index.pool.QueryRow(ctx, `
+		SELECT metadata_json
+		FROM query_object_facets
+		WHERE object_digest = $1 AND kind = $2`,
+		digest,
+		contracts.MailMessageFacetKind,
+	).Scan(&metadataJSON); err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"rfc_message_id",
+		"gmail_message_id",
+		"thread_id",
+		"subject",
+		"date",
+		"received_at",
+		"history_id",
+		"internal_date",
+		"size_estimate",
+		"archive_mailbox",
+		"archive_source_path",
+		"classification_label_values",
+	} {
+		if _, ok := metadata[key]; !ok {
+			t.Fatalf("projected mail-message metadata missing %q: %#v", key, metadata)
+		}
+	}
+
+	states, err := index.JMAPEmailStates(ctx, []contracts.ObjectDigest{digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, ok := states[digest]
+	if !ok ||
+		!sameStrings(state.MailboxIDs, []string{"all", "inbox"}) ||
+		!sameStrings(state.Keywords, []string{"$flagged", "$seen"}) {
+		t.Fatalf("unexpected projected mail-message labels: %#v", states)
+	}
+	if state.ThreadID != "thread-apollo" ||
+		!state.ReceivedAt.Equal(time.Date(2023, 11, 14, 22, 13, 20, 0, time.UTC)) {
+		t.Fatalf("unexpected projected mail-message state: %#v", state)
 	}
 }
 

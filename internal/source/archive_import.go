@@ -14,19 +14,16 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"mime"
-	"mime/multipart"
-	"net/mail"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/facets/mailmessage"
 	"blackcat.ca/gmeow/internal/rpc"
 )
 
@@ -202,31 +199,14 @@ func messageIDShard(messageID string) uint32 {
 }
 
 type archiveMessage struct {
-	ObservedAt       time.Time
-	SourcePath       string
-	Mailbox          string
-	Format           string
-	ExternalID       string
-	ExternalVersion  string
-	Raw              []byte
-	Headers          map[string]string
-	Body             []byte
-	BodyMediaType    string
-	Attachments      []archiveAttachment
-	MessageID        string
-	GeneratedMessage bool
-	Fingerprint      string
-	BodyLineHash     string
-	Subject          string
-	Date             string
-	From             string
-	To               string
-}
+	mailmessage.Message
 
-type archiveAttachment struct {
-	Content   []byte
-	FileName  string
-	MediaType string
+	ObservedAt      time.Time
+	SourcePath      string
+	Mailbox         string
+	Format          string
+	ExternalID      string
+	ExternalVersion string
 }
 
 func NewArchiveImporter(store FilestoreClient) (*ArchiveImporter, error) {
@@ -732,7 +712,7 @@ func (importer *ArchiveImporter) ingestCanonicalMessage(
 		SourceHint:  message.Subject,
 		Compound: &CompoundObject{
 			ObjectID:   "mail_message:" + message.MessageID,
-			MediaType:  "application/vnd.gmeow.archive-message+json",
+			MediaType:  mailmessage.MediaType,
 			SourceHint: message.Subject,
 			ContentRoles: []string{
 				contracts.MailMessageContentRole,
@@ -860,7 +840,7 @@ func (importer *ArchiveImporter) ingestVariantMessage(
 		SourceHint:  message.Subject,
 		Compound: &CompoundObject{
 			ObjectID:   "mail_message:" + message.MessageID,
-			MediaType:  "application/vnd.gmeow.archive-message+json",
+			MediaType:  mailmessage.MediaType,
 			SourceHint: message.Subject,
 			ContentRoles: []string{
 				contracts.MailMessageContentRole,
@@ -950,7 +930,7 @@ func (importer *ArchiveImporter) writeArchiveMessageParts(
 	message archiveMessage,
 	variant bool,
 ) ([]contracts.CompoundPart, error) {
-	headers, err := json.Marshal(sortedHeaderRows(message.Headers))
+	headers, err := json.Marshal(mailmessage.SortedHeaderRows(message.Headers))
 	if err != nil {
 		return nil, err
 	}
@@ -1155,7 +1135,8 @@ func (importer *ArchiveImporter) writeVariantPatches(
 	if err != nil {
 		return "", "", err
 	}
-	headerTarget := mustJSON(sortedHeaderRows(message.Headers))
+
+	headerTarget := mustJSON(mailmessage.SortedHeaderRows(message.Headers))
 	headerPatch := []byte(linePatch(string(canonicalHeaders), string(headerTarget)))
 	bodyPatch := []byte(linePatch(string(canonicalBody), string(message.Body)))
 	headerDigest, _, err := importer.service.Ingest(ctx, IngestObject{
@@ -1392,105 +1373,25 @@ func parseArchiveMessage(
 	path, root, format string,
 	offset int,
 ) (archiveMessage, error) {
-	parsed, err := mail.ReadMessage(bytes.NewReader(raw))
+	canonical, err := mailmessage.Parse(raw, path)
 	if err != nil {
-		return archiveMessage{}, fmt.Errorf("parse mail %s: %w", path, err)
+		return archiveMessage{}, fmt.Errorf("parse archive mail message: %w", err)
 	}
-	body, attachments := extractMailBodyAndAttachments(parsed.Header, parsed.Body)
-	headers := headerMap(parsed.Header)
-	rel, _ := filepath.Rel(root, path)
-	message := archiveMessage{
-		ObservedAt:      time.Now().UTC(),
-		SourcePath:      filepath.Clean(path),
-		Mailbox:         archiveMailbox(rel, format),
-		Format:          format,
-		ExternalID:      archiveExternalID(rel, offset),
-		ExternalVersion: archiveExternalVersion(raw),
-		Raw:             raw,
-		Headers:         headers,
-		Body:            body,
-		BodyMediaType:   "text/plain",
-		Attachments:     attachments,
-		Subject:         headers["subject"],
-		Date:            headers["date"],
-		From:            headers["from"],
-		To:              headers["to"],
+
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return archiveMessage{}, fmt.Errorf("resolve archive message path: %w", err)
 	}
-	message.MessageID = normalizeArchiveMessageID(headers["message-id"])
-	message.BodyLineHash = canonicalBodyLineFingerprint(message.Body)
-	message.Fingerprint = canonicalFingerprint(message)
-	if message.MessageID == "" {
-		message.GeneratedMessage = true
-		message.MessageID = fmt.Sprintf(
-			"<gmeow-generated-%s@%s>",
-			message.Fingerprint,
-			contracts.MailGeneratedMessageIDHost,
-		)
-	}
+
+	message := archiveMessage{Message: canonical}
+	message.ObservedAt = time.Now().UTC()
+	message.SourcePath = filepath.Clean(path)
+	message.Mailbox = archiveMailbox(rel, format)
+	message.Format = format
+	message.ExternalID = archiveExternalID(rel, offset)
+	message.ExternalVersion = archiveExternalVersion(raw)
 
 	return message, nil
-}
-
-func extractMailBodyAndAttachments(
-	headers mail.Header,
-	body io.Reader,
-) ([]byte, []archiveAttachment) {
-	textBodies := []string{}
-	attachments := []archiveAttachment{}
-	extractMailPart(headers, body, &textBodies, &attachments)
-
-	return []byte(strings.Join(textBodies, "\n")), attachments
-}
-
-func extractMailPart(
-	headers mail.Header,
-	body io.Reader,
-	textBodies *[]string,
-	attachments *[]archiveAttachment,
-) {
-	contentType := headers.Get("Content-Type")
-	mediaType, params, err := mime.ParseMediaType(contentType)
-	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
-		content, _ := io.ReadAll(body)
-		disposition, _, _ := mime.ParseMediaType(headers.Get("Content-Disposition"))
-		fileName := archivePartFilename(headers)
-		if disposition == "attachment" || fileName != "" {
-			*attachments = append(*attachments, archiveAttachment{
-				Content:   content,
-				FileName:  fileName,
-				MediaType: firstNonEmpty(mediaType, "application/octet-stream"),
-			})
-			return
-		}
-		if mediaType == "text/plain" || (mediaType == "" && len(*textBodies) == 0) {
-			*textBodies = append(*textBodies, string(content))
-		}
-		return
-	}
-	reader := multipart.NewReader(body, params["boundary"])
-	for {
-		part, err := reader.NextPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			break
-		}
-		extractMailPart(mail.Header(part.Header), part, textBodies, attachments)
-	}
-}
-
-func archivePartFilename(headers mail.Header) string {
-	_, params, err := mime.ParseMediaType(headers.Get("Content-Disposition"))
-	if err == nil && params["filename"] != "" {
-		return params["filename"]
-	}
-	_, params, err = mime.ParseMediaType(headers.Get("Content-Type"))
-	if err == nil {
-		return params["name"]
-	}
-
-	return ""
 }
 
 func detectArchiveFileFormat(path, root, requested string) string {
@@ -1629,25 +1530,18 @@ func archiveMailMetadata(
 	versionCount int,
 	canonicalVersionID string,
 ) map[string]any {
-	return map[string]any{
-		"rfc_message_id":           message.MessageID,
-		"subject":                  message.Subject,
-		"date":                     message.Date,
-		"from":                     message.From,
-		"to":                       message.To,
-		"archive_format":           message.Format,
-		"archive_mailbox":          message.Mailbox,
-		"archive_source_path":      message.SourcePath,
-		"generated_message_id":     message.GeneratedMessage,
-		"canonical_fingerprint":    message.Fingerprint,
-		"body_line_fingerprint":    message.BodyLineHash,
-		"canonical_version_id":     canonicalVersionID,
-		"version_count":            versionCount,
-		"max_scale":                maxScale,
-		"message_id_collision":     collision,
-		"analysis_scope":           contracts.AnalysisScopeCanonical,
-		"analysis_input_body_line": message.BodyLineHash,
-	}
+	metadata := mailmessage.Metadata(
+		message.Message,
+		collision,
+		maxScale,
+		versionCount,
+		canonicalVersionID,
+	)
+	metadata["archive_format"] = message.Format
+	metadata["archive_mailbox"] = message.Mailbox
+	metadata["archive_source_path"] = message.SourcePath
+
+	return metadata
 }
 
 func (importer *ArchiveImporter) canonicalBodyOrder(
@@ -1685,65 +1579,6 @@ func cloneMetadata(metadata map[string]any) map[string]any {
 	}
 
 	return cloned
-}
-
-func headerMap(header mail.Header) map[string]string {
-	result := map[string]string{}
-	for key, values := range header {
-		result[strings.ToLower(key)] = strings.Join(values, "\n")
-	}
-	return result
-}
-
-func sortedHeaderRows(headers map[string]string) []map[string]string {
-	names := make([]string, 0, len(headers))
-	for name := range headers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	rows := make([]map[string]string, 0, len(names))
-	for _, name := range names {
-		rows = append(rows, map[string]string{"name": name, "value": headers[name]})
-	}
-	return rows
-}
-
-func normalizeArchiveMessageID(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return ""
-	}
-	trimmed = strings.Trim(trimmed, "<>")
-	if trimmed == "" {
-		return ""
-	}
-	return "<" + strings.ToLower(trimmed) + ">"
-}
-
-func canonicalFingerprint(message archiveMessage) string {
-	parts := []string{
-		normalizeArchiveMessageID(message.Headers["message-id"]),
-		strings.ToLower(strings.TrimSpace(message.Subject)),
-		strings.ToLower(strings.TrimSpace(message.From)),
-		strings.ToLower(strings.TrimSpace(message.To)),
-		collapseArchiveWhitespace(string(message.Body)),
-	}
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
-	return hex.EncodeToString(sum[:])[:32]
-}
-
-func canonicalBodyLineFingerprint(body []byte) string {
-	lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
-	normalized := make([]string, 0, len(lines))
-	for _, line := range lines {
-		collapsed := collapseArchiveWhitespace(line)
-		if collapsed != "" {
-			normalized = append(normalized, collapsed)
-		}
-	}
-	sum := sha256.Sum256([]byte(strings.Join(normalized, "\n")))
-
-	return hex.EncodeToString(sum[:])[:32]
 }
 
 func appendSkippedMessageID(report *ArchiveImportReport, messageID string) {

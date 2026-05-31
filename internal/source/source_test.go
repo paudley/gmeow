@@ -5,13 +5,17 @@ package source
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/facets/mailmessage"
 	"blackcat.ca/gmeow/internal/rpc"
 	"blackcat.ca/gmeow/internal/testsupport"
 )
@@ -117,7 +121,7 @@ func TestBackfillSkipsConcurrentSourceIngestClaim(t *testing.T) {
 	}
 }
 
-func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
+func TestGmailMessageCreatesCompoundWithoutRawMessageDuplicate(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
 	defer filestoreService.Close()
@@ -174,7 +178,6 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 	for _, role := range []string{
 		"rfc822_headers",
 		"email_body",
-		"gmail_data",
 		"mime_structure",
 		"attachment",
 	} {
@@ -193,7 +196,7 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 	}
 	if labels := stringSliceValue(metadata["label_ids"]); len(labels) != 2 ||
 		labels[0] != "INBOX" || labels[1] != "UNREAD" {
-		t.Fatalf("expected Gmail label IDs in mail facet metadata, got %#v", metadata)
+		t.Fatalf("expected Gmail label IDs in mail_message facet, got %#v", metadata)
 	}
 	if !hasRelationship(
 		manifest.Relationships,
@@ -218,6 +221,193 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 			"compound manifest missing part_of relationship: %#v",
 			manifest.Relationships,
 		)
+	}
+}
+
+func TestGmailRawMessageCollapsesOntoArchiveMailMessage(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+
+	raw := []byte(strings.Join([]string{
+		"Message-ID: <same@example.test>",
+		"Subject: Same data",
+		"From: Sender <sender@example.test>",
+		"To: Receiver <receiver@example.test>",
+		"",
+		"hello body",
+	}, "\r\n"))
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "same.eml"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Format:     ArchiveImportFormatEMLDir,
+		Roots:      []string{root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Imported != 1 {
+		t.Fatalf("expected archive import, got %#v", report)
+	}
+	archiveDigest, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind: contracts.MailArchiveSourceKind,
+			SourceName: "archive",
+			ExternalID: "same.eml",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("archive source object was not indexed")
+	}
+
+	service, err := NewService(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := NewGmailAdapter("primary", gmailExternalBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gmailDigest, _, err := adapter.IngestMessage(ctx, service, GmailMessage{
+		MessageID:  "gmail-1",
+		Version:    "h1",
+		ThreadID:   "thread-1",
+		Metadata:   map[string]any{"label_ids": []string{"INBOX"}},
+		RawMessage: raw,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gmailDigest != archiveDigest {
+		t.Fatalf(
+			"expected same canonical digest, archive=%s gmail=%s",
+			archiveDigest,
+			gmailDigest,
+		)
+	}
+	manifest, err := filestoreService.Client.ReadManifest(ctx, gmailDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ObjectID != "mail_message:<same@example.test>" {
+		t.Fatalf("expected canonical mail_message object id, got %q", manifest.ObjectID)
+	}
+	if manifest.MediaType != mailmessage.MediaType {
+		t.Fatalf("expected canonical mail message media type, got %q", manifest.MediaType)
+	}
+	metadata := mailMessageMetadataForTest(t, manifest)
+	if metadata["rfc_message_id"] != "<same@example.test>" {
+		t.Fatalf("expected canonical RFC Message-ID, got %#v", metadata)
+	}
+	if labels := stringSliceValue(metadata["label_ids"]); len(labels) != 1 ||
+		labels[0] != "INBOX" {
+		t.Fatalf("expected Gmail labels in canonical mail facet, got %#v", metadata)
+	}
+}
+
+func TestGmailRawMessageUsesCanonicalSubjectAndMIMEStructure(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	service, err := NewService(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	adapter, err := NewGmailAdapter("primary", gmailExternalBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw := []byte(strings.Join([]string{
+		"Message-ID: <multipart@example.test>",
+		"Subject: Canonical subject",
+		"Content-Type: multipart/mixed; boundary=\"gmeow-boundary\"",
+		"",
+		"--gmeow-boundary",
+		"Content-Type: text/plain",
+		"",
+		"hello body",
+		"--gmeow-boundary",
+		"Content-Type: text/plain; name=\"note.txt\"",
+		"Content-Disposition: attachment; filename=\"note.txt\"",
+		"",
+		"attached text",
+		"--gmeow-boundary--",
+	}, "\r\n"))
+	message := GmailMessage{
+		MessageID:  "gmail-multipart",
+		Version:    "h1",
+		RawMessage: raw,
+	}
+
+	object, err := adapter.messageObject(ctx, nil, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object.Compound.SourceHint != "Canonical subject" {
+		t.Fatalf("expected canonical subject hint, got %q", object.Compound.SourceHint)
+	}
+
+	digest, _, err := adapter.IngestMessage(ctx, service, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	structure, err := filestoreService.Client.GetStructure(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mimeParts := structure.PartsByRole["mime_structure"]
+	if len(mimeParts) != 1 {
+		t.Fatalf("expected one mime_structure part, got %#v", mimeParts)
+	}
+
+	reader, err := filestoreService.Client.Open(ctx, mimeParts[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mimeStructure struct {
+		BodyMediaType string `json:"body_media_type"`
+		Attachments   []struct {
+			ID        string `json:"id"`
+			FileName  string `json:"filename"`
+			MediaType string `json:"media_type"`
+			Size      int    `json:"size"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal(payload, &mimeStructure); err != nil {
+		t.Fatal(err)
+	}
+	if mimeStructure.BodyMediaType != "text/plain" {
+		t.Fatalf("expected canonical body media type, got %#v", mimeStructure)
+	}
+	if len(mimeStructure.Attachments) != 1 {
+		t.Fatalf("expected canonical attachment in MIME structure, got %#v", mimeStructure)
+	}
+	attachment := mimeStructure.Attachments[0]
+	if attachment.ID != "raw:0" ||
+		attachment.FileName != "note.txt" ||
+		attachment.MediaType != "text/plain" ||
+		attachment.Size == 0 {
+		t.Fatalf("expected canonical attachment metadata, got %#v", attachment)
 	}
 }
 

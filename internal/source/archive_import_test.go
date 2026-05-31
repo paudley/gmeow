@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/facets/mailmessage"
 	"blackcat.ca/gmeow/internal/testsupport"
 )
 
@@ -576,6 +577,42 @@ func TestExtractMailBodyAndAttachmentsRecursesNestedMultipart(t *testing.T) {
 		message.Attachments[0].FileName != "note.txt" ||
 		string(message.Attachments[0].Content) != "attachment body" {
 		t.Fatalf("unexpected attachments: %#v", message.Attachments)
+	}
+}
+
+func TestArchiveMailMetadataUsesGenericMailMessageFields(t *testing.T) {
+	message := archiveMessage{
+		Message: mailmessage.Message{
+			MessageID:    "<archive@example.test>",
+			Subject:      "Archive update",
+			Date:         "Wed, 27 May 2026 09:15:00 -0600",
+			From:         "sender@example.test",
+			To:           "recipient@example.test",
+			Fingerprint:  "fingerprint",
+			BodyLineHash: "body-line",
+		},
+		Format:     ArchiveImportFormatEMLDir,
+		Mailbox:    "cur",
+		SourcePath: "mail/cur/1.eml",
+	}
+
+	metadata := archiveMailMetadata(
+		message,
+		false,
+		contracts.VersionScaleMinor,
+		1,
+		message.Fingerprint,
+	)
+
+	if metadata["date"] != "Wed, 27 May 2026 09:15:00 -0600" ||
+		metadata["subject"] != "Archive update" ||
+		metadata["archive_format"] != ArchiveImportFormatEMLDir ||
+		metadata["archive_mailbox"] != "cur" ||
+		metadata["archive_source_path"] != "mail/cur/1.eml" {
+		t.Fatalf("unexpected archive mail-message metadata: %#v", metadata)
+	}
+	if _, ok := metadata["received_at"]; ok {
+		t.Fatalf("archive import should not fabricate received_at: %#v", metadata)
 	}
 }
 

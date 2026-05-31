@@ -37,6 +37,9 @@ const (
 	manifestFilename                 = "manifest.json.zst"
 	sourceCursorFilename             = "cursor.json.zst"
 	schemaVersion                    = "1"
+	versionScaleRankTrivial          = 1
+	versionScaleRankMinor            = versionScaleRankTrivial + 1
+	versionScaleRankMajor            = versionScaleRankMinor + 1
 )
 
 type FilesystemStore struct {
@@ -1073,6 +1076,8 @@ func normalizeFacets(facets []contracts.Facet) []contracts.Facet {
 		facet.Name = ""
 		if facet.Metadata == nil {
 			facet.Metadata = facet.Attributes
+		} else {
+			facet.Metadata = mergeMaps(facet.Attributes, facet.Metadata)
 		}
 
 		facet.Attributes = nil
@@ -1238,24 +1243,107 @@ func mergeMaps(existing, incoming map[string]any) map[string]any {
 }
 
 func mergeFacets(existing, incoming []contracts.Facet) []contracts.Facet {
-	incomingKinds := map[string]bool{}
-	for _, item := range incoming {
+	result := make([]contracts.Facet, 0, len(existing)+len(incoming))
+	indexByKind := map[string]int{}
+
+	for _, item := range existing {
 		kind := strings.TrimSpace(item.FacetKind())
 		if kind != "" {
-			incomingKinds[kind] = true
-		}
-	}
-
-	result := make([]contracts.Facet, 0, len(existing)+len(incoming))
-	for _, item := range existing {
-		if incomingKinds[strings.TrimSpace(item.FacetKind())] {
-			continue
+			indexByKind[kind] = len(result)
 		}
 		result = append(result, item)
 	}
-	result = append(result, incoming...)
+
+	for _, item := range incoming {
+		kind := strings.TrimSpace(item.FacetKind())
+		if index, ok := indexByKind[kind]; ok && kind != "" {
+			result[index] = mergeFacet(result[index], item)
+
+			continue
+		}
+
+		result = append(result, item)
+		if kind != "" {
+			indexByKind[kind] = len(result) - 1
+		}
+	}
 
 	return normalizeFacets(result)
+}
+
+func mergeFacet(existing, incoming contracts.Facet) contracts.Facet {
+	merged := existing
+	if incoming.Kind != "" {
+		merged.Kind = incoming.Kind
+	}
+
+	if incoming.Name != "" {
+		merged.Name = incoming.Name
+	}
+
+	if incoming.Version != "" {
+		merged.Version = incoming.Version
+	}
+
+	existingMetadata := mergeMaps(existing.Attributes, existing.Metadata)
+	incomingMetadata := mergeMaps(incoming.Attributes, incoming.Metadata)
+	merged.Metadata = mergeFacetMetadata(
+		merged.FacetKind(),
+		existingMetadata,
+		incomingMetadata,
+	)
+	merged.Attributes = nil
+
+	return merged
+}
+
+func mergeFacetMetadata(
+	kind string,
+	existingMetadata map[string]any,
+	incomingMetadata map[string]any,
+) map[string]any {
+	merged := mergeMaps(existingMetadata, incomingMetadata)
+	if kind != contracts.MailMessageFacetKind {
+		return merged
+	}
+
+	existingVersionCount := intFromAny(existingMetadata["version_count"])
+	incomingVersionCount := intFromAny(incomingMetadata["version_count"])
+	merged["version_count"] = max(existingVersionCount, incomingVersionCount)
+	merged["max_scale"] = maxMailVersionScale(
+		stringFromAny(existingMetadata["max_scale"]),
+		stringFromAny(incomingMetadata["max_scale"]),
+	)
+
+	merged["message_id_collision"] = boolFromAny(
+		existingMetadata["message_id_collision"],
+	) || boolFromAny(incomingMetadata["message_id_collision"])
+	if existingVersionCount > incomingVersionCount {
+		if existingCanonical := stringFromAny(
+			existingMetadata["canonical_version_id"],
+		); existingCanonical != "" {
+			merged["canonical_version_id"] = existingCanonical
+		}
+	}
+
+	return merged
+}
+
+func maxMailVersionScale(left, right string) string {
+	scaleRank := map[string]int{
+		contracts.VersionScaleTrivial: versionScaleRankTrivial,
+		contracts.VersionScaleMinor:   versionScaleRankMinor,
+		contracts.VersionScaleMajor:   versionScaleRankMajor,
+	}
+	if scaleRank[right] > scaleRank[left] {
+		return right
+	}
+
+	if left != "" {
+		return left
+	}
+
+	return right
 }
 
 func provenanceMergeKey(item contracts.Provenance) string {
@@ -1665,4 +1753,25 @@ func stringFromAny(value any) string {
 	}
 
 	return ""
+}
+
+func intFromAny(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
+	}
+}
+
+func boolFromAny(value any) bool {
+	if typed, ok := value.(bool); ok {
+		return typed
+	}
+
+	return false
 }

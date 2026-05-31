@@ -671,7 +671,7 @@ func defaultJMAPMailboxes(labelIDs []string) []string {
 }
 
 func jmapReceivedAt(manifest contracts.Manifest, metadata map[string]any) *time.Time {
-	for _, key := range []string{"received_at", "internal_date", "date"} {
+	for _, key := range []string{"received_at", "date"} {
 		if receivedAt, ok := parseJMAPTime(stringFromAny(metadata[key])); ok {
 			return &receivedAt
 		}
