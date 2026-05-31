@@ -442,6 +442,137 @@ func TestMailArchiveMissingGmailReport(t *testing.T) {
 	}
 }
 
+func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
+	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	migrationsDir := queryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
+
+	store := filestore.NewFilesystemStore(t.TempDir())
+	profile := `@prefix bcid: <https://patrickaudley.com/lod#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix schema: <https://schema.org/> .
+
+<https://patrickaudley.com/#paudley> a foaf:Person, schema:Person ;
+    foaf:name "Patrick Colm Audley"@en ;
+    schema:email <mailto:paudley@blackcat.ca> ;
+    bcid:historicalEmail <mailto:paudley@gt.ca> ;
+    schema:knowsAbout <https://patrickaudley.com/#concept-linked-data> .
+`
+	profileDigest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader(profile),
+		MediaType: "text/turtle",
+		Facets: []contracts.Facet{{
+			Kind: contracts.RDFSourceBundleFacetKind,
+			Metadata: map[string]any{
+				"root_subject": "https://patrickaudley.com/#paudley",
+				"format":       "text/turtle",
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "fixture",
+			SourceName: "rdf-profile",
+			ExternalID: "profile",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	correction := `@prefix bcid: <https://patrickaudley.com/lod#> .
+@prefix time: <http://www.w3.org/2006/time#> .
+
+<< <https://patrickaudley.com/#paudley> bcid:historicalEmail <mailto:paudley@gt.ca> >>
+    time:hasEnd "2004-06-30" .
+`
+	correctionDigest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader(correction),
+		MediaType: "text/turtle",
+		Facets: []contracts.Facet{{
+			Kind: contracts.RDFClaimBundleFacetKind,
+			Metadata: map[string]any{
+				"format": "text/turtle",
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "fixture",
+			SourceName: "rdf-claim",
+			ExternalID: "profile-correction",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	index := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
+	if err := index.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	aggregate, err := index.ContactAggregate(ctx, contracts.ContactAggregateRequest{
+		ContactID: "https://patrickaudley.com/#paudley",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregate.DisplayName != "Patrick Colm Audley" ||
+		aggregate.PrimaryEmail != "paudley@blackcat.ca" {
+		t.Fatalf("unexpected contact aggregate: %#v", aggregate)
+	}
+	historical := contactFactValueFor(aggregate.Facts, "email", "paudley@gt.ca")
+	if historical.ValidUntil != "2004-06-30" || !historical.Historical {
+		t.Fatalf("historical email correction not applied: %#v", aggregate.Facts)
+	}
+	resolved, err := index.ResolveContactIdentity(
+		ctx,
+		contracts.ContactIdentityResolveRequest{
+			Identity: "mailto:paudley@gt.ca",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameStrings(resolved.ContactIDs, []string{"https://patrickaudley.com/#paudley"}) {
+		t.Fatalf("unexpected contact identity resolution: %#v", resolved)
+	}
+	search, err := index.ContactSearch(ctx, contracts.ContactSearchRequest{
+		Query: "blackcat",
+		Limit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if search.Total != 1 ||
+		search.Results[0].ContactID != "https://patrickaudley.com/#paudley" {
+		t.Fatalf("contact email was not searchable through rollup: %#v", search)
+	}
+	emptyPage, err := index.ContactSearch(ctx, contracts.ContactSearchRequest{
+		Query:  "blackcat",
+		Limit:  5,
+		Offset: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyPage.Total != 1 || len(emptyPage.Results) != 0 {
+		t.Fatalf("empty page lost contact search total: %#v", emptyPage)
+	}
+
+	structure, err := index.Structure(ctx, profileDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(structure.PartsByRole) != 0 {
+		t.Fatalf(
+			"RDF profile should not expand into FILESTORE compound parts: %#v",
+			structure,
+		)
+	}
+	if _, err := index.Structure(ctx, correctionDigest); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func putMailIdentityProjectionFixture(
 	t *testing.T,
 	ctx context.Context,
@@ -533,6 +664,20 @@ func itemForDigest(
 	}
 
 	return contracts.MailIdentityReportItem{}, false
+}
+
+func contactFactValueFor(
+	facts []contracts.ContactFact,
+	kind string,
+	value string,
+) contracts.ContactFact {
+	for _, fact := range facts {
+		if fact.FactKind == kind && fact.Value == value {
+			return fact
+		}
+	}
+
+	return contracts.ContactFact{}
 }
 
 func queryIntegrationDSN(t *testing.T) string {
