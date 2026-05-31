@@ -23,6 +23,15 @@ import (
 
 const MediaType = "application/vnd.gmeow.mail-message+json"
 
+const (
+	metadataKeyFrom    = "from"
+	metadataKeySender  = "sender"
+	metadataKeyReplyTo = "reply_to"
+	metadataKeyTo      = "to"
+	metadataKeyCC      = "cc"
+	metadataKeyBCC     = "bcc"
+)
+
 type Message struct {
 	Headers          map[string]string
 	Subject          string
@@ -44,6 +53,14 @@ type Attachment struct {
 	FileName  string
 	MediaType string
 	Content   []byte
+}
+
+type Participant struct {
+	Role        string
+	DisplayName string
+	Address     string
+	RawValue    string
+	Ordinal     int
 }
 
 func Parse(raw []byte, sourceHint string) (Message, error) {
@@ -99,8 +116,12 @@ func Metadata(
 		"rfc_message_id":           message.MessageID,
 		"subject":                  message.Subject,
 		"date":                     message.Date,
-		"from":                     message.From,
-		"to":                       message.To,
+		metadataKeyFrom:            message.From,
+		metadataKeySender:          message.Headers[metadataKeySender],
+		metadataKeyReplyTo:         message.Headers["reply-to"],
+		metadataKeyTo:              message.To,
+		metadataKeyCC:              message.Headers[metadataKeyCC],
+		metadataKeyBCC:             message.Headers[metadataKeyBCC],
 		"generated_message_id":     message.GeneratedMessage,
 		"canonical_fingerprint":    message.Fingerprint,
 		"body_line_fingerprint":    message.BodyLineHash,
@@ -111,6 +132,180 @@ func Metadata(
 		"analysis_scope":           contracts.AnalysisScopeCanonical,
 		"analysis_input_body_line": message.BodyLineHash,
 	}
+}
+
+func ParticipantsFromMetadata(metadata map[string]any) []Participant {
+	if metadata == nil {
+		return nil
+	}
+
+	participants := []Participant{}
+	for _, header := range []struct {
+		key  string
+		role string
+	}{
+		{key: metadataKeyFrom, role: metadataKeyFrom},
+		{key: metadataKeySender, role: metadataKeySender},
+		{key: metadataKeyReplyTo, role: metadataKeyReplyTo},
+		{key: metadataKeyTo, role: metadataKeyTo},
+		{key: metadataKeyCC, role: metadataKeyCC},
+		{key: metadataKeyBCC, role: metadataKeyBCC},
+	} {
+		participants = append(
+			participants,
+			participantsFromHeader(header.role, stringMetadata(metadata, header.key))...,
+		)
+	}
+
+	return participants
+}
+
+func participantsFromHeader(role, value string) []Participant {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	addresses, err := mail.ParseAddressList(value)
+	if err != nil {
+		addresses = parseAddressListSegments(value)
+	}
+
+	participants := make([]Participant, 0, len(addresses))
+	for index, address := range addresses {
+		if strings.TrimSpace(address.Address) == "" {
+			continue
+		}
+
+		participants = append(participants, Participant{
+			Role:        role,
+			DisplayName: strings.TrimSpace(address.Name),
+			Address:     strings.TrimSpace(address.Address),
+			RawValue:    strings.TrimSpace(address.String()),
+			Ordinal:     index,
+		})
+	}
+
+	return participants
+}
+
+func parseAddressListSegments(value string) []*mail.Address {
+	segments := splitAddressListSegments(value)
+	addresses := make([]*mail.Address, 0, len(segments))
+
+	for _, segment := range segments {
+		address, err := mail.ParseAddress(segment)
+		if err != nil {
+			continue
+		}
+
+		addresses = append(addresses, address)
+	}
+
+	return addresses
+}
+
+func splitAddressListSegments(value string) []string {
+	segments := []string{}
+	state := addressListSplitState{}
+	start := 0
+
+	for index, character := range value {
+		if state.segmentBoundary(character) {
+			segments = appendAddressListSegment(segments, value[start:index])
+			start = index + len(string(character))
+		}
+	}
+
+	return appendAddressListSegment(segments, value[start:])
+}
+
+type addressListSplitState struct {
+	quoted       bool
+	escaped      bool
+	commentDepth int
+}
+
+func (state *addressListSplitState) segmentBoundary(character rune) bool {
+	switch {
+	case state.consumeEscaped():
+		return false
+	case state.startEscape(character):
+		return false
+	case state.toggleQuote(character):
+		return false
+	case state.updateComment(character):
+		return false
+	default:
+		return character == ',' && !state.quoted && state.commentDepth == 0
+	}
+}
+
+func (state *addressListSplitState) consumeEscaped() bool {
+	if !state.escaped {
+		return false
+	}
+
+	state.escaped = false
+
+	return true
+}
+
+func (state *addressListSplitState) startEscape(character rune) bool {
+	if character != '\\' {
+		return false
+	}
+
+	state.escaped = true
+
+	return true
+}
+
+func (state *addressListSplitState) toggleQuote(character rune) bool {
+	if character != '"' || state.commentDepth != 0 {
+		return false
+	}
+
+	state.quoted = !state.quoted
+
+	return true
+}
+
+func (state *addressListSplitState) updateComment(character rune) bool {
+	if state.quoted {
+		return false
+	}
+
+	switch {
+	case character == '(':
+		state.commentDepth++
+
+		return true
+	case character == ')' && state.commentDepth > 0:
+		state.commentDepth--
+
+		return true
+	default:
+		return false
+	}
+}
+
+func appendAddressListSegment(segments []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return segments
+	}
+
+	return append(segments, value)
+}
+
+func stringMetadata(metadata map[string]any, key string) string {
+	value, ok := metadata[key].(string)
+	if !ok {
+		return ""
+	}
+
+	return value
 }
 
 func MIMEStructure(bodyMediaType string, attachments []Attachment) map[string]any {

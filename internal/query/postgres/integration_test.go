@@ -586,6 +586,142 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 	}
 }
 
+func TestContactMessagesProjectMailParticipantObservations(t *testing.T) {
+	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	migrationsDir := queryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
+
+	store := filestore.NewFilesystemStore(t.TempDir())
+	contactID := "https://patrickaudley.com/#paudley"
+	profile := `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix schema: <https://schema.org/> .
+
+<https://patrickaudley.com/#paudley> a foaf:Person ;
+    foaf:name "Patrick Audley" ;
+    schema:email <mailto:paudley@blackcat.ca> .
+`
+	if _, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader(profile),
+		MediaType: "text/turtle",
+		Facets: []contracts.Facet{
+			contactentity.Facet(contactentity.MetadataInput{
+				RootSubject: contactID,
+				Format:      "text/turtle",
+			}),
+			{
+				Kind: contracts.RDFSourceBundleFacetKind,
+				Metadata: contactentity.Metadata(contactentity.MetadataInput{
+					RootSubject: contactID,
+					Format:      "text/turtle",
+				}),
+			},
+		},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "fixture",
+			SourceName: "rdf-profile",
+			ExternalID: "contact-messages-profile",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	older := putMailParticipantProjectionFixture(
+		t,
+		ctx,
+		store,
+		"<older@example.test>",
+		"Wed, 27 May 2026 09:15:00 -0600",
+		"Patrick <paudley@blackcat.ca>",
+		"Apollo <apollo@example.test>",
+	)
+	newer := putMailParticipantProjectionFixture(
+		t,
+		ctx,
+		store,
+		"<newer@example.test>",
+		"Thu, 28 May 2026 10:30:00 -0600",
+		"Apollo <apollo@example.test>",
+		"Patrick <paudley@blackcat.ca>",
+	)
+
+	index := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
+	if err := index.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := index.ContactMessages(ctx, contracts.ContactMessageRequest{
+		ContactID: contactID,
+		Limit:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages.Total != 2 ||
+		len(messages.Results) != 1 ||
+		messages.Results[0].MessageDigest != newer ||
+		messages.Results[0].Role != "to" ||
+		messages.Results[0].Token != "paudley@blackcat.ca" {
+		t.Fatalf("unexpected contact messages page: %#v", messages)
+	}
+
+	fromMessages, err := index.ContactMessages(ctx, contracts.ContactMessageRequest{
+		ContactID: contactID,
+		Role:      "from",
+		Limit:     5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromMessages.Total != 1 ||
+		len(fromMessages.Results) != 1 ||
+		fromMessages.Results[0].MessageDigest != older {
+		t.Fatalf("unexpected role-filtered contact messages: %#v", fromMessages)
+	}
+
+	aggregate, err := index.ContactAggregate(ctx, contracts.ContactAggregateRequest{
+		ContactID: contactID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregate.MessageCount != 2 ||
+		aggregate.ParticipantCount != 2 ||
+		aggregate.FirstSeenAt.IsZero() ||
+		aggregate.LastSeenAt.IsZero() {
+		t.Fatalf("mail observations did not refresh contact rollup: %#v", aggregate)
+	}
+
+	manifest, err := store.ReadManifest(ctx, older)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range manifest.Facets {
+		if manifest.Facets[index].FacetKind() != contracts.MailMessageFacetKind {
+			continue
+		}
+		manifest.Facets[index].Metadata["from"] = "Other <other@example.test>"
+		manifest.Facets[index].Metadata["to"] = "Apollo <apollo@example.test>"
+	}
+	if err := index.Project(ctx, manifest, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err = index.ContactMessages(ctx, contracts.ContactMessageRequest{
+		ContactID: contactID,
+		Limit:     5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages.Total != 1 ||
+		len(messages.Results) != 1 ||
+		messages.Results[0].MessageDigest != newer {
+		t.Fatalf("stale participant rows survived re-projection: %#v", messages)
+	}
+}
+
 func putMailIdentityProjectionFixture(
 	t *testing.T,
 	ctx context.Context,
@@ -612,6 +748,41 @@ func putMailIdentityProjectionFixture(
 		Provenance: []contracts.Provenance{{
 			SourceKind: sourceKind,
 			SourceName: sourceName,
+			ExternalID: messageID,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func putMailParticipantProjectionFixture(
+	t *testing.T,
+	ctx context.Context,
+	store *filestore.FilesystemStore,
+	messageID string,
+	date string,
+	from string,
+	to string,
+) contracts.ObjectDigest {
+	t.Helper()
+	digest, err := store.PutCompound(ctx, filestore.CompoundPutRequest{
+		ObjectID:     "fixture:mail-participant:" + messageID,
+		MediaType:    "application/vnd.gmeow.fixture+json",
+		ContentRoles: []string{contracts.MailMessageContentRole},
+		Facets: []contracts.Facet{{
+			Kind: contracts.MailMessageFacetKind,
+			Metadata: map[string]any{
+				"rfc_message_id": messageID,
+				"date":           date,
+				"from":           from,
+				"to":             to,
+			},
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "fixture",
+			SourceName: "mail-participant",
 			ExternalID: messageID,
 		}},
 	})
