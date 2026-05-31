@@ -1243,8 +1243,8 @@ func refreshContactRollupsTx(ctx context.Context, transaction pgx.Tx) error {
 		),
 		observation_rollups AS (
 		SELECT b.contact_id,
-		min(p.message_time) FILTER (WHERE p.message_time IS NOT NULL) AS first_seen_at,
-		max(p.message_time) FILTER (WHERE p.message_time IS NOT NULL) AS last_seen_at,
+		min(p.message_time) AS first_seen_at,
+		max(p.message_time) AS last_seen_at,
 		count(DISTINCT p.message_digest)::integer AS message_count,
 		count(*)::integer AS participant_count
 		FROM (
@@ -1318,8 +1318,8 @@ func refreshContactRollupsForContactsTx(
 		),
 		observation_rollups AS (
 		SELECT b.contact_id,
-		min(p.message_time) FILTER (WHERE p.message_time IS NOT NULL) AS first_seen_at,
-		max(p.message_time) FILTER (WHERE p.message_time IS NOT NULL) AS last_seen_at,
+		min(p.message_time) AS first_seen_at,
+		max(p.message_time) AS last_seen_at,
 		count(DISTINCT p.message_digest)::integer AS message_count,
 		count(*)::integer AS participant_count
 		FROM (

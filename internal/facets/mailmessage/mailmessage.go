@@ -159,12 +159,7 @@ func participantsFromHeader(role, value string) []Participant {
 
 	addresses, err := mail.ParseAddressList(value)
 	if err != nil {
-		address, singleErr := mail.ParseAddress(value)
-		if singleErr != nil {
-			return nil
-		}
-
-		addresses = []*mail.Address{address}
+		addresses = parseAddressListSegments(value)
 	}
 
 	participants := make([]Participant, 0, len(addresses))
@@ -183,6 +178,116 @@ func participantsFromHeader(role, value string) []Participant {
 	}
 
 	return participants
+}
+
+func parseAddressListSegments(value string) []*mail.Address {
+	segments := splitAddressListSegments(value)
+	addresses := make([]*mail.Address, 0, len(segments))
+
+	for _, segment := range segments {
+		address, err := mail.ParseAddress(segment)
+		if err != nil {
+			continue
+		}
+
+		addresses = append(addresses, address)
+	}
+
+	return addresses
+}
+
+func splitAddressListSegments(value string) []string {
+	segments := []string{}
+	state := addressListSplitState{}
+	start := 0
+
+	for index, character := range value {
+		if state.segmentBoundary(character) {
+			segments = appendAddressListSegment(segments, value[start:index])
+			start = index + len(string(character))
+		}
+	}
+
+	return appendAddressListSegment(segments, value[start:])
+}
+
+type addressListSplitState struct {
+	quoted       bool
+	escaped      bool
+	commentDepth int
+}
+
+func (state *addressListSplitState) segmentBoundary(character rune) bool {
+	switch {
+	case state.consumeEscaped():
+		return false
+	case state.startEscape(character):
+		return false
+	case state.toggleQuote(character):
+		return false
+	case state.updateComment(character):
+		return false
+	default:
+		return character == ',' && !state.quoted && state.commentDepth == 0
+	}
+}
+
+func (state *addressListSplitState) consumeEscaped() bool {
+	if !state.escaped {
+		return false
+	}
+
+	state.escaped = false
+
+	return true
+}
+
+func (state *addressListSplitState) startEscape(character rune) bool {
+	if character != '\\' {
+		return false
+	}
+
+	state.escaped = true
+
+	return true
+}
+
+func (state *addressListSplitState) toggleQuote(character rune) bool {
+	if character != '"' || state.commentDepth != 0 {
+		return false
+	}
+
+	state.quoted = !state.quoted
+
+	return true
+}
+
+func (state *addressListSplitState) updateComment(character rune) bool {
+	if state.quoted {
+		return false
+	}
+
+	switch {
+	case character == '(':
+		state.commentDepth++
+
+		return true
+	case character == ')' && state.commentDepth > 0:
+		state.commentDepth--
+
+		return true
+	default:
+		return false
+	}
+}
+
+func appendAddressListSegment(segments []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return segments
+	}
+
+	return append(segments, value)
 }
 
 func stringMetadata(metadata map[string]any, key string) string {

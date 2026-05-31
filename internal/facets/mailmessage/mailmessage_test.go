@@ -152,3 +152,26 @@ func TestParticipantsFromMetadataParsesRolesAndDisplayNames(t *testing.T) {
 		}
 	}
 }
+
+func TestParticipantsFromMetadataKeepsValidAddressesFromMalformedList(t *testing.T) {
+	participants := ParticipantsFromMetadata(map[string]any{
+		"to": `"Valid, Name" <valid@example.test>, not an address, Other <other@example.test>`,
+	})
+
+	expected := []string{"valid@example.test", "other@example.test"}
+	if len(participants) != len(expected) {
+		t.Fatalf("ParticipantsFromMetadata returned %#v", participants)
+	}
+
+	for index, address := range expected {
+		if participants[index].Address != address {
+			t.Fatalf(
+				"participant %d address = %q, want %q: %#v",
+				index,
+				participants[index].Address,
+				address,
+				participants,
+			)
+		}
+	}
+}

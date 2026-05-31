@@ -18,6 +18,88 @@ import (
 	"blackcat.ca/gmeow/internal/facets/mailmessage"
 )
 
+type mailParticipantProjectionState struct {
+	manifest *contracts.Manifest
+	contacts []string
+	current  bool
+}
+
+func mailParticipantProjectionStateTx(
+	ctx context.Context,
+	transaction pgx.Tx,
+	manifest contracts.Manifest,
+) (mailParticipantProjectionState, error) {
+	state := mailParticipantProjectionState{
+		manifest: &manifest,
+		current:  manifestHasFacetKind(manifest, contracts.MailMessageFacetKind),
+	}
+
+	previous, err := objectHadMailParticipantRowsTx(
+		ctx,
+		transaction,
+		manifest.ObjectDigest,
+	)
+	if err != nil {
+		return mailParticipantProjectionState{}, err
+	}
+
+	if !state.current && !previous {
+		return state, nil
+	}
+
+	state.contacts, err = contactIDsForMailParticipantsTx(
+		ctx,
+		transaction,
+		manifest.ObjectDigest,
+	)
+	if err != nil {
+		return mailParticipantProjectionState{}, err
+	}
+
+	return state, nil
+}
+
+func insertMailParticipantProjectionRows(
+	ctx context.Context,
+	transaction pgx.Tx,
+	state *mailParticipantProjectionState,
+) error {
+	if !state.current {
+		return nil
+	}
+
+	err := insertMailParticipantRows(ctx, transaction, *state.manifest)
+	if err != nil {
+		return err
+	}
+
+	contacts, err := contactIDsForMailParticipantsTx(
+		ctx,
+		transaction,
+		state.manifest.ObjectDigest,
+	)
+	if err != nil {
+		return err
+	}
+
+	state.contacts = append(state.contacts, contacts...)
+
+	return nil
+}
+
+func refreshMailParticipantContactRollupsTx(
+	ctx context.Context,
+	transaction pgx.Tx,
+	state mailParticipantProjectionState,
+) error {
+	contacts := uniqueNonEmptyStrings(state.contacts)
+	if len(contacts) == 0 {
+		return nil
+	}
+
+	return refreshContactRollupsForContactsTx(ctx, transaction, contacts)
+}
+
 func insertMailParticipantRows(
 	ctx context.Context,
 	transaction pgx.Tx,
@@ -130,6 +212,27 @@ func contactIDsForMailParticipantsTx(
 	}
 
 	return contacts, nil
+}
+
+func objectHadMailParticipantRowsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	digest contracts.ObjectDigest,
+) (bool, error) {
+	var found bool
+
+	err := tx.QueryRow(
+		ctx,
+		`SELECT EXISTS(
+		   SELECT 1 FROM query_mail_participants WHERE message_digest = $1
+		 )`,
+		digest,
+	).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("query existing mail participant projection: %w", err)
+	}
+
+	return found, nil
 }
 
 func (index *Index) ContactMessages(
