@@ -33,7 +33,7 @@ var errSourceImportDeadLetter = errors.New(
 )
 
 func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
-	if err := channel.ExchangeDeclare(
+	err := channel.ExchangeDeclare(
 		broker.topology.sourceImportExchange,
 		"direct",
 		true,
@@ -41,7 +41,8 @@ func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
 		false,
 		false,
 		nil,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("declare source import exchange: %w", err)
 	}
 
@@ -59,6 +60,7 @@ func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
 	); err != nil {
 		return fmt.Errorf("declare source import work queue: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.sourceImportRetryQueue,
 		true,
@@ -72,6 +74,7 @@ func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
 	); err != nil {
 		return fmt.Errorf("declare source import retry queue: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.sourceImportFailedQueue,
 		true,
@@ -82,6 +85,7 @@ func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
 	); err != nil {
 		return fmt.Errorf("declare source import failed queue: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.sourceImportDeadLetterQueue,
 		true,
@@ -128,13 +132,15 @@ type SourceImportJobSourceConfig struct {
 }
 
 type SourceImportJobSource struct {
-	connection     *amqp.Connection
-	channel        *amqp.Channel
-	deliveries     <-chan amqp.Delivery
-	publishChannel *amqp.Channel
-	config         SourceImportJobSourceConfig
-	mutex          sync.Mutex
-	publishMutex   sync.Mutex
+	connection      *amqp.Connection
+	channel         *amqp.Channel
+	deliveries      <-chan amqp.Delivery
+	publishChannel  *amqp.Channel
+	publishConfirms <-chan amqp.Confirmation
+	publishReturns  <-chan amqp.Return
+	config          SourceImportJobSourceConfig
+	mutex           sync.Mutex
+	publishMutex    sync.Mutex
 }
 
 func NewSourceImportJobSource(
@@ -144,9 +150,11 @@ func NewSourceImportJobSource(
 	if strings.TrimSpace(config.URL) == "" {
 		return nil, errors.New("scheduler rabbitmq url is required")
 	}
+
 	if strings.TrimSpace(config.QueuePrefix) == "" {
 		config.QueuePrefix = defaultQueuePrefix
 	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -380,6 +388,7 @@ func (broker *Broker) sourceImportRetryPublishing(
 	body []byte,
 ) amqp.Publishing {
 	backoff := broker.retryBackoff(job.Attempt)
+
 	headers := amqp.Table{
 		"idempotency_key": job.IdempotencyKey,
 		"attempt":         int32(job.Attempt),
@@ -408,7 +417,8 @@ func (broker *Broker) sourceImportRetryPublishing(
 func (source *SourceImportJobSource) Receive(
 	ctx context.Context,
 ) (SourceImportReceipt, error) {
-	if err := source.ensureConsumer(ctx); err != nil {
+	err := source.ensureConsumer(ctx)
+	if err != nil {
 		return nil, err
 	}
 
@@ -421,7 +431,9 @@ func (source *SourceImportJobSource) Receive(
 		}
 
 		var job contracts.SourceImportJob
-		if err := json.Unmarshal(delivery.Body, &job); err != nil {
+
+		err := json.Unmarshal(delivery.Body, &job)
+		if err != nil {
 			_ = delivery.Nack(false, false)
 
 			return nil, fmt.Errorf("decode source import job: %w", err)
@@ -437,10 +449,13 @@ func (source *SourceImportJobSource) Receive(
 
 func (source *SourceImportJobSource) Close() error {
 	source.publishMutex.Lock()
+
 	var err error
 	if source.publishChannel != nil {
 		err = source.publishChannel.Close()
 		source.publishChannel = nil
+		source.publishConfirms = nil
+		source.publishReturns = nil
 	}
 	source.publishMutex.Unlock()
 
@@ -450,12 +465,15 @@ func (source *SourceImportJobSource) Close() error {
 		if closeErr := source.channel.Close(); err == nil {
 			err = closeErr
 		}
+
 		source.channel = nil
 	}
+
 	if source.connection != nil {
 		if closeErr := source.connection.Close(); err == nil {
 			err = closeErr
 		}
+
 		source.connection = nil
 	}
 	source.mutex.Unlock()
@@ -470,8 +488,13 @@ func (source *SourceImportJobSource) ensureConsumer(ctx context.Context) error {
 	if source.deliveries != nil {
 		return nil
 	}
+
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+
+	if source.connection == nil {
+		return errBrokerClosed
 	}
 
 	channel, err := source.connection.Channel()
@@ -483,6 +506,7 @@ func (source *SourceImportJobSource) ensureConsumer(ctx context.Context) error {
 	if prefetch <= 0 {
 		prefetch = 1
 	}
+
 	if err := channel.Qos(prefetch, 0, false); err != nil {
 		_ = channel.Close()
 
@@ -518,6 +542,7 @@ func (source *SourceImportJobSource) publishFailure(
 	if cause != nil {
 		job.Failure = cause.Error()
 	}
+
 	body, err := json.Marshal(job)
 	if err != nil {
 		return err
@@ -558,11 +583,24 @@ func (source *SourceImportJobSource) publishFailurePersistent(
 		return err
 	}
 
-	err = channel.PublishWithContext(ctx, exchange, routingKey, false, false, publishing)
+	err = channel.PublishWithContext(ctx, exchange, routingKey, true, false, publishing)
 	if err != nil {
 		source.resetPublisher()
 
 		return fmt.Errorf("publish scheduler rabbitmq source import failure: %w", err)
+	}
+
+	err = waitRabbitMQPublishConfirmed(
+		ctx,
+		exchange,
+		routingKey,
+		source.publishConfirms,
+		source.publishReturns,
+	)
+	if err != nil {
+		source.resetPublisher()
+
+		return err
 	}
 
 	return nil
@@ -580,7 +618,16 @@ func (source *SourceImportJobSource) publisher(
 		return nil, fmt.Errorf("publish source import failure: %w", err)
 	}
 
+	source.mutex.Lock()
+	if source.connection == nil {
+		source.mutex.Unlock()
+
+		return nil, errBrokerClosed
+	}
+
 	channel, err := source.connection.Channel()
+	source.mutex.Unlock()
+
 	if err != nil {
 		return nil, fmt.Errorf(
 			"open scheduler rabbitmq source import failure channel: %w",
@@ -588,7 +635,16 @@ func (source *SourceImportJobSource) publisher(
 		)
 	}
 
+	confirms, returns, err := configureRabbitMQPublisher(channel)
+	if err != nil {
+		_ = channel.Close()
+
+		return nil, err
+	}
+
 	source.publishChannel = channel
+	source.publishConfirms = confirms
+	source.publishReturns = returns
 
 	return channel, nil
 }
@@ -601,6 +657,8 @@ func (source *SourceImportJobSource) resetPublisher() {
 	channel := source.publishChannel
 
 	source.publishChannel = nil
+	source.publishConfirms = nil
+	source.publishReturns = nil
 
 	closeRabbitMQChannelAsync(channel)
 }
@@ -641,6 +699,7 @@ func (receipt *SourceImportJobReceipt) Retry(ctx context.Context, cause error) e
 	if err != nil {
 		receipt.source.mutex.Lock()
 		defer receipt.source.mutex.Unlock()
+
 		_ = receipt.delivery.Nack(false, true)
 
 		return err

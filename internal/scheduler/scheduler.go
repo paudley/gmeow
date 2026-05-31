@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -57,19 +58,17 @@ type Store interface {
 }
 
 type Service struct {
-	store     Store
-	broker    Broker
-	projector ProjectionRefresher
-	now       func() time.Time
-	specs     []contracts.AnalyzerSpec
-	config    Config
-
+	store          Store
+	broker         Broker
+	projector      ProjectionRefresher
+	now            func() time.Time
 	fullyAnnotated *lruCache
-
-	mu        sync.Mutex
-	pressured bool
-	writeSeen bool
-	sweepPos  string
+	sweepPos       string
+	specs          []contracts.AnalyzerSpec
+	config         Config
+	mu             sync.Mutex
+	pressured      bool
+	writeSeen      bool
 }
 
 type Option func(*Service)
@@ -264,6 +263,7 @@ func (service *Service) Scan(
 			jobs := service.jobsForObject(object, request)
 			if len(jobs) == 0 {
 				service.fullyAnnotated.Add(string(object.Manifest.ObjectDigest))
+
 				response.Skipped++
 
 				return nil
@@ -409,11 +409,18 @@ func (service *Service) NotifyObjectsChanged(
 		0,
 		len(request.ObjectDigests),
 	)
+	seen := make(map[contracts.ObjectDigest]struct{}, len(request.ObjectDigests))
 
 	for _, digest := range request.ObjectDigests {
 		if strings.TrimSpace(string(digest)) == "" {
 			continue
 		}
+
+		if _, ok := seen[digest]; ok {
+			continue
+		}
+
+		seen[digest] = struct{}{}
 
 		normalized.ObjectDigests = append(normalized.ObjectDigests, digest)
 		response.Scanned++
@@ -1102,13 +1109,7 @@ func containsAny(wanted, available []string) bool {
 }
 
 func containsString(values []string, value string) bool {
-	for _, item := range values {
-		if item == value {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(values, value)
 }
 
 func firstNonEmpty(values ...string) string {

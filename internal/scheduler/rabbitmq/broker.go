@@ -45,6 +45,7 @@ const (
 	sourceImportFailedRoutingKey     = "source_import.failed"
 	sourceImportDeadLetterRoutingKey = "source_import.dead"
 	rabbitMQChannelOpenTimeout       = 2 * time.Second
+	rabbitMQPublishConfirmTimeout    = 5 * time.Second
 	rabbitMQChannelOpenAttempts      = 2
 	rabbitMQStreamPrefetch           = 1000
 )
@@ -53,30 +54,33 @@ var (
 	errBrokerClosed             = errors.New("rabbitmq broker is closed")
 	errObjectChangeFuncRequired = errors.New("object change function is required")
 	errConsumerStreamClosed     = errors.New("rabbitmq consumer stream closed")
+	errRabbitMQPublishReturned  = errors.New("rabbitmq publish returned")
+	errRabbitMQPublishNacked    = errors.New("rabbitmq publish negatively acknowledged")
+	errRabbitMQConfirmClosed    = errors.New("rabbitmq publish confirm channel closed")
+	errRabbitMQConfirmTimeout   = errors.New("rabbitmq publish confirm timeout")
 )
 
 type Config struct {
 	URL          string
 	QueuePrefix  string
+	Analyzers    []string
 	RetryLimit   int
 	RetryBackoff time.Duration
-	// Analyzers is the set of analyzer names that each get their own work and
-	// retry queue, so a slow analyzer's backlog never blocks a fast one. Empty is
-	// tolerated (no analysis work queues declared) for source-import-only callers.
-	Analyzers []string
 }
 
 type Broker struct {
-	mu             sync.Mutex
-	connection     *amqp.Connection
-	publishMu      sync.Mutex
-	publishChannel *amqp.Channel
-	consumeMu      sync.Mutex
-	consumeStreams map[string]*rabbitMQConsumerStream
-	adminMu        sync.Mutex
-	adminChannel   *amqp.Channel
-	config         Config
-	topology       topology
+	connection      *amqp.Connection
+	publishChannel  *amqp.Channel
+	publishConfirms <-chan amqp.Confirmation
+	publishReturns  <-chan amqp.Return
+	consumeStreams  map[string]*rabbitMQConsumerStream
+	adminChannel    *amqp.Channel
+	topology        topology
+	config          Config
+	mu              sync.Mutex
+	publishMu       sync.Mutex
+	consumeMu       sync.Mutex
+	adminMu         sync.Mutex
 }
 
 type rabbitMQConsumerStream struct {
@@ -90,19 +94,19 @@ type channelOpenResult struct {
 }
 
 type topology struct {
-	analysisExchange            string
+	failedQueue                 string
 	projectionExchange          string
 	sourceImportExchange        string
 	prefix                      string
-	analyzers                   []string
 	reconcileQueue              string
-	failedQueue                 string
+	analysisExchange            string
 	deadLetterQueue             string
 	projectionQueue             string
 	sourceImportWorkQueue       string
 	sourceImportRetryQueue      string
 	sourceImportFailedQueue     string
 	sourceImportDeadLetterQueue string
+	analyzers                   []string
 }
 
 // Per-analyzer queue and routing-key helpers. Work and retry are partitioned by
@@ -328,9 +332,10 @@ func (broker *Broker) Declare(ctx context.Context) error {
 			broker.topology.projectionExchange,
 		},
 	}
+
 	bindings = append(bindings, broker.sourceImportBindings()...)
 	for _, binding := range bindings {
-		err := channel.QueueBind(
+		err = channel.QueueBind(
 			binding.queue,
 			binding.routingKey,
 			binding.exchange,
@@ -370,23 +375,25 @@ func (broker *Broker) declareAnalyzerQueues(channel *amqp.Channel) error {
 			return fmt.Errorf("declare retry queue %s: %w", retryQueue, err)
 		}
 
-		if err := channel.QueueBind(
+		err := channel.QueueBind(
 			workQueue,
 			broker.topology.workRoutingKeyFor(analyzer),
 			broker.topology.analysisExchange,
 			false,
 			nil,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("bind work queue %s: %w", workQueue, err)
 		}
 
-		if err := channel.QueueBind(
+		err = channel.QueueBind(
 			retryQueue,
 			broker.topology.retryRoutingKeyFor(analyzer),
 			broker.topology.analysisExchange,
 			false,
 			nil,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("bind retry queue %s: %w", retryQueue, err)
 		}
 	}
@@ -402,6 +409,10 @@ func (broker *Broker) PurgeAll(ctx context.Context) (int, error) {
 		broker.topology.failedQueue,
 		broker.topology.deadLetterQueue,
 		broker.topology.projectionQueue,
+		broker.topology.sourceImportWorkQueue,
+		broker.topology.sourceImportRetryQueue,
+		broker.topology.sourceImportFailedQueue,
+		broker.topology.sourceImportDeadLetterQueue,
 	}
 	for _, analyzer := range broker.topology.analyzers {
 		queues = append(
@@ -641,6 +652,7 @@ func (broker *Broker) ReconcilePending(
 			"reconcile predicate is required",
 		)
 	}
+
 	if limit <= 0 {
 		limit = 100
 	}
@@ -763,6 +775,7 @@ func (broker *Broker) drainReconcileByAnalyzer(
 	channel *amqp.Channel,
 ) (int, error) {
 	moved := 0
+
 	for {
 		delivery, received, err := broker.receiveDelivery(
 			ctx,
@@ -801,6 +814,7 @@ func (broker *Broker) drainReconcileByAnalyzer(
 		if ackErr != nil {
 			return moved, ackErr
 		}
+
 		moved++
 	}
 
@@ -876,42 +890,42 @@ func (broker *Broker) peekJobs(
 	jobs := []contracts.AnalyzerJob{}
 	deliveries := []amqp.Delivery{}
 
-	err := broker.withConsumer(ctx, func(channel *amqp.Channel) error {
-		for len(jobs) < limit {
-			delivery, ok, err := broker.receiveDelivery(ctx, queue, false)
-			if err != nil {
-				return err
-			}
-
-			if !ok {
-				break
-			}
-
-			var job contracts.AnalyzerJob
-
-			unmarshalErr := json.Unmarshal(delivery.Body, &job)
-			if unmarshalErr != nil {
-				return nackAfterError(
-					delivery,
-					fmt.Errorf("decode queued analyzer job: %w", unmarshalErr),
-				)
-			}
-
-			deliveries = append(deliveries, delivery)
-			jobs = append(jobs, job)
-		}
-
-		for _, delivery := range deliveries {
-			nackErr := nackDelivery(delivery, true)
-			if nackErr != nil {
-				return nackErr
-			}
-		}
-
-		return nil
-	})
+	stream, err := broker.openConsumerStream(ctx, queue, "gmeow.peek."+queue)
 	if err != nil {
 		return nil, err
+	}
+	defer closeRabbitMQChannelAsync(stream.channel)
+
+	for len(jobs) < limit {
+		delivery, ok, err := receiveDeliveryFrom(ctx, queue, stream.deliveries, false)
+		if err != nil {
+			return nil, err
+		}
+
+		if !ok {
+			break
+		}
+
+		deliveries = append(deliveries, delivery)
+
+		var job contracts.AnalyzerJob
+
+		unmarshalErr := json.Unmarshal(delivery.Body, &job)
+		if unmarshalErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("decode queued analyzer job: %w", unmarshalErr),
+				nackDeliveries(deliveries, true),
+			)
+		}
+
+		jobs = append(jobs, job)
+	}
+
+	for _, delivery := range deliveries {
+		nackErr := nackDelivery(delivery, true)
+		if nackErr != nil {
+			return nil, nackErr
+		}
 	}
 
 	return jobs, nil
@@ -925,6 +939,7 @@ func (broker *Broker) ProcessObjectChanges(
 	if process == nil {
 		return 0, errObjectChangeFuncRequired
 	}
+
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1058,9 +1073,12 @@ func projectionRefreshDigest(body []byte) (contracts.ObjectDigest, error) {
 	var message struct {
 		Digest string `json:"digest"`
 	}
-	if err := json.Unmarshal(body, &message); err != nil {
+
+	err := json.Unmarshal(body, &message)
+	if err != nil {
 		return "", err
 	}
+
 	digest := contracts.ObjectDigest(strings.TrimSpace(message.Digest))
 	if digest == "" {
 		return "", errors.New("projection refresh digest is required")
@@ -1258,6 +1276,7 @@ func (broker *Broker) retryPublishing(
 	body []byte,
 ) amqp.Publishing {
 	backoff := broker.retryBackoff(job.Attempt)
+
 	headers := amqp.Table{
 		"idempotency_key": job.IdempotencyKey,
 		"attempt":         int32(job.Attempt),
@@ -1306,6 +1325,8 @@ func (broker *Broker) Close() error {
 		}
 
 		broker.publishChannel = nil
+		broker.publishConfirms = nil
+		broker.publishReturns = nil
 	}
 	broker.publishMu.Unlock()
 
@@ -1361,12 +1382,24 @@ func (broker *Broker) receiveDelivery(
 		return amqp.Delivery{}, false, err
 	}
 
+	delivery, received, err := receiveDeliveryFrom(ctx, queue, deliveries, wait)
+	if errors.Is(err, errConsumerStreamClosed) {
+		broker.resetConsumerStream(queue)
+	}
+
+	return delivery, received, err
+}
+
+func receiveDeliveryFrom(
+	ctx context.Context,
+	queue string,
+	deliveries <-chan amqp.Delivery,
+	wait bool,
+) (amqp.Delivery, bool, error) {
 	if wait {
 		select {
 		case delivery, received := <-deliveries:
 			if !received {
-				broker.resetConsumerStream(queue)
-
 				return amqp.Delivery{}, false, fmt.Errorf(
 					"%w: %s",
 					errConsumerStreamClosed,
@@ -1387,8 +1420,6 @@ func (broker *Broker) receiveDelivery(
 	select {
 	case delivery, received := <-deliveries:
 		if !received {
-			broker.resetConsumerStream(queue)
-
 			return amqp.Delivery{}, false, fmt.Errorf(
 				"%w: %s",
 				errConsumerStreamClosed,
@@ -1415,6 +1446,25 @@ func (broker *Broker) consumerStream(
 		}
 	}
 
+	stream, err := broker.openConsumerStream(ctx, queue, "gmeow."+queue)
+	if err != nil {
+		return nil, err
+	}
+
+	if broker.consumeStreams == nil {
+		broker.consumeStreams = map[string]*rabbitMQConsumerStream{}
+	}
+
+	broker.consumeStreams[queue] = stream
+
+	return stream.deliveries, nil
+}
+
+func (broker *Broker) openConsumerStream(
+	ctx context.Context,
+	queue string,
+	consumerTag string,
+) (*rabbitMQConsumerStream, error) {
 	channel, err := broker.channel(ctx)
 	if err != nil {
 		return nil, err
@@ -1429,7 +1479,7 @@ func (broker *Broker) consumerStream(
 
 	deliveries, err := channel.Consume(
 		queue,
-		"gmeow."+queue,
+		consumerTag,
 		false,
 		false,
 		false,
@@ -1442,16 +1492,10 @@ func (broker *Broker) consumerStream(
 		return nil, fmt.Errorf("consume queue %s: %w", queue, err)
 	}
 
-	if broker.consumeStreams == nil {
-		broker.consumeStreams = map[string]*rabbitMQConsumerStream{}
-	}
-
-	broker.consumeStreams[queue] = &rabbitMQConsumerStream{
+	return &rabbitMQConsumerStream{
 		channel:    channel,
 		deliveries: deliveries,
-	}
-
-	return deliveries, nil
+	}, nil
 }
 
 func (broker *Broker) resetConsumerStream(queue string) {
@@ -1512,11 +1556,24 @@ func (broker *Broker) publishPersistent(
 		return err
 	}
 
-	err = channel.PublishWithContext(ctx, exchange, routingKey, false, false, publishing)
+	err = channel.PublishWithContext(ctx, exchange, routingKey, true, false, publishing)
 	if err != nil {
 		broker.resetPublisher()
 
 		return fmt.Errorf("publish rabbitmq message: %w", err)
+	}
+
+	err = waitRabbitMQPublishConfirmed(
+		ctx,
+		exchange,
+		routingKey,
+		broker.publishConfirms,
+		broker.publishReturns,
+	)
+	if err != nil {
+		broker.resetPublisher()
+
+		return err
 	}
 
 	return nil
@@ -1534,7 +1591,16 @@ func (broker *Broker) publisher(
 		return nil, err
 	}
 
+	confirms, returns, err := configureRabbitMQPublisher(channel)
+	if err != nil {
+		_ = channel.Close()
+
+		return nil, err
+	}
+
 	broker.publishChannel = channel
+	broker.publishConfirms = confirms
+	broker.publishReturns = returns
 
 	return channel, nil
 }
@@ -1547,8 +1613,76 @@ func (broker *Broker) resetPublisher() {
 	channel := broker.publishChannel
 
 	broker.publishChannel = nil
+	broker.publishConfirms = nil
+	broker.publishReturns = nil
 
 	closeRabbitMQChannelAsync(channel)
+}
+
+func configureRabbitMQPublisher(
+	channel *amqp.Channel,
+) (<-chan amqp.Confirmation, <-chan amqp.Return, error) {
+	err := channel.Confirm(false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("enable rabbitmq publisher confirms: %w", err)
+	}
+
+	return channel.NotifyPublish(make(chan amqp.Confirmation, 1)),
+		channel.NotifyReturn(make(chan amqp.Return, 1)),
+		nil
+}
+
+func waitRabbitMQPublishConfirmed(
+	ctx context.Context,
+	exchange string,
+	routingKey string,
+	confirms <-chan amqp.Confirmation,
+	returns <-chan amqp.Return,
+) error {
+	timer := time.NewTimer(rabbitMQPublishConfirmTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case returned := <-returns:
+			return fmt.Errorf(
+				"%w: exchange=%q routing_key=%q reply=%s",
+				errRabbitMQPublishReturned,
+				exchange,
+				routingKey,
+				returned.ReplyText,
+			)
+		case confirmation, ok := <-confirms:
+			if !ok {
+				return fmt.Errorf(
+					"%w: exchange=%q routing_key=%q",
+					errRabbitMQConfirmClosed,
+					exchange,
+					routingKey,
+				)
+			}
+
+			if !confirmation.Ack {
+				return fmt.Errorf(
+					"%w: exchange=%q routing_key=%q",
+					errRabbitMQPublishNacked,
+					exchange,
+					routingKey,
+				)
+			}
+
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("wait rabbitmq publish confirm: %w", ctx.Err())
+		case <-timer.C:
+			return fmt.Errorf(
+				"%w: exchange=%q routing_key=%q",
+				errRabbitMQConfirmTimeout,
+				exchange,
+				routingKey,
+			)
+		}
+	}
 }
 
 func (broker *Broker) withConsumer(
@@ -1668,7 +1802,15 @@ func openRabbitMQChannel(
 
 	go func() {
 		channel, err := conn.Channel()
-		resultc <- channelOpenResult{channel: channel, err: err}
+		result := channelOpenResult{channel: channel, err: err}
+
+		select {
+		case resultc <- result:
+		case <-openCtx.Done():
+			if channel != nil {
+				_ = channel.Close()
+			}
+		}
 	}()
 
 	select {
@@ -1698,16 +1840,18 @@ func (broker *Broker) reconnect(
 		return fmt.Errorf("reconnect rabbitmq: %w", err)
 	}
 
+	conn, err := dialRabbitMQ(broker.config)
+	if err != nil {
+		return err
+	}
+
 	broker.mu.Lock()
 	defer broker.mu.Unlock()
 
 	if broker.connection != stale {
-		return nil
-	}
+		_ = conn.Close()
 
-	conn, err := dialRabbitMQ(broker.config)
-	if err != nil {
-		return err
+		return nil
 	}
 
 	broker.connection = conn

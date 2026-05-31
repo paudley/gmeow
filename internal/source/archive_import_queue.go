@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,25 +72,31 @@ func (run ArchiveImportQueuedRun) Run(
 			"archive import queued run requires importer",
 		)
 	}
+
 	if request.Publisher == nil {
 		return ArchiveImportReport{}, errors.New(
 			"archive import queued run requires publisher",
 		)
 	}
+
 	if run.Source == nil {
 		return ArchiveImportReport{}, errors.New("archive import queued run requires source")
 	}
 
 	sourceName := archiveImportSourceName(request)
 	runID := archiveImportRunID(request, sourceName)
+
 	var state archiveImportRunState
+
 	if request.Resume {
 		var err error
+
 		state, err = loadArchiveImportState(request.StateDir, runID)
 		if err != nil {
 			return ArchiveImportReport{}, err
 		}
 	}
+
 	if state.RunID == "" {
 		state = archiveImportRunState{
 			RunID:      runID,
@@ -126,11 +133,13 @@ func (run ArchiveImportQueuedRun) Run(
 			LowNoise:   request.LowNoise,
 		}
 		_ = WriteImportRunRecord(request.StateDir, record)
+
 		defer func() {
 			record.Status = ImportRunStatusCompleted
 			if len(report.Failures) > 0 {
 				record.Status = ImportRunStatusFailed
 			}
+
 			record.FinishedAt = time.Now().UTC()
 			record.Scanned = report.Scanned
 			record.Parsed = report.Parsed
@@ -145,18 +154,21 @@ func (run ArchiveImportQueuedRun) Run(
 		return run.drainOne(runCtx, request, sourceName, &state, &report)
 	}
 	if !state.DiscoveryDone {
-		if err := run.Importer.enqueueArchiveImportJobs(
+		err := run.Importer.enqueueArchiveImportJobs(
 			runCtx,
 			request,
 			sourceName,
 			runID,
 			&state,
 			&report,
-		); err != nil {
+		)
+		if err != nil {
 			report.Failures = append(report.Failures, err.Error())
 		} else {
 			state.DiscoveryDone = true
-			if err := saveArchiveImportState(request.StateDir, state); err != nil {
+
+			err := saveArchiveImportState(request.StateDir, state)
+			if err != nil {
 				return report, err
 			}
 		}
@@ -168,6 +180,8 @@ func (run ArchiveImportQueuedRun) Run(
 			report.Failures = append(report.Failures, err.Error())
 		}
 	}
+
+	cancelRun()
 
 	err := archiveImportFailureQueueError(failureErrc)
 	if err != nil {
@@ -215,16 +229,13 @@ func startArchiveImportFailureQueues(
 }
 
 func archiveImportFailureQueueError(errc <-chan error) error {
-	select {
-	case err, ok := <-errc:
-		if !ok {
-			return nil
-		}
+	var joined error
 
-		return err
-	default:
-		return nil
+	for err := range errc {
+		joined = errors.Join(joined, err)
 	}
+
+	return joined
 }
 
 func (run ArchiveImportQueuedRun) drain(
@@ -235,24 +246,30 @@ func (run ArchiveImportQueuedRun) drain(
 	report *ArchiveImportReport,
 ) error {
 	start := time.Now()
+
 	interval := request.ProgressInterval
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
+
 	lastEmit := start
 	emit := func(force bool) {
 		if request.Progress == nil {
 			return
 		}
+
 		if !force && time.Since(lastEmit) < interval {
 			return
 		}
+
 		lastEmit = time.Now()
 		elapsed := time.Since(start)
+
 		rate := 0.0
 		if seconds := elapsed.Seconds(); seconds > 0 {
 			rate = float64(report.Processed) / seconds
 		}
+
 		request.Progress(ArchiveImportProgress{
 			Scanned:           int64(report.Scanned),
 			Parsed:            int64(report.Parsed),
@@ -265,11 +282,14 @@ func (run ArchiveImportQueuedRun) drain(
 	}
 
 	for report.Processed < report.Enqueued {
-		if err := run.drainOne(ctx, request, sourceName, state, report); err != nil {
+		err := run.drainOne(ctx, request, sourceName, state, report)
+		if err != nil {
 			return err
 		}
+
 		emit(false)
 	}
+
 	emit(true)
 
 	return nil
@@ -289,12 +309,14 @@ func (run ArchiveImportQueuedRun) drainOne(
 
 	job := receipt.Job()
 	if job.RunID != report.RunID {
-		if err := receipt.Release(ctx); err != nil {
+		err := receipt.Release(ctx)
+		if err != nil {
 			return err
 		}
 
 		return nil
 	}
+
 	if err := run.Importer.ProcessSourceImportJob(
 		ctx,
 		sourceName,
@@ -303,7 +325,9 @@ func (run ArchiveImportQueuedRun) drainOne(
 		report,
 	); err != nil {
 		state.Failures++
-		if retryErr := receipt.Retry(ctx, err); retryErr != nil {
+
+		retryErr := receipt.Retry(ctx, err)
+		if retryErr != nil {
 			return retryErr
 		}
 
@@ -330,9 +354,11 @@ func (run ArchiveImportQueuedRun) drainOne(
 
 		return saveArchiveImportState(request.StateDir, *state)
 	}
+
 	if err := receipt.Ack(ctx); err != nil {
 		return err
 	}
+
 	report.Processed++
 	state.Processed = report.Processed
 
@@ -362,8 +388,9 @@ func (importer *ArchiveImporter) enqueueArchiveImportJobs(
 	if highWater <= 0 {
 		highWater = defaultArchiveImportQueueHighWater
 	}
+
 	for _, root := range request.Roots {
-		if err := importer.walkArchiveJobs(
+		err := importer.walkArchiveJobs(
 			ctx,
 			request,
 			sourceName,
@@ -372,10 +399,12 @@ func (importer *ArchiveImporter) enqueueArchiveImportJobs(
 			highWater,
 			state,
 			report,
-		); err != nil {
+		)
+		if err != nil {
 			report.Failures = append(report.Failures, err.Error())
 		}
 	}
+
 	if len(report.Failures) > 0 {
 		return fmt.Errorf(
 			"archive import discovery completed with %d failure(s)",
@@ -397,10 +426,12 @@ func (importer *ArchiveImporter) walkArchiveJobs(
 	report *ArchiveImportReport,
 ) error {
 	root = filepath.Clean(root)
+
 	info, err := os.Stat(root)
 	if err != nil {
 		return err
 	}
+
 	if !info.IsDir() {
 		return importer.enqueueArchiveFileJobs(
 			ctx,
@@ -420,21 +451,29 @@ func (importer *ArchiveImporter) walkArchiveJobs(
 		func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				report.Failures = append(report.Failures, walkErr.Error())
+
 				return nil
 			}
-			if err := ctx.Err(); err != nil {
+
+			err := ctx.Err()
+			if err != nil {
 				return err
 			}
+
 			if entry.IsDir() {
 				if shouldSkipArchiveDir(entry.Name()) {
 					return filepath.SkipDir
 				}
+
 				return nil
 			}
+
 			if shouldSkipArchiveFile(entry.Name()) {
 				report.Skipped++
+
 				return nil
 			}
+
 			return importer.enqueueArchiveFileJobs(
 				ctx,
 				request,
@@ -464,20 +503,26 @@ func (importer *ArchiveImporter) enqueueArchiveFileJobs(
 	format := detectArchiveFileFormat(path, root, request.Format)
 	if format == "" {
 		report.Skipped++
+
 		return nil
 	}
+
 	if shouldSkipArchivePath(path, format, state) {
 		return nil
 	}
+
 	report.Scanned++
 	state.Scanned = report.Scanned
+
 	if format == ArchiveImportFormatMbox {
 		return forEachMboxMessageOffset(path, func(offset, size int64) error {
 			if path == state.LastPath && offset <= state.LastOffset {
 				return nil
 			}
+
 			report.Parsed++
 			state.Parsed = report.Parsed
+
 			return importer.publishArchiveImportJob(
 				ctx,
 				request,
@@ -497,6 +542,7 @@ func (importer *ArchiveImporter) enqueueArchiveFileJobs(
 
 	report.Parsed++
 	state.Parsed = report.Parsed
+
 	return importer.publishArchiveImportJob(
 		ctx,
 		request,
@@ -553,10 +599,14 @@ func (importer *ArchiveImporter) publishArchiveImportJob(
 		Priority:      0,
 	}
 	job.IdempotencyKey = sourceImportJobKey(job)
+
 	job.JobID = job.IdempotencyKey
-	if err := request.Publisher.PublishSourceImportJob(ctx, job); err != nil {
+
+	err := request.Publisher.PublishSourceImportJob(ctx, job)
+	if err != nil {
 		return err
 	}
+
 	report.Enqueued++
 	state.Enqueued = report.Enqueued
 	state.LastPath = path
@@ -582,9 +632,11 @@ func shouldSkipArchivePath(path, format string, state *archiveImportRunState) bo
 	if state == nil || state.LastPath == "" {
 		return false
 	}
+
 	if path < state.LastPath {
 		return true
 	}
+
 	if path == state.LastPath && format != ArchiveImportFormatMbox {
 		return true
 	}
@@ -602,15 +654,20 @@ func waitForArchiveImportCapacity(
 		if err != nil {
 			return err
 		}
+
 		if status.Pending+status.Retry < highWater {
 			return nil
 		}
+
 		if request.CapacityDrainer != nil {
-			if err := request.CapacityDrainer(ctx); err != nil {
+			err := request.CapacityDrainer(ctx)
+			if err != nil {
 				return err
 			}
+
 			continue
 		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -629,8 +686,10 @@ func (importer *ArchiveImporter) ProcessSourceImportJob(
 	message, err := parseArchiveJobMessage(job)
 	if err != nil {
 		report.ParseFailures++
+
 		return err
 	}
+
 	return importer.ingestArchiveMessage(ctx, sourceName, message, request, report)
 }
 
@@ -647,9 +706,11 @@ func archiveImportSourceName(request ArchiveImportRequest) string {
 	if sourceName != "" {
 		return sourceName
 	}
+
 	if len(request.Roots) == 0 {
 		return ""
 	}
+
 	return sourceNameFromRoot(request.Roots[0])
 }
 
@@ -657,10 +718,12 @@ func archiveImportRunID(request ArchiveImportRequest, sourceName string) string 
 	if strings.TrimSpace(request.RunID) != "" {
 		return strings.TrimSpace(request.RunID)
 	}
+
 	roots := append([]string{}, request.Roots...)
 	for index, root := range roots {
 		roots[index] = filepath.Clean(root)
 	}
+
 	input := strings.Join(append([]string{
 		sourceName,
 		request.Format,
@@ -679,7 +742,7 @@ func sourceImportJobKey(job contracts.SourceImportJob) string {
 		filepath.Clean(job.Root),
 		filepath.Clean(job.Path),
 		job.Format,
-		fmt.Sprintf("%d", job.Offset),
+		strconv.FormatInt(job.Offset, 10),
 	}, "\x00")
 	sum := sha256.Sum256([]byte(input))
 
@@ -690,11 +753,14 @@ func loadArchiveImportState(stateDir, runID string) (archiveImportRunState, erro
 	if strings.TrimSpace(stateDir) == "" {
 		return archiveImportRunState{}, nil
 	}
+
 	path := filepath.Join(stateDir, runID, archiveImportStateFile)
+
 	content, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return archiveImportRunState{}, nil
 	}
+
 	if err != nil {
 		return archiveImportRunState{}, err
 	}
@@ -711,40 +777,54 @@ func saveArchiveImportState(stateDir string, state archiveImportRunState) error 
 	if strings.TrimSpace(stateDir) == "" {
 		return nil
 	}
+
 	state.UpdatedAt = time.Now().UTC()
+
 	dir := filepath.Join(stateDir, state.RunID)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
+
 	encoded, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
+
 	path := filepath.Join(dir, archiveImportStateFile)
+
 	tmp, err := os.CreateTemp(dir, ".state.")
 	if err != nil {
 		return err
 	}
+
 	cleanup := true
+
 	defer func() {
 		if cleanup {
 			_ = os.Remove(tmp.Name())
 		}
 	}()
+
 	if _, err := tmp.Write(encoded); err != nil {
 		_ = tmp.Close()
+
 		return err
 	}
+
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
+
 		return err
 	}
+
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return err
 	}
+
 	cleanup = false
 
 	return nil

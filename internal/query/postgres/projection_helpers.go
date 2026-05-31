@@ -92,45 +92,40 @@ func marshalPostgresJSON(value any) ([]byte, error) {
 		return nil, fmt.Errorf("encode postgres json payload: %w", err)
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.UseNumber()
-
-	var decoded any
-
-	err = decoder.Decode(&decoded)
-	if err != nil {
-		return nil, fmt.Errorf("decode postgres json payload: %w", err)
-	}
-
-	sanitized, err := json.Marshal(sanitizePostgresJSON(decoded))
-	if err != nil {
-		return nil, fmt.Errorf("encode sanitized postgres json payload: %w", err)
-	}
-
-	return sanitized, nil
+	return stripPostgresNULJSONEscapes(encoded), nil
 }
 
-func sanitizePostgresJSON(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		result := make(map[string]any, len(typed))
-		for key, item := range typed {
-			result[stripPostgresNUL(key)] = sanitizePostgresJSON(item)
-		}
-
-		return result
-	case []any:
-		result := make([]any, 0, len(typed))
-		for _, item := range typed {
-			result = append(result, sanitizePostgresJSON(item))
-		}
-
-		return result
-	case string:
-		return stripPostgresNUL(typed)
-	default:
-		return value
+func stripPostgresNULJSONEscapes(encoded []byte) []byte {
+	if !bytes.Contains(encoded, []byte(`\u0000`)) {
+		return encoded
 	}
+
+	result := make([]byte, 0, len(encoded))
+	for offset := 0; offset < len(encoded); offset++ {
+		if isPostgresNULJSONEscape(encoded, offset) {
+			offset += len(`\u0000`) - 1
+
+			continue
+		}
+
+		result = append(result, encoded[offset])
+	}
+
+	return result
+}
+
+func isPostgresNULJSONEscape(encoded []byte, offset int) bool {
+	if offset+len(`\u0000`) > len(encoded) ||
+		!bytes.Equal(encoded[offset:offset+len(`\u0000`)], []byte(`\u0000`)) {
+		return false
+	}
+
+	backslashes := 0
+	for cursor := offset - 1; cursor >= 0 && encoded[cursor] == '\\'; cursor-- {
+		backslashes++
+	}
+
+	return backslashes%2 == 0
 }
 
 func stripPostgresNUL(value string) string {

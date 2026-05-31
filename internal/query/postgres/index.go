@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -94,6 +96,7 @@ func New(
 
 func (index *Index) Close() {
 	index.pool.Close()
+
 	if closer, ok := index.source.(io.Closer); ok {
 		_ = closer.Close()
 	}
@@ -120,8 +123,10 @@ func Migrate(ctx context.Context, config Config) error {
 
 	migrationMu.Lock()
 	defer migrationMu.Unlock()
+
 	if strings.TrimSpace(config.MigrationTable) != "" {
 		previousTable := goose.TableName()
+
 		goose.SetTableName(config.MigrationTable)
 		defer goose.SetTableName(previousTable)
 	}
@@ -139,6 +144,7 @@ func validateRequiredProjectionCapabilities(
 ) error {
 	for _, extension := range []string{"vector", "age"} {
 		var exists bool
+
 		err := pool.QueryRow(
 			ctx,
 			"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1)",
@@ -506,10 +512,7 @@ func (index *Index) Search(
 
 	limit := normalizedLimit(request.Limit)
 
-	offset := request.Offset
-	if offset < 0 {
-		offset = 0
-	}
+	offset := max(request.Offset, 0)
 
 	args = append(args, limit, offset)
 	sqlText := fmt.Sprintf(
@@ -598,6 +601,7 @@ func (index *Index) Structure(
 
 	for facetRows.Next() {
 		var kind string
+
 		err := facetRows.Scan(&kind)
 		if err != nil {
 			facetRows.Close()
@@ -709,6 +713,7 @@ func (index *Index) Relationships(
 
 	for rows.Next() {
 		var relationship contracts.Relationship
+
 		err := rows.Scan(
 			&relationship.Type,
 			&relationship.From,
@@ -960,6 +965,7 @@ func (index *Index) analysisStatusObjects(
 
 	for rows.Next() {
 		var digest contracts.ObjectDigest
+
 		err := rows.Scan(&digest)
 		if err != nil {
 			return nil, err
@@ -1115,6 +1121,7 @@ func (index *Index) VectorSearch(
 
 	for rows.Next() {
 		var result contracts.VectorSearchResult
+
 		err := rows.Scan(
 			&result.ObjectDigest,
 			&result.Model,
@@ -1189,6 +1196,7 @@ func (index *Index) SourceCursors(
 		}
 
 		cursor.SchemaVersion = contracts.SchemaVersionPhase00
+
 		err = json.Unmarshal(data, &cursor.Cursor)
 		if err != nil {
 			return contracts.SourceCursorResponse{}, err
@@ -1428,7 +1436,9 @@ func insertFacetRows(
 	manifest contracts.Manifest,
 ) error {
 	for _, facet := range manifest.Facets {
-		metadata, err := json.Marshal(nonNilMap(firstMap(facet.Metadata, facet.Attributes)))
+		metadata, err := marshalPostgresJSON(
+			nonNilMap(firstMap(facet.Metadata, facet.Attributes)),
+		)
 		if err != nil {
 			return err
 		}
@@ -1458,7 +1468,9 @@ func insertProvenanceRows(
 	manifest contracts.Manifest,
 ) error {
 	for _, item := range manifest.Provenance {
-		attributes, err := json.Marshal(nonNilMap(firstMap(item.Metadata, item.Attributes)))
+		attributes, err := marshalPostgresJSON(
+			nonNilMap(firstMap(item.Metadata, item.Attributes)),
+		)
 		if err != nil {
 			return err
 		}
@@ -1514,7 +1526,7 @@ func insertCompoundRows(
 	manifest contracts.Manifest,
 ) error {
 	for _, item := range manifest.Compound.Parts {
-		metadata, err := json.Marshal(nonNilMap(item.Metadata))
+		metadata, err := marshalPostgresJSON(nonNilMap(item.Metadata))
 		if err != nil {
 			return err
 		}
@@ -1551,7 +1563,7 @@ func insertAnalysisRows(
 			continue
 		}
 
-		data, err := json.Marshal(nonNilMap(annotation.Data))
+		data, err := marshalPostgresJSON(nonNilMap(annotation.Data))
 		if err != nil {
 			return err
 		}
@@ -1586,7 +1598,7 @@ func insertGraphRows(
 	manifest contracts.Manifest,
 ) error {
 	for _, fact := range manifest.Graph {
-		metadata, err := json.Marshal(nonNilMap(fact.Metadata))
+		metadata, err := marshalPostgresJSON(nonNilMap(fact.Metadata))
 		if err != nil {
 			return err
 		}
@@ -1727,13 +1739,11 @@ func insertOverlayRows(
 
 	for _, annotation := range annotations {
 		if annotation.Kind == "overlays" {
-			for key, value := range annotation.Data {
-				overlays[key] = value
-			}
+			maps.Copy(overlays, annotation.Data)
 		}
 	}
 
-	encoded, err := json.Marshal(overlays)
+	encoded, err := marshalPostgresJSON(overlays)
 	if err != nil {
 		return err
 	}
@@ -1759,7 +1769,7 @@ func insertSummaryRows(
 	annotations []contracts.Annotation,
 ) error {
 	for _, item := range summaryRowsFrom(manifest, annotations) {
-		metadata, err := json.Marshal(nonNilMap(item.metadata))
+		metadata, err := marshalPostgresJSON(nonNilMap(item.metadata))
 		if err != nil {
 			return err
 		}
@@ -1787,7 +1797,7 @@ func (index *Index) recordProjectionFindings(
 	ctx context.Context,
 	object filestore.ProjectionObject,
 ) error {
-	encoded, err := json.Marshal(object.Findings)
+	encoded, err := marshalPostgresJSON(object.Findings)
 	if err != nil {
 		return err
 	}
@@ -1867,13 +1877,7 @@ func nonNilMap(value map[string]any) map[string]any {
 }
 
 func containsString(values []string, value string) bool {
-	for _, item := range values {
-		if item == value {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(values, value)
 }
 
 func firstNonEmpty(values ...string) string {

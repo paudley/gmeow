@@ -21,3 +21,16 @@ func TestMarshalPostgresJSONStripsNULCharacters(t *testing.T) {
 		t.Fatalf("expected postgres-safe json, got %s", encoded)
 	}
 }
+
+func TestMarshalPostgresJSONPreservesLiteralEscapeText(t *testing.T) {
+	encoded, err := marshalPostgresJSON(map[string]any{
+		"literal": `\u0000`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(encoded, []byte(`\\u0000`)) {
+		t.Fatalf("expected literal escape text to remain, got %s", encoded)
+	}
+}
