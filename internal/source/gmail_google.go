@@ -19,6 +19,8 @@ import (
 
 const defaultGmailUserID = "me"
 
+var errGmailRawMessageMissing = errors.New("gmail raw message is empty")
+
 type GoogleGmailBackend struct {
 	service *gmail.Service
 	userID  string
@@ -209,32 +211,57 @@ func (backend *GoogleGmailBackend) GetMessage(
 	}
 
 	converted := GmailMessage{
-		Headers:      map[string]string{},
-		Metadata:     map[string]any{"label_ids": append([]string{}, message.LabelIds...)},
-		MessageID:    message.Id,
-		Version:      fmt.Sprint(message.HistoryId),
-		ThreadID:     message.ThreadId,
-		Snippet:      message.Snippet,
-		BodyMediaTyp: "text/plain",
+		Headers:   map[string]string{},
+		Metadata:  gmailMessageMetadata(message),
+		MessageID: message.Id,
+		Version:   strconv.FormatUint(message.HistoryId, 10),
+		ThreadID:  message.ThreadId,
+		Snippet:   message.Snippet,
 	}
-	if message.Raw != "" {
-		raw, decodeErr := decodeGmailData(message.Raw)
-		if decodeErr != nil {
-			return GmailMessage{}, fmt.Errorf(
-				"decode gmail raw message %s: %w",
-				messageID,
-				decodeErr,
-			)
-		}
+	if message.Raw == "" {
+		return GmailMessage{}, fmt.Errorf(
+			"%w: %s",
+			errGmailRawMessageMissing,
+			messageID,
+		)
+	}
 
-		converted.RawMessage = raw
+	raw, decodeErr := decodeGmailData(message.Raw)
+	if decodeErr != nil {
+		return GmailMessage{}, fmt.Errorf(
+			"decode gmail raw message %s: %w",
+			messageID,
+			decodeErr,
+		)
 	}
-	collectGmailPart(message.Payload, &converted)
-	if converted.Subject == "" {
-		converted.Subject = converted.Headers["Subject"]
+
+	converted.RawMessage = raw
+
+	canonical, canonicalErr := gmailCanonicalMessage(converted)
+	if canonicalErr != nil {
+		return GmailMessage{}, fmt.Errorf(
+			"canonicalize gmail raw message %s: %w",
+			messageID,
+			canonicalErr,
+		)
 	}
+
+	converted.Headers = canonical.Headers
+	converted.Subject = canonical.Subject
+	converted.Body = canonical.Body
+	converted.BodyMediaTyp = canonical.BodyMediaType
+	converted.Attachments = gmailAttachments(converted, canonical)
 
 	return converted, nil
+}
+
+func gmailMessageMetadata(message *gmail.Message) map[string]any {
+	return map[string]any{
+		"label_ids":     append([]string{}, message.LabelIds...),
+		"history_id":    message.HistoryId,
+		"internal_date": message.InternalDate,
+		"size_estimate": message.SizeEstimate,
+	}
 }
 
 func (backend *GoogleGmailBackend) ModifyMessage(
@@ -271,38 +298,6 @@ func (backend *GoogleGmailBackend) ModifyMessage(
 		"label_ids":  append([]string{}, message.LabelIds...),
 		"history_id": message.HistoryId,
 	}, nil
-}
-
-func collectGmailPart(part *gmail.MessagePart, message *GmailMessage) {
-	if part == nil {
-		return
-	}
-
-	for _, header := range part.Headers {
-		message.Headers[header.Name] = header.Value
-	}
-
-	if part.MimeType != "" && part.Body != nil && len(part.Body.Data) > 0 {
-		body, err := decodeGmailData(part.Body.Data)
-		if err == nil {
-			if strings.HasPrefix(part.MimeType, "text/") && len(message.Body) == 0 {
-				message.Body = body
-				message.BodyMediaTyp = part.MimeType
-			} else {
-				message.Attachments = append(message.Attachments, GmailAttachment{
-					Content:   body,
-					FileName:  part.Filename,
-					MediaType: part.MimeType,
-					ID:        part.PartId,
-					Version:   message.Version,
-				})
-			}
-		}
-	}
-
-	for _, child := range part.Parts {
-		collectGmailPart(child, message)
-	}
 }
 
 func decodeGmailData(value string) ([]byte, error) {

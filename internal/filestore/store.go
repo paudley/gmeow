@@ -1073,6 +1073,8 @@ func normalizeFacets(facets []contracts.Facet) []contracts.Facet {
 		facet.Name = ""
 		if facet.Metadata == nil {
 			facet.Metadata = facet.Attributes
+		} else {
+			facet.Metadata = mergeMaps(facet.Metadata, facet.Attributes)
 		}
 
 		facet.Attributes = nil
@@ -1280,8 +1282,11 @@ func mergeFacet(existing, incoming contracts.Facet) contracts.Facet {
 		merged.Version = incoming.Version
 	}
 
-	merged.Metadata = mergeMaps(existing.Metadata, incoming.Metadata)
-	merged.Attributes = mergeMaps(existing.Attributes, incoming.Attributes)
+	merged.Metadata = mergeMaps(
+		mergeMaps(existing.Metadata, existing.Attributes),
+		mergeMaps(incoming.Metadata, incoming.Attributes),
+	)
+	merged.Attributes = nil
 
 	return merged
 }

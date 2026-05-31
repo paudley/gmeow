@@ -712,7 +712,7 @@ func (importer *ArchiveImporter) ingestCanonicalMessage(
 		SourceHint:  message.Subject,
 		Compound: &CompoundObject{
 			ObjectID:   "mail_message:" + message.MessageID,
-			MediaType:  "application/vnd.gmeow.archive-message+json",
+			MediaType:  mailmessage.MediaType,
 			SourceHint: message.Subject,
 			ContentRoles: []string{
 				contracts.MailMessageContentRole,
@@ -840,7 +840,7 @@ func (importer *ArchiveImporter) ingestVariantMessage(
 		SourceHint:  message.Subject,
 		Compound: &CompoundObject{
 			ObjectID:   "mail_message:" + message.MessageID,
-			MediaType:  "application/vnd.gmeow.archive-message+json",
+			MediaType:  mailmessage.MediaType,
 			SourceHint: message.Subject,
 			ContentRoles: []string{
 				contracts.MailMessageContentRole,

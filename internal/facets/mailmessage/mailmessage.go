@@ -19,6 +19,8 @@ import (
 	"blackcat.ca/gmeow/internal/contracts"
 )
 
+const MediaType = "application/vnd.gmeow.mail-message+json"
+
 type Message struct {
 	Headers          map[string]string
 	Subject          string

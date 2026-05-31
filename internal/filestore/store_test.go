@@ -1193,6 +1193,59 @@ func TestCompoundMergeReplacesSameRoleAndOrderPart(t *testing.T) {
 	}
 }
 
+func TestCompoundMergeFoldsLegacyFacetAttributesIntoMetadata(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+
+	first, err := store.PutCompound(ctx, CompoundPutRequest{
+		ObjectID: "mail_message:<attributes@example.test>",
+		Facets: []contracts.Facet{{
+			Kind:       "mail_message",
+			Metadata:   map[string]any{"subject": "initial"},
+			Attributes: map[string]any{"legacy_existing": "kept"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := store.PutCompound(ctx, CompoundPutRequest{
+		ObjectID: "mail_message:<attributes@example.test>",
+		Facets: []contracts.Facet{{
+			Kind:       "mail_message",
+			Metadata:   map[string]any{"subject": "incoming"},
+			Attributes: map[string]any{"legacy_incoming": "kept"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("expected stable compound digest, first=%s second=%s", first, second)
+	}
+
+	manifest, err := store.ReadManifest(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, facet := range manifest.Facets {
+		if facet.FacetKind() != "mail_message" {
+			continue
+		}
+		if facet.Attributes != nil {
+			t.Fatalf("expected legacy attributes folded into metadata, got %#v", facet)
+		}
+		if facet.Metadata["subject"] != "incoming" ||
+			facet.Metadata["legacy_existing"] != "kept" ||
+			facet.Metadata["legacy_incoming"] != "kept" {
+			t.Fatalf("expected merged metadata and attributes, got %#v", facet.Metadata)
+		}
+
+		return
+	}
+	t.Fatal("mail_message facet missing")
+}
+
 func TestCompoundMergePreservesBlobAndRecoverySidecar(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 	ctx := context.Background()

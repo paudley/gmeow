@@ -15,6 +15,7 @@ import (
 
 	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/facets/mailmessage"
 	"blackcat.ca/gmeow/internal/rpc"
 	"blackcat.ca/gmeow/internal/testsupport"
 )
@@ -302,6 +303,9 @@ func TestGmailRawMessageCollapsesOntoArchiveMailMessage(t *testing.T) {
 	}
 	if manifest.ObjectID != "mail_message:<same@example.test>" {
 		t.Fatalf("expected canonical mail_message object id, got %q", manifest.ObjectID)
+	}
+	if manifest.MediaType != mailmessage.MediaType {
+		t.Fatalf("expected canonical mail message media type, got %q", manifest.MediaType)
 	}
 	metadata := mailMessageMetadataForTest(t, manifest)
 	if metadata["rfc_message_id"] != "<same@example.test>" {

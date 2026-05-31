@@ -504,7 +504,7 @@ func (adapter *GmailAdapter) messageObject(
 		ExternalVer: message.Version,
 		Compound: &CompoundObject{
 			ObjectID:   objectID,
-			MediaType:  "application/vnd.gmeow.mail-message+json",
+			MediaType:  mailmessage.MediaType,
 			SourceHint: firstNonEmpty(canonical.Subject, message.Subject),
 			ContentRoles: []string{
 				contracts.MailMessageContentRole,
