@@ -179,6 +179,45 @@ func objectHadRDFRowsTx(
 	return exists, nil
 }
 
+func rdfSubjectsForSourceTx(
+	ctx context.Context,
+	transaction pgx.Tx,
+	digest contracts.ObjectDigest,
+) ([]string, error) {
+	rows, err := transaction.Query(
+		ctx,
+		`SELECT DISTINCT subj.term_value
+		   FROM query_rdf_statements s
+		   JOIN query_rdf_terms subj ON subj.term_id = s.subject_term_id
+		  WHERE s.source_digest = $1`,
+		digest,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query RDF source subjects: %w", err)
+	}
+	defer rows.Close()
+
+	subjects := []string{}
+
+	for rows.Next() {
+		var subject string
+
+		err = rows.Scan(&subject)
+		if err != nil {
+			return nil, fmt.Errorf("scan RDF source subject: %w", err)
+		}
+
+		subjects = append(subjects, subject)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return nil, fmt.Errorf("iterate RDF source subjects: %w", err)
+	}
+
+	return subjects, nil
+}
+
 func insertRDFStatement(
 	ctx context.Context,
 	transaction pgx.Tx,
@@ -867,6 +906,57 @@ func refreshContactProjectionTx(ctx context.Context, transaction pgx.Tx) error {
 	return refreshContactRollupsTx(ctx, transaction)
 }
 
+func refreshContactProjectionForContactsTx(
+	ctx context.Context,
+	transaction pgx.Tx,
+	contacts []string,
+) error {
+	contacts = uniqueNonEmptyStrings(contacts)
+	if len(contacts) == 0 {
+		return nil
+	}
+
+	for _, table := range []string{
+		"query_contact_identity_bindings",
+		"query_contact_facts",
+		"query_contact_rollups",
+	} {
+		_, err := transaction.Exec(
+			ctx,
+			"DELETE FROM "+table+" WHERE contact_id = ANY($1)",
+			contacts,
+		)
+		if err != nil {
+			return fmt.Errorf("clear scoped %s: %w", table, err)
+		}
+	}
+
+	statements, err := contactProjectionStatementsForContacts(ctx, transaction, contacts)
+	if err != nil {
+		return err
+	}
+
+	annotations, err := contactProjectionAnnotationsForContacts(ctx, transaction, contacts)
+	if err != nil {
+		return err
+	}
+
+	contactSet := contactSubjects(statements)
+	for _, contact := range contacts {
+		contactSet[contact] = true
+	}
+
+	facts := contactFactsFromStatements(statements, annotations, contactSet)
+	for _, fact := range facts {
+		err := insertContactFact(ctx, transaction, fact)
+		if err != nil {
+			return err
+		}
+	}
+
+	return refreshContactRollupsForContactsTx(ctx, transaction, contacts)
+}
+
 func refreshContactProjection(ctx context.Context, beginner transactionBeginner) error {
 	transaction, err := beginner.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -914,12 +1004,18 @@ func contactProjectionStatements(
 	}
 	defer rows.Close()
 
+	return scanContactProjectionStatements(rows)
+}
+
+func scanContactProjectionStatements(
+	rows pgx.Rows,
+) ([]contactProjectionStatement, error) {
 	statements := []contactProjectionStatement{}
 
 	for rows.Next() {
 		var statement contactProjectionStatement
 
-		err = rows.Scan(
+		err := rows.Scan(
 			&statement.sourceDigest,
 			&statement.statementHash,
 			&statement.subject,
@@ -934,12 +1030,37 @@ func contactProjectionStatements(
 		statements = append(statements, statement)
 	}
 
-	err = rows.Err()
+	err := rows.Err()
 	if err != nil {
 		return nil, fmt.Errorf("iterate RDF statements for contact projection: %w", err)
 	}
 
 	return statements, nil
+}
+
+func contactProjectionStatementsForContacts(
+	ctx context.Context,
+	transaction pgx.Tx,
+	contacts []string,
+) ([]contactProjectionStatement, error) {
+	rows, err := transaction.Query(
+		ctx,
+		`SELECT s.source_digest, s.statement_hash,
+subj.term_value, pred.term_value, obj.term_value, obj.term_kind
+FROM query_rdf_statements s
+JOIN query_rdf_terms subj ON subj.term_id = s.subject_term_id
+JOIN query_rdf_terms pred ON pred.term_id = s.predicate_term_id
+JOIN query_rdf_terms obj ON obj.term_id = s.object_term_id
+WHERE subj.term_value = ANY($1)
+ORDER BY s.statement_order, s.statement_hash`,
+		contacts,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query scoped RDF statements for contact projection: %w", err)
+	}
+	defer rows.Close()
+
+	return scanContactProjectionStatements(rows)
 }
 
 func contactProjectionAnnotations(
@@ -958,6 +1079,12 @@ func contactProjectionAnnotations(
 	}
 	defer rows.Close()
 
+	return scanContactProjectionAnnotations(rows)
+}
+
+func scanContactProjectionAnnotations(
+	rows pgx.Rows,
+) (map[sourceStatementKey]map[string]string, error) {
 	annotations := map[sourceStatementKey]map[string]string{}
 
 	for rows.Next() {
@@ -965,7 +1092,7 @@ func contactProjectionAnnotations(
 
 		var hash, predicate, object string
 
-		err = rows.Scan(&sourceDigest, &hash, &predicate, &object)
+		err := rows.Scan(&sourceDigest, &hash, &predicate, &object)
 		if err != nil {
 			return nil, fmt.Errorf("scan RDF annotation for contact projection: %w", err)
 		}
@@ -981,12 +1108,38 @@ func contactProjectionAnnotations(
 		annotations[key][predicate] = object
 	}
 
-	err = rows.Err()
+	err := rows.Err()
 	if err != nil {
 		return nil, fmt.Errorf("iterate RDF annotations for contact projection: %w", err)
 	}
 
 	return annotations, nil
+}
+
+func contactProjectionAnnotationsForContacts(
+	ctx context.Context,
+	transaction pgx.Tx,
+	contacts []string,
+) (map[sourceStatementKey]map[string]string, error) {
+	rows, err := transaction.Query(
+		ctx,
+		`SELECT a.source_digest, a.statement_hash, pred.term_value, obj.term_value
+		   FROM query_rdf_statement_annotations a
+		   JOIN query_rdf_statements s
+		     ON s.source_digest = a.source_digest
+		    AND s.statement_hash = a.statement_hash
+		   JOIN query_rdf_terms subj ON subj.term_id = s.subject_term_id
+		   JOIN query_rdf_terms pred ON pred.term_id = a.annotation_predicate_term_id
+		   JOIN query_rdf_terms obj ON obj.term_id = a.annotation_object_term_id
+		  WHERE subj.term_value = ANY($1)`,
+		contacts,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query scoped RDF annotations for contact projection: %w", err)
+	}
+	defer rows.Close()
+
+	return scanContactProjectionAnnotations(rows)
 }
 
 func contactSubjects(statements []contactProjectionStatement) map[string]bool {
@@ -1260,6 +1413,50 @@ func refreshContactRollupsTx(ctx context.Context, transaction pgx.Tx) error {
 	return nil
 }
 
+func refreshContactRollupsForContactsTx(
+	ctx context.Context,
+	transaction pgx.Tx,
+	contacts []string,
+) error {
+	_, err := transaction.Exec(
+		ctx,
+		`INSERT INTO query_contact_rollups(
+contact_id, display_name, primary_email, fact_count, search_text, updated_at
+)
+SELECT f.contact_id,
+COALESCE(
+min(f.value) FILTER (WHERE f.fact_kind = 'name'),
+min(f.value) FILTER (WHERE f.fact_kind = 'alias'),
+f.contact_id
+) AS display_name,
+COALESCE(
+min(f.value) FILTER (
+WHERE f.fact_kind = 'email' AND f.historical = false
+),
+min(f.value) FILTER (WHERE f.fact_kind = 'email'),
+''
+) AS primary_email,
+count(*)::integer AS fact_count,
+string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text,
+now()
+FROM query_contact_facts f
+WHERE f.contact_id = ANY($1)
+GROUP BY f.contact_id
+ON CONFLICT(contact_id) DO UPDATE SET
+display_name = excluded.display_name,
+primary_email = excluded.primary_email,
+fact_count = excluded.fact_count,
+search_text = excluded.search_text,
+updated_at = now()`,
+		contacts,
+	)
+	if err != nil {
+		return fmt.Errorf("refresh scoped contact rollups: %w", err)
+	}
+
+	return nil
+}
+
 func (index *Index) ContactAggregate(
 	ctx context.Context,
 	request contracts.ContactAggregateRequest,
@@ -1505,6 +1702,23 @@ func normalizeContactEmail(value string) string {
 	}
 
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	seen := map[string]bool{}
+	unique := []string{}
+
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+
+		seen[value] = true
+		unique = append(unique, value)
+	}
+
+	return unique
 }
 
 func hashString(value string) string {

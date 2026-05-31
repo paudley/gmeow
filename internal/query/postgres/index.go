@@ -1215,6 +1215,11 @@ func projectObjectTx(
 		return err
 	}
 
+	affectedContacts, err := rdfSubjectsForSourceTx(ctx, tx, object.Manifest.ObjectDigest)
+	if err != nil {
+		return err
+	}
+
 	rdfProjectionChanged = rdfProjectionChanged ||
 		manifestHasFacetKind(object.Manifest, contracts.RDFSourceBundleFacetKind) ||
 		manifestHasFacetKind(object.Manifest, contracts.RDFClaimBundleFacetKind)
@@ -1344,7 +1349,14 @@ func projectObjectTx(
 	}
 
 	if refreshContactProjection && (rdfProjectionChanged || rdfRowsInserted) {
-		err := refreshContactProjectionTx(ctx, tx)
+		newContacts, err := rdfSubjectsForSourceTx(ctx, tx, object.Manifest.ObjectDigest)
+		if err != nil {
+			return err
+		}
+
+		affectedContacts = append(affectedContacts, newContacts...)
+
+		err = refreshContactProjectionForContactsTx(ctx, tx, affectedContacts)
 		if err != nil {
 			return err
 		}
