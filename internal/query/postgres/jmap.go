@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/mail"
 	"sort"
 	"strings"
 	"time"
@@ -244,7 +245,7 @@ func (index *Index) JMAPEmailQuery(
 	}
 	if !request.After.IsZero() {
 		args = append(args, request.After)
-		where = append(where, fmt.Sprintf("s.received_at > $%d", len(args)))
+		where = append(where, fmt.Sprintf("s.received_at >= $%d", len(args)))
 	}
 	if !request.Before.IsZero() {
 		args = append(args, request.Before)
@@ -695,17 +696,11 @@ func parseJMAPTime(value string) (time.Time, bool) {
 	if trimmed == "" {
 		return time.Time{}, false
 	}
-	for _, layout := range []string{
-		time.RFC3339Nano,
-		time.RFC1123Z,
-		time.RFC1123,
-		time.RFC822Z,
-		time.RFC822,
-	} {
-		parsed, err := time.Parse(layout, trimmed)
-		if err == nil {
-			return parsed.UTC(), true
-		}
+	if parsed, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+		return parsed.UTC(), true
+	}
+	if parsed, err := mail.ParseDate(trimmed); err == nil {
+		return parsed.UTC(), true
 	}
 
 	return time.Time{}, false

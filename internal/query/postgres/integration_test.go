@@ -215,6 +215,20 @@ func TestJMAPMutableMailStateRecoversFromFilestoreRebuild(t *testing.T) {
 	if !sameDigests(query.IDs, []contracts.ObjectDigest{digest}) {
 		t.Fatalf("date-filtered JMAP query did not return recovered message: %#v", query)
 	}
+	exactAfter, ok := parseJMAPTime(messageDate)
+	if !ok {
+		t.Fatalf("test message date did not parse: %q", messageDate)
+	}
+	query, err = secondIndex.JMAPEmailQuery(ctx, contracts.JMAPEmailQueryRequest{
+		After: exactAfter,
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameDigests(query.IDs, []contracts.ObjectDigest{digest}) {
+		t.Fatalf("inclusive after filter did not return boundary message: %#v", query)
+	}
 }
 
 func TestMailArchiveMissingGmailReport(t *testing.T) {
@@ -626,15 +640,19 @@ func hasMailbox(mailboxes []contracts.JMAPMailbox, mailboxID string) bool {
 }
 
 func sameStrings(left, right []string) bool {
-	slices.Sort(left)
-	slices.Sort(right)
+	leftCopy := slices.Clone(left)
+	rightCopy := slices.Clone(right)
+	slices.Sort(leftCopy)
+	slices.Sort(rightCopy)
 
-	return slices.Equal(left, right)
+	return slices.Equal(leftCopy, rightCopy)
 }
 
 func sameDigests(left, right []contracts.ObjectDigest) bool {
-	slices.Sort(left)
-	slices.Sort(right)
+	leftCopy := slices.Clone(left)
+	rightCopy := slices.Clone(right)
+	slices.Sort(leftCopy)
+	slices.Sort(rightCopy)
 
-	return slices.Equal(left, right)
+	return slices.Equal(leftCopy, rightCopy)
 }

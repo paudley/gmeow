@@ -39,9 +39,9 @@ type JMAPQuota struct {
 }
 
 type JMAPEmailMutation struct {
-	ObjectDigest     contracts.ObjectDigest `json:"object_digest"`
 	MailboxIDs       map[string]bool        `json:"mailbox_ids,omitempty"`
 	Keywords         map[string]bool        `json:"keywords,omitempty"`
+	ObjectDigest     contracts.ObjectDigest `json:"object_digest"`
 	ReplaceMailboxes bool                   `json:"replace_mailboxes,omitempty"`
 	ReplaceKeywords  bool                   `json:"replace_keywords,omitempty"`
 }
@@ -81,7 +81,7 @@ type JMAPBlob struct {
 
 func (services *Services) JMAPQuotas(ctx context.Context) ([]JMAPQuota, error) {
 	reader, ok := services.query.(interface {
-		ObjectBreakdown(context.Context) (contracts.ObjectBreakdown, error)
+		ObjectBreakdown(ctx context.Context) (contracts.ObjectBreakdown, error)
 	})
 	if !ok {
 		return nil, errors.New("JMAP quota reader is not configured")
