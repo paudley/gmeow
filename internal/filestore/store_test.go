@@ -1200,9 +1200,12 @@ func TestCompoundMergeFoldsLegacyFacetAttributesIntoMetadata(t *testing.T) {
 	first, err := store.PutCompound(ctx, CompoundPutRequest{
 		ObjectID: "mail_message:<attributes@example.test>",
 		Facets: []contracts.Facet{{
-			Kind:       "mail_message",
-			Metadata:   map[string]any{"subject": "initial"},
-			Attributes: map[string]any{"legacy_existing": "kept"},
+			Kind:     "mail_message",
+			Metadata: map[string]any{"subject": "initial"},
+			Attributes: map[string]any{
+				"legacy_existing": "kept",
+				"subject":         "stale legacy",
+			},
 		}},
 	})
 	if err != nil {
@@ -1212,9 +1215,12 @@ func TestCompoundMergeFoldsLegacyFacetAttributesIntoMetadata(t *testing.T) {
 	second, err := store.PutCompound(ctx, CompoundPutRequest{
 		ObjectID: "mail_message:<attributes@example.test>",
 		Facets: []contracts.Facet{{
-			Kind:       "mail_message",
-			Metadata:   map[string]any{"subject": "incoming"},
-			Attributes: map[string]any{"legacy_incoming": "kept"},
+			Kind:     "mail_message",
+			Metadata: map[string]any{"subject": "incoming"},
+			Attributes: map[string]any{
+				"legacy_incoming": "kept",
+				"subject":         "incoming stale legacy",
+			},
 		}},
 	})
 	if err != nil {
@@ -1244,6 +1250,61 @@ func TestCompoundMergeFoldsLegacyFacetAttributesIntoMetadata(t *testing.T) {
 		return
 	}
 	t.Fatal("mail_message facet missing")
+}
+
+func TestMailMessageMergePreservesAggregateVersionMetadata(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+
+	first, err := store.PutCompound(ctx, CompoundPutRequest{
+		ObjectID: "mail_message:<versioned@example.test>",
+		Facets: []contracts.Facet{{
+			Kind: contracts.MailMessageFacetKind,
+			Metadata: map[string]any{
+				"subject":              "archive canonical",
+				"version_count":        3,
+				"max_scale":            contracts.VersionScaleMajor,
+				"message_id_collision": true,
+				"canonical_version_id": "archive-version",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := store.PutCompound(ctx, CompoundPutRequest{
+		ObjectID: "mail_message:<versioned@example.test>",
+		Facets: []contracts.Facet{{
+			Kind: contracts.MailMessageFacetKind,
+			Metadata: map[string]any{
+				"subject":              "gmail observation",
+				"version_count":        1,
+				"max_scale":            contracts.VersionScaleMinor,
+				"message_id_collision": false,
+				"canonical_version_id": "gmail-version",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("expected stable compound digest, first=%s second=%s", first, second)
+	}
+
+	manifest, err := store.ReadManifest(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mailMessageMetadataForStoreTest(t, manifest)
+	if metadata["subject"] != "gmail observation" ||
+		metadata["version_count"] != float64(3) ||
+		metadata["max_scale"] != contracts.VersionScaleMajor ||
+		metadata["message_id_collision"] != true ||
+		metadata["canonical_version_id"] != "archive-version" {
+		t.Fatalf("unexpected merged mail metadata: %#v", metadata)
+	}
 }
 
 func TestCompoundMergePreservesBlobAndRecoverySidecar(t *testing.T) {
@@ -1855,6 +1916,21 @@ func assertFinding(t *testing.T, report VerifyReport, code string) {
 		}
 	}
 	t.Fatalf("missing finding %q in %#v", code, report.Findings)
+}
+
+func mailMessageMetadataForStoreTest(
+	t *testing.T,
+	manifest contracts.Manifest,
+) map[string]any {
+	t.Helper()
+	for _, facet := range manifest.Facets {
+		if facet.FacetKind() == contracts.MailMessageFacetKind {
+			return facet.Metadata
+		}
+	}
+	t.Fatalf("manifest missing mail message facet: %#v", manifest.Facets)
+
+	return nil
 }
 
 func assertStorageRole(t *testing.T, report StorageBreakdownReport, role string) {

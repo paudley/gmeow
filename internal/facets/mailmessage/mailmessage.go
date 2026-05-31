@@ -6,12 +6,14 @@ package mailmessage
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/mail"
 	"sort"
 	"strings"
@@ -50,7 +52,10 @@ func Parse(raw []byte, sourceHint string) (Message, error) {
 		return Message{}, fmt.Errorf("parse mail %s: %w", sourceHint, err)
 	}
 
-	body, attachments, err := extractBodyAndAttachments(parsed.Header, parsed.Body)
+	body, bodyMediaType, attachments, err := extractBodyAndAttachments(
+		parsed.Header,
+		parsed.Body,
+	)
 	if err != nil {
 		return Message{}, err
 	}
@@ -60,7 +65,7 @@ func Parse(raw []byte, sourceHint string) (Message, error) {
 		Raw:           raw,
 		Headers:       headers,
 		Body:          body,
-		BodyMediaType: "text/plain",
+		BodyMediaType: firstNonEmpty(bodyMediaType, "text/plain"),
 		Attachments:   attachments,
 		Subject:       headers["subject"],
 		Date:          headers["date"],
@@ -196,22 +201,24 @@ func BodyLineFingerprint(body []byte) string {
 func extractBodyAndAttachments(
 	headers mail.Header,
 	body io.Reader,
-) ([]byte, []Attachment, error) {
+) ([]byte, string, []Attachment, error) {
 	textBodies := []string{}
+	bodyMediaType := ""
 
 	attachments := []Attachment{}
 
-	err := extractPart(headers, body, &textBodies, &attachments)
+	err := extractPart(headers, body, &bodyMediaType, &textBodies, &attachments)
 	if err != nil {
-		return nil, nil, err
+		return nil, "", nil, err
 	}
 
-	return []byte(strings.Join(textBodies, "\n")), attachments, nil
+	return []byte(strings.Join(textBodies, "\n")), bodyMediaType, attachments, nil
 }
 
 func extractPart(
 	headers mail.Header,
 	body io.Reader,
+	bodyMediaType *string,
 	textBodies *[]string,
 	attachments *[]Attachment,
 ) error {
@@ -219,7 +226,14 @@ func extractPart(
 
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
-		return extractLeafPart(headers, body, mediaType, textBodies, attachments)
+		return extractLeafPart(
+			headers,
+			body,
+			mediaType,
+			bodyMediaType,
+			textBodies,
+			attachments,
+		)
 	}
 
 	reader := multipart.NewReader(body, params["boundary"])
@@ -236,6 +250,7 @@ func extractPart(
 		err = extractPart(
 			mail.Header(part.Header),
 			part,
+			bodyMediaType,
 			textBodies,
 			attachments,
 		)
@@ -249,10 +264,11 @@ func extractLeafPart(
 	headers mail.Header,
 	body io.Reader,
 	mediaType string,
+	bodyMediaType *string,
 	textBodies *[]string,
 	attachments *[]Attachment,
 ) error {
-	content, err := io.ReadAll(body)
+	content, err := readDecodedPart(headers, body)
 	if err != nil {
 		return fmt.Errorf("read mail part: %w", err)
 	}
@@ -277,11 +293,56 @@ func extractLeafPart(
 		return nil
 	}
 
-	if mediaType == "text/plain" || (mediaType == "" && len(*textBodies) == 0) {
+	if mediaType == "text/plain" || mediaType == "" {
+		if *bodyMediaType != "text/plain" {
+			*textBodies = nil
+		}
+
+		*bodyMediaType = "text/plain"
 		*textBodies = append(*textBodies, string(content))
+
+		return nil
+	}
+
+	if strings.HasPrefix(mediaType, "text/") && *bodyMediaType != "text/plain" {
+		if *bodyMediaType == "" {
+			*bodyMediaType = mediaType
+		}
+
+		if *bodyMediaType == mediaType {
+			*textBodies = append(*textBodies, string(content))
+		}
 	}
 
 	return nil
+}
+
+func readDecodedPart(headers mail.Header, body io.Reader) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(headers.Get("Content-Transfer-Encoding"))) {
+	case "", "7bit", "8bit", "binary":
+		return readAllPart(body, "read unencoded mail part")
+	case "base64":
+		return readAllPart(
+			base64.NewDecoder(base64.StdEncoding, body),
+			"decode base64 mail part",
+		)
+	case "quoted-printable":
+		return readAllPart(
+			quotedprintable.NewReader(body),
+			"decode quoted-printable mail part",
+		)
+	default:
+		return readAllPart(body, "read unknown-encoded mail part")
+	}
+}
+
+func readAllPart(body io.Reader, context string) ([]byte, error) {
+	content, err := io.ReadAll(body)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", context, err)
+	}
+
+	return content, nil
 }
 
 func partFilename(headers mail.Header) string {
