@@ -182,63 +182,6 @@ type OpsStatusResponse struct {
 	Metadata  map[string]any                 `json:"metadata,omitempty"`
 }
 
-type JMAPEmailQueryResponse struct {
-	IDs    []contracts.ObjectDigest `json:"ids"`
-	Total  int                      `json:"total"`
-	Offset int                      `json:"offset"`
-	Limit  int                      `json:"limit"`
-}
-
-type JMAPEmailQueryRequest struct {
-	Text       string `json:"text,omitempty"`
-	InMailbox  string `json:"in_mailbox,omitempty"`
-	HasKeyword string `json:"has_keyword,omitempty"`
-	NotKeyword string `json:"not_keyword,omitempty"`
-	Offset     int    `json:"offset"`
-	Limit      int    `json:"limit"`
-}
-
-type JMAPEmailMutation struct {
-	ObjectDigest     contracts.ObjectDigest `json:"object_digest"`
-	MailboxIDs       map[string]bool        `json:"mailbox_ids,omitempty"`
-	Keywords         map[string]bool        `json:"keywords,omitempty"`
-	ReplaceMailboxes bool                   `json:"replace_mailboxes,omitempty"`
-	ReplaceKeywords  bool                   `json:"replace_keywords,omitempty"`
-}
-
-type JMAPMailboxMutation struct {
-	Create  map[string]JMAPMailboxCreate `json:"create,omitempty"`
-	Update  map[string]JMAPMailboxPatch  `json:"update,omitempty"`
-	Destroy []string                     `json:"destroy,omitempty"`
-}
-
-type JMAPMailboxCreate struct {
-	Name      string `json:"name"`
-	ParentID  string `json:"parent_id,omitempty"`
-	SortOrder int    `json:"sort_order,omitempty"`
-}
-
-type JMAPMailboxPatch struct {
-	Name      *string `json:"name,omitempty"`
-	ParentID  *string `json:"parent_id,omitempty"`
-	SortOrder *int    `json:"sort_order,omitempty"`
-}
-
-type JMAPMailboxMutationResult struct {
-	Created      map[string]contracts.JMAPMailbox `json:"created,omitempty"`
-	Updated      []string                         `json:"updated,omitempty"`
-	Destroyed    []string                         `json:"destroyed,omitempty"`
-	NotCreated   map[string]string                `json:"not_created,omitempty"`
-	NotUpdated   map[string]string                `json:"not_updated,omitempty"`
-	NotDestroyed map[string]string                `json:"not_destroyed,omitempty"`
-}
-
-type JMAPBlob struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
-	Size int64  `json:"size"`
-}
-
 type StaticSourceRegistry struct {
 	adapters []source.Adapter
 }
@@ -761,6 +704,8 @@ func (services *Services) JMAPEmailQuery(
 		limit = jmapDefaultLimit
 	}
 	response, err := reader.JMAPEmailQuery(ctx, contracts.JMAPEmailQueryRequest{
+		After:      request.After,
+		Before:     request.Before,
 		Text:       request.Text,
 		InMailbox:  request.InMailbox,
 		HasKeyword: request.HasKeyword,

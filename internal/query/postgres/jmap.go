@@ -24,7 +24,9 @@ const (
 	jmapMailboxInbox   = "inbox"
 	jmapMailboxSent    = "sent"
 	jmapMailboxSpam    = "spam"
+	jmapMailboxStarred = "starred"
 	jmapMailboxTrash   = "trash"
+	jmapMailboxUnread  = "unread"
 	jmapKeywordFlagged = "$flagged"
 	jmapKeywordSeen    = "$seen"
 )
@@ -239,6 +241,14 @@ func (index *Index) JMAPEmailQuery(
 				 WHERE k.object_digest = s.object_digest
 				   AND k.keyword = $%d
 			)`, len(args)))
+	}
+	if !request.After.IsZero() {
+		args = append(args, request.After)
+		where = append(where, fmt.Sprintf("s.received_at > $%d", len(args)))
+	}
+	if !request.Before.IsZero() {
+		args = append(args, request.Before)
+		where = append(where, fmt.Sprintf("s.received_at < $%d", len(args)))
 	}
 
 	limit := normalizedLimit(request.Limit)
@@ -517,13 +527,15 @@ func seedJMAPEmailStateTx(
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO jmap_email_state(object_digest, thread_id)
-		VALUES($1, $2)
+		INSERT INTO jmap_email_state(object_digest, thread_id, received_at)
+		VALUES($1, $2, $3)
 		ON CONFLICT(object_digest) DO UPDATE SET
 		  thread_id = excluded.thread_id,
+		  received_at = coalesce(jmap_email_state.received_at, excluded.received_at),
 		  updated_at = now()`,
 		manifest.ObjectDigest,
 		stringFromAny(metadata["thread_id"]),
+		jmapReceivedAt(manifest, metadata),
 	); err != nil {
 		return fmt.Errorf("seed JMAP email state: %w", err)
 	}
@@ -654,8 +666,49 @@ func defaultJMAPMailboxes(labelIDs []string) []string {
 	default:
 		mailboxes = append(mailboxes, jmapMailboxArchive)
 	}
-
 	return mailboxes
+}
+
+func jmapReceivedAt(manifest contracts.Manifest, metadata map[string]any) *time.Time {
+	for _, key := range []string{"received_at", "internal_date", "date"} {
+		if receivedAt, ok := parseJMAPTime(stringFromAny(metadata[key])); ok {
+			return &receivedAt
+		}
+	}
+	for _, candidate := range []time.Time{
+		manifest.Timestamps.Observed,
+		manifest.Timestamps.Modified,
+		manifest.CreatedAt,
+	} {
+		if !candidate.IsZero() {
+			receivedAt := candidate.UTC()
+
+			return &receivedAt
+		}
+	}
+
+	return nil
+}
+
+func parseJMAPTime(value string) (time.Time, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC1123Z,
+		time.RFC1123,
+		time.RFC822Z,
+		time.RFC822,
+	} {
+		parsed, err := time.Parse(layout, trimmed)
+		if err == nil {
+			return parsed.UTC(), true
+		}
+	}
+
+	return time.Time{}, false
 }
 
 func defaultJMAPKeywords(labelIDs []string) []string {
@@ -874,7 +927,9 @@ func normalizedJMAPMailboxCatalog(
 		jmapMailboxInbox:   true,
 		jmapMailboxSent:    true,
 		jmapMailboxSpam:    true,
+		jmapMailboxStarred: true,
 		jmapMailboxTrash:   true,
+		jmapMailboxUnread:  true,
 	}
 	seenIDs := map[string]bool{}
 	namesByParent := map[string]map[string]bool{}

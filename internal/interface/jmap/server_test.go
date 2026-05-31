@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"blackcat.ca/gmeow/internal/appsvc"
@@ -585,7 +586,7 @@ func TestJMAPEmailQueryPassesFilterToAppServices(t *testing.T) {
 	defer server.Close()
 	body := bytes.NewBufferString(`{
 		"using":["urn:ietf:params:jmap:mail"],
-		"methodCalls":[["Email/query",{"accountId":"gmeow","position":2,"limit":7,"filter":{"text":"apollo","inMailbox":"inbox","hasKeyword":"$flagged","notKeyword":"$seen"}},"e1"]]
+		"methodCalls":[["Email/query",{"accountId":"gmeow","position":2,"limit":7,"filter":{"text":"apollo","inMailbox":"inbox","hasKeyword":"$flagged","notKeyword":"$seen","after":"2026-05-01T00:00:00Z","before":"2026-06-01T00:00:00Z"}},"e1"]]
 	}`)
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
 	if err != nil {
@@ -620,6 +621,8 @@ func TestJMAPEmailQueryPassesFilterToAppServices(t *testing.T) {
 		captured.InMailbox != "inbox" ||
 		captured.HasKeyword != "$flagged" ||
 		captured.NotKeyword != "$seen" ||
+		!captured.After.Equal(time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)) ||
+		!captured.Before.Equal(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)) ||
 		captured.Offset != 2 ||
 		captured.Limit != 7 {
 		t.Fatalf("unexpected captured query: %#v", captured)
@@ -1045,9 +1048,18 @@ func TestJMAPAddressListParsesMultipleRecipients(t *testing.T) {
 	}
 }
 
-func TestJMAPQuotaReadMethodsReturnEmptyState(t *testing.T) {
+func TestJMAPQuotaReadMethodsReturnUsageState(t *testing.T) {
 	services, err := appsvc.New(appsvc.Options{
-		Query:   jmapQueryFixture{},
+		Query: jmapQueryFixture{
+			breakdown: contracts.ObjectBreakdown{
+				TotalObjects:   4,
+				TotalSizeBytes: 2048,
+				ByFacet: []contracts.BreakdownCount{{
+					Label: appsvc.MailMessageFacet,
+					Count: 2,
+				}},
+			},
+		},
 		Objects: objectReaderFixture{},
 	})
 	if err != nil {
@@ -1098,9 +1110,14 @@ func TestJMAPQuotaReadMethodsReturnEmptyState(t *testing.T) {
 	if err := json.Unmarshal(getTuple[1], &getResponse); err != nil {
 		t.Fatal(err)
 	}
-	if getName != "Quota/get" || len(getResponse.List) != 0 ||
+	if getName != "Quota/get" || len(getResponse.List) != 3 ||
 		len(getResponse.NotFound) != 0 {
 		t.Fatalf("unexpected quota get response name=%q args=%#v", getName, getResponse)
+	}
+	if !hasQuotaUsage(getResponse.List, "filestore-bytes", 2048) ||
+		!hasQuotaUsage(getResponse.List, "messages", 2) ||
+		!hasQuotaUsage(getResponse.List, "objects", 4) {
+		t.Fatalf("quota usage missing from %#v", getResponse.List)
 	}
 
 	var queryTuple []json.RawMessage
@@ -1111,8 +1128,8 @@ func TestJMAPQuotaReadMethodsReturnEmptyState(t *testing.T) {
 	if err := json.Unmarshal(queryTuple[1], &queryResponse); err != nil {
 		t.Fatal(err)
 	}
-	if queryResponse.Position != 3 || queryResponse.Total != 0 ||
-		len(queryResponse.IDs) != 0 {
+	if queryResponse.Position != 3 || queryResponse.Total != 3 ||
+		len(queryResponse.IDs) != 3 {
 		t.Fatalf("unexpected quota query response: %#v", queryResponse)
 	}
 
@@ -1153,6 +1170,7 @@ type jmapQueryFixture struct {
 	search             contracts.SearchResponse
 	emailQuery         contracts.JMAPEmailQueryResponse
 	blobLookup         contracts.JMAPBlobLookupResponse
+	breakdown          contracts.ObjectBreakdown
 	mailboxEmailCounts map[string]int
 	requested          *contracts.JMAPEmailQueryRequest
 }
@@ -1162,6 +1180,12 @@ func (query jmapQueryFixture) Search(
 	contracts.SearchRequest,
 ) (contracts.SearchResponse, error) {
 	return query.search, nil
+}
+
+func (query jmapQueryFixture) ObjectBreakdown(
+	context.Context,
+) (contracts.ObjectBreakdown, error) {
+	return query.breakdown, nil
 }
 
 func (query jmapQueryFixture) JMAPMailboxes(
@@ -1332,4 +1356,14 @@ func (objects objectReaderFixture) WriteSourceCursor(
 	}
 
 	return nil
+}
+
+func hasQuotaUsage(quotas []jmapQuota, id string, used uint64) bool {
+	for _, quota := range quotas {
+		if quota.ID == id && quota.Used == used {
+			return true
+		}
+	}
+
+	return false
 }
