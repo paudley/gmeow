@@ -7,39 +7,29 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/mail"
 	"strings"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/facets/contactentity"
 	"blackcat.ca/gmeow/internal/observability"
 	"blackcat.ca/gmeow/internal/query"
 )
 
 const (
-	contactFactAffiliation  = "affiliation"
-	contactFactAlias        = "alias"
-	contactFactAddress      = "address"
-	contactFactAccount      = "account"
-	contactFactEmail        = "email"
-	contactFactIdentifier   = "identifier"
-	contactFactName         = "name"
-	contactFactPhone        = "phone"
-	contactFactRelationship = "relationship"
-	contactFactTitle        = "title"
-	contactFactURL          = "url"
-	prefixFieldCount        = 3
-	rdfScannerBufferSize    = 4096
-	rdfScannerMaxCapacity   = 1024 * 1024
-	rdfTypePredicate        = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
-	splitQuoteOffset        = 2
+	prefixFieldCount      = 3
+	rdfScannerBufferSize  = 4096
+	rdfScannerMaxCapacity = 1024 * 1024
+	rdfTypePredicate      = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+	splitQuoteOffset      = 2
 )
 
 type rdfTerm struct {
@@ -63,38 +53,12 @@ type rdfAnnotation struct {
 	hash      string
 }
 
-type sourceStatementKey struct {
-	sourceDigest  contracts.ObjectDigest
-	statementHash string
-}
-
 type transactionBeginner interface {
 	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
 }
 
 type contactSearchCounter interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
-type contactProjectionStatement struct {
-	sourceDigest  contracts.ObjectDigest
-	statementHash string
-	subject       string
-	predicate     string
-	object        string
-	objectKind    string
-}
-
-type contactProjectionFact struct {
-	sourceDigest  contracts.ObjectDigest
-	statementHash string
-	contactID     string
-	factKind      string
-	value         string
-	predicate     string
-	validFrom     string
-	validUntil    string
-	historical    bool
 }
 
 type rdfBundleParser struct {
@@ -913,9 +877,7 @@ func refreshContactProjectionTx(ctx context.Context, transaction pgx.Tx) error {
 		return err
 	}
 
-	contacts := contactSubjects(statements)
-
-	facts := contactFactsFromStatements(statements, annotations, contacts)
+	facts := contactentity.FactsFromStatements(statements, annotations)
 	for _, fact := range facts {
 		err := insertContactFact(ctx, transaction, fact)
 		if err != nil {
@@ -961,9 +923,9 @@ func refreshContactProjectionForContactsTx(
 		return err
 	}
 
-	contactSet := contactSubjects(statements)
+	contactSet := contactentity.ContactSubjects(statements)
 
-	facts := contactFactsFromStatements(statements, annotations, contactSet)
+	facts := contactentity.FactsForContacts(statements, annotations, contactSet)
 	for _, fact := range facts {
 		err := insertContactFact(ctx, transaction, fact)
 		if err != nil {
@@ -1009,7 +971,7 @@ func rollbackProjectionTx(ctx context.Context, transaction pgx.Tx) {
 func contactProjectionStatements(
 	ctx context.Context,
 	transaction pgx.Tx,
-) ([]contactProjectionStatement, error) {
+) ([]contactentity.Statement, error) {
 	rows, err := transaction.Query(
 		ctx,
 		`SELECT s.source_digest, s.statement_hash,
@@ -1030,19 +992,19 @@ func contactProjectionStatements(
 
 func scanContactProjectionStatements(
 	rows pgx.Rows,
-) ([]contactProjectionStatement, error) {
-	statements := []contactProjectionStatement{}
+) ([]contactentity.Statement, error) {
+	statements := []contactentity.Statement{}
 
 	for rows.Next() {
-		var statement contactProjectionStatement
+		var statement contactentity.Statement
 
 		err := rows.Scan(
-			&statement.sourceDigest,
-			&statement.statementHash,
-			&statement.subject,
-			&statement.predicate,
-			&statement.object,
-			&statement.objectKind,
+			&statement.SourceDigest,
+			&statement.StatementHash,
+			&statement.Subject,
+			&statement.Predicate,
+			&statement.Object,
+			&statement.ObjectKind,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan RDF statement for contact projection: %w", err)
@@ -1063,7 +1025,7 @@ func contactProjectionStatementsForContacts(
 	ctx context.Context,
 	transaction pgx.Tx,
 	contacts []string,
-) ([]contactProjectionStatement, error) {
+) ([]contactentity.Statement, error) {
 	rows, err := transaction.Query(
 		ctx,
 		`SELECT s.source_digest, s.statement_hash,
@@ -1087,7 +1049,7 @@ func contactProjectionStatementsForContacts(
 func contactProjectionAnnotations(
 	ctx context.Context,
 	transaction pgx.Tx,
-) (map[sourceStatementKey]map[string]string, error) {
+) ([]contactentity.Annotation, error) {
 	rows, err := transaction.Query(
 		ctx,
 		`SELECT a.source_digest, a.statement_hash, pred.term_value, obj.term_value
@@ -1105,28 +1067,23 @@ func contactProjectionAnnotations(
 
 func scanContactProjectionAnnotations(
 	rows pgx.Rows,
-) (map[sourceStatementKey]map[string]string, error) {
-	annotations := map[sourceStatementKey]map[string]string{}
+) ([]contactentity.Annotation, error) {
+	annotations := []contactentity.Annotation{}
 
 	for rows.Next() {
-		var sourceDigest contracts.ObjectDigest
+		var annotation contactentity.Annotation
 
-		var hash, predicate, object string
-
-		err := rows.Scan(&sourceDigest, &hash, &predicate, &object)
+		err := rows.Scan(
+			&annotation.SourceDigest,
+			&annotation.StatementHash,
+			&annotation.Predicate,
+			&annotation.Object,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("scan RDF annotation for contact projection: %w", err)
 		}
 
-		key := sourceStatementKey{
-			sourceDigest:  sourceDigest,
-			statementHash: hash,
-		}
-		if annotations[key] == nil {
-			annotations[key] = map[string]string{}
-		}
-
-		annotations[key][predicate] = object
+		annotations = append(annotations, annotation)
 	}
 
 	err := rows.Err()
@@ -1141,7 +1098,7 @@ func contactProjectionAnnotationsForContacts(
 	ctx context.Context,
 	transaction pgx.Tx,
 	contacts []string,
-) (map[sourceStatementKey]map[string]string, error) {
+) ([]contactentity.Annotation, error) {
 	rows, err := transaction.Query(
 		ctx,
 		`SELECT a.source_digest, a.statement_hash, pred.term_value, obj.term_value
@@ -1163,269 +1120,13 @@ func contactProjectionAnnotationsForContacts(
 	return scanContactProjectionAnnotations(rows)
 }
 
-func contactSubjects(statements []contactProjectionStatement) map[string]bool {
-	contacts := map[string]bool{}
-
-	for _, statement := range statements {
-		if statement.predicate != rdfTypePredicate {
-			continue
-		}
-
-		if contactTypeObject(statement.object) {
-			contacts[statement.subject] = true
-		}
-	}
-
-	return contacts
-}
-
-func contactTypeObject(value string) bool {
-	return value == "http://xmlns.com/foaf/0.1/Person" ||
-		value == "https://schema.org/Person" ||
-		value == "http://www.w3.org/2000/10/swap/pim/gedcom#Individual"
-}
-
-func contactFactsFromStatements(
-	statements []contactProjectionStatement,
-	annotations map[sourceStatementKey]map[string]string,
-	contacts map[string]bool,
-) []contactProjectionFact {
-	facts := []contactProjectionFact{}
-
-	for _, statement := range statements {
-		if !contacts[statement.subject] {
-			continue
-		}
-
-		factKind, historical, ok := contactFactKind(statement.predicate)
-		if !ok {
-			continue
-		}
-
-		value := contactFactValue(statement.object, statement.objectKind, factKind)
-		if strings.TrimSpace(value) == "" {
-			continue
-		}
-
-		fact := contactProjectionFact{
-			sourceDigest:  statement.sourceDigest,
-			statementHash: statement.statementHash,
-			contactID:     statement.subject,
-			factKind:      factKind,
-			value:         value,
-			predicate:     statement.predicate,
-			historical:    historical,
-		}
-
-		key := sourceStatementKey{
-			sourceDigest:  statement.sourceDigest,
-			statementHash: statement.statementHash,
-		}
-		for predicate, object := range annotations[key] {
-			switch {
-			case strings.HasSuffix(predicate, "hasBeginning") ||
-				strings.HasSuffix(predicate, "validFrom"):
-				fact.validFrom = object
-			case strings.HasSuffix(predicate, "hasEnd") ||
-				strings.HasSuffix(predicate, "validUntil"):
-				fact.validUntil = object
-			}
-		}
-
-		facts = append(facts, fact)
-	}
-
-	return facts
-}
-
-func contactFactKind(predicate string) (string, bool, bool) {
-	kind, found := relationshipContactFactKind(predicate)
-	if found {
-		return kind, false, true
-	}
-
-	kind, found = owlContactFactKind(predicate)
-	if found {
-		return kind, false, true
-	}
-
-	kind, found = vcardContactFactKind(predicate)
-	if found {
-		return kind, false, true
-	}
-
-	kind, found = orgContactFactKind(predicate)
-	if found {
-		return kind, false, true
-	}
-
-	kind, found = foafContactFactKind(predicate)
-	if found {
-		return kind, false, true
-	}
-
-	kind, historical, found := patrickAudleyContactFactKind(predicate)
-	if found {
-		return kind, historical, true
-	}
-
-	kind, found = schemaContactFactKind(predicate)
-	if found {
-		return kind, false, true
-	}
-
-	return "", false, false
-}
-
-func relationshipContactFactKind(predicate string) (string, bool) {
-	switch predicate {
-	case "http://purl.org/vocab/relationship/childOf",
-		"http://purl.org/vocab/relationship/parentOf",
-		"http://purl.org/vocab/relationship/spouseOf":
-		return contactFactRelationship, true
-	default:
-		return "", false
-	}
-}
-
-func owlContactFactKind(predicate string) (string, bool) {
-	switch predicate {
-	case "http://www.w3.org/2002/07/owl#sameAs",
-		"http://www.w3.org/2004/02/skos/core#exactMatch":
-		return contactFactIdentifier, true
-	default:
-		return "", false
-	}
-}
-
-func vcardContactFactKind(predicate string) (string, bool) {
-	switch predicate {
-	case "http://www.w3.org/2006/vcard/ns#fn":
-		return contactFactName, true
-	case "http://www.w3.org/2006/vcard/ns#hasAddress":
-		return contactFactAddress, true
-	case "http://www.w3.org/2006/vcard/ns#hasEmail":
-		return contactFactEmail, true
-	case "http://www.w3.org/2006/vcard/ns#hasTelephone":
-		return contactFactPhone, true
-	case "http://www.w3.org/2006/vcard/ns#hasURL":
-		return contactFactURL, true
-	case "http://www.w3.org/2006/vcard/ns#nickname":
-		return contactFactAlias, true
-	default:
-		return "", false
-	}
-}
-
-func orgContactFactKind(predicate string) (string, bool) {
-	if predicate == "http://www.w3.org/ns/org#member" {
-		return contactFactAffiliation, true
-	}
-
-	return "", false
-}
-
-func foafContactFactKind(predicate string) (string, bool) {
-	switch predicate {
-	case "http://xmlns.com/foaf/0.1/account":
-		return contactFactAccount, true
-	case "http://xmlns.com/foaf/0.1/homepage":
-		return contactFactURL, true
-	case "http://xmlns.com/foaf/0.1/knows":
-		return contactFactRelationship, true
-	case "http://xmlns.com/foaf/0.1/mbox":
-		return contactFactEmail, true
-	case "http://xmlns.com/foaf/0.1/name":
-		return contactFactName, true
-	case "http://xmlns.com/foaf/0.1/nick":
-		return contactFactAlias, true
-	case "http://xmlns.com/foaf/0.1/phone":
-		return contactFactPhone, true
-	case "http://xmlns.com/foaf/0.1/title":
-		return contactFactTitle, true
-	default:
-		return "", false
-	}
-}
-
-func patrickAudleyContactFactKind(predicate string) (string, bool, bool) {
-	switch predicate {
-	case "https://patrickaudley.com/lod#emailIdentity":
-		return contactFactEmail, false, true
-	case "https://patrickaudley.com/lod#historicalEmail":
-		return contactFactEmail, true, true
-	default:
-		return "", false, false
-	}
-}
-
-func schemaContactFactKind(predicate string) (string, bool) {
-	if kind, found := schemaContactFactKindEarly(predicate); found {
-		return kind, true
-	}
-
-	return schemaContactFactKindLate(predicate)
-}
-
-func schemaContactFactKindEarly(predicate string) (string, bool) {
-	switch predicate {
-	case "https://schema.org/address":
-		return contactFactAddress, true
-	case "https://schema.org/affiliation":
-		return contactFactAffiliation, true
-	case "https://schema.org/alternateName":
-		return contactFactAlias, true
-	case "https://schema.org/email":
-		return contactFactEmail, true
-	case "https://schema.org/identifier":
-		return contactFactIdentifier, true
-	case "https://schema.org/jobTitle":
-		return contactFactTitle, true
-	default:
-		return "", false
-	}
-}
-
-func schemaContactFactKindLate(predicate string) (string, bool) {
-	switch predicate {
-	case "https://schema.org/knows":
-		return contactFactRelationship, true
-	case "https://schema.org/memberOf":
-		return contactFactAffiliation, true
-	case "https://schema.org/name":
-		return contactFactName, true
-	case "https://schema.org/sameAs":
-		return contactFactIdentifier, true
-	case "https://schema.org/telephone":
-		return contactFactPhone, true
-	case "https://schema.org/url":
-		return contactFactURL, true
-	case "https://schema.org/worksFor":
-		return contactFactAffiliation, true
-	default:
-		return "", false
-	}
-}
-
-func contactFactValue(value, objectKind, factKind string) string {
-	if factKind == contactFactEmail {
-		return normalizeContactEmail(value)
-	}
-
-	if objectKind == "literal" {
-		return strings.TrimSpace(value)
-	}
-
-	return strings.TrimSpace(value)
-}
-
 func insertContactFact(
 	ctx context.Context,
 	transaction pgx.Tx,
-	fact contactProjectionFact,
+	fact contactentity.Fact,
 ) error {
 	metadata, err := json.Marshal(map[string]any{
-		"historical": fact.historical,
+		"historical": fact.Historical,
 	})
 	if err != nil {
 		return fmt.Errorf("encode contact fact metadata: %w", err)
@@ -1449,23 +1150,23 @@ func insertContactFact(
 		   valid_until = COALESCE(NULLIF(excluded.valid_until, ''), query_contact_facts.valid_until),
 		   historical = excluded.historical,
 		   metadata_json = excluded.metadata_json`,
-		fact.contactID,
-		fact.factKind,
-		fact.value,
-		hashString(fact.value),
-		fact.predicate,
-		fact.sourceDigest,
-		fact.statementHash,
-		fact.validFrom,
-		fact.validUntil,
-		fact.historical,
+		fact.ContactID,
+		fact.FactKind,
+		fact.Value,
+		hashString(fact.Value),
+		fact.Predicate,
+		fact.SourceDigest,
+		fact.StatementHash,
+		fact.ValidFrom,
+		fact.ValidUntil,
+		fact.Historical,
 		metadata,
 	)
 	if err != nil {
 		return fmt.Errorf("insert contact fact projection: %w", err)
 	}
 
-	if fact.factKind != contactFactEmail {
+	if fact.FactKind != contactentity.FactKindEmail {
 		return nil
 	}
 
@@ -1475,9 +1176,9 @@ func insertContactFact(
 func insertContactIdentityBinding(
 	ctx context.Context,
 	transaction pgx.Tx,
-	fact contactProjectionFact,
+	fact contactentity.Fact,
 ) error {
-	token := normalizeContactEmail(fact.value)
+	token := contactentity.NormalizeIdentity(fact.Value)
 	if token == "" {
 		return nil
 	}
@@ -1505,11 +1206,11 @@ func insertContactIdentityBinding(
 		   END`,
 		hashString(token),
 		token,
-		fact.contactID,
-		fact.statementHash,
-		fact.validFrom,
-		fact.validUntil,
-		fact.sourceDigest,
+		fact.ContactID,
+		fact.StatementHash,
+		fact.ValidFrom,
+		fact.ValidUntil,
+		fact.SourceDigest,
 	)
 	if err != nil {
 		return fmt.Errorf("insert contact identity binding projection: %w", err)
@@ -1521,33 +1222,65 @@ func insertContactIdentityBinding(
 func refreshContactRollupsTx(ctx context.Context, transaction pgx.Tx) error {
 	_, err := transaction.Exec(
 		ctx,
-		`INSERT INTO query_contact_rollups(
-		   contact_id, display_name, primary_email, fact_count, search_text, updated_at
-		 )
-		 SELECT f.contact_id,
-		        COALESCE(
-		          min(f.value) FILTER (WHERE f.fact_kind = 'name'),
-		          min(f.value) FILTER (WHERE f.fact_kind = 'alias'),
-		          f.contact_id
-		        ) AS display_name,
-		        COALESCE(
-		          min(f.value) FILTER (
-		            WHERE f.fact_kind = 'email' AND f.historical = false
-		          ),
-		          min(f.value) FILTER (WHERE f.fact_kind = 'email'),
-		          ''
-		        ) AS primary_email,
-		        count(*)::integer AS fact_count,
-		        string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text,
-		        now()
-		   FROM query_contact_facts f
-		  GROUP BY f.contact_id
-		 ON CONFLICT(contact_id) DO UPDATE SET
-		   display_name = excluded.display_name,
-		   primary_email = excluded.primary_email,
-		   fact_count = excluded.fact_count,
-		   search_text = excluded.search_text,
-		   updated_at = now()`,
+		`WITH fact_rollups AS (
+		SELECT f.contact_id,
+		COALESCE(
+		min(f.value) FILTER (WHERE f.fact_kind = 'name'),
+		min(f.value) FILTER (WHERE f.fact_kind = 'alias'),
+		f.contact_id
+		) AS display_name,
+		COALESCE(
+		min(f.value) FILTER (
+		WHERE f.fact_kind = 'email' AND f.historical = false
+		),
+		min(f.value) FILTER (WHERE f.fact_kind = 'email'),
+		''
+		) AS primary_email,
+		count(*)::integer AS fact_count,
+		string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text
+		FROM query_contact_facts f
+		GROUP BY f.contact_id
+		),
+		observation_rollups AS (
+		SELECT b.contact_id,
+		min(p.message_time) AS first_seen_at,
+		max(p.message_time) AS last_seen_at,
+		count(DISTINCT p.message_digest)::integer AS message_count,
+		count(*)::integer AS participant_count
+		FROM (
+		SELECT DISTINCT contact_id, token_hash, token
+		FROM query_contact_identity_bindings
+		) b
+		JOIN query_mail_participants p
+		ON p.token_hash = b.token_hash AND p.token = b.token
+		GROUP BY b.contact_id
+		)
+		INSERT INTO query_contact_rollups(
+		contact_id, display_name, primary_email, fact_count, search_text,
+		first_seen_at, last_seen_at, message_count, participant_count, updated_at
+		)
+		SELECT f.contact_id,
+		f.display_name,
+		f.primary_email,
+		f.fact_count,
+		f.search_text,
+		o.first_seen_at,
+		o.last_seen_at,
+		COALESCE(o.message_count, 0),
+		COALESCE(o.participant_count, 0),
+		now()
+		FROM fact_rollups f
+		LEFT JOIN observation_rollups o ON o.contact_id = f.contact_id
+		ON CONFLICT(contact_id) DO UPDATE SET
+		display_name = excluded.display_name,
+		primary_email = excluded.primary_email,
+		fact_count = excluded.fact_count,
+		search_text = excluded.search_text,
+		first_seen_at = excluded.first_seen_at,
+		last_seen_at = excluded.last_seen_at,
+		message_count = excluded.message_count,
+		participant_count = excluded.participant_count,
+		updated_at = now()`,
 	)
 	if err != nil {
 		return fmt.Errorf("refresh contact rollups: %w", err)
@@ -1563,9 +1296,7 @@ func refreshContactRollupsForContactsTx(
 ) error {
 	_, err := transaction.Exec(
 		ctx,
-		`INSERT INTO query_contact_rollups(
-		contact_id, display_name, primary_email, fact_count, search_text, updated_at
-		)
+		`WITH fact_rollups AS (
 		SELECT f.contact_id,
 		COALESCE(
 		min(f.value) FILTER (WHERE f.fact_kind = 'name'),
@@ -1580,16 +1311,51 @@ func refreshContactRollupsForContactsTx(
 		''
 		) AS primary_email,
 		count(*)::integer AS fact_count,
-		string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text,
-		now()
+		string_agg(f.value, ' ' ORDER BY f.fact_kind, f.value) AS search_text
 		FROM query_contact_facts f
 		WHERE f.contact_id = ANY($1)
 		GROUP BY f.contact_id
+		),
+		observation_rollups AS (
+		SELECT b.contact_id,
+		min(p.message_time) AS first_seen_at,
+		max(p.message_time) AS last_seen_at,
+		count(DISTINCT p.message_digest)::integer AS message_count,
+		count(*)::integer AS participant_count
+		FROM (
+		SELECT DISTINCT contact_id, token_hash, token
+		FROM query_contact_identity_bindings
+		WHERE contact_id = ANY($1)
+		) b
+		JOIN query_mail_participants p
+		ON p.token_hash = b.token_hash AND p.token = b.token
+		GROUP BY b.contact_id
+		)
+		INSERT INTO query_contact_rollups(
+		contact_id, display_name, primary_email, fact_count, search_text,
+		first_seen_at, last_seen_at, message_count, participant_count, updated_at
+		)
+		SELECT f.contact_id,
+		f.display_name,
+		f.primary_email,
+		f.fact_count,
+		f.search_text,
+		o.first_seen_at,
+		o.last_seen_at,
+		COALESCE(o.message_count, 0),
+		COALESCE(o.participant_count, 0),
+		now()
+		FROM fact_rollups f
+		LEFT JOIN observation_rollups o ON o.contact_id = f.contact_id
 		ON CONFLICT(contact_id) DO UPDATE SET
 		display_name = excluded.display_name,
 		primary_email = excluded.primary_email,
 		fact_count = excluded.fact_count,
 		search_text = excluded.search_text,
+		first_seen_at = excluded.first_seen_at,
+		last_seen_at = excluded.last_seen_at,
+		message_count = excluded.message_count,
+		participant_count = excluded.participant_count,
 		updated_at = now()`,
 		contacts,
 	)
@@ -1606,11 +1372,16 @@ func (index *Index) ContactAggregate(
 ) (contracts.ContactAggregate, error) {
 	contactID := strings.TrimSpace(request.ContactID)
 
-	var aggregate contracts.ContactAggregate
+	var (
+		aggregate contracts.ContactAggregate
+		firstSeen sql.NullTime
+		lastSeen  sql.NullTime
+	)
 
 	err := index.pool.QueryRow(
 		ctx,
-		`SELECT contact_id, display_name, primary_email, fact_count
+		`SELECT contact_id, display_name, primary_email, fact_count,
+		first_seen_at, last_seen_at, message_count, participant_count
 		   FROM query_contact_rollups
 		  WHERE contact_id = $1`,
 		contactID,
@@ -1619,6 +1390,10 @@ func (index *Index) ContactAggregate(
 		&aggregate.DisplayName,
 		&aggregate.PrimaryEmail,
 		&aggregate.FactCount,
+		&firstSeen,
+		&lastSeen,
+		&aggregate.MessageCount,
+		&aggregate.ParticipantCount,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1674,6 +1449,13 @@ func (index *Index) ContactAggregate(
 	}
 
 	aggregate.SchemaVersion = contracts.SchemaVersionPhase00
+	if firstSeen.Valid {
+		aggregate.FirstSeenAt = firstSeen.Time
+	}
+
+	if lastSeen.Valid {
+		aggregate.LastSeenAt = lastSeen.Time
+	}
 
 	return aggregate, nil
 }
@@ -1706,7 +1488,8 @@ func (index *Index) ContactSearch(
 	args = append(args, limit, offset)
 
 	rows, err := index.pool.Query(ctx, fmt.Sprintf(
-		`SELECT contact_id, display_name, primary_email, fact_count
+		`SELECT contact_id, display_name, primary_email, fact_count,
+		first_seen_at, last_seen_at, message_count, participant_count
 		   FROM query_contact_rollups
 		  WHERE %s
 		  ORDER BY display_name, contact_id
@@ -1723,19 +1506,35 @@ func (index *Index) ContactSearch(
 	results := []contracts.ContactSearchResult{}
 
 	for rows.Next() {
-		var result contracts.ContactSearchResult
+		var (
+			result    contracts.ContactSearchResult
+			firstSeen sql.NullTime
+			lastSeen  sql.NullTime
+		)
 
 		err = rows.Scan(
 			&result.ContactID,
 			&result.DisplayName,
 			&result.PrimaryEmail,
 			&result.FactCount,
+			&firstSeen,
+			&lastSeen,
+			&result.MessageCount,
+			&result.ParticipantCount,
 		)
 		if err != nil {
 			return contracts.ContactSearchResponse{}, fmt.Errorf("scan contact search: %w", err)
 		}
 
 		result.Score = 1
+		if firstSeen.Valid {
+			result.FirstSeenAt = firstSeen.Time
+		}
+
+		if lastSeen.Valid {
+			result.LastSeenAt = lastSeen.Time
+		}
+
 		results = append(results, result)
 	}
 
@@ -1782,7 +1581,7 @@ func (index *Index) ResolveContactIdentity(
 	ctx context.Context,
 	request contracts.ContactIdentityResolveRequest,
 ) (contracts.ContactIdentityResolveResponse, error) {
-	token := normalizeContactEmail(request.Identity)
+	token := contactentity.NormalizeIdentity(request.Identity)
 	if token == "" {
 		return contracts.ContactIdentityResolveResponse{
 			SchemaVersion: contracts.SchemaVersionPhase00,
@@ -1832,19 +1631,6 @@ func (index *Index) ResolveContactIdentity(
 	}
 
 	return response, nil
-}
-
-func normalizeContactEmail(value string) string {
-	value = strings.TrimSpace(value)
-
-	value = strings.TrimPrefix(value, "mailto:")
-
-	address, err := mail.ParseAddress(value)
-	if err == nil {
-		value = address.Address
-	}
-
-	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func uniqueNonEmptyStrings(values []string) []string {

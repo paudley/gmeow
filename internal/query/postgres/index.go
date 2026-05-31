@@ -1220,6 +1220,15 @@ func projectObjectTx(
 		return err
 	}
 
+	mailParticipantProjection, err := mailParticipantProjectionStateTx(
+		ctx,
+		tx,
+		object.Manifest,
+	)
+	if err != nil {
+		return err
+	}
+
 	rdfProjectionChanged = rdfProjectionChanged ||
 		manifestHasFacetKind(object.Manifest, contracts.RDFSourceBundleFacetKind) ||
 		manifestHasFacetKind(object.Manifest, contracts.RDFClaimBundleFacetKind)
@@ -1277,6 +1286,7 @@ func projectObjectTx(
 		"query_object_overlays",
 		"query_summaries",
 		"query_mail_identities",
+		"query_mail_participants",
 		"query_rdf_statement_annotations",
 		"query_rdf_statements",
 	} {
@@ -1298,6 +1308,11 @@ func projectObjectTx(
 	}
 
 	if err := insertMailIdentityRows(ctx, tx, object.Manifest); err != nil {
+		return err
+	}
+
+	err = insertMailParticipantProjectionRows(ctx, tx, &mailParticipantProjection)
+	if err != nil {
 		return err
 	}
 
@@ -1362,6 +1377,11 @@ func projectObjectTx(
 		}
 	}
 
+	err = refreshMailParticipantContactRollupsTx(ctx, tx, mailParticipantProjection)
+	if err != nil {
+		return err
+	}
+
 	if err := seedJMAPEmailStateTx(
 		ctx,
 		tx,
@@ -1372,56 +1392,6 @@ func projectObjectTx(
 	}
 
 	return nil
-}
-
-func truncateProjectionTablesSQL() string {
-	return strings.Join([]string{
-		"TRUNCATE",
-		"query_projection_state,",
-		"query_summaries,",
-		"query_source_cursors,",
-		"query_contact_rollups,",
-		"query_contact_identity_bindings,",
-		"query_contact_facts,",
-		"query_rdf_statement_annotations,",
-		"query_rdf_statements,",
-		"query_rdf_terms,",
-		"query_objects",
-		"CASCADE",
-	}, " ")
-}
-
-func deleteProjectionRowsSQL(table string) string {
-	switch table {
-	case "query_object_facets":
-		return "DELETE FROM query_object_facets WHERE object_digest = $1"
-	case "query_object_provenance":
-		return "DELETE FROM query_object_provenance WHERE object_digest = $1"
-	case "query_object_relationships":
-		return "DELETE FROM query_object_relationships WHERE object_digest = $1"
-	case "query_object_compound_parts":
-		return "DELETE FROM query_object_compound_parts WHERE object_digest = $1"
-	case "query_object_analysis":
-		return "DELETE FROM query_object_analysis WHERE object_digest = $1"
-	case "query_object_graph_edges":
-		return "DELETE FROM query_object_graph_edges WHERE object_digest = $1"
-	case "query_object_keywords":
-		return "DELETE FROM query_object_keywords WHERE object_digest = $1"
-	case "query_object_embeddings":
-		return "DELETE FROM query_object_embeddings WHERE object_digest = $1"
-	case "query_object_overlays":
-		return "DELETE FROM query_object_overlays WHERE object_digest = $1"
-	case "query_summaries":
-		return "DELETE FROM query_summaries WHERE object_digest = $1"
-	case "query_mail_identities":
-		return "DELETE FROM query_mail_identities WHERE object_digest = $1"
-	case "query_rdf_statement_annotations":
-		return "DELETE FROM query_rdf_statement_annotations WHERE source_digest = $1"
-	case "query_rdf_statements":
-		return "DELETE FROM query_rdf_statements WHERE source_digest = $1"
-	default:
-		panic("unsupported query projection delete table: " + table)
-	}
 }
 
 func deleteAgeFactsForDigest(

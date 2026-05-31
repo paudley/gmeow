@@ -91,3 +91,87 @@ func TestParseDecodesTransferEncodedBodyAndAttachments(t *testing.T) {
 		t.Fatalf("Attachments = %#v", message.Attachments)
 	}
 }
+
+func TestMetadataIncludesParticipantHeaders(t *testing.T) {
+	message := Message{
+		Headers: map[string]string{
+			"sender":   "sender@example.test",
+			"reply-to": "reply@example.test",
+			"cc":       "Carbon <cc@example.test>",
+			"bcc":      "Blind <bcc@example.test>",
+		},
+		MessageID: "<participants@example.test>",
+		From:      "From <from@example.test>",
+		To:        "To <to@example.test>",
+	}
+
+	metadata := Metadata(message, false, "", 1, "")
+	for _, key := range []string{"from", "sender", "reply_to", "to", "cc", "bcc"} {
+		if metadata[key] == "" {
+			t.Fatalf("metadata missing participant header %q: %#v", key, metadata)
+		}
+	}
+}
+
+func TestParticipantsFromMetadataParsesRolesAndDisplayNames(t *testing.T) {
+	participants := ParticipantsFromMetadata(map[string]any{
+		"from":     "Alice Example <alice@example.test>",
+		"reply_to": "Replies <reply@example.test>",
+		"to":       "Bob <bob@example.test>, carol@example.test",
+		"cc":       "Carbon <cc@example.test>",
+		"bcc":      "not an address",
+	})
+
+	expected := map[string]string{
+		"from:alice@example.test":     "Alice Example",
+		"reply_to:reply@example.test": "Replies",
+		"to:bob@example.test":         "Bob",
+		"to:carol@example.test":       "",
+		"cc:cc@example.test":          "Carbon",
+	}
+	if len(participants) != len(expected) {
+		t.Fatalf("ParticipantsFromMetadata returned %#v", participants)
+	}
+
+	for _, participant := range participants {
+		key := participant.Role + ":" + participant.Address
+		displayName, ok := expected[key]
+		if !ok {
+			t.Fatalf("unexpected participant %#v", participant)
+		}
+		if participant.DisplayName != displayName {
+			t.Fatalf(
+				"display name for %s = %q, want %q",
+				key,
+				participant.DisplayName,
+				displayName,
+			)
+		}
+		if participant.RawValue == "" {
+			t.Fatalf("participant missing raw value: %#v", participant)
+		}
+	}
+}
+
+func TestParticipantsFromMetadataKeepsValidAddressesFromMalformedList(t *testing.T) {
+	participants := ParticipantsFromMetadata(map[string]any{
+		"to": `"Valid, Name" <valid@example.test>, not an address, Other <other@example.test>`,
+	})
+
+	expected := []string{"valid@example.test", "other@example.test"}
+	if len(participants) != len(expected) {
+		t.Fatalf("ParticipantsFromMetadata returned %#v", participants)
+	}
+
+	for index, address := range expected {
+		if participants[index].Address != address {
+			t.Fatalf(
+				"participant %d address = %q, want %q: %#v",
+				index,
+				participants[index].Address,
+				address,
+				participants,
+			)
+		}
+	}
+}
