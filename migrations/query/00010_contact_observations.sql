@@ -17,9 +17,6 @@ CREATE TABLE IF NOT EXISTS query_mail_participants (
 CREATE INDEX IF NOT EXISTS query_mail_participants_token_time_idx
   ON query_mail_participants(token_hash, message_time DESC NULLS LAST);
 
-CREATE INDEX IF NOT EXISTS query_mail_participants_message_idx
-  ON query_mail_participants(message_digest);
-
 CREATE INDEX IF NOT EXISTS query_mail_participants_role_token_idx
   ON query_mail_participants(role, token_hash);
 
