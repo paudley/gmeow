@@ -23,6 +23,15 @@ import (
 
 const MediaType = "application/vnd.gmeow.mail-message+json"
 
+const (
+	metadataKeyFrom    = "from"
+	metadataKeySender  = "sender"
+	metadataKeyReplyTo = "reply_to"
+	metadataKeyTo      = "to"
+	metadataKeyCC      = "cc"
+	metadataKeyBCC     = "bcc"
+)
+
 type Message struct {
 	Headers          map[string]string
 	Subject          string
@@ -107,12 +116,12 @@ func Metadata(
 		"rfc_message_id":           message.MessageID,
 		"subject":                  message.Subject,
 		"date":                     message.Date,
-		"from":                     message.From,
-		"sender":                   message.Headers["sender"],
-		"reply_to":                 message.Headers["reply-to"],
-		"to":                       message.To,
-		"cc":                       message.Headers["cc"],
-		"bcc":                      message.Headers["bcc"],
+		metadataKeyFrom:            message.From,
+		metadataKeySender:          message.Headers[metadataKeySender],
+		metadataKeyReplyTo:         message.Headers["reply-to"],
+		metadataKeyTo:              message.To,
+		metadataKeyCC:              message.Headers[metadataKeyCC],
+		metadataKeyBCC:             message.Headers[metadataKeyBCC],
 		"generated_message_id":     message.GeneratedMessage,
 		"canonical_fingerprint":    message.Fingerprint,
 		"body_line_fingerprint":    message.BodyLineHash,
@@ -135,12 +144,12 @@ func ParticipantsFromMetadata(metadata map[string]any) []Participant {
 		key  string
 		role string
 	}{
-		{key: "from", role: "from"},
-		{key: "sender", role: "sender"},
-		{key: "reply_to", role: "reply_to"},
-		{key: "to", role: "to"},
-		{key: "cc", role: "cc"},
-		{key: "bcc", role: "bcc"},
+		{key: metadataKeyFrom, role: metadataKeyFrom},
+		{key: metadataKeySender, role: metadataKeySender},
+		{key: metadataKeyReplyTo, role: metadataKeyReplyTo},
+		{key: metadataKeyTo, role: metadataKeyTo},
+		{key: metadataKeyCC, role: metadataKeyCC},
+		{key: metadataKeyBCC, role: metadataKeyBCC},
 	} {
 		participants = append(
 			participants,

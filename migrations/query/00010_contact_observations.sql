@@ -15,10 +15,13 @@ CREATE TABLE IF NOT EXISTS query_mail_participants (
 );
 
 CREATE INDEX IF NOT EXISTS query_mail_participants_token_time_idx
-  ON query_mail_participants(token_hash, message_time DESC NULLS LAST);
+  ON query_mail_participants(token_hash, token, message_time DESC NULLS LAST);
 
-CREATE INDEX IF NOT EXISTS query_mail_participants_role_token_idx
-  ON query_mail_participants(participant_role, token_hash);
+CREATE INDEX IF NOT EXISTS query_mail_participants_role_token_time_idx
+  ON query_mail_participants(participant_role, token_hash, token, message_time DESC NULLS LAST);
+
+CREATE INDEX IF NOT EXISTS query_contact_identity_bindings_contact_idx
+  ON query_contact_identity_bindings(contact_id, token_hash, token);
 
 ALTER TABLE query_contact_rollups
   ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ,
@@ -27,6 +30,8 @@ ALTER TABLE query_contact_rollups
   ADD COLUMN IF NOT EXISTS participant_count INTEGER NOT NULL DEFAULT 0;
 
 -- +goose Down
+DROP INDEX IF EXISTS query_contact_identity_bindings_contact_idx;
+
 ALTER TABLE query_contact_rollups
   DROP COLUMN IF EXISTS participant_count,
   DROP COLUMN IF EXISTS message_count,
