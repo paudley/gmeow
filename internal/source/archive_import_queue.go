@@ -21,7 +21,10 @@ import (
 const (
 	defaultArchiveImportQueueHighWater = 10000
 	archiveImportStateFile             = "state.json"
+	sourceImportFailureProcessLimit    = 100
 )
+
+var errSourceImportDeadLettered = errors.New("source import dead-lettered jobs")
 
 type ArchiveImportJobReceipt interface {
 	Job() contracts.SourceImportJob
@@ -32,6 +35,10 @@ type ArchiveImportJobReceipt interface {
 
 type ArchiveImportJobSource interface {
 	Receive(context.Context) (ArchiveImportJobReceipt, error)
+}
+
+type ArchiveImportFailureQueueRunner interface {
+	RunSourceImportFailureQueues(ctx context.Context) error
 }
 
 type ArchiveImportQueuedRun struct {
@@ -102,6 +109,11 @@ func (run ArchiveImportQueuedRun) Run(
 	}
 	request.RunID = runID
 
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	failureErrc := startArchiveImportFailureQueues(runCtx, cancelRun, request.Publisher)
+
 	if !request.DryRun {
 		record := ImportRunRecord{
 			RunID:      runID,
@@ -129,12 +141,12 @@ func (run ArchiveImportQueuedRun) Run(
 		}()
 	}
 
-	request.CapacityDrainer = func(ctx context.Context) error {
-		return run.drainOne(ctx, request, sourceName, &state, &report)
+	request.CapacityDrainer = func(context.Context) error {
+		return run.drainOne(runCtx, request, sourceName, &state, &report)
 	}
 	if !state.DiscoveryDone {
 		if err := run.Importer.enqueueArchiveImportJobs(
-			ctx,
+			runCtx,
 			request,
 			sourceName,
 			runID,
@@ -151,10 +163,17 @@ func (run ArchiveImportQueuedRun) Run(
 	}
 
 	if len(report.Failures) == 0 {
-		if err := run.drain(ctx, request, sourceName, &state, &report); err != nil {
+		err := run.drain(runCtx, request, sourceName, &state, &report)
+		if err != nil {
 			report.Failures = append(report.Failures, err.Error())
 		}
 	}
+
+	err := archiveImportFailureQueueError(failureErrc)
+	if err != nil {
+		report.Failures = append(report.Failures, err.Error())
+	}
+
 	if len(report.Failures) > 0 {
 		return report, fmt.Errorf(
 			"archive import completed with %d failure(s)",
@@ -163,6 +182,49 @@ func (run ArchiveImportQueuedRun) Run(
 	}
 
 	return report, nil
+}
+
+func startArchiveImportFailureQueues(
+	ctx context.Context,
+	cancelRun context.CancelFunc,
+	publisher ArchiveImportPublisher,
+) <-chan error {
+	errc := make(chan error, 1)
+
+	runner, ok := publisher.(ArchiveImportFailureQueueRunner)
+	if !ok {
+		close(errc)
+
+		return errc
+	}
+
+	go func() {
+		defer close(errc)
+
+		err := runner.RunSourceImportFailureQueues(ctx)
+		if err == nil || errors.Is(err, context.Canceled) {
+			return
+		}
+
+		errc <- err
+
+		cancelRun()
+	}()
+
+	return errc
+}
+
+func archiveImportFailureQueueError(errc <-chan error) error {
+	select {
+	case err, ok := <-errc:
+		if !ok {
+			return nil
+		}
+
+		return err
+	default:
+		return nil
+	}
 }
 
 func (run ArchiveImportQueuedRun) drain(
@@ -220,41 +282,18 @@ func (run ArchiveImportQueuedRun) drainOne(
 	state *archiveImportRunState,
 	report *ArchiveImportReport,
 ) error {
-	status, err := request.Publisher.SourceImportStatus(ctx)
+	receipt, err := run.receiveSourceImportJob(ctx)
 	if err != nil {
 		return err
-	}
-	if status.Failed > 0 {
-		_, err := request.Publisher.ProcessSourceImportFailures(ctx, 100)
-		return err
-	}
-	if status.Pending == 0 {
-		if status.Retry == 0 && status.DeadLetter > 0 {
-			return fmt.Errorf("source import dead-lettered %d job(s)", status.DeadLetter)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-			return nil
-		}
 	}
 
-	receipt, err := run.Source.Receive(ctx)
-	if err != nil {
-		return err
-	}
 	job := receipt.Job()
 	if job.RunID != report.RunID {
 		if err := receipt.Release(ctx); err != nil {
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-			return nil
-		}
+
+		return nil
 	}
 	if err := run.Importer.ProcessSourceImportJob(
 		ctx,
@@ -267,6 +306,28 @@ func (run ArchiveImportQueuedRun) drainOne(
 		if retryErr := receipt.Retry(ctx, err); retryErr != nil {
 			return retryErr
 		}
+
+		_, processErr := request.Publisher.ProcessSourceImportFailures(
+			ctx,
+			sourceImportFailureProcessLimit,
+		)
+		if processErr != nil {
+			return fmt.Errorf("process source import failures: %w", processErr)
+		}
+
+		status, statusErr := request.Publisher.SourceImportStatus(ctx)
+		if statusErr != nil {
+			return fmt.Errorf("inspect source import queue status: %w", statusErr)
+		}
+
+		if status.Pending == 0 && status.Retry == 0 && status.DeadLetter > 0 {
+			return fmt.Errorf(
+				"%w: %d job(s)",
+				errSourceImportDeadLettered,
+				status.DeadLetter,
+			)
+		}
+
 		return saveArchiveImportState(request.StateDir, *state)
 	}
 	if err := receipt.Ack(ctx); err != nil {
@@ -276,6 +337,17 @@ func (run ArchiveImportQueuedRun) drainOne(
 	state.Processed = report.Processed
 
 	return saveArchiveImportState(request.StateDir, *state)
+}
+
+func (run ArchiveImportQueuedRun) receiveSourceImportJob(
+	ctx context.Context,
+) (ArchiveImportJobReceipt, error) {
+	receipt, err := run.Source.Receive(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("receive source import job: %w", err)
+	}
+
+	return receipt, nil
 }
 
 func (importer *ArchiveImporter) enqueueArchiveImportJobs(
@@ -455,9 +527,13 @@ func (importer *ArchiveImporter) publishArchiveImportJob(
 	state *archiveImportRunState,
 	report *ArchiveImportReport,
 ) error {
-	if err := waitForArchiveImportCapacity(ctx, request, highWater); err != nil {
-		return err
+	if archiveImportLocalBacklog(report) >= highWater {
+		err := waitForArchiveImportCapacity(ctx, request, highWater)
+		if err != nil {
+			return err
+		}
 	}
+
 	relative, _ := filepath.Rel(root, path)
 	job := contracts.SourceImportJob{
 		SchemaVersion: contracts.SchemaVersionPhase00,
@@ -487,6 +563,19 @@ func (importer *ArchiveImporter) publishArchiveImportJob(
 	state.LastOffset = offset
 
 	return saveArchiveImportState(request.StateDir, *state)
+}
+
+func archiveImportLocalBacklog(report *ArchiveImportReport) int {
+	if report == nil {
+		return 0
+	}
+
+	backlog := report.Enqueued - report.Processed
+	if backlog < 0 {
+		return 0
+	}
+
+	return backlog
 }
 
 func shouldSkipArchivePath(path, format string, state *archiveImportRunState) bool {

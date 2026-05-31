@@ -52,6 +52,7 @@ type Scheduler interface {
 type Broker interface {
 	Declare(ctx context.Context) error
 	Publish(ctx context.Context, job contracts.AnalyzerJob) error
+	PublishObjectChanges(ctx context.Context, request contracts.ObjectChangeRequest) error
 	PublishProjectionRefresh(ctx context.Context, digest contracts.ObjectDigest) error
 	ProcessFailures(ctx context.Context, limit int) (int, error)
 	ReconcilePending(
@@ -59,10 +60,10 @@ type Broker interface {
 		limit int,
 		isSatisfied func(contracts.AnalyzerJob) (bool, error),
 	) (contracts.ReconcilePendingResponse, error)
-	ProcessProjectionRefreshes(
+	ProcessObjectChanges(
 		ctx context.Context,
 		limit int,
-		refresh ProjectionRefreshFunc,
+		process ObjectChangeFunc,
 	) (int, error)
 	RouteFailure(ctx context.Context, job contracts.AnalyzerJob) error
 	Status(ctx context.Context) (contracts.SchedulerStatus, error)
@@ -79,7 +80,7 @@ type ProjectionRefresher interface {
 	ProjectObject(ctx context.Context, object filestore.ProjectionObject) error
 }
 
-type ProjectionRefreshFunc func(
+type ObjectChangeFunc func(
 	ctx context.Context,
-	digests []contracts.ObjectDigest,
+	requests []contracts.ObjectChangeRequest,
 ) error

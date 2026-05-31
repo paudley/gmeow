@@ -1224,12 +1224,12 @@ func projectObjectTx(
 		manifestHasFacetKind(object.Manifest, contracts.RDFSourceBundleFacetKind) ||
 		manifestHasFacetKind(object.Manifest, contracts.RDFClaimBundleFacetKind)
 
-	manifestJSON, err := json.Marshal(object.Manifest)
+	manifestJSON, err := marshalPostgresJSON(object.Manifest)
 	if err != nil {
 		return err
 	}
 
-	annotationsJSON, err := json.Marshal(object.Annotations)
+	annotationsJSON, err := marshalPostgresJSON(object.Annotations)
 	if err != nil {
 		return err
 	}

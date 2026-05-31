@@ -41,6 +41,11 @@ type GmailAdapter struct {
 	name    string
 }
 
+const (
+	concurrentGmailPartWaitTimeout = 5 * time.Second
+	concurrentGmailPartPoll        = 100 * time.Millisecond
+)
+
 type GmailSearchHit struct {
 	MessageID string
 	Version   string
@@ -642,13 +647,20 @@ func (adapter *GmailAdapter) writeMessageParts(
 			message.MessageID,
 			input.role,
 		)
-		digest, _, err := service.Ingest(ctx, IngestObject{
+		ref := contracts.SourceObjectRef{
+			SourceKind:      adapter.Kind(),
+			SourceName:      adapter.name,
+			ExternalID:      message.MessageID + ":" + input.role,
+			ExternalVersion: message.Version,
+		}
+
+		digest, err := ingestGmailPart(ctx, service, ref, IngestObject{
 			ObservedAt:   observed,
 			Reader:       bytes.NewReader(input.payload),
 			MediaType:    input.mediaType,
-			SourceKind:   adapter.Kind(),
-			SourceName:   adapter.name,
-			ExternalID:   message.MessageID + ":" + input.role,
+			SourceKind:   ref.SourceKind,
+			SourceName:   ref.SourceName,
+			ExternalID:   ref.ExternalID,
 			ExternalVer:  message.Version,
 			SourceHint:   input.role,
 			ContentRoles: []string{input.role},
@@ -682,14 +694,21 @@ func (adapter *GmailAdapter) writeMessageParts(
 			message.MessageID,
 			attachmentID,
 		)
-		digest, _, err := service.Ingest(ctx, IngestObject{
+		ref := contracts.SourceObjectRef{
+			SourceKind:      adapter.Kind(),
+			SourceName:      adapter.name,
+			ExternalID:      message.MessageID + ":attachment:" + attachmentID,
+			ExternalVersion: firstNonEmpty(attachment.Version, message.Version),
+		}
+
+		digest, err := ingestGmailPart(ctx, service, ref, IngestObject{
 			ObservedAt:   observed,
 			Reader:       bytes.NewReader(attachment.Content),
 			MediaType:    firstNonEmpty(attachment.MediaType, "application/octet-stream"),
-			SourceKind:   adapter.Kind(),
-			SourceName:   adapter.name,
-			ExternalID:   message.MessageID + ":attachment:" + attachmentID,
-			ExternalVer:  firstNonEmpty(attachment.Version, message.Version),
+			SourceKind:   ref.SourceKind,
+			SourceName:   ref.SourceName,
+			ExternalID:   ref.ExternalID,
+			ExternalVer:  ref.ExternalVersion,
 			SourceHint:   attachment.FileName,
 			ContentRoles: []string{"attachment"},
 			Facets: []contracts.Facet{{
@@ -720,6 +739,46 @@ func (adapter *GmailAdapter) writeMessageParts(
 	}
 
 	return parts, nil
+}
+
+func ingestGmailPart(
+	ctx context.Context,
+	service IngestService,
+	ref contracts.SourceObjectRef,
+	object IngestObject,
+) (contracts.ObjectDigest, error) {
+	digest, _, err := service.Ingest(ctx, object)
+	if err == nil {
+		return digest, nil
+	}
+
+	if !errors.Is(err, ErrSourceIngestInProgress) {
+		return "", fmt.Errorf("ingest gmail part: %w", err)
+	}
+
+	timer := time.NewTimer(concurrentGmailPartWaitTimeout)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(concurrentGmailPartPoll)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("wait for concurrent gmail part ingest: %w", ctx.Err())
+		case <-timer.C:
+			return "", fmt.Errorf("wait for concurrent gmail part ingest: %w", err)
+		case <-ticker.C:
+			digest, found, lookupErr := service.LookupSourceObject(ctx, ref)
+			if lookupErr != nil {
+				return "", fmt.Errorf("lookup concurrent gmail part: %w", lookupErr)
+			}
+
+			if found {
+				return digest, nil
+			}
+		}
+	}
 }
 
 func gmailAttachments(

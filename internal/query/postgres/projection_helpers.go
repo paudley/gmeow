@@ -4,7 +4,9 @@
 package postgres
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -60,7 +62,7 @@ func searchText(
 	for _, facet := range manifest.Facets {
 		parts = append(parts, facet.Kind, facet.Name)
 		if len(facet.Metadata) > 0 {
-			encoded, err := json.Marshal(facet.Metadata)
+			encoded, err := marshalPostgresJSON(facet.Metadata)
 			if err == nil {
 				parts = append(parts, string(encoded))
 			}
@@ -76,12 +78,63 @@ func searchText(
 		)
 	}
 
-	encoded, err := json.Marshal(annotations)
+	encoded, err := marshalPostgresJSON(annotations)
 	if err == nil {
 		parts = append(parts, string(encoded))
 	}
 
-	return truncateSearchText(strings.Join(parts, "\n"))
+	return truncateSearchText(stripPostgresNUL(strings.Join(parts, "\n")))
+}
+
+func marshalPostgresJSON(value any) ([]byte, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode postgres json payload: %w", err)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+
+	var decoded any
+
+	err = decoder.Decode(&decoded)
+	if err != nil {
+		return nil, fmt.Errorf("decode postgres json payload: %w", err)
+	}
+
+	sanitized, err := json.Marshal(sanitizePostgresJSON(decoded))
+	if err != nil {
+		return nil, fmt.Errorf("encode sanitized postgres json payload: %w", err)
+	}
+
+	return sanitized, nil
+}
+
+func sanitizePostgresJSON(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
+			result[stripPostgresNUL(key)] = sanitizePostgresJSON(item)
+		}
+
+		return result
+	case []any:
+		result := make([]any, 0, len(typed))
+		for _, item := range typed {
+			result = append(result, sanitizePostgresJSON(item))
+		}
+
+		return result
+	case string:
+		return stripPostgresNUL(typed)
+	default:
+		return value
+	}
+}
+
+func stripPostgresNUL(value string) string {
+	return strings.ReplaceAll(value, "\x00", "")
 }
 
 func truncateSearchText(text string) string {

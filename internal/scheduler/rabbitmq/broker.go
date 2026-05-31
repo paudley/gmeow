@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -43,6 +44,15 @@ const (
 	sourceImportRetryRoutingKey      = "source_import.retry"
 	sourceImportFailedRoutingKey     = "source_import.failed"
 	sourceImportDeadLetterRoutingKey = "source_import.dead"
+	rabbitMQChannelOpenTimeout       = 2 * time.Second
+	rabbitMQChannelOpenAttempts      = 2
+	rabbitMQStreamPrefetch           = 1000
+)
+
+var (
+	errBrokerClosed             = errors.New("rabbitmq broker is closed")
+	errObjectChangeFuncRequired = errors.New("object change function is required")
+	errConsumerStreamClosed     = errors.New("rabbitmq consumer stream closed")
 )
 
 type Config struct {
@@ -57,9 +67,26 @@ type Config struct {
 }
 
 type Broker struct {
-	connection *amqp.Connection
-	config     Config
-	topology   topology
+	mu             sync.Mutex
+	connection     *amqp.Connection
+	publishMu      sync.Mutex
+	publishChannel *amqp.Channel
+	consumeMu      sync.Mutex
+	consumeStreams map[string]*rabbitMQConsumerStream
+	adminMu        sync.Mutex
+	adminChannel   *amqp.Channel
+	config         Config
+	topology       topology
+}
+
+type rabbitMQConsumerStream struct {
+	channel    *amqp.Channel
+	deliveries <-chan amqp.Delivery
+}
+
+type channelOpenResult struct {
+	channel *amqp.Channel
+	err     error
 }
 
 type topology struct {
@@ -119,9 +146,7 @@ func New(ctx context.Context, cfg Config) (*Broker, error) {
 		cfg.RetryBackoff = 30 * time.Second
 	}
 
-	conn, err := amqp.DialConfig(cfg.URL, amqp.Config{
-		Properties: amqp.Table{"connection_name": "gmeow.scheduler"},
-	})
+	conn, err := dialRabbitMQ(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect rabbitmq: %w", err)
 	}
@@ -138,6 +163,17 @@ func New(ctx context.Context, cfg Config) (*Broker, error) {
 	}
 
 	return broker, nil
+}
+
+func dialRabbitMQ(cfg Config) (*amqp.Connection, error) {
+	conn, err := amqp.DialConfig(cfg.URL, amqp.Config{
+		Properties: amqp.Table{"connection_name": "gmeow.scheduler"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connect rabbitmq: %w", err)
+	}
+
+	return conn, nil
 }
 
 func ConfigFromResolved(
@@ -202,11 +238,10 @@ func newTopology(prefix string, analyzers []string) topology {
 }
 
 func (broker *Broker) Declare(ctx context.Context) error {
-	channel, err := broker.channel(ctx)
+	channel, err := broker.admin(ctx)
 	if err != nil {
 		return err
 	}
-	defer channel.Close()
 
 	if err := channel.ExchangeDeclare(
 		broker.topology.analysisExchange,
@@ -360,12 +395,6 @@ func (broker *Broker) declareAnalyzerQueues(channel *amqp.Channel) error {
 }
 
 func (broker *Broker) PurgeAll(ctx context.Context) (int, error) {
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer channel.Close()
-
 	total := 0
 
 	queues := []string{
@@ -382,13 +411,20 @@ func (broker *Broker) PurgeAll(ctx context.Context) (int, error) {
 		)
 	}
 
-	for _, queue := range queues {
-		purged, err := channel.QueuePurge(queue, false)
-		if err != nil {
-			return total, fmt.Errorf("purge queue %s: %w", queue, err)
+	err := broker.withAdmin(ctx, func(channel *amqp.Channel) error {
+		for _, queue := range queues {
+			purged, err := channel.QueuePurge(queue, false)
+			if err != nil {
+				return fmt.Errorf("purge queue %s: %w", queue, err)
+			}
+
+			total += purged
 		}
 
-		total += purged
+		return nil
+	})
+	if err != nil {
+		return total, err
 	}
 
 	return total, nil
@@ -400,15 +436,8 @@ func (broker *Broker) Publish(ctx context.Context, job contracts.AnalyzerJob) er
 		return err
 	}
 
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return err
-	}
-	defer channel.Close()
-
-	return publishConfirmed(
+	return broker.publishPersistent(
 		ctx,
-		channel,
 		broker.topology.analysisExchange,
 		broker.topology.workRoutingKeyFor(job.Analyzer.Name),
 		amqp.Publishing{
@@ -416,7 +445,7 @@ func (broker *Broker) Publish(ctx context.Context, job contracts.AnalyzerJob) er
 			DeliveryMode: amqp.Persistent,
 			MessageId:    job.IdempotencyKey,
 			Timestamp:    time.Now().UTC(),
-			Priority:     uint8(clampPriority(job.Priority)),
+			Priority:     clampPriority(job.Priority),
 			Headers: amqp.Table{
 				"idempotency_key": job.IdempotencyKey,
 				"attempt":         int32(job.Attempt),
@@ -426,66 +455,87 @@ func (broker *Broker) Publish(ctx context.Context, job contracts.AnalyzerJob) er
 	)
 }
 
-func (broker *Broker) PublishProjectionRefresh(
+func (broker *Broker) PublishObjectChanges(
 	ctx context.Context,
-	digest contracts.ObjectDigest,
+	request contracts.ObjectChangeRequest,
 ) error {
-	body, err := json.Marshal(map[string]string{"digest": string(digest)})
+	body, err := json.Marshal(request)
 	if err != nil {
 		return err
 	}
 
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return err
+	messageID := "object-change:" + time.Now().UTC().Format(time.RFC3339Nano)
+	if len(request.ObjectDigests) == 1 {
+		messageID = "object-change:" + string(request.ObjectDigests[0])
 	}
-	defer channel.Close()
 
-	return publishConfirmed(
+	return broker.publishPersistent(
 		ctx,
-		channel,
 		broker.topology.projectionExchange,
 		projectionRoutingKey,
 		amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
-			MessageId:    "projection:" + string(digest),
+			MessageId:    messageID,
 			Timestamp:    time.Now().UTC(),
 			Body:         body,
 		},
 	)
 }
 
-func (broker *Broker) Status(ctx context.Context) (contracts.SchedulerStatus, error) {
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return contracts.SchedulerStatus{}, err
-	}
-	defer channel.Close()
+func (broker *Broker) PublishProjectionRefresh(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+) error {
+	return broker.PublishObjectChanges(ctx, contracts.ObjectChangeRequest{
+		SchemaVersion:  contracts.SchemaVersionPhase00,
+		ObjectDigests:  []contracts.ObjectDigest{digest},
+		RequestedBy:    "scheduler",
+		Reason:         "projection_refresh",
+		ProjectionOnly: true,
+	})
+}
 
+func (broker *Broker) Status(ctx context.Context) (contracts.SchedulerStatus, error) {
 	pending := 0
 	retry := 0
-	for _, analyzer := range broker.topology.analyzers {
-		work, err := channel.QueueInspect(broker.topology.workQueueFor(analyzer))
-		if err != nil {
-			return contracts.SchedulerStatus{}, err
+
+	var failed, dead amqp.Queue
+
+	err := broker.withAdmin(ctx, func(channel *amqp.Channel) error {
+		var inspectErr error
+
+		for _, analyzer := range broker.topology.analyzers {
+			workQueue := broker.topology.workQueueFor(analyzer)
+
+			work, err := inspectQueue(channel, workQueue)
+			if err != nil {
+				return err
+			}
+
+			retryQueue := broker.topology.retryQueueFor(analyzer)
+
+			retryQ, err := inspectQueue(channel, retryQueue)
+			if err != nil {
+				return err
+			}
+
+			pending += work.Messages
+			retry += retryQ.Messages
 		}
 
-		retryQ, err := channel.QueueInspect(broker.topology.retryQueueFor(analyzer))
-		if err != nil {
-			return contracts.SchedulerStatus{}, err
+		failed, inspectErr = inspectQueue(channel, broker.topology.failedQueue)
+		if inspectErr != nil {
+			return inspectErr
 		}
 
-		pending += work.Messages
-		retry += retryQ.Messages
-	}
+		dead, inspectErr = inspectQueue(channel, broker.topology.deadLetterQueue)
+		if inspectErr != nil {
+			return inspectErr
+		}
 
-	failed, err := channel.QueueInspect(broker.topology.failedQueue)
-	if err != nil {
-		return contracts.SchedulerStatus{}, err
-	}
-
-	dead, err := channel.QueueInspect(broker.topology.deadLetterQueue)
+		return nil
+	})
 	if err != nil {
 		return contracts.SchedulerStatus{}, err
 	}
@@ -504,29 +554,35 @@ func (broker *Broker) Status(ctx context.Context) (contracts.SchedulerStatus, er
 func (broker *Broker) PerAnalyzerStatus(
 	ctx context.Context,
 ) ([]contracts.AnalyzerQueueDepth, error) {
-	channel, err := broker.channel(ctx)
+	depths := make([]contracts.AnalyzerQueueDepth, 0, len(broker.topology.analyzers))
+
+	err := broker.withAdmin(ctx, func(channel *amqp.Channel) error {
+		for _, analyzer := range broker.topology.analyzers {
+			workQueue := broker.topology.workQueueFor(analyzer)
+
+			work, err := inspectQueue(channel, workQueue)
+			if err != nil {
+				return err
+			}
+
+			retryQueue := broker.topology.retryQueueFor(analyzer)
+
+			retryQ, err := inspectQueue(channel, retryQueue)
+			if err != nil {
+				return err
+			}
+
+			depths = append(depths, contracts.AnalyzerQueueDepth{
+				Analyzer: analyzer,
+				Pending:  work.Messages,
+				Retry:    retryQ.Messages,
+			})
+		}
+
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	defer channel.Close()
-
-	depths := make([]contracts.AnalyzerQueueDepth, 0, len(broker.topology.analyzers))
-	for _, analyzer := range broker.topology.analyzers {
-		work, err := channel.QueueInspect(broker.topology.workQueueFor(analyzer))
-		if err != nil {
-			return nil, err
-		}
-
-		retryQ, err := channel.QueueInspect(broker.topology.retryQueueFor(analyzer))
-		if err != nil {
-			return nil, err
-		}
-
-		depths = append(depths, contracts.AnalyzerQueueDepth{
-			Analyzer: analyzer,
-			Pending:  work.Messages,
-			Retry:    retryQ.Messages,
-		})
 	}
 
 	return depths, nil
@@ -589,97 +645,112 @@ func (broker *Broker) ReconcilePending(
 		limit = 100
 	}
 
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return contracts.ReconcilePendingResponse{}, err
-	}
-	defer channel.Close()
-	confirms, err := enablePublishConfirms(channel)
-	if err != nil {
-		return contracts.ReconcilePendingResponse{}, err
-	}
-
 	response := contracts.ReconcilePendingResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 	}
 
-	// Drain any scratch left by a crashed prior run, routing each job back to its
-	// own analyzer's work queue.
-	moved, err := broker.drainReconcileByAnalyzer(ctx, channel, confirms)
-	if err != nil {
-		return response, err
-	}
-	response.Republished += moved
-
-	seen := map[string]bool{}
-	for _, analyzer := range broker.topology.analyzers {
-		workQueue := broker.topology.workQueueFor(analyzer)
-		for response.Checked < limit {
-			delivery, ok, err := channel.Get(workQueue, false)
-			if err != nil {
-				return response, err
-			}
-			if !ok {
-				break
-			}
-
-			var job contracts.AnalyzerJob
-			if err := json.Unmarshal(delivery.Body, &job); err != nil {
-				_ = delivery.Nack(false, true)
-
-				return response, err
-			}
-			response.Checked++
-
-			satisfied, err := isSatisfied(job)
-			if err != nil {
-				_ = delivery.Nack(false, true)
-
-				return response, err
-			}
-			if satisfied {
-				if err := delivery.Ack(false); err != nil {
-					return response, err
-				}
-				response.DroppedSatisfied++
-
-				continue
-			}
-			if seen[job.IdempotencyKey] {
-				if err := delivery.Ack(false); err != nil {
-					return response, err
-				}
-				response.DroppedDuplicate++
-
-				continue
-			}
-			seen[job.IdempotencyKey] = true
-			response.KeptJobs = append(response.KeptJobs, job)
-
-			if err := publishAndWaitConfirmed(
-				ctx,
-				channel,
-				confirms,
-				"",
-				broker.topology.reconcileQueue,
-				publishingFromDelivery(delivery),
-			); err != nil {
-				_ = delivery.Nack(false, true)
-
-				return response, err
-			}
-			if err := delivery.Ack(false); err != nil {
-				return response, err
-			}
-			response.Kept++
+	consumeErr := broker.withConsumer(ctx, func(channel *amqp.Channel) error {
+		// Drain any scratch left by a crashed prior run, routing each job back to its
+		// own analyzer's work queue.
+		moved, drainErr := broker.drainReconcileByAnalyzer(ctx, channel)
+		if drainErr != nil {
+			return drainErr
 		}
-	}
 
-	moved, err = broker.drainReconcileByAnalyzer(ctx, channel, confirms)
-	if err != nil {
-		return response, err
+		response.Republished += moved
+
+		seen := map[string]bool{}
+
+		for _, analyzer := range broker.topology.analyzers {
+			workQueue := broker.topology.workQueueFor(analyzer)
+
+			for response.Checked < limit {
+				delivery, received, getErr := broker.receiveDelivery(
+					ctx,
+					workQueue,
+					false,
+				)
+				if getErr != nil {
+					return getErr
+				}
+
+				if !received {
+					break
+				}
+
+				var job contracts.AnalyzerJob
+
+				unmarshalErr := json.Unmarshal(delivery.Body, &job)
+				if unmarshalErr != nil {
+					return nackAfterError(
+						delivery,
+						fmt.Errorf("decode reconcile job: %w", unmarshalErr),
+					)
+				}
+
+				response.Checked++
+
+				satisfied, satisfyErr := isSatisfied(job)
+				if satisfyErr != nil {
+					return nackAfterError(delivery, satisfyErr)
+				}
+
+				if satisfied {
+					ackErr := ackDelivery(delivery)
+					if ackErr != nil {
+						return ackErr
+					}
+
+					response.DroppedSatisfied++
+
+					continue
+				}
+
+				if seen[job.IdempotencyKey] {
+					ackErr := ackDelivery(delivery)
+					if ackErr != nil {
+						return ackErr
+					}
+
+					response.DroppedDuplicate++
+
+					continue
+				}
+
+				seen[job.IdempotencyKey] = true
+				response.KeptJobs = append(response.KeptJobs, job)
+
+				publishErr := broker.publishPersistent(
+					ctx,
+					"",
+					broker.topology.reconcileQueue,
+					publishingFromDelivery(delivery),
+				)
+				if publishErr != nil {
+					return nackAfterError(delivery, publishErr)
+				}
+
+				ackErr := ackDelivery(delivery)
+				if ackErr != nil {
+					return ackErr
+				}
+
+				response.Kept++
+			}
+		}
+
+		moved, drainErr = broker.drainReconcileByAnalyzer(ctx, channel)
+		if drainErr != nil {
+			return drainErr
+		}
+
+		response.Republished += moved
+
+		return nil
+	})
+	if consumeErr != nil {
+		return response, consumeErr
 	}
-	response.Republished += moved
 
 	return response, nil
 }
@@ -690,41 +761,46 @@ func (broker *Broker) ReconcilePending(
 func (broker *Broker) drainReconcileByAnalyzer(
 	ctx context.Context,
 	channel *amqp.Channel,
-	confirms <-chan amqp.Confirmation,
 ) (int, error) {
 	moved := 0
 	for {
-		delivery, ok, err := channel.Get(broker.topology.reconcileQueue, false)
+		delivery, received, err := broker.receiveDelivery(
+			ctx,
+			broker.topology.reconcileQueue,
+			false,
+		)
 		if err != nil {
 			return moved, err
 		}
-		if !ok {
+
+		if !received {
 			break
 		}
 
 		var job contracts.AnalyzerJob
-		if err := json.Unmarshal(delivery.Body, &job); err != nil {
-			_ = delivery.Nack(false, true)
 
-			return moved, err
+		unmarshalErr := json.Unmarshal(delivery.Body, &job)
+		if unmarshalErr != nil {
+			return moved, nackAfterError(
+				delivery,
+				fmt.Errorf("decode reconcile job: %w", unmarshalErr),
+			)
 		}
 
-		if err := publishAndWaitConfirmed(
+		publishErr := broker.publishPersistent(
 			ctx,
-			channel,
-			confirms,
 			broker.topology.analysisExchange,
 			broker.topology.workRoutingKeyFor(job.Analyzer.Name),
 			publishingFromDelivery(delivery),
-		); err != nil {
-			_ = delivery.Nack(false, true)
-
-			return moved, err
-		}
-		if err := delivery.Ack(false); err != nil {
-			return moved, err
+		)
+		if publishErr != nil {
+			return moved, nackAfterError(delivery, publishErr)
 		}
 
+		ackErr := ackDelivery(delivery)
+		if ackErr != nil {
+			return moved, ackErr
+		}
 		moved++
 	}
 
@@ -750,6 +826,44 @@ func publishingFromDelivery(delivery amqp.Delivery) amqp.Publishing {
 	}
 }
 
+func inspectQueue(channel *amqp.Channel, queue string) (amqp.Queue, error) {
+	declared, err := channel.QueueDeclarePassive(
+		queue,
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		return amqp.Queue{}, fmt.Errorf("inspect queue %s: %w", queue, err)
+	}
+
+	return declared, nil
+}
+
+func ackDelivery(delivery amqp.Delivery) error {
+	err := delivery.Ack(false)
+	if err != nil {
+		return fmt.Errorf("ack rabbitmq delivery: %w", err)
+	}
+
+	return nil
+}
+
+func nackDelivery(delivery amqp.Delivery, requeue bool) error {
+	err := delivery.Nack(false, requeue)
+	if err != nil {
+		return fmt.Errorf("nack rabbitmq delivery: %w", err)
+	}
+
+	return nil
+}
+
+func nackAfterError(delivery amqp.Delivery, cause error) error {
+	return errors.Join(cause, nackDelivery(delivery, true))
+}
+
 func (broker *Broker) peekJobs(
 	ctx context.Context,
 	queue string,
@@ -759,105 +873,185 @@ func (broker *Broker) peekJobs(
 		limit = 20
 	}
 
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer channel.Close()
-
 	jobs := []contracts.AnalyzerJob{}
 	deliveries := []amqp.Delivery{}
 
-	defer func() {
+	err := broker.withConsumer(ctx, func(channel *amqp.Channel) error {
+		for len(jobs) < limit {
+			delivery, ok, err := broker.receiveDelivery(ctx, queue, false)
+			if err != nil {
+				return err
+			}
+
+			if !ok {
+				break
+			}
+
+			var job contracts.AnalyzerJob
+
+			unmarshalErr := json.Unmarshal(delivery.Body, &job)
+			if unmarshalErr != nil {
+				return nackAfterError(
+					delivery,
+					fmt.Errorf("decode queued analyzer job: %w", unmarshalErr),
+				)
+			}
+
+			deliveries = append(deliveries, delivery)
+			jobs = append(jobs, job)
+		}
+
 		for _, delivery := range deliveries {
-			_ = delivery.Nack(false, true)
-		}
-	}()
-
-	for len(jobs) < limit {
-		delivery, ok, err := channel.Get(queue, false)
-		if err != nil {
-			return nil, err
+			nackErr := nackDelivery(delivery, true)
+			if nackErr != nil {
+				return nackErr
+			}
 		}
 
-		if !ok {
-			break
-		}
-
-		var job contracts.AnalyzerJob
-		if err := json.Unmarshal(delivery.Body, &job); err != nil {
-			_ = delivery.Nack(false, true)
-
-			return nil, err
-		}
-
-		deliveries = append(deliveries, delivery)
-		jobs = append(jobs, job)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return jobs, nil
 }
 
-func (broker *Broker) ProcessProjectionRefreshes(
+func (broker *Broker) ProcessObjectChanges(
 	ctx context.Context,
 	limit int,
-	refresh scheduler.ProjectionRefreshFunc,
+	process scheduler.ObjectChangeFunc,
 ) (int, error) {
-	if refresh == nil {
-		return 0, errors.New("projection refresh function is required")
+	if process == nil {
+		return 0, errObjectChangeFuncRequired
 	}
 	if limit <= 0 {
 		limit = 100
 	}
 
-	channel, err := broker.channel(ctx)
+	var processed int
+
+	err := broker.withConsumer(ctx, func(channel *amqp.Channel) error {
+		deliveries, readErr := broker.objectChangeDeliveries(
+			ctx,
+			broker.topology.projectionQueue,
+			limit,
+		)
+		if readErr != nil {
+			processed = len(deliveries)
+
+			return fmt.Errorf("read object change deliveries: %w", readErr)
+		}
+
+		if len(deliveries) == 0 {
+			return nil
+		}
+
+		requests, requestErr := objectChangeRequests(deliveries)
+		if requestErr != nil {
+			nackErr := nackDeliveries(deliveries, false)
+			if nackErr != nil {
+				return errors.Join(requestErr, nackErr)
+			}
+
+			return requestErr
+		}
+
+		processErr := process(ctx, requests)
+		if processErr != nil {
+			nackErr := nackDeliveries(deliveries, true)
+			if nackErr != nil {
+				return errors.Join(processErr, nackErr)
+			}
+
+			return fmt.Errorf("process object changes: %w", processErr)
+		}
+
+		acked, ackErr := ackDeliveries(deliveries)
+		processed = acked
+
+		return ackErr
+	})
 	if err != nil {
-		return 0, err
-	}
-	defer channel.Close()
-
-	deliveries := []amqp.Delivery{}
-	for len(deliveries) < limit {
-		delivery, ok, err := channel.Get(broker.topology.projectionQueue, false)
-		if err != nil {
-			return len(deliveries), err
-		}
-		if !ok {
-			break
-		}
-
-		deliveries = append(deliveries, delivery)
-	}
-	if len(deliveries) == 0 {
-		return 0, nil
+		return processed, err
 	}
 
-	digests := make([]contracts.ObjectDigest, 0, len(deliveries))
+	return processed, nil
+}
+
+func objectChangeRequests(
+	deliveries []amqp.Delivery,
+) ([]contracts.ObjectChangeRequest, error) {
+	requests := make([]contracts.ObjectChangeRequest, 0, len(deliveries))
+
 	for _, delivery := range deliveries {
-		digest, err := projectionRefreshDigest(delivery.Body)
+		request, err := objectChangeRequest(delivery.Body)
 		if err != nil {
-			_ = delivery.Nack(false, false)
-
-			return 0, err
-		}
-		digests = append(digests, digest)
-	}
-
-	if err := refresh(ctx, digests); err != nil {
-		for _, delivery := range deliveries {
-			_ = delivery.Nack(false, true)
+			return nil, err
 		}
 
-		return 0, err
+		requests = append(requests, request)
 	}
 
+	return requests, nil
+}
+
+func ackDeliveries(deliveries []amqp.Delivery) (int, error) {
 	for processed, delivery := range deliveries {
-		if err := delivery.Ack(false); err != nil {
-			return processed, err
+		err := delivery.Ack(false)
+		if err != nil {
+			return processed, fmt.Errorf("ack object change delivery: %w", err)
 		}
 	}
 
 	return len(deliveries), nil
+}
+
+func nackDeliveries(deliveries []amqp.Delivery, requeue bool) error {
+	var joined error
+
+	for _, delivery := range deliveries {
+		err := delivery.Nack(false, requeue)
+		if err != nil {
+			joined = errors.Join(
+				joined,
+				fmt.Errorf("nack object change delivery: %w", err),
+			)
+		}
+	}
+
+	return joined
+}
+
+func objectChangeRequest(body []byte) (contracts.ObjectChangeRequest, error) {
+	var request contracts.ObjectChangeRequest
+
+	err := json.Unmarshal(body, &request)
+	if err != nil {
+		return contracts.ObjectChangeRequest{}, fmt.Errorf(
+			"decode object change request: %w",
+			err,
+		)
+	}
+
+	if len(request.ObjectDigests) > 0 {
+		request.SchemaVersion = contracts.SchemaVersionPhase00
+
+		return request, nil
+	}
+
+	digest, err := projectionRefreshDigest(body)
+	if err != nil {
+		return contracts.ObjectChangeRequest{}, err
+	}
+
+	return contracts.ObjectChangeRequest{
+		SchemaVersion:  contracts.SchemaVersionPhase00,
+		ObjectDigests:  []contracts.ObjectDigest{digest},
+		RequestedBy:    "scheduler",
+		Reason:         "projection_refresh",
+		ProjectionOnly: true,
+	}, nil
 }
 
 func projectionRefreshDigest(body []byte) (contracts.ObjectDigest, error) {
@@ -883,68 +1077,72 @@ func (broker *Broker) RequeueDeadLetters(
 		limit = 20
 	}
 
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer channel.Close()
-	confirms, err := enablePublishConfirms(channel)
-	if err != nil {
-		return 0, err
-	}
-
 	requeued := 0
-	for requeued < limit {
-		delivery, ok, err := channel.Get(broker.topology.deadLetterQueue, false)
-		if err != nil {
-			return requeued, err
+
+	consumeErr := broker.withConsumer(ctx, func(channel *amqp.Channel) error {
+		for requeued < limit {
+			delivery, received, getErr := broker.receiveDelivery(
+				ctx,
+				broker.topology.deadLetterQueue,
+				false,
+			)
+			if getErr != nil {
+				return getErr
+			}
+
+			if !received {
+				break
+			}
+
+			var job contracts.AnalyzerJob
+
+			unmarshalErr := json.Unmarshal(delivery.Body, &job)
+			if unmarshalErr != nil {
+				return nackAfterError(
+					delivery,
+					fmt.Errorf("decode dead-letter job: %w", unmarshalErr),
+				)
+			}
+
+			job.Attempt = 0
+
+			body, marshalErr := json.Marshal(job)
+			if marshalErr != nil {
+				return nackAfterError(
+					delivery,
+					fmt.Errorf("encode requeued dead-letter job: %w", marshalErr),
+				)
+			}
+
+			publishErr := broker.publishPersistent(
+				ctx,
+				broker.topology.analysisExchange,
+				broker.topology.workRoutingKeyFor(job.Analyzer.Name),
+				amqp.Publishing{
+					ContentType:  "application/json",
+					DeliveryMode: amqp.Persistent,
+					MessageId:    job.IdempotencyKey,
+					Timestamp:    time.Now().UTC(),
+					Priority:     clampPriority(job.Priority),
+					Body:         body,
+				},
+			)
+			if publishErr != nil {
+				return nackAfterError(delivery, publishErr)
+			}
+
+			ackErr := ackDelivery(delivery)
+			if ackErr != nil {
+				return ackErr
+			}
+
+			requeued++
 		}
 
-		if !ok {
-			break
-		}
-
-		var job contracts.AnalyzerJob
-		if err := json.Unmarshal(delivery.Body, &job); err != nil {
-			_ = delivery.Nack(false, true)
-
-			return requeued, err
-		}
-
-		job.Attempt = 0
-
-		body, err := json.Marshal(job)
-		if err != nil {
-			_ = delivery.Nack(false, true)
-
-			return requeued, err
-		}
-
-		if err := publishAndWaitConfirmed(
-			ctx,
-			channel,
-			confirms,
-			broker.topology.analysisExchange,
-			broker.topology.workRoutingKeyFor(job.Analyzer.Name),
-			amqp.Publishing{
-				ContentType:  "application/json",
-				DeliveryMode: amqp.Persistent,
-				MessageId:    job.IdempotencyKey,
-				Timestamp:    time.Now().UTC(),
-				Priority:     uint8(clampPriority(job.Priority)),
-				Body:         body,
-			},
-		); err != nil {
-			_ = delivery.Nack(false, true)
-
-			return requeued, err
-		}
-
-		if err := delivery.Ack(false); err != nil {
-			return requeued, err
-		}
-
-		requeued++
+		return nil
+	})
+	if consumeErr != nil {
+		return requeued, consumeErr
 	}
 
 	return requeued, nil
@@ -958,67 +1156,72 @@ func (broker *Broker) ProcessFailures(
 		limit = 100
 	}
 
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer channel.Close()
-	confirms, err := enablePublishConfirms(channel)
-	if err != nil {
-		return 0, err
-	}
-
 	processed := 0
-	for processed < limit {
-		delivery, ok, err := channel.Get(broker.topology.failedQueue, false)
-		if err != nil {
-			return processed, err
+
+	consumeErr := broker.withConsumer(ctx, func(channel *amqp.Channel) error {
+		for processed < limit {
+			delivery, received, getErr := broker.receiveDelivery(
+				ctx,
+				broker.topology.failedQueue,
+				processed == 0,
+			)
+			if getErr != nil {
+				return getErr
+			}
+
+			if !received {
+				break
+			}
+
+			var job contracts.AnalyzerJob
+
+			unmarshalErr := json.Unmarshal(delivery.Body, &job)
+			if unmarshalErr != nil {
+				return nackAfterError(
+					delivery,
+					fmt.Errorf("decode failed analyzer job: %w", unmarshalErr),
+				)
+			}
+
+			job.Attempt++
+
+			routingKey := broker.topology.retryRoutingKeyFor(job.Analyzer.Name)
+			if job.Attempt > broker.config.RetryLimit {
+				routingKey = deadLetterRoutingKey
+			}
+
+			body, marshalErr := json.Marshal(job)
+			if marshalErr != nil {
+				return nackAfterError(
+					delivery,
+					fmt.Errorf("encode retried analyzer job: %w", marshalErr),
+				)
+			}
+
+			publishing := broker.retryPublishing(job, body)
+
+			publishErr := broker.publishPersistent(
+				ctx,
+				broker.topology.analysisExchange,
+				routingKey,
+				publishing,
+			)
+			if publishErr != nil {
+				return nackAfterError(delivery, publishErr)
+			}
+
+			ackErr := ackDelivery(delivery)
+			if ackErr != nil {
+				return ackErr
+			}
+
+			processed++
 		}
 
-		if !ok {
-			break
-		}
-
-		var job contracts.AnalyzerJob
-		if err := json.Unmarshal(delivery.Body, &job); err != nil {
-			_ = delivery.Nack(false, true)
-
-			return processed, err
-		}
-
-		job.Attempt++
-
-		routingKey := broker.topology.retryRoutingKeyFor(job.Analyzer.Name)
-		if job.Attempt > broker.config.RetryLimit {
-			routingKey = deadLetterRoutingKey
-		}
-
-		body, err := json.Marshal(job)
-		if err != nil {
-			_ = delivery.Nack(false, true)
-
-			return processed, err
-		}
-
-		publishing := broker.retryPublishing(job, body)
-		if err := publishAndWaitConfirmed(
-			ctx,
-			channel,
-			confirms,
-			broker.topology.analysisExchange,
-			routingKey,
-			publishing,
-		); err != nil {
-			_ = delivery.Nack(false, true)
-
-			return processed, err
-		}
-
-		if err := delivery.Ack(false); err != nil {
-			return processed, err
-		}
-
-		processed++
+		return nil
+	})
+	if consumeErr != nil {
+		return processed, consumeErr
 	}
 
 	return processed, nil
@@ -1028,12 +1231,6 @@ func (broker *Broker) RouteFailure(
 	ctx context.Context,
 	job contracts.AnalyzerJob,
 ) error {
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return err
-	}
-	defer channel.Close()
-
 	job.Attempt++
 
 	// Retry queues are bound per analyzer; the aggregate "analysis.retry" key is
@@ -1048,9 +1245,8 @@ func (broker *Broker) RouteFailure(
 		return err
 	}
 
-	return publishConfirmed(
+	return broker.publishPersistent(
 		ctx,
-		channel,
 		broker.topology.analysisExchange,
 		routingKey,
 		broker.retryPublishing(job, body),
@@ -1075,7 +1271,7 @@ func (broker *Broker) retryPublishing(
 		DeliveryMode: amqp.Persistent,
 		MessageId:    job.IdempotencyKey,
 		Timestamp:    time.Now().UTC(),
-		Priority:     uint8(clampPriority(job.Priority)),
+		Priority:     clampPriority(job.Priority),
 		Headers:      headers,
 		Body:         body,
 	}
@@ -1099,94 +1295,431 @@ func (broker *Broker) retryBackoff(attempt int) time.Duration {
 	return backoff
 }
 
-func publishConfirmed(
-	ctx context.Context,
-	channel *amqp.Channel,
-	exchange string,
-	routingKey string,
-	publishing amqp.Publishing,
-) error {
-	confirms, err := enablePublishConfirms(channel)
-	if err != nil {
-		return err
+func (broker *Broker) Close() error {
+	var joined error
+
+	broker.publishMu.Lock()
+	if broker.publishChannel != nil {
+		err := broker.publishChannel.Close()
+		if err != nil {
+			joined = errors.Join(joined, fmt.Errorf("close rabbitmq publisher: %w", err))
+		}
+
+		broker.publishChannel = nil
+	}
+	broker.publishMu.Unlock()
+
+	broker.consumeMu.Lock()
+	for queue, stream := range broker.consumeStreams {
+		err := stream.channel.Close()
+		if err != nil {
+			joined = errors.Join(
+				joined,
+				fmt.Errorf("close rabbitmq consumer %s: %w", queue, err),
+			)
+		}
 	}
 
-	return publishAndWaitConfirmed(
-		ctx,
-		channel,
-		confirms,
-		exchange,
-		routingKey,
-		publishing,
-	)
-}
+	broker.consumeStreams = nil
+	broker.consumeMu.Unlock()
 
-func enablePublishConfirms(channel *amqp.Channel) (<-chan amqp.Confirmation, error) {
-	if err := channel.Confirm(false); err != nil {
-		return nil, fmt.Errorf("enable publish confirms: %w", err)
+	broker.adminMu.Lock()
+	if broker.adminChannel != nil {
+		err := broker.adminChannel.Close()
+		if err != nil {
+			joined = errors.Join(joined, fmt.Errorf("close rabbitmq admin: %w", err))
+		}
+
+		broker.adminChannel = nil
+	}
+	broker.adminMu.Unlock()
+
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+
+	if broker.connection == nil {
+		return joined
 	}
 
-	return channel.NotifyPublish(make(chan amqp.Confirmation, 1)), nil
+	err := broker.connection.Close()
+	broker.connection = nil
+
+	if err != nil {
+		joined = errors.Join(joined, fmt.Errorf("close rabbitmq connection: %w", err))
+	}
+
+	return joined
 }
 
-func publishAndWaitConfirmed(
+func (broker *Broker) receiveDelivery(
 	ctx context.Context,
-	channel *amqp.Channel,
-	confirms <-chan amqp.Confirmation,
-	exchange string,
-	routingKey string,
-	publishing amqp.Publishing,
-) error {
-	err := channel.PublishWithContext(
-		ctx,
-		exchange,
-		routingKey,
-		false,
-		false,
-		publishing,
-	)
+	queue string,
+	wait bool,
+) (amqp.Delivery, bool, error) {
+	deliveries, err := broker.consumerStream(ctx, queue)
 	if err != nil {
-		return err
+		return amqp.Delivery{}, false, err
+	}
+
+	if wait {
+		select {
+		case delivery, received := <-deliveries:
+			if !received {
+				broker.resetConsumerStream(queue)
+
+				return amqp.Delivery{}, false, fmt.Errorf(
+					"%w: %s",
+					errConsumerStreamClosed,
+					queue,
+				)
+			}
+
+			return delivery, true, nil
+		case <-ctx.Done():
+			return amqp.Delivery{}, false, fmt.Errorf(
+				"receive queue %s: %w",
+				queue,
+				ctx.Err(),
+			)
+		}
 	}
 
 	select {
-	case confirmation := <-confirms:
-		if !confirmation.Ack {
-			return errors.New("rabbitmq publish was not confirmed")
+	case delivery, received := <-deliveries:
+		if !received {
+			broker.resetConsumerStream(queue)
+
+			return amqp.Delivery{}, false, fmt.Errorf(
+				"%w: %s",
+				errConsumerStreamClosed,
+				queue,
+			)
 		}
 
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		return delivery, true, nil
+	default:
+		return amqp.Delivery{}, false, nil
 	}
 }
 
-func (broker *Broker) Close() error {
-	if broker.connection == nil {
-		return nil
+func (broker *Broker) consumerStream(
+	ctx context.Context,
+	queue string,
+) (<-chan amqp.Delivery, error) {
+	broker.consumeMu.Lock()
+	defer broker.consumeMu.Unlock()
+
+	if broker.consumeStreams != nil {
+		if stream, ok := broker.consumeStreams[queue]; ok {
+			return stream.deliveries, nil
+		}
 	}
 
-	return broker.connection.Close()
-}
-
-func (broker *Broker) channel(ctx context.Context) (*amqp.Channel, error) {
-	if err := ctx.Err(); err != nil {
+	channel, err := broker.channel(ctx)
+	if err != nil {
 		return nil, err
 	}
 
-	if broker.connection == nil {
-		return nil, errors.New("rabbitmq broker is closed")
+	qosErr := channel.Qos(rabbitMQStreamPrefetch, 0, false)
+	if qosErr != nil {
+		_ = channel.Close()
+
+		return nil, fmt.Errorf("set rabbitmq consumer qos for queue %s: %w", queue, qosErr)
 	}
 
-	channel, err := broker.connection.Channel()
+	deliveries, err := channel.Consume(
+		queue,
+		"gmeow."+queue,
+		false,
+		false,
+		false,
+		false,
+		nil,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("open rabbitmq channel: %w", err)
+		_ = channel.Close()
+
+		return nil, fmt.Errorf("consume queue %s: %w", queue, err)
 	}
+
+	if broker.consumeStreams == nil {
+		broker.consumeStreams = map[string]*rabbitMQConsumerStream{}
+	}
+
+	broker.consumeStreams[queue] = &rabbitMQConsumerStream{
+		channel:    channel,
+		deliveries: deliveries,
+	}
+
+	return deliveries, nil
+}
+
+func (broker *Broker) resetConsumerStream(queue string) {
+	broker.consumeMu.Lock()
+	defer broker.consumeMu.Unlock()
+
+	if broker.consumeStreams == nil {
+		return
+	}
+
+	stream, ok := broker.consumeStreams[queue]
+	if !ok {
+		return
+	}
+
+	delete(broker.consumeStreams, queue)
+	closeRabbitMQChannelAsync(stream.channel)
+}
+
+func (broker *Broker) objectChangeDeliveries(
+	ctx context.Context,
+	queue string,
+	limit int,
+) ([]amqp.Delivery, error) {
+	deliveries := []amqp.Delivery{}
+
+	for len(deliveries) < limit {
+		delivery, received, err := broker.receiveDelivery(
+			ctx,
+			queue,
+			len(deliveries) == 0,
+		)
+		if err != nil {
+			return deliveries, fmt.Errorf("receive object change delivery: %w", err)
+		}
+
+		if !received {
+			break
+		}
+
+		deliveries = append(deliveries, delivery)
+	}
+
+	return deliveries, nil
+}
+
+func (broker *Broker) publishPersistent(
+	ctx context.Context,
+	exchange string,
+	routingKey string,
+	publishing amqp.Publishing,
+) error {
+	broker.publishMu.Lock()
+	defer broker.publishMu.Unlock()
+
+	channel, err := broker.publisher(ctx)
+	if err != nil {
+		return err
+	}
+
+	err = channel.PublishWithContext(ctx, exchange, routingKey, false, false, publishing)
+	if err != nil {
+		broker.resetPublisher()
+
+		return fmt.Errorf("publish rabbitmq message: %w", err)
+	}
+
+	return nil
+}
+
+func (broker *Broker) publisher(
+	ctx context.Context,
+) (*amqp.Channel, error) {
+	if broker.publishChannel != nil {
+		return broker.publishChannel, nil
+	}
+
+	channel, err := broker.channel(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	broker.publishChannel = channel
 
 	return channel, nil
 }
 
-func clampPriority(priority int) int {
+func (broker *Broker) resetPublisher() {
+	if broker.publishChannel == nil {
+		return
+	}
+
+	channel := broker.publishChannel
+
+	broker.publishChannel = nil
+
+	closeRabbitMQChannelAsync(channel)
+}
+
+func (broker *Broker) withConsumer(
+	ctx context.Context,
+	operation func(*amqp.Channel) error,
+) error {
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("use rabbitmq consumer: %w", err)
+	}
+
+	return operation(nil)
+}
+
+func (broker *Broker) withAdmin(
+	ctx context.Context,
+	operation func(*amqp.Channel) error,
+) error {
+	broker.adminMu.Lock()
+	defer broker.adminMu.Unlock()
+
+	channel, err := broker.admin(ctx)
+	if err != nil {
+		return err
+	}
+
+	err = operation(channel)
+	if err != nil {
+		broker.resetAdmin()
+
+		return err
+	}
+
+	return nil
+}
+
+func (broker *Broker) admin(ctx context.Context) (*amqp.Channel, error) {
+	if broker.adminChannel != nil {
+		return broker.adminChannel, nil
+	}
+
+	channel, err := broker.channel(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	broker.adminChannel = channel
+
+	return channel, nil
+}
+
+func (broker *Broker) resetAdmin() {
+	if broker.adminChannel == nil {
+		return
+	}
+
+	channel := broker.adminChannel
+
+	broker.adminChannel = nil
+
+	closeRabbitMQChannelAsync(channel)
+}
+
+func (broker *Broker) channel(ctx context.Context) (*amqp.Channel, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, fmt.Errorf("open rabbitmq channel: %w", err)
+	}
+
+	var lastErr error
+
+	for range rabbitMQChannelOpenAttempts {
+		conn, err := broker.currentConnection()
+		if err != nil {
+			return nil, err
+		}
+
+		channel, err := openRabbitMQChannel(ctx, conn)
+		if err == nil {
+			return channel, nil
+		}
+
+		lastErr = err
+
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("open rabbitmq channel: %w", err)
+		}
+
+		err = broker.reconnect(ctx, conn)
+		if err != nil {
+			return nil, errors.Join(lastErr, err)
+		}
+	}
+
+	return nil, fmt.Errorf("open rabbitmq channel after reconnect: %w", lastErr)
+}
+
+func (broker *Broker) currentConnection() (*amqp.Connection, error) {
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+
+	if broker.connection == nil {
+		return nil, errBrokerClosed
+	}
+
+	return broker.connection, nil
+}
+
+func openRabbitMQChannel(
+	ctx context.Context,
+	conn *amqp.Connection,
+) (*amqp.Channel, error) {
+	openCtx, cancel := context.WithTimeout(ctx, rabbitMQChannelOpenTimeout)
+	defer cancel()
+
+	resultc := make(chan channelOpenResult, 1)
+
+	go func() {
+		channel, err := conn.Channel()
+		resultc <- channelOpenResult{channel: channel, err: err}
+	}()
+
+	select {
+	case result := <-resultc:
+		if result.err != nil {
+			return nil, fmt.Errorf("open rabbitmq channel: %w", result.err)
+		}
+
+		return result.channel, nil
+	case <-openCtx.Done():
+		return nil, fmt.Errorf("open rabbitmq channel: %w", openCtx.Err())
+	}
+}
+
+func closeRabbitMQChannelAsync(channel *amqp.Channel) {
+	go func() {
+		_ = channel.Close()
+	}()
+}
+
+func (broker *Broker) reconnect(
+	ctx context.Context,
+	stale *amqp.Connection,
+) error {
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("reconnect rabbitmq: %w", err)
+	}
+
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+
+	if broker.connection != stale {
+		return nil
+	}
+
+	conn, err := dialRabbitMQ(broker.config)
+	if err != nil {
+		return err
+	}
+
+	broker.connection = conn
+
+	go func() {
+		_ = stale.Close()
+	}()
+
+	return nil
+}
+
+func clampPriority(priority int) uint8 {
 	if priority < 0 {
 		return 0
 	}
@@ -1195,7 +1728,7 @@ func clampPriority(priority int) int {
 		return 100
 	}
 
-	return priority
+	return uint8(priority)
 }
 
 var _ scheduler.Broker = (*Broker)(nil)
