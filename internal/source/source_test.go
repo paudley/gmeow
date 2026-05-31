@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -117,7 +119,7 @@ func TestBackfillSkipsConcurrentSourceIngestClaim(t *testing.T) {
 	}
 }
 
-func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
+func TestGmailMessageCreatesCompoundWithoutRawMessageDuplicate(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
 	defer filestoreService.Close()
@@ -174,7 +176,6 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 	for _, role := range []string{
 		"rfc822_headers",
 		"email_body",
-		"gmail_data",
 		"mime_structure",
 		"attachment",
 	} {
@@ -193,7 +194,7 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 	}
 	if labels := stringSliceValue(metadata["label_ids"]); len(labels) != 2 ||
 		labels[0] != "INBOX" || labels[1] != "UNREAD" {
-		t.Fatalf("expected Gmail label IDs in mail facet metadata, got %#v", metadata)
+		t.Fatalf("expected Gmail label IDs in mail_message facet, got %#v", metadata)
 	}
 	if !hasRelationship(
 		manifest.Relationships,
@@ -218,6 +219,96 @@ func TestGmailMessageCreatesCompoundWithoutRawRFC822Duplicate(t *testing.T) {
 			"compound manifest missing part_of relationship: %#v",
 			manifest.Relationships,
 		)
+	}
+}
+
+func TestGmailRawMessageCollapsesOntoArchiveMailMessage(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+
+	raw := []byte(strings.Join([]string{
+		"Message-ID: <same@example.test>",
+		"Subject: Same data",
+		"From: Sender <sender@example.test>",
+		"To: Receiver <receiver@example.test>",
+		"",
+		"hello body",
+	}, "\r\n"))
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "same.eml"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Format:     ArchiveImportFormatEMLDir,
+		Roots:      []string{root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Imported != 1 {
+		t.Fatalf("expected archive import, got %#v", report)
+	}
+	archiveDigest, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind: contracts.MailArchiveSourceKind,
+			SourceName: "archive",
+			ExternalID: "same.eml",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("archive source object was not indexed")
+	}
+
+	service, err := NewService(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := NewGmailAdapter("primary", gmailExternalBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gmailDigest, _, err := adapter.IngestMessage(ctx, service, GmailMessage{
+		MessageID:  "gmail-1",
+		Version:    "h1",
+		ThreadID:   "thread-1",
+		Metadata:   map[string]any{"label_ids": []string{"INBOX"}},
+		RawMessage: raw,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gmailDigest != archiveDigest {
+		t.Fatalf(
+			"expected same canonical digest, archive=%s gmail=%s",
+			archiveDigest,
+			gmailDigest,
+		)
+	}
+	manifest, err := filestoreService.Client.ReadManifest(ctx, gmailDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ObjectID != "mail_message:<same@example.test>" {
+		t.Fatalf("expected canonical mail_message object id, got %q", manifest.ObjectID)
+	}
+	metadata := mailMessageMetadataForTest(t, manifest)
+	if metadata["rfc_message_id"] != "<same@example.test>" {
+		t.Fatalf("expected canonical RFC Message-ID, got %#v", metadata)
+	}
+	if labels := stringSliceValue(metadata["label_ids"]); len(labels) != 1 ||
+		labels[0] != "INBOX" {
+		t.Fatalf("expected Gmail labels in canonical mail facet, got %#v", metadata)
 	}
 }
 

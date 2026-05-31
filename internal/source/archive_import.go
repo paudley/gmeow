@@ -1392,29 +1392,43 @@ func parseArchiveMessage(
 	path, root, format string,
 	offset int,
 ) (archiveMessage, error) {
+	message, err := parseMailMessage(raw, path)
+	if err != nil {
+		return archiveMessage{}, err
+	}
+
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return archiveMessage{}, fmt.Errorf("resolve archive message path: %w", err)
+	}
+
+	message.ObservedAt = time.Now().UTC()
+	message.SourcePath = filepath.Clean(path)
+	message.Mailbox = archiveMailbox(rel, format)
+	message.Format = format
+	message.ExternalID = archiveExternalID(rel, offset)
+	message.ExternalVersion = archiveExternalVersion(raw)
+
+	return message, nil
+}
+
+func parseMailMessage(raw []byte, path string) (archiveMessage, error) {
 	parsed, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
 		return archiveMessage{}, fmt.Errorf("parse mail %s: %w", path, err)
 	}
 	body, attachments := extractMailBodyAndAttachments(parsed.Header, parsed.Body)
 	headers := headerMap(parsed.Header)
-	rel, _ := filepath.Rel(root, path)
 	message := archiveMessage{
-		ObservedAt:      time.Now().UTC(),
-		SourcePath:      filepath.Clean(path),
-		Mailbox:         archiveMailbox(rel, format),
-		Format:          format,
-		ExternalID:      archiveExternalID(rel, offset),
-		ExternalVersion: archiveExternalVersion(raw),
-		Raw:             raw,
-		Headers:         headers,
-		Body:            body,
-		BodyMediaType:   "text/plain",
-		Attachments:     attachments,
-		Subject:         headers["subject"],
-		Date:            headers["date"],
-		From:            headers["from"],
-		To:              headers["to"],
+		Raw:           raw,
+		Headers:       headers,
+		Body:          body,
+		BodyMediaType: "text/plain",
+		Attachments:   attachments,
+		Subject:       headers["subject"],
+		Date:          headers["date"],
+		From:          headers["from"],
+		To:            headers["to"],
 	}
 	message.MessageID = normalizeArchiveMessageID(headers["message-id"])
 	message.BodyLineHash = canonicalBodyLineFingerprint(message.Body)

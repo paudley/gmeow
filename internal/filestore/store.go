@@ -1238,24 +1238,52 @@ func mergeMaps(existing, incoming map[string]any) map[string]any {
 }
 
 func mergeFacets(existing, incoming []contracts.Facet) []contracts.Facet {
-	incomingKinds := map[string]bool{}
-	for _, item := range incoming {
+	result := make([]contracts.Facet, 0, len(existing)+len(incoming))
+	indexByKind := map[string]int{}
+
+	for _, item := range existing {
 		kind := strings.TrimSpace(item.FacetKind())
 		if kind != "" {
-			incomingKinds[kind] = true
-		}
-	}
-
-	result := make([]contracts.Facet, 0, len(existing)+len(incoming))
-	for _, item := range existing {
-		if incomingKinds[strings.TrimSpace(item.FacetKind())] {
-			continue
+			indexByKind[kind] = len(result)
 		}
 		result = append(result, item)
 	}
-	result = append(result, incoming...)
+
+	for _, item := range incoming {
+		kind := strings.TrimSpace(item.FacetKind())
+		if index, ok := indexByKind[kind]; ok && kind != "" {
+			result[index] = mergeFacet(result[index], item)
+
+			continue
+		}
+
+		result = append(result, item)
+		if kind != "" {
+			indexByKind[kind] = len(result) - 1
+		}
+	}
 
 	return normalizeFacets(result)
+}
+
+func mergeFacet(existing, incoming contracts.Facet) contracts.Facet {
+	merged := existing
+	if incoming.Kind != "" {
+		merged.Kind = incoming.Kind
+	}
+
+	if incoming.Name != "" {
+		merged.Name = incoming.Name
+	}
+
+	if incoming.Version != "" {
+		merged.Version = incoming.Version
+	}
+
+	merged.Metadata = mergeMaps(existing.Metadata, incoming.Metadata)
+	merged.Attributes = mergeMaps(existing.Attributes, incoming.Attributes)
+
+	return merged
 }
 
 func provenanceMergeKey(item contracts.Provenance) string {

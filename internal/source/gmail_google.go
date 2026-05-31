@@ -201,7 +201,7 @@ func (backend *GoogleGmailBackend) GetMessage(
 	messageID string,
 ) (GmailMessage, error) {
 	message, err := backend.service.Users.Messages.Get(backend.userID, messageID).
-		Format("full").
+		Format("raw").
 		Context(ctx).
 		Do()
 	if err != nil {
@@ -216,6 +216,18 @@ func (backend *GoogleGmailBackend) GetMessage(
 		ThreadID:     message.ThreadId,
 		Snippet:      message.Snippet,
 		BodyMediaTyp: "text/plain",
+	}
+	if message.Raw != "" {
+		raw, decodeErr := decodeGmailData(message.Raw)
+		if decodeErr != nil {
+			return GmailMessage{}, fmt.Errorf(
+				"decode gmail raw message %s: %w",
+				messageID,
+				decodeErr,
+			)
+		}
+
+		converted.RawMessage = raw
 	}
 	collectGmailPart(message.Payload, &converted)
 	if converted.Subject == "" {
@@ -294,11 +306,20 @@ func collectGmailPart(part *gmail.MessagePart, message *GmailMessage) {
 }
 
 func decodeGmailData(value string) ([]byte, error) {
-	if decoded, err := base64.RawURLEncoding.DecodeString(value); err == nil {
+	decoded, rawErr := base64.RawURLEncoding.DecodeString(value)
+	if rawErr == nil {
 		return decoded, nil
 	}
 
-	return base64.URLEncoding.DecodeString(value)
+	decoded, paddedErr := base64.URLEncoding.DecodeString(value)
+	if paddedErr != nil {
+		return nil, fmt.Errorf(
+			"decode gmail base64 payload: %w",
+			errors.Join(rawErr, paddedErr),
+		)
+	}
+
+	return decoded, nil
 }
 
 func stringList(value any) []string {
