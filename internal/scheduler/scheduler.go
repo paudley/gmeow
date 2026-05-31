@@ -737,7 +737,6 @@ func (service *Service) selfHealChunk(ctx context.Context) {
 	count := 0
 	chunkSize := service.config.SelfHealChunkSize
 	started := false
-	wrapped := false
 	lastDigest := ""
 
 	scanRequest := contracts.SchedulerScanRequest{
@@ -804,7 +803,9 @@ func (service *Service) selfHealChunk(ctx context.Context) {
 	}
 
 	service.mu.Lock()
-	if count < chunkSize && !wrapped {
+	if count < chunkSize {
+		// Fewer than a full chunk means the walk reached the end of the corpus;
+		// reset the cursor so the next sweep restarts from a fresh random position.
 		service.sweepPos = ""
 	} else {
 		service.sweepPos = lastDigest

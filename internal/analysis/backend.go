@@ -201,6 +201,12 @@ func newBackendPool(spec BackendSpec, idleTimeout time.Duration) *backendPool {
 }
 
 func (pool *backendPool) acquire(ctx context.Context) (*backend, error) {
+	// Bail before the select below: a cancelled ctx must not win the pseudo-random
+	// race against an available slot and spawn an unwanted (heavy) backend.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Prefer a ready backend, then a free capacity slot to spawn a new one.
 	select {
 	case backend := <-pool.idle:
@@ -346,10 +352,11 @@ func (pool *backendPool) spawn(_ context.Context) (*backend, error) {
 }
 
 type backend struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   *bufio.Reader
-	lastUsed time.Time
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    *bufio.Reader
+	lastUsed  time.Time
+	closeOnce sync.Once
 }
 
 // roundTrip sends one request and reads one response. alive reports whether the
@@ -425,22 +432,26 @@ func (backend *backend) readLine(
 }
 
 func (backend *backend) close() {
-	// Closing stdin signals EOF so the backend exits its loop cleanly; fall back
-	// to a kill if it does not exit promptly (also unblocks any pending readLine).
-	_ = backend.stdin.Close()
+	// close may be called concurrently (a pool discard/reap racing BackendManager
+	// shutdown); cmd.Wait must run exactly once, so serialize the whole teardown.
+	backend.closeOnce.Do(func() {
+		// Closing stdin signals EOF so the backend exits its loop cleanly; fall back
+		// to a kill if it does not exit promptly (also unblocks any pending readLine).
+		_ = backend.stdin.Close()
 
-	done := make(chan struct{})
-	go func() {
-		_ = backend.cmd.Wait()
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			_ = backend.cmd.Wait()
+			close(done)
+		}()
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		if backend.cmd.Process != nil {
-			_ = backend.cmd.Process.Kill()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			if backend.cmd.Process != nil {
+				_ = backend.cmd.Process.Kill()
+			}
+			<-done
 		}
-		<-done
-	}
+	})
 }

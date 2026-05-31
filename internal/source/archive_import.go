@@ -1071,6 +1071,13 @@ func (importer *ArchiveImporter) ingestMessageParts(
 	var waitGroup sync.WaitGroup
 
 	for index := range jobs {
+		// Stop acquiring the semaphore and spawning goroutines once the context is
+		// cancelled; remaining jobs would only fail fast inside Ingest anyway.
+		if err := ctx.Err(); err != nil {
+			errs[index] = err
+
+			continue
+		}
 		waitGroup.Add(1)
 		importer.acquireIngest()
 		go func(index int) {
