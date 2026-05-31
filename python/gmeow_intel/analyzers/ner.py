@@ -75,6 +75,11 @@ def analyze(request: ExternalCommandRequest) -> Annotation:
     )
 
 
+def warmup() -> None:
+    """Load the spaCy model so a persistent backend is ready before serving."""
+    _nlp()
+
+
 @cache
 def _nlp() -> _NLPLike:
     try:

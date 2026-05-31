@@ -20,10 +20,10 @@ import (
 )
 
 func TestQueueNamesUseGmeowDotPrefix(t *testing.T) {
-	topology := newTopology(testQueuePrefix)
+	topology := newTopology(testQueuePrefix, []string{"rfc822.headers"})
 	for _, name := range []string{
-		topology.workQueue,
-		topology.retryQueue,
+		topology.workQueueFor("rfc822.headers"),
+		topology.retryQueueFor("rfc822.headers"),
 		topology.failedQueue,
 		topology.deadLetterQueue,
 		topology.projectionQueue,
@@ -71,7 +71,7 @@ func TestRabbitMQDeliversHigherPriorityWorkFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer channel.Close()
-	delivery, ok, err := channel.Get(broker.topology.workQueue, false)
+	delivery, ok, err := channel.Get(broker.topology.workQueueFor("noop"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,11 @@ func TestRabbitMQUnackedDeliveryRedeliversAfterChannelClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := channel.Get(broker.topology.workQueue, false); err != nil || !ok {
+	if _, ok, err := channel.Get(
+		broker.topology.workQueueFor("noop"),
+		false,
+	); err != nil ||
+		!ok {
 		t.Fatalf("expected first delivery, ok=%t err=%v", ok, err)
 	}
 	if err := channel.Close(); err != nil {
@@ -165,7 +169,7 @@ func TestRabbitMQUnackedDeliveryRedeliversAfterChannelClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer channel.Close()
-	delivery, ok, err := channel.Get(broker.topology.workQueue, false)
+	delivery, ok, err := channel.Get(broker.topology.workQueueFor("noop"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +582,11 @@ func testRabbitMQConfig(t *testing.T) Config {
 	if rabbitURL == "" {
 		t.Skip("GMEOW_TEST_RABBITMQ_URL is required for RabbitMQ integration tests")
 	}
-	cfg := Config{URL: rabbitURL, QueuePrefix: testQueuePrefix}
+	cfg := Config{
+		URL:         rabbitURL,
+		QueuePrefix: testQueuePrefix,
+		Analyzers:   []string{"noop", "summary.model"},
+	}
 	cfg.RetryLimit = 1
 	cfg.RetryBackoff = 50 * time.Millisecond
 	return cfg
@@ -591,7 +599,7 @@ func nackOne(t *testing.T, broker *Broker) {
 		t.Fatal(err)
 	}
 	defer channel.Close()
-	delivery, ok, err := channel.Get(broker.topology.workQueue, false)
+	delivery, ok, err := channel.Get(broker.topology.workQueueFor("noop"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,14 +618,20 @@ func purgeQueues(t *testing.T, broker *Broker) {
 		t.Fatal(err)
 	}
 	defer channel.Close()
-	for _, name := range []string{
-		broker.topology.workQueue,
+	names := []string{
 		broker.topology.reconcileQueue,
-		broker.topology.retryQueue,
 		broker.topology.failedQueue,
 		broker.topology.deadLetterQueue,
 		broker.topology.projectionQueue,
-	} {
+	}
+	for _, analyzer := range broker.topology.analyzers {
+		names = append(
+			names,
+			broker.topology.workQueueFor(analyzer),
+			broker.topology.retryQueueFor(analyzer),
+		)
+	}
+	for _, name := range names {
 		if _, err := channel.QueuePurge(name, false); err != nil {
 			t.Fatalf("purge %s: %v", name, err)
 		}

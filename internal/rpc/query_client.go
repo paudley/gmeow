@@ -359,6 +359,40 @@ func (client *QueryClient) VectorSearch(
 	}, nil
 }
 
+func (client *QueryClient) RelatedObjects(
+	ctx context.Context,
+	request contracts.RelatedObjectsRequest,
+) (contracts.RelatedObjectsResponse, error) {
+	response, err := client.client.RelatedObjects(ctx, &pb.RelatedObjectsRequest{
+		SchemaVersion: int32(request.SchemaVersion),
+		Digest:        string(request.Digest),
+		Facet:         request.Facet,
+		Limit:         int32(request.Limit),
+	})
+	if err != nil {
+		return contracts.RelatedObjectsResponse{}, err
+	}
+
+	results := make([]contracts.VectorSearchResult, 0, len(response.GetResults()))
+	for _, result := range response.GetResults() {
+		results = append(results, contracts.VectorSearchResult{
+			ObjectDigest: contracts.ObjectDigest(result.GetObjectDigest()),
+			Model:        result.GetModel(),
+			EmbeddingID:  result.GetEmbeddingId(),
+			Kind:         result.GetKind(),
+			SourceDigest: contracts.ObjectDigest(result.GetSourceDigest()),
+			TextPreview:  result.GetTextPreview(),
+			Distance:     result.GetDistance(),
+		})
+	}
+
+	return contracts.RelatedObjectsResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		Seed:          contracts.ObjectDigest(response.GetSeedDigest()),
+		Results:       results,
+	}, nil
+}
+
 func (client *QueryClient) SourceCursors(
 	ctx context.Context,
 	request contracts.SourceCursorRequest,

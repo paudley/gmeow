@@ -575,6 +575,10 @@ type PutObjectStart struct {
 	Facets        []*Facet               `protobuf:"bytes,4,rep,name=facets,proto3" json:"facets,omitempty"`
 	Provenance    []*Provenance          `protobuf:"bytes,5,rep,name=provenance,proto3" json:"provenance,omitempty"`
 	Relationships []*Relationship        `protobuf:"bytes,6,rep,name=relationships,proto3" json:"relationships,omitempty"`
+	// priority_class tags the analysis priority the scheduler should assign to work
+	// derived from this object (e.g. fresh_ingest for inbox, background for
+	// backfill). Empty lets the scheduler choose by reason.
+	PriorityClass string `protobuf:"bytes,7,opt,name=priority_class,json=priorityClass,proto3" json:"priority_class,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -649,6 +653,13 @@ func (x *PutObjectStart) GetRelationships() []*Relationship {
 		return x.Relationships
 	}
 	return nil
+}
+
+func (x *PutObjectStart) GetPriorityClass() string {
+	if x != nil {
+		return x.PriorityClass
+	}
+	return ""
 }
 
 type PutObjectFinish struct {
@@ -735,6 +746,7 @@ type AttachProvenanceRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Digest        string                 `protobuf:"bytes,1,opt,name=digest,proto3" json:"digest,omitempty"`
 	Provenance    []*Provenance          `protobuf:"bytes,2,rep,name=provenance,proto3" json:"provenance,omitempty"`
+	PriorityClass string                 `protobuf:"bytes,3,opt,name=priority_class,json=priorityClass,proto3" json:"priority_class,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -783,6 +795,13 @@ func (x *AttachProvenanceRequest) GetProvenance() []*Provenance {
 	return nil
 }
 
+func (x *AttachProvenanceRequest) GetPriorityClass() string {
+	if x != nil {
+		return x.PriorityClass
+	}
+	return ""
+}
+
 type PutCompoundRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ObjectId      string                 `protobuf:"bytes,1,opt,name=object_id,json=objectId,proto3" json:"object_id,omitempty"`
@@ -793,6 +812,7 @@ type PutCompoundRequest struct {
 	Provenance    []*Provenance          `protobuf:"bytes,6,rep,name=provenance,proto3" json:"provenance,omitempty"`
 	Relationships []*Relationship        `protobuf:"bytes,7,rep,name=relationships,proto3" json:"relationships,omitempty"`
 	Parts         []*CompoundPart        `protobuf:"bytes,8,rep,name=parts,proto3" json:"parts,omitempty"`
+	PriorityClass string                 `protobuf:"bytes,9,opt,name=priority_class,json=priorityClass,proto3" json:"priority_class,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -881,6 +901,13 @@ func (x *PutCompoundRequest) GetParts() []*CompoundPart {
 		return x.Parts
 	}
 	return nil
+}
+
+func (x *PutCompoundRequest) GetPriorityClass() string {
+	if x != nil {
+		return x.PriorityClass
+	}
+	return ""
 }
 
 type PutCompoundResponse struct {
@@ -3061,7 +3088,7 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\x05start\x18\x01 \x01(\v2\x18.gmeow.v1.PutObjectStartH\x00R\x05start\x12\x14\n" +
 	"\x04data\x18\x02 \x01(\fH\x00R\x04data\x123\n" +
 	"\x06finish\x18\x03 \x01(\v2\x19.gmeow.v1.PutObjectFinishH\x00R\x06finishB\a\n" +
-	"\x05frame\"\x92\x02\n" +
+	"\x05frame\"\xb9\x02\n" +
 	"\x0ePutObjectStart\x12\x1d\n" +
 	"\n" +
 	"media_type\x18\x01 \x01(\tR\tmediaType\x12\x1f\n" +
@@ -3072,15 +3099,17 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\n" +
 	"provenance\x18\x05 \x03(\v2\x14.gmeow.v1.ProvenanceR\n" +
 	"provenance\x12<\n" +
-	"\rrelationships\x18\x06 \x03(\v2\x16.gmeow.v1.RelationshipR\rrelationships\"\x11\n" +
+	"\rrelationships\x18\x06 \x03(\v2\x16.gmeow.v1.RelationshipR\rrelationships\x12%\n" +
+	"\x0epriority_class\x18\a \x01(\tR\rpriorityClass\"\x11\n" +
 	"\x0fPutObjectFinish\"+\n" +
 	"\x11PutObjectResponse\x12\x16\n" +
-	"\x06digest\x18\x01 \x01(\tR\x06digest\"g\n" +
+	"\x06digest\x18\x01 \x01(\tR\x06digest\"\x8e\x01\n" +
 	"\x17AttachProvenanceRequest\x12\x16\n" +
 	"\x06digest\x18\x01 \x01(\tR\x06digest\x124\n" +
 	"\n" +
 	"provenance\x18\x02 \x03(\v2\x14.gmeow.v1.ProvenanceR\n" +
-	"provenance\"\xe1\x02\n" +
+	"provenance\x12%\n" +
+	"\x0epriority_class\x18\x03 \x01(\tR\rpriorityClass\"\x88\x03\n" +
 	"\x12PutCompoundRequest\x12\x1b\n" +
 	"\tobject_id\x18\x01 \x01(\tR\bobjectId\x12\x1d\n" +
 	"\n" +
@@ -3093,7 +3122,8 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"provenance\x18\x06 \x03(\v2\x14.gmeow.v1.ProvenanceR\n" +
 	"provenance\x12<\n" +
 	"\rrelationships\x18\a \x03(\v2\x16.gmeow.v1.RelationshipR\rrelationships\x12,\n" +
-	"\x05parts\x18\b \x03(\v2\x16.gmeow.v1.CompoundPartR\x05parts\"-\n" +
+	"\x05parts\x18\b \x03(\v2\x16.gmeow.v1.CompoundPartR\x05parts\x12%\n" +
+	"\x0epriority_class\x18\t \x01(\tR\rpriorityClass\"-\n" +
 	"\x13PutCompoundResponse\x12\x16\n" +
 	"\x06digest\x18\x01 \x01(\tR\x06digest\"%\n" +
 	"\vOpenRequest\x12\x16\n" +

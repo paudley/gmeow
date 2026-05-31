@@ -98,12 +98,17 @@ type RabbitMQConfig struct {
 }
 
 type SchedulerConfig struct {
-	ScanInterval         string            `toml:"scan_interval"`
-	RetryBackoff         string            `toml:"retry_backoff"`
-	QueuePrefix          string            `toml:"queue_prefix"`
-	Priorities           SchedulerPriority `toml:"priorities"`
-	RetryLimit           int               `toml:"retry_limit"`
-	DeadLetterInspectMax int               `toml:"dead_letter_inspect_max"`
+	ScanInterval            string            `toml:"scan_interval"`
+	RetryBackoff            string            `toml:"retry_backoff"`
+	QueuePrefix             string            `toml:"queue_prefix"`
+	SelfHealIdleThreshold   string            `toml:"self_heal_idle_threshold"`
+	Priorities              SchedulerPriority `toml:"priorities"`
+	RetryLimit              int               `toml:"retry_limit"`
+	DeadLetterInspectMax    int               `toml:"dead_letter_inspect_max"`
+	BackpressureHighWater   int               `toml:"backpressure_high_water"`
+	BackpressureLowWater    int               `toml:"backpressure_low_water"`
+	SelfHealChunkSize       int               `toml:"self_heal_chunk_size"`
+	FullyAnnotatedCacheSize int               `toml:"fully_annotated_cache_size"`
 }
 
 type SchedulerPriority struct {
@@ -159,10 +164,12 @@ type SourceInboxRefreshConfig struct {
 }
 
 type AnalysisConfig struct {
-	Embeddings        EmbeddingConfig  `toml:"embeddings"`
-	Summary           SummaryConfig    `toml:"summary"`
-	Analyzers         []AnalyzerConfig `toml:"analyzers"`
-	WorkerConcurrency int              `toml:"worker_concurrency"`
+	Embeddings            EmbeddingConfig  `toml:"embeddings"`
+	Summary               SummaryConfig    `toml:"summary"`
+	Analyzers             []AnalyzerConfig `toml:"analyzers"`
+	WorkerConcurrency     int              `toml:"worker_concurrency"`
+	BackendIdleTimeout    string           `toml:"backend_idle_timeout"`
+	BackendStartupTimeout string           `toml:"backend_startup_timeout"`
 }
 
 type EmbeddingConfig struct {
@@ -176,13 +183,19 @@ type SummaryConfig struct {
 }
 
 type AnalyzerConfig struct {
-	Name       string   `toml:"name"`
-	Version    string   `toml:"version"`
-	WorkerKind string   `toml:"worker_kind"`
-	Command    string   `toml:"command"`
-	Timeout    string   `toml:"timeout"`
-	MediaTypes []string `toml:"media_types"`
-	Args       []string `toml:"args"`
+	Name           string   `toml:"name"`
+	Version        string   `toml:"version"`
+	WorkerKind     string   `toml:"worker_kind"`
+	Command        string   `toml:"command"`
+	Timeout        string   `toml:"timeout"`
+	StartupTimeout string   `toml:"startup_timeout"`
+	MediaTypes     []string `toml:"media_types"`
+	Args           []string `toml:"args"`
+	MaxInstances   int      `toml:"max_instances"`
+	// Workers is the number of consumer goroutines draining this analyzer's queue.
+	// Fast in-process analyzers can go wide; model-backed ones should match their
+	// backend capacity. Zero falls back to analysis.worker_concurrency.
+	Workers int `toml:"workers"`
 }
 
 type SearchConfig struct {
@@ -231,12 +244,17 @@ type ResolvedRPCEndpoint struct {
 }
 
 type ResolvedScheduler struct {
-	ScanInterval         string
-	RetryBackoff         string
-	QueuePrefix          string
-	Priorities           SchedulerPriority
-	RetryLimit           int
-	DeadLetterInspectMax int
+	ScanInterval            string
+	RetryBackoff            string
+	QueuePrefix             string
+	SelfHealIdleThreshold   string
+	Priorities              SchedulerPriority
+	RetryLimit              int
+	DeadLetterInspectMax    int
+	BackpressureHighWater   int
+	BackpressureLowWater    int
+	SelfHealChunkSize       int
+	FullyAnnotatedCacheSize int
 }
 
 type ResolvedSource struct {
@@ -1055,12 +1073,17 @@ func configuredAnalyzers(analyzers []AnalyzerConfig) []AnalyzerConfig {
 
 func resolvedScheduler(raw SchedulerConfig) ResolvedScheduler {
 	resolved := ResolvedScheduler{
-		ScanInterval:         firstNonEmpty(raw.ScanInterval, "30s"),
-		RetryLimit:           raw.RetryLimit,
-		RetryBackoff:         firstNonEmpty(raw.RetryBackoff, "30s"),
-		QueuePrefix:          firstNonEmpty(raw.QueuePrefix, "gmeow."),
-		Priorities:           raw.Priorities,
-		DeadLetterInspectMax: raw.DeadLetterInspectMax,
+		ScanInterval:            firstNonEmpty(raw.ScanInterval, "30s"),
+		RetryLimit:              raw.RetryLimit,
+		RetryBackoff:            firstNonEmpty(raw.RetryBackoff, "30s"),
+		QueuePrefix:             firstNonEmpty(raw.QueuePrefix, "gmeow."),
+		Priorities:              raw.Priorities,
+		DeadLetterInspectMax:    raw.DeadLetterInspectMax,
+		BackpressureHighWater:   raw.BackpressureHighWater,
+		BackpressureLowWater:    raw.BackpressureLowWater,
+		SelfHealChunkSize:       raw.SelfHealChunkSize,
+		SelfHealIdleThreshold:   firstNonEmpty(raw.SelfHealIdleThreshold, "5m"),
+		FullyAnnotatedCacheSize: raw.FullyAnnotatedCacheSize,
 	}
 	if resolved.RetryLimit <= 0 {
 		resolved.RetryLimit = 5
@@ -1088,6 +1111,22 @@ func resolvedScheduler(raw SchedulerConfig) ResolvedScheduler {
 
 	if resolved.Priorities.Background == 0 {
 		resolved.Priorities.Background = 10
+	}
+
+	if resolved.BackpressureHighWater <= 0 {
+		resolved.BackpressureHighWater = 10000
+	}
+
+	if resolved.BackpressureLowWater <= 0 {
+		resolved.BackpressureLowWater = 5000
+	}
+
+	if resolved.SelfHealChunkSize <= 0 {
+		resolved.SelfHealChunkSize = 500
+	}
+
+	if resolved.FullyAnnotatedCacheSize <= 0 {
+		resolved.FullyAnnotatedCacheSize = 100000
 	}
 
 	return resolved

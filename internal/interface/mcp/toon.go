@@ -76,6 +76,20 @@ type toonSummaryMessageItem struct {
 	Summary   string `toon:"summary"`
 }
 
+type toonSimilarMessagesOutput struct {
+	Tool     string                   `toon:"tool"`
+	Seed     string                   `toon:"seed_digest"`
+	Messages []toonSimilarMessageItem `toon:"messages"`
+	Returned int                      `toon:"returned"`
+}
+
+type toonSimilarMessageItem struct {
+	IDSubject string  `toon:"msgid_subject"`
+	ToFrom    string  `toon:"to_from"`
+	Summary   string  `toon:"summary"`
+	Distance  float64 `toon:"distance"`
+}
+
 type toonMessage struct {
 	MessageID       string              `toon:"message_id,omitempty"`
 	Digest          string              `toon:"digest"`
@@ -355,6 +369,27 @@ func toonSummarySearch(response appsvc.SummarySearchResponse) toonSummarySearchO
 	}
 }
 
+func toonSimilarMessages(
+	response appsvc.SimilarMessagesResponse,
+) toonSimilarMessagesOutput {
+	messages := make([]toonSimilarMessageItem, 0, len(response.Messages))
+	for _, message := range response.Messages {
+		messages = append(messages, toonSimilarMessageItem{
+			IDSubject: summaryIDSubject(message.MessageSummaryListItem),
+			ToFrom:    message.To + " / " + message.From,
+			Summary:   message.Summary,
+			Distance:  message.Distance,
+		})
+	}
+
+	return toonSimilarMessagesOutput{
+		Tool:     "similar_messages",
+		Seed:     response.Seed,
+		Messages: messages,
+		Returned: response.Returned,
+	}
+}
+
 func summaryIDSubject(message appsvc.MessageSummaryListItem) string {
 	parts := []string{firstNonEmpty(message.MessageID, message.Digest)}
 	if message.Date != "" {
@@ -601,15 +636,6 @@ func toonOperationResult(
 	output := toonOperation(response.Operation)
 	output.Tool = "operation_result"
 	output.Result = toonNestedOperationResult(response.Operation.Name, response.Result)
-
-	return output
-}
-
-func toonOperationResume(
-	response contracts.OperationResultResponse,
-) toonOperationOutput {
-	output := toonOperationResult(response)
-	output.Tool = "operation_resume"
 
 	return output
 }

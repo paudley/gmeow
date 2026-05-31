@@ -39,6 +39,11 @@ retry_limit = 3
 retry_backoff = "30s"
 queue_prefix = "gmeow."
 dead_letter_inspect_max = 20
+backpressure_high_water = 10000
+backpressure_low_water = 5000
+self_heal_chunk_size = 500
+self_heal_idle_threshold = "5m"
+fully_annotated_cache_size = 100000
 
 [scheduler.priorities]
 interactive = 100
@@ -89,7 +94,17 @@ password = "change-me"
 facets = ["mail_message"]
 
 [analysis]
-worker_concurrency = 4
+# Default per-analyzer consumer concurrency, used for any analyzer that does not
+# set its own `workers`. Each analyzer has its own work queue, so a slow
+# model-backed analyzer never blocks a fast in-process one; set `workers` per
+# analyzer below (wide for cheap in-process analyzers, ~backend capacity for
+# model-backed ones).
+worker_concurrency = 1
+# Persistent external (Python/model) backends load their models once and stay
+# resident. Reap a backend after this much idle time to reclaim memory; allow a
+# slow first model load this long before treating the backend as unavailable.
+backend_idle_timeout = "60m"
+backend_startup_timeout = "60s"
 
 [analysis.embeddings]
 endpoint = "http://127.0.0.1:8090/v1/embeddings"
@@ -103,20 +118,25 @@ model = "gemma-4-E4B-it-uncensored-Q4_K_M.gguf"
 name = "text.extract"
 version = "phase04-email-v2"
 worker_kind = "go"
+# Cheap in-process analyzer: drain its queue wide (bounded by CPU cores).
+workers = 8
 
 [[analysis.analyzers]]
 name = "rfc822.headers"
 version = "phase04-email-v2"
 worker_kind = "go"
+workers = 8
 
 [[analysis.analyzers]]
 name = "metadata.extract"
 version = "phase04-email-v2"
 worker_kind = "go"
+workers = 8
 
 [[analysis.analyzers]]
 name = "graph.facts"
 version = "phase04-email-v2"
+workers = 8
 worker_kind = "go"
 
 [[analysis.analyzers]]
@@ -137,16 +157,21 @@ name = "ner.spacy"
 version = "python-email-v1"
 worker_kind = "python"
 command = "gmeow-intel"
-args = ["analyze", "ner.spacy"]
-timeout = "2m"
+# "serve" keeps the backend resident (models load once); the worker streams one
+# object per request over stdin/stdout. max_instances bounds concurrent backends
+# for this tag (default 1 = serial).
+args = ["serve", "ner.spacy"]
+timeout = "20m"
+max_instances = 1
 
 [[analysis.analyzers]]
 name = "categories.sklearn"
 version = "python-email-v1"
 worker_kind = "python"
 command = "gmeow-intel"
-args = ["analyze", "categories.sklearn"]
-timeout = "2m"
+args = ["serve", "categories.sklearn"]
+timeout = "20m"
+max_instances = 1
 
 [[search.backends]]
 name = "query"

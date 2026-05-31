@@ -519,6 +519,12 @@ func (store *FilesystemStore) lookupChunk(hash string) (chunkIndexEntry, bool, e
 }
 
 func (store *FilesystemStore) readChunk(hash string) ([]byte, error) {
+	// Chunk content is immutable by hash, so a cache hit is always valid and skips
+	// the pack read + zstd decode.
+	if cached, ok := store.chunkCache.Get(hash); ok {
+		return cached, nil
+	}
+
 	entry, ok, err := store.lookupChunk(hash)
 	if err != nil {
 		return nil, err
@@ -541,7 +547,16 @@ func (store *FilesystemStore) readChunk(hash string) ([]byte, error) {
 			return nil, fmt.Errorf("chunk %s not found in index", hash)
 		}
 
-		return store.readChunkAt(hash, fresh)
+		retried, retryErr := store.readChunkAt(hash, fresh)
+		if retryErr == nil {
+			store.chunkCache.Put(hash, retried)
+		}
+
+		return retried, retryErr
+	}
+
+	if err == nil {
+		store.chunkCache.Put(hash, chunk)
 	}
 
 	return chunk, err

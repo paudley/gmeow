@@ -15,6 +15,16 @@ where required. Summary and embedding endpoint calls are serialized per worker
 instance, use a 60s timeout, and route endpoint failures back through SCHEDULER
 retry handling.
 
+Each analyzer drains its own SCHEDULER work queue through a dedicated consumer
+pool, so a slow model-backed analyzer never head-of-line-blocks a fast
+in-process one. Pool size is the per-analyzer `workers` count in config (falling
+back to `worker_concurrency`); idempotent re-delivery plus an in-memory
+annotation-presence cache make a re-seen object a no-op before any FILESTORE
+read. External Python adapters run as a persistent backend
+(`gmeow-intel serve <analyzer>`): the model loads once, the adapter emits a
+ready sentinel, then handles one request per stdin line, eliminating per-object
+model reloads.
+
 ## Analyzer Set
 
 The email cutover analyzer versions are `phase04-email-v2` for Go analyzers and

@@ -29,7 +29,7 @@ type Store interface {
 		ctx context.Context,
 		digest contracts.ObjectDigest,
 		provenance []contracts.Provenance,
-	) error
+	) (bool, error)
 	PutCompound(
 		ctx context.Context,
 		request CompoundPutRequest,

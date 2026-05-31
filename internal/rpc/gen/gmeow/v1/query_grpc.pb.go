@@ -30,6 +30,7 @@ const (
 	QueryService_Graph_FullMethodName                     = "/gmeow.v1.QueryService/Graph"
 	QueryService_AnalysisStatus_FullMethodName            = "/gmeow.v1.QueryService/AnalysisStatus"
 	QueryService_VectorSearch_FullMethodName              = "/gmeow.v1.QueryService/VectorSearch"
+	QueryService_RelatedObjects_FullMethodName            = "/gmeow.v1.QueryService/RelatedObjects"
 	QueryService_SourceCursors_FullMethodName             = "/gmeow.v1.QueryService/SourceCursors"
 	QueryService_JMAPMailboxes_FullMethodName             = "/gmeow.v1.QueryService/JMAPMailboxes"
 	QueryService_JMAPEmailStates_FullMethodName           = "/gmeow.v1.QueryService/JMAPEmailStates"
@@ -65,6 +66,7 @@ type QueryServiceClient interface {
 	Graph(ctx context.Context, in *GraphRequest, opts ...grpc.CallOption) (*GraphResponse, error)
 	AnalysisStatus(ctx context.Context, in *AnalysisStatusRequest, opts ...grpc.CallOption) (*AnalysisStatusResponse, error)
 	VectorSearch(ctx context.Context, in *VectorSearchRequest, opts ...grpc.CallOption) (*VectorSearchResponse, error)
+	RelatedObjects(ctx context.Context, in *RelatedObjectsRequest, opts ...grpc.CallOption) (*RelatedObjectsResponse, error)
 	SourceCursors(ctx context.Context, in *SourceCursorRequest, opts ...grpc.CallOption) (*SourceCursorResponse, error)
 	JMAPMailboxes(ctx context.Context, in *JMAPMailboxRequest, opts ...grpc.CallOption) (*JMAPMailboxResponse, error)
 	JMAPEmailStates(ctx context.Context, in *JMAPEmailStateRequest, opts ...grpc.CallOption) (*JMAPEmailStateResponse, error)
@@ -197,6 +199,16 @@ func (c *queryServiceClient) VectorSearch(ctx context.Context, in *VectorSearchR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VectorSearchResponse)
 	err := c.cc.Invoke(ctx, QueryService_VectorSearch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) RelatedObjects(ctx context.Context, in *RelatedObjectsRequest, opts ...grpc.CallOption) (*RelatedObjectsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RelatedObjectsResponse)
+	err := c.cc.Invoke(ctx, QueryService_RelatedObjects_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +410,7 @@ type QueryServiceServer interface {
 	Graph(context.Context, *GraphRequest) (*GraphResponse, error)
 	AnalysisStatus(context.Context, *AnalysisStatusRequest) (*AnalysisStatusResponse, error)
 	VectorSearch(context.Context, *VectorSearchRequest) (*VectorSearchResponse, error)
+	RelatedObjects(context.Context, *RelatedObjectsRequest) (*RelatedObjectsResponse, error)
 	SourceCursors(context.Context, *SourceCursorRequest) (*SourceCursorResponse, error)
 	JMAPMailboxes(context.Context, *JMAPMailboxRequest) (*JMAPMailboxResponse, error)
 	JMAPEmailStates(context.Context, *JMAPEmailStateRequest) (*JMAPEmailStateResponse, error)
@@ -458,6 +471,9 @@ func (UnimplementedQueryServiceServer) AnalysisStatus(context.Context, *Analysis
 }
 func (UnimplementedQueryServiceServer) VectorSearch(context.Context, *VectorSearchRequest) (*VectorSearchResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method VectorSearch not implemented")
+}
+func (UnimplementedQueryServiceServer) RelatedObjects(context.Context, *RelatedObjectsRequest) (*RelatedObjectsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RelatedObjects not implemented")
 }
 func (UnimplementedQueryServiceServer) SourceCursors(context.Context, *SourceCursorRequest) (*SourceCursorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SourceCursors not implemented")
@@ -728,6 +744,24 @@ func _QueryService_VectorSearch_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(QueryServiceServer).VectorSearch(ctx, req.(*VectorSearchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_RelatedObjects_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RelatedObjectsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).RelatedObjects(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_RelatedObjects_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).RelatedObjects(ctx, req.(*RelatedObjectsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1106,6 +1140,10 @@ var QueryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "VectorSearch",
 			Handler:    _QueryService_VectorSearch_Handler,
+		},
+		{
+			MethodName: "RelatedObjects",
+			Handler:    _QueryService_RelatedObjects_Handler,
 		},
 		{
 			MethodName: "SourceCursors",

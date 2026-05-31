@@ -44,6 +44,8 @@ type Scheduler interface {
 		request contracts.DeadLetterRequest,
 	) (contracts.DeadLetterResponse, error)
 	Status(ctx context.Context) (contracts.SchedulerStatus, error)
+	Pressured() bool
+	SelfHealSweep(ctx context.Context) (contracts.SchedulerScanResponse, error)
 	Run(ctx context.Context) error
 }
 
@@ -64,11 +66,12 @@ type Broker interface {
 	) (int, error)
 	RouteFailure(ctx context.Context, job contracts.AnalyzerJob) error
 	Status(ctx context.Context) (contracts.SchedulerStatus, error)
-	ActiveJobKeys(ctx context.Context, limit int) (map[string]bool, error)
+	PerAnalyzerStatus(ctx context.Context) ([]contracts.AnalyzerQueueDepth, error)
 	FailedJobs(ctx context.Context, limit int) ([]contracts.AnalyzerJob, error)
 	PendingJobs(ctx context.Context, limit int) ([]contracts.AnalyzerJob, error)
 	DeadLetters(ctx context.Context, limit int) ([]contracts.AnalyzerJob, error)
 	RequeueDeadLetters(ctx context.Context, limit int) (int, error)
+	PurgeAll(ctx context.Context) (int, error)
 	Close() error
 }
 

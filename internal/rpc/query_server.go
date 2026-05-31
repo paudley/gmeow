@@ -339,6 +339,40 @@ func (server *QueryServer) VectorSearch(
 	}, nil
 }
 
+func (server *QueryServer) RelatedObjects(
+	ctx context.Context,
+	request *pb.RelatedObjectsRequest,
+) (*pb.RelatedObjectsResponse, error) {
+	response, err := server.index.RelatedObjects(ctx, contracts.RelatedObjectsRequest{
+		SchemaVersion: contracts.SchemaVersion(request.GetSchemaVersion()),
+		Digest:        contracts.ObjectDigest(request.GetDigest()),
+		Facet:         request.GetFacet(),
+		Limit:         int(request.GetLimit()),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]*pb.VectorSearchResult, 0, len(response.Results))
+	for _, result := range response.Results {
+		results = append(results, &pb.VectorSearchResult{
+			ObjectDigest: string(result.ObjectDigest),
+			Model:        result.Model,
+			EmbeddingId:  result.EmbeddingID,
+			Kind:         result.Kind,
+			SourceDigest: string(result.SourceDigest),
+			TextPreview:  result.TextPreview,
+			Distance:     result.Distance,
+		})
+	}
+
+	return &pb.RelatedObjectsResponse{
+		SchemaVersion: int32(response.SchemaVersion),
+		SeedDigest:    string(response.Seed),
+		Results:       results,
+	}, nil
+}
+
 func (server *QueryServer) SourceCursors(
 	ctx context.Context,
 	request *pb.SourceCursorRequest,

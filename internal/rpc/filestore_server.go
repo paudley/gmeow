@@ -53,6 +53,7 @@ type FilestoreServer struct {
 // not treat as new analyzer work.
 type changeNotice struct {
 	digest         contracts.ObjectDigest
+	priorityClass  string
 	projectionOnly bool
 }
 
@@ -228,7 +229,7 @@ func (server *FilestoreServer) PutObject(
 		return put.err
 	}
 
-	server.enqueueObjectChanged(put.digest)
+	server.enqueueObjectChanged(put.digest, start.GetPriorityClass())
 
 	return stream.SendAndClose(&pb.PutObjectResponse{Digest: string(put.digest)})
 }
@@ -242,7 +243,7 @@ func (server *FilestoreServer) AttachProvenance(
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	err = server.store.AttachProvenance(
+	changed, err := server.store.AttachProvenance(
 		ctx,
 		contracts.ObjectDigest(request.GetDigest()),
 		provenance,
@@ -251,7 +252,15 @@ func (server *FilestoreServer) AttachProvenance(
 		return nil, err
 	}
 
-	server.enqueueObjectChanged(contracts.ObjectDigest(request.GetDigest()))
+	// Re-observing an already-seen object changes nothing, so it must not emit a
+	// change notice — otherwise a duplicate-heavy re-ingest re-schedules analysis
+	// for objects that have not changed.
+	if changed {
+		server.enqueueObjectChanged(
+			contracts.ObjectDigest(request.GetDigest()),
+			request.GetPriorityClass(),
+		)
+	}
 
 	return &pb.Empty{}, nil
 }
@@ -289,7 +298,7 @@ func (server *FilestoreServer) PutCompound(
 		return nil, err
 	}
 
-	server.enqueueObjectChanged(digest)
+	server.enqueueObjectChanged(digest, request.GetPriorityClass())
 
 	return &pb.PutCompoundResponse{Digest: string(digest)}, nil
 }
@@ -439,8 +448,11 @@ func (server *FilestoreServer) WriteOverlays(
 // longer waits on a per-object RPC. The scheduler de-duplicates already-analyzed
 // objects ("only missing analyzer work"), so re-notifying a dedup hit is cheap
 // and harmless.
-func (server *FilestoreServer) enqueueObjectChanged(digest contracts.ObjectDigest) {
-	server.enqueueChange(changeNotice{digest: digest})
+func (server *FilestoreServer) enqueueObjectChanged(
+	digest contracts.ObjectDigest,
+	priorityClass string,
+) {
+	server.enqueueChange(changeNotice{digest: digest, priorityClass: priorityClass})
 }
 
 func (server *FilestoreServer) enqueueProjectionRefresh(digest contracts.ObjectDigest) {
@@ -469,14 +481,22 @@ func (server *FilestoreServer) runNotifyBatcher() {
 	ticker := time.NewTicker(notifyFlushInterval)
 	defer ticker.Stop()
 
-	var changed, projection []contracts.ObjectDigest
+	// Changed objects are grouped by priority class so each NotifyObjectsChanged
+	// carries one class: a fast backfill and a live inbox sync ingesting at once
+	// stay on their own priority tracks instead of being flattened together.
+	changed := map[string][]contracts.ObjectDigest{}
+	changedCount := 0
+	var projection []contracts.ObjectDigest
 	flush := func() {
-		if len(changed) > 0 {
-			server.flushChangeBatch(changed, false)
-			changed = changed[:0]
+		for priorityClass, digests := range changed {
+			if len(digests) > 0 {
+				server.flushChangeBatch(digests, false, priorityClass)
+			}
 		}
+		changed = map[string][]contracts.ObjectDigest{}
+		changedCount = 0
 		if len(projection) > 0 {
-			server.flushChangeBatch(projection, true)
+			server.flushChangeBatch(projection, true, "")
 			projection = projection[:0]
 		}
 	}
@@ -492,9 +512,13 @@ func (server *FilestoreServer) runNotifyBatcher() {
 			if notice.projectionOnly {
 				projection = append(projection, notice.digest)
 			} else {
-				changed = append(changed, notice.digest)
+				changed[notice.priorityClass] = append(
+					changed[notice.priorityClass],
+					notice.digest,
+				)
+				changedCount++
 			}
-			if len(changed) >= notifyBatchMax || len(projection) >= notifyBatchMax {
+			if changedCount >= notifyBatchMax || len(projection) >= notifyBatchMax {
 				flush()
 			}
 		case <-ticker.C:
@@ -506,6 +530,7 @@ func (server *FilestoreServer) runNotifyBatcher() {
 func (server *FilestoreServer) flushChangeBatch(
 	digests []contracts.ObjectDigest,
 	projectionOnly bool,
+	priorityClass string,
 ) {
 	ctx, cancel := context.WithTimeout(context.Background(), notifyFlushTimeout)
 	defer cancel()
@@ -518,6 +543,7 @@ func (server *FilestoreServer) flushChangeBatch(
 	_, err := server.notifier.NotifyObjectsChanged(ctx, contracts.ObjectChangeRequest{
 		SchemaVersion:  contracts.SchemaVersionPhase00,
 		ObjectDigests:  digests,
+		PriorityClass:  priorityClass,
 		RequestedBy:    "filestore",
 		Reason:         reason,
 		ProjectionOnly: projectionOnly,

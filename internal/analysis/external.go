@@ -4,13 +4,11 @@
 package analysis
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -19,16 +17,18 @@ import (
 
 type ExternalCommandAnalyzer struct {
 	spec    contracts.AnalyzerSpec
-	command string
-	args    []string
-	timeout time.Duration
+	manager *BackendManager
+	backend BackendSpec
 }
 
 type ExternalCommandConfig struct {
-	Spec    contracts.AnalyzerSpec
-	Command string
-	Args    []string
-	Timeout time.Duration
+	Spec           contracts.AnalyzerSpec
+	Command        string
+	Args           []string
+	Timeout        time.Duration
+	StartupTimeout time.Duration
+	MaxInstances   int
+	Manager        *BackendManager
 }
 
 type ExternalCommandRequest struct {
@@ -50,8 +50,15 @@ func NewExternalCommandAnalyzer(
 		return nil, errors.New("external analyzer command is required")
 	}
 
+	if config.Manager == nil {
+		return nil, errors.New("external analyzer backend manager is required")
+	}
+
 	if config.Timeout <= 0 {
 		config.Timeout = 2 * time.Minute
+	}
+	if config.StartupTimeout <= 0 {
+		config.StartupTimeout = 2 * time.Minute
 	}
 
 	spec := config.Spec
@@ -61,9 +68,15 @@ func NewExternalCommandAnalyzer(
 
 	return &ExternalCommandAnalyzer{
 		spec:    spec,
-		command: config.Command,
-		args:    append([]string(nil), config.Args...),
-		timeout: config.Timeout,
+		manager: config.Manager,
+		backend: BackendSpec{
+			Key:            spec.Name,
+			Command:        config.Command,
+			Args:           append([]string(nil), config.Args...),
+			MaxInstances:   max(config.MaxInstances, 1),
+			StartupTimeout: config.StartupTimeout,
+			RequestTimeout: config.Timeout,
+		},
 	}, nil
 }
 
@@ -101,36 +114,15 @@ func (analyzer *ExternalCommandAnalyzer) Analyze(
 		return contracts.Annotation{}, err
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, analyzer.timeout)
-	defer cancel()
-
-	command := exec.CommandContext(runCtx, analyzer.command, analyzer.args...)
-	command.Stdin = bytes.NewReader(input)
-
-	var stderr bytes.Buffer
-
-	command.Stderr = &stderr
-
-	output, err := command.Output()
+	// Dispatch to the persistent backend. The manager classifies failures: a
+	// backend that cannot start → ErrAnalyzerUnavailable (the worker parks); a
+	// per-object rejection or a crash while serving → an ordinary error (the
+	// worker follows the bounded-retry path).
+	output, err := analyzer.manager.Run(ctx, analyzer.backend, input)
 	if err != nil {
-		wrapped := fmt.Errorf(
-			"run external analyzer %s: %w: %s",
-			analyzer.spec.Name,
-			err,
-			strings.TrimSpace(stderr.String()),
+		return contracts.Annotation{}, fmt.Errorf(
+			"run external analyzer %s: %w", analyzer.spec.Name, err,
 		)
-		// A command that could not launch (binary missing, failed to start) or
-		// that timed out means the analyzer runtime is unavailable, not that the
-		// job is bad: mark it so the worker parks and waits for recovery. A clean
-		// non-zero exit (the analyzer ran and rejected the work) stays on the
-		// bounded-retry path.
-		var exitErr *exec.ExitError
-		ranAndExited := errors.As(err, &exitErr)
-		if !ranAndExited || errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return contracts.Annotation{}, fmt.Errorf("%w: %w", ErrAnalyzerUnavailable, wrapped)
-		}
-
-		return contracts.Annotation{}, wrapped
 	}
 
 	var annotation contracts.Annotation

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"blackcat.ca/gmeow/internal/cache"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/rpc"
 )
@@ -46,6 +47,12 @@ type FilestoreClient interface {
 	Open(context.Context, contracts.ObjectDigest) (io.ReadCloser, error)
 	ReadManifest(context.Context, contracts.ObjectDigest) (contracts.Manifest, error)
 	AttachProvenance(context.Context, contracts.ObjectDigest, []contracts.Provenance) error
+	AttachProvenanceWithPriority(
+		context.Context,
+		contracts.ObjectDigest,
+		[]contracts.Provenance,
+		string,
+	) error
 	PutCompound(context.Context, rpc.CompoundPutRequest) (contracts.ObjectDigest, error)
 	WriteSourceCursor(context.Context, contracts.SourceCursor) error
 	ReadSourceCursor(
@@ -59,6 +66,14 @@ type ChangeNotifier interface {
 		context.Context,
 		contracts.ObjectChangeRequest,
 	) (contracts.SchedulerScanResponse, error)
+}
+
+// PressureReporter exposes the scheduler's backpressure signal to the source.
+// The scheduler owns the global pressure view (analysis queue depth); the
+// source self-throttles against it, pausing backfill scheduling while pressured
+// and resuming once the backlog drains. A nil reporter disables throttling.
+type PressureReporter interface {
+	Pressured(context.Context) (bool, error)
 }
 
 type Adapter interface {
@@ -111,12 +126,16 @@ type PullRequest struct {
 }
 
 type BackfillRequest struct {
-	Cursor      map[string]any
-	CursorKey   string
-	PageSize    int
-	MaxPages    int
-	Concurrency int
-	Resume      bool
+	Cursor map[string]any
+	// PriorityClass tags the analysis priority of objects this run ingests and
+	// also selects throttling: only low-priority background backfill pauses under
+	// analysis backpressure. High-priority inbox refresh runs at full speed.
+	PriorityClass string
+	CursorKey     string
+	PageSize      int
+	MaxPages      int
+	Concurrency   int
+	Resume        bool
 }
 
 type BackfillReport struct {
@@ -155,25 +174,33 @@ type ActionResult struct {
 }
 
 type IngestObject struct {
-	ObservedAt    time.Time
-	Reader        io.Reader
-	Compound      *CompoundObject
-	MediaType     string
-	SourceKind    string
-	SourceName    string
-	ExternalID    string
-	ExternalVer   string
-	SourceHint    string
+	ObservedAt  time.Time
+	Reader      io.Reader
+	Compound    *CompoundObject
+	MediaType   string
+	SourceKind  string
+	SourceName  string
+	ExternalID  string
+	ExternalVer string
+	SourceHint  string
+	// PriorityClass tags the analysis priority the scheduler should assign to work
+	// derived from this object (e.g. fresh_ingest for inbox, background for
+	// backfill, repair for imports). Empty defers to the scheduler's reason-based
+	// default.
+	PriorityClass string
 	ContentRoles  []string
 	Facets        []contracts.Facet
 	Provenance    []contracts.Provenance
 	Relationships []contracts.Relationship
 }
 
+// CompoundObject mirrors rpc.CompoundPutRequest field-for-field so it converts
+// directly; keep PriorityClass in the same position as that struct.
 type CompoundObject struct {
 	ObjectID      string
 	MediaType     string
 	SourceHint    string
+	PriorityClass string
 	ContentRoles  []string
 	Facets        []contracts.Facet
 	Provenance    []contracts.Provenance
@@ -184,7 +211,20 @@ type CompoundObject struct {
 type Service struct {
 	store    FilestoreClient
 	notifier ChangeNotifier
+	pressure PressureReporter
+	// sourceLookup caches positive (source-ref -> digest) answers. The mapping is
+	// permanent: once an exact source/name/external-id/version maps to a digest it
+	// never changes, so a duplicate-heavy re-ingest resolves known objects from
+	// memory instead of a FILESTORE round-trip. Negatives are never cached.
+	sourceLookup *cache.LRU[string, contracts.ObjectDigest]
 }
+
+// pressurePollInterval bounds how often a paused backfill re-checks the
+// scheduler's pressure signal before resuming.
+const pressurePollInterval = 5 * time.Second
+
+// sourceLookupCacheSize bounds the in-process source-ref resolution cache.
+const sourceLookupCacheSize = 200000
 
 type IngestService interface {
 	Ingest(ctx context.Context, object IngestObject) (contracts.ObjectDigest, bool, error)
@@ -206,7 +246,89 @@ func NewServiceWithNotifier(
 		return nil, errors.New("source filestore client is required")
 	}
 
-	return &Service{store: store, notifier: notifier}, nil
+	return &Service{
+		store:        store,
+		notifier:     notifier,
+		sourceLookup: cache.NewLRU[string, contracts.ObjectDigest](sourceLookupCacheSize),
+	}, nil
+}
+
+func sourceRefKey(ref contracts.SourceObjectRef) string {
+	return ref.SourceKind + "\x00" +
+		ref.SourceName + "\x00" +
+		ref.ExternalID + "\x00" +
+		ref.ExternalVersion
+}
+
+// lookupSourceObject resolves a source ref to its object digest, serving and
+// populating the permanent positive cache so repeated lookups of an already-seen
+// ref (the dominant case in a duplicate-heavy re-ingest) avoid a FILESTORE call.
+func (service *Service) lookupSourceObject(
+	ctx context.Context,
+	ref contracts.SourceObjectRef,
+) (contracts.ObjectDigest, bool, error) {
+	key := sourceRefKey(ref)
+	if digest, ok := service.sourceLookup.Get(key); ok {
+		return digest, true, nil
+	}
+
+	digest, found, err := service.store.LookupSourceObject(ctx, ref)
+	if err != nil {
+		return "", false, err
+	}
+
+	if found {
+		service.sourceLookup.Put(key, digest)
+	}
+
+	return digest, found, nil
+}
+
+// SetPressureReporter wires the scheduler backpressure signal that gates backfill
+// scheduling. It is optional: with no reporter set, backfill never pauses.
+func (service *Service) SetPressureReporter(reporter PressureReporter) {
+	service.pressure = reporter
+}
+
+// awaitPressureRelief blocks while the scheduler reports backpressure, so the
+// source pauses fetching new backfill pages until the analysis backlog drains
+// below the scheduler's low-water mark. It fails open: a pressure-check error
+// must not wedge ingest, so it returns and lets the page proceed. It honours
+// context cancellation so a shutdown is never delayed by a pause.
+func (service *Service) awaitPressureRelief(ctx context.Context) error {
+	if service.pressure == nil {
+		return nil
+	}
+
+	paused := false
+	for {
+		pressured, err := service.pressure.Pressured(ctx)
+		if err != nil {
+			log.Printf("source backfill pressure check failed: %v", err)
+
+			return nil
+		}
+		if !pressured {
+			if paused {
+				log.Printf("source backfill resumed: analysis backpressure released")
+			}
+
+			return nil
+		}
+		if !paused {
+			paused = true
+			log.Printf("source backfill paused: analysis backpressure engaged")
+		}
+
+		timer := time.NewTimer(pressurePollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (service *Service) Ingest(
@@ -220,11 +342,16 @@ func (service *Service) Ingest(
 
 	provenance := provenanceFor(object)
 	if hasRef {
-		if digest, found, err := service.store.LookupSourceObject(ctx, ref); err != nil {
+		if digest, found, err := service.lookupSourceObject(ctx, ref); err != nil {
 			return "", false, err
 		} else if found {
 			if len(provenance) > 0 {
-				if err := service.store.AttachProvenance(ctx, digest, provenance); err != nil {
+				if err := service.store.AttachProvenanceWithPriority(
+					ctx,
+					digest,
+					provenance,
+					object.PriorityClass,
+				); err != nil {
 					return "", false, err
 				}
 				if err := service.notifyChanged(ctx, digest); err != nil {
@@ -261,7 +388,7 @@ func (service *Service) Ingest(
 				service.releaseClaim(ctx, claim)
 			}
 		}()
-		if digest, found, err := service.store.LookupSourceObject(ctx, ref); err != nil {
+		if digest, found, err := service.lookupSourceObject(ctx, ref); err != nil {
 			return "", false, err
 		} else if found {
 			if err := service.store.ReleaseSourceIngest(ctx, claim); err != nil {
@@ -269,7 +396,12 @@ func (service *Service) Ingest(
 			}
 			claimAcquired = false
 			if len(provenance) > 0 {
-				if err := service.store.AttachProvenance(ctx, digest, provenance); err != nil {
+				if err := service.store.AttachProvenanceWithPriority(
+					ctx,
+					digest,
+					provenance,
+					object.PriorityClass,
+				); err != nil {
 					return "", false, err
 				}
 				if err := service.notifyChanged(ctx, digest); err != nil {
@@ -284,6 +416,9 @@ func (service *Service) Ingest(
 	if object.Compound != nil {
 		compound := *object.Compound
 		compound.Provenance = mergeProvenance(compound.Provenance, provenance)
+		if object.PriorityClass != "" {
+			compound.PriorityClass = object.PriorityClass
+		}
 		digest, err := service.store.PutCompound(ctx, rpc.CompoundPutRequest(compound))
 		if err != nil {
 			if digest, found, lookupErr := service.lookupAfterWriteError(
@@ -319,6 +454,7 @@ func (service *Service) Ingest(
 		Reader:        object.Reader,
 		MediaType:     object.MediaType,
 		SourceHint:    object.SourceHint,
+		PriorityClass: object.PriorityClass,
 		ContentRoles:  append([]string{}, object.ContentRoles...),
 		Facets:        append([]contracts.Facet{}, object.Facets...),
 		Provenance:    mergeProvenance(object.Provenance, provenance),
@@ -356,7 +492,7 @@ func (service *Service) lookupAfterWriteError(
 		return "", false, nil
 	}
 
-	return service.store.LookupSourceObject(ctx, ref)
+	return service.lookupSourceObject(ctx, ref)
 }
 
 func (service *Service) notifyChanged(
@@ -382,7 +518,7 @@ func (service *Service) LookupSourceObject(
 	ctx context.Context,
 	ref contracts.SourceObjectRef,
 ) (contracts.ObjectDigest, bool, error) {
-	return service.store.LookupSourceObject(ctx, ref)
+	return service.lookupSourceObject(ctx, ref)
 }
 
 func (service *Service) WriteCursor(
@@ -487,7 +623,18 @@ func (service *Service) RunBackfill(
 		return report, nil
 	}
 
+	throttled := request.PriorityClass == contracts.PriorityBackground
 	for report.MaxPagesNotReached(request.MaxPages) {
+		// Only low-priority background backfill gates on backpressure: a fast
+		// historical backfill must not outrun analysis and grow the work queue
+		// without bound. High-priority inbox sync, search, and imports run at full
+		// speed and rely on priority ordering to preempt backfill's analysis.
+		if throttled {
+			if err := service.awaitPressureRelief(ctx); err != nil {
+				return report, err
+			}
+		}
+
 		objects, nextCursor, err := adapter.Pull(ctx, service, PullRequest{
 			Cursor: cursor,
 			Limit:  pageSize,
@@ -522,7 +669,12 @@ func (service *Service) RunBackfill(
 			return report, nil
 		}
 
-		pageReport := service.ingestBackfillPage(ctx, objects, workerCount)
+		pageReport := service.ingestBackfillPage(
+			ctx,
+			objects,
+			workerCount,
+			request.PriorityClass,
+		)
 		report.Processed += pageReport.Processed
 		report.Created += pageReport.Created
 		report.Skipped += pageReport.Skipped
@@ -591,6 +743,7 @@ func (service *Service) ingestBackfillPage(
 	ctx context.Context,
 	objects []IngestObject,
 	workerCount int,
+	priorityClass string,
 ) BackfillReport {
 	jobs := make(chan IngestObject)
 	results := make(chan backfillIngestResult)
@@ -600,6 +753,7 @@ func (service *Service) ingestBackfillPage(
 		go func() {
 			defer workers.Done()
 			for object := range jobs {
+				object.PriorityClass = priorityClass
 				_, created, err := service.Ingest(ctx, object)
 				results <- backfillIngestResult{
 					messageID: object.ExternalID,

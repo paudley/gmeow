@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/rpc"
 )
 
 const (
@@ -223,17 +224,87 @@ type archiveAttachment struct {
 }
 
 func NewArchiveImporter(store FilestoreClient) (*ArchiveImporter, error) {
-	service, err := NewService(store)
+	// Stamp every object an import creates with medium (repair) analysis priority,
+	// so a bulk import's analysis preempts low-priority backfill but yields to
+	// high-priority inbox sync and search. The decorator covers all import writes
+	// — parts, version records, and the compound message — without threading the
+	// class through each call site.
+	prioritized := archivePriorityClient{
+		FilestoreClient: store,
+		priorityClass:   contracts.PriorityRepair,
+	}
+
+	service, err := NewService(prioritized)
 	if err != nil {
 		return nil, err
 	}
 
 	return &ArchiveImporter{
 		service:     service,
-		store:       store,
+		store:       prioritized,
 		concurrency: defaultIngestConcurrency,
 		ingestSem:   make(chan struct{}, defaultIngestConcurrency),
 	}, nil
+}
+
+// archivePriorityClient wraps a FilestoreClient to default the analysis priority
+// class on every write, tagging all objects a bulk producer creates.
+type archivePriorityClient struct {
+	FilestoreClient
+	priorityClass string
+}
+
+func (client archivePriorityClient) Put(
+	ctx context.Context,
+	request rpc.PutRequest,
+) (contracts.ObjectDigest, error) {
+	if request.PriorityClass == "" {
+		request.PriorityClass = client.priorityClass
+	}
+
+	return client.FilestoreClient.Put(ctx, request)
+}
+
+func (client archivePriorityClient) PutCompound(
+	ctx context.Context,
+	request rpc.CompoundPutRequest,
+) (contracts.ObjectDigest, error) {
+	if request.PriorityClass == "" {
+		request.PriorityClass = client.priorityClass
+	}
+
+	return client.FilestoreClient.PutCompound(ctx, request)
+}
+
+func (client archivePriorityClient) AttachProvenance(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	provenance []contracts.Provenance,
+) error {
+	return client.FilestoreClient.AttachProvenanceWithPriority(
+		ctx,
+		digest,
+		provenance,
+		client.priorityClass,
+	)
+}
+
+func (client archivePriorityClient) AttachProvenanceWithPriority(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	provenance []contracts.Provenance,
+	priorityClass string,
+) error {
+	if priorityClass == "" {
+		priorityClass = client.priorityClass
+	}
+
+	return client.FilestoreClient.AttachProvenanceWithPriority(
+		ctx,
+		digest,
+		provenance,
+		priorityClass,
+	)
 }
 
 func (importer *ArchiveImporter) Import(

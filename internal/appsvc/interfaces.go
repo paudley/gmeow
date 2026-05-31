@@ -32,6 +32,10 @@ type QueryReader interface {
 		ctx context.Context,
 		request contracts.AnalysisStatusRequest,
 	) (contracts.AnalysisStatusResponse, error)
+	RelatedObjects(
+		ctx context.Context,
+		request contracts.RelatedObjectsRequest,
+	) (contracts.RelatedObjectsResponse, error)
 	SourceCursors(
 		ctx context.Context,
 		request contracts.SourceCursorRequest,

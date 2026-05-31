@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -30,6 +31,7 @@ func newSchedulerCommand(out io.Writer, configPath *string) *cobra.Command {
 	}
 	command.AddCommand(newSchedulerScanCommand(out, configPath))
 	command.AddCommand(newSchedulerStatusCommand(out, configPath))
+	command.AddCommand(newSchedulerAnalyzersCommand(out, configPath))
 	command.AddCommand(newSchedulerPendingCommand(out, configPath))
 	command.AddCommand(
 		newSchedulerReconcilePendingCommand(out, configPath, "reconcile-pending"),
@@ -42,6 +44,8 @@ func newSchedulerCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newSchedulerDeadLetterCommand(out, configPath))
 	command.AddCommand(newSchedulerRequeueCommand(out, configPath))
 	command.AddCommand(newSchedulerForceCommand(out, configPath))
+	command.AddCommand(newSchedulerPurgeQueuesCommand(out, configPath))
+	command.AddCommand(newSchedulerSelfHealCommand(out, configPath))
 	command.AddCommand(newSchedulerRunCommand(out, configPath, "run"))
 	command.AddCommand(newSchedulerServeCommand(out, configPath, "serve"))
 
@@ -115,6 +119,39 @@ func newSchedulerStatusCommand(out io.Writer, configPath *string) *cobra.Command
 			)
 
 			return err
+		},
+	}
+}
+
+func newSchedulerAnalyzersCommand(out io.Writer, configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "analyzers",
+		Short: "Inspect per-analyzer work and retry queue depths",
+		RunE: func(command *cobra.Command, _ []string) error {
+			service, closeFn, err := openScheduler(command.Context(), configPath)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			depths, err := service.AnalyzerStatus(command.Context())
+			if err != nil {
+				return err
+			}
+
+			writer := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(writer, "ANALYZER\tPENDING\tRETRY")
+			for _, depth := range depths {
+				fmt.Fprintf(
+					writer,
+					"%s\t%d\t%d\n",
+					depth.Analyzer,
+					depth.Pending,
+					depth.Retry,
+				)
+			}
+
+			return writer.Flush()
 		},
 	}
 }
@@ -438,6 +475,78 @@ func newSchedulerForceCommand(out io.Writer, configPath *string) *cobra.Command 
 	return command
 }
 
+func newSchedulerPurgeQueuesCommand(out io.Writer, configPath *string) *cobra.Command {
+	var confirmInstance string
+
+	command := &cobra.Command{
+		Use:   "purge-queues",
+		Short: "Purge all scheduler queues (work, retry, failed, dead-letter, projection)",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+
+			if err := requireInstanceConfirmation(
+				loaded,
+				"scheduler purge-queues",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+
+			service, closeFn, err := openSchedulerLoaded(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			purged, err := service.PurgeQueues(command.Context())
+			if err != nil {
+				return err
+			}
+
+			_, err = fmt.Fprintf(out, "scheduler purge-queues: purged=%d\n", purged)
+
+			return err
+		},
+	}
+	command.Flags().
+		StringVar(&confirmInstance, "confirm-instance", "", "confirm instance id before purging queues")
+
+	return command
+}
+
+func newSchedulerSelfHealCommand(out io.Writer, configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "self-heal",
+		Short: "Run a full self-heal sweep of the FILESTORE projection",
+		RunE: func(command *cobra.Command, _ []string) error {
+			service, closeFn, err := openScheduler(command.Context(), configPath)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			response, err := service.SelfHealSweep(command.Context())
+			if err != nil {
+				return err
+			}
+
+			_, err = fmt.Fprintf(
+				out,
+				"scheduler self-heal: scanned=%d enqueued=%d skipped=%d failed=%d\n",
+				response.Scanned,
+				response.Enqueued,
+				response.Skipped,
+				response.Failed,
+			)
+
+			return err
+		},
+	}
+}
+
 func newSchedulerRunCommand(
 	out io.Writer,
 	configPath *string,
@@ -589,6 +698,7 @@ func openSchedulerLoaded(
 	broker, err := schedmq.New(ctx, schedmq.ConfigFromResolved(
 		loaded.Resolved.RabbitMQ,
 		loaded.Resolved.Scheduler,
+		loaded.Config.Analysis.Analyzers,
 	))
 	if err != nil {
 		_ = filestoreClient.Close()
@@ -632,10 +742,23 @@ func schedulerConfigFromResolved(
 		return scheduler.Config{}, fmt.Errorf("parse scheduler.scan_interval: %w", err)
 	}
 
+	selfHealIdle, err := time.ParseDuration(resolved.SelfHealIdleThreshold)
+	if err != nil {
+		return scheduler.Config{}, fmt.Errorf(
+			"parse scheduler.self_heal_idle_threshold: %w",
+			err,
+		)
+	}
+
 	return scheduler.Config{
-		ScanInterval: scanInterval,
-		RetryBackoff: retryBackoffDuration(resolved.RetryBackoff),
-		Priorities:   resolved.Priorities,
+		ScanInterval:            scanInterval,
+		RetryBackoff:            retryBackoffDuration(resolved.RetryBackoff),
+		Priorities:              resolved.Priorities,
+		BackpressureHighWater:   resolved.BackpressureHighWater,
+		BackpressureLowWater:    resolved.BackpressureLowWater,
+		SelfHealChunkSize:       resolved.SelfHealChunkSize,
+		SelfHealIdleThreshold:   selfHealIdle,
+		FullyAnnotatedCacheSize: resolved.FullyAnnotatedCacheSize,
 	}, nil
 }
 

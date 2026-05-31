@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 
 	"blackcat.ca/gmeow/internal/config"
+	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
 	schedmq "blackcat.ca/gmeow/internal/scheduler/rabbitmq"
@@ -26,6 +28,56 @@ import (
 )
 
 var configuredSourceRetryDelay = 30 * time.Second
+
+// schedulerPressureGate reports the scheduler's analysis backpressure to the
+// source with the same high/low-water hysteresis the scheduler applies
+// internally: it engages at or above the high-water mark and only releases once
+// depth falls to the low-water mark, so backfill does not flap on and off near
+// a single threshold. It satisfies source.PressureReporter.
+type schedulerPressureGate struct {
+	client    *rpc.SchedulerClient
+	mu        sync.Mutex
+	highWater int
+	lowWater  int
+	pressured bool
+}
+
+func newSchedulerPressureGate(
+	client *rpc.SchedulerClient,
+	resolved config.ResolvedScheduler,
+) *schedulerPressureGate {
+	high := resolved.BackpressureHighWater
+	if high <= 0 {
+		high = 10000
+	}
+
+	low := resolved.BackpressureLowWater
+	if low <= 0 || low > high {
+		low = high / 2
+	}
+
+	return &schedulerPressureGate{client: client, highWater: high, lowWater: low}
+}
+
+func (gate *schedulerPressureGate) Pressured(ctx context.Context) (bool, error) {
+	status, err := gate.client.Status(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	depth := status.Pending + status.Retry
+
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+
+	if gate.pressured && depth <= gate.lowWater {
+		gate.pressured = false
+	} else if !gate.pressured && depth >= gate.highWater {
+		gate.pressured = true
+	}
+
+	return gate.pressured, nil
+}
 
 func newSourceCommand(out io.Writer, configPath *string) *cobra.Command {
 	command := &cobra.Command{
@@ -285,6 +337,7 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 					schedmq.ConfigFromResolved(
 						loaded.Resolved.RabbitMQ,
 						loaded.Resolved.Scheduler,
+						loaded.Config.Analysis.Analyzers,
 					),
 				)
 				if brokerErr != nil {
@@ -416,6 +469,22 @@ func newSourceServeCommand(
 			if err != nil {
 				return err
 			}
+
+			// Wire the scheduler's backpressure signal so the configured backfill
+			// pauses when the analysis queue is deep and resumes once it drains —
+			// the source self-throttles instead of firehosing the work queue.
+			schedulerClient, err := rpc.NewSchedulerClient(
+				ctx,
+				rpcEndpoint(loaded.Resolved.RPC.Scheduler),
+			)
+			if err != nil {
+				return err
+			}
+			defer schedulerClient.Close()
+			sourceService.SetPressureReporter(
+				newSchedulerPressureGate(schedulerClient, loaded.Resolved.Scheduler),
+			)
+
 			sourceServer, err := sourcegrpc.NewServer(adapter, sourceService)
 			if err != nil {
 				return err
@@ -552,10 +621,11 @@ func newSourceBackfillCommand(out io.Writer, configPath *string) *cobra.Command 
 			}
 
 			report, err := sourceService.RunBackfill(ctx, adapter, source.BackfillRequest{
-				Cursor:      cursor,
-				PageSize:    pageSize,
-				MaxPages:    maxPages,
-				Concurrency: concurrency,
+				Cursor:        cursor,
+				PriorityClass: contracts.PriorityBackground,
+				PageSize:      pageSize,
+				MaxPages:      maxPages,
+				Concurrency:   concurrency,
 			})
 			if printErr := printBackfillReport(out, adapter, report); printErr != nil {
 				return printErr
@@ -681,11 +751,14 @@ func runConfiguredBackfill(
 				"mode":  firstNonEmpty(sourceConfig.Backfill.Mode, "full"),
 				"query": sourceConfig.Backfill.Query,
 			},
-			CursorKey:   firstNonEmpty(sourceConfig.Backfill.CursorKey, "backfill"),
-			PageSize:    sourceConfig.Backfill.PageSize,
-			MaxPages:    sourceConfig.Backfill.MaxPages,
-			Concurrency: sourceConfig.Backfill.Concurrency,
-			Resume:      sourceConfig.Backfill.Resume,
+			// Backfill is low priority and the one producer that pauses under
+			// analysis backpressure.
+			PriorityClass: contracts.PriorityBackground,
+			CursorKey:     firstNonEmpty(sourceConfig.Backfill.CursorKey, "backfill"),
+			PageSize:      sourceConfig.Backfill.PageSize,
+			MaxPages:      sourceConfig.Backfill.MaxPages,
+			Concurrency:   sourceConfig.Backfill.Concurrency,
+			Resume:        sourceConfig.Backfill.Resume,
 		})
 		if err != nil && ctx.Err() == nil {
 			fmt.Printf(
@@ -735,11 +808,14 @@ func runConfiguredInboxRefresh(
 				"mode":  "full",
 				"query": query,
 			},
-			CursorKey:   "inbox_refresh",
-			PageSize:    sourceConfig.InboxRefresh.PageSize,
-			MaxPages:    sourceConfig.InboxRefresh.MaxPages,
-			Concurrency: sourceConfig.InboxRefresh.Concurrency,
-			Resume:      false,
+			// Inbox refresh is high priority and runs at full speed: it never pauses
+			// under analysis backpressure, and its analysis preempts backfill's.
+			PriorityClass: contracts.PriorityFreshIngest,
+			CursorKey:     "inbox_refresh",
+			PageSize:      sourceConfig.InboxRefresh.PageSize,
+			MaxPages:      sourceConfig.InboxRefresh.MaxPages,
+			Concurrency:   sourceConfig.InboxRefresh.Concurrency,
+			Resume:        false,
 		})
 		if err != nil {
 			if ctx.Err() != nil {

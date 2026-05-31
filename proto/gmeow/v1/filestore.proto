@@ -62,6 +62,10 @@ message PutObjectStart {
   repeated Facet facets = 4;
   repeated Provenance provenance = 5;
   repeated Relationship relationships = 6;
+  // priority_class tags the analysis priority the scheduler should assign to work
+  // derived from this object (e.g. fresh_ingest for inbox, background for
+  // backfill). Empty lets the scheduler choose by reason.
+  string priority_class = 7;
 }
 
 message PutObjectFinish {}
@@ -70,6 +74,7 @@ message PutObjectResponse { string digest = 1; }
 message AttachProvenanceRequest {
   string digest = 1;
   repeated Provenance provenance = 2;
+  string priority_class = 3;
 }
 
 message PutCompoundRequest {
@@ -81,6 +86,7 @@ message PutCompoundRequest {
   repeated Provenance provenance = 6;
   repeated Relationship relationships = 7;
   repeated CompoundPart parts = 8;
+  string priority_class = 9;
 }
 
 message PutCompoundResponse { string digest = 1; }

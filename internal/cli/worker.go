@@ -43,19 +43,6 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 				return err
 			}
 
-			source, err := schedmq.NewAnalysisJobSource(
-				command.Context(),
-				schedmq.AnalysisJobSourceConfig{
-					URL:         loaded.Resolved.RabbitMQ.URL,
-					QueuePrefix: loaded.Resolved.Scheduler.QueuePrefix,
-					Prefetch:    analysisWorkerConcurrency(loaded.Config.Analysis),
-				},
-			)
-			if err != nil {
-				return err
-			}
-			defer source.Close()
-
 			store, err := rpc.NewFilestoreClient(
 				command.Context(),
 				rpcEndpoint(loaded.Resolved.RPC.Filestore),
@@ -65,17 +52,53 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 			}
 			defer store.Close()
 
-			registry, err := workerRegistryFromConfig(loaded.Config.Analysis)
+			// One manager owns the persistent analyzer backends for the worker's
+			// lifetime; closing it terminates them on shutdown.
+			manager := analysis.NewBackendManager(analysis.BackendManagerConfig{
+				IdleTimeout: backendIdleTimeout(loaded.Config.Analysis),
+			})
+			defer manager.Close()
+
+			registry, err := workerRegistryFromConfig(loaded.Config.Analysis, manager)
 			if err != nil {
 				return err
 			}
 
-			runtime, err := analysis.NewRuntime(
-				source,
-				store,
-				registry,
-				analysis.WithConcurrency(analysisWorkerConcurrency(loaded.Config.Analysis)),
+			// One consumer source + pool per analyzer queue: a slow model analyzer
+			// can never block a fast in-process one, and each analyzer's concurrency
+			// is tuned independently.
+			var (
+				sources []*schedmq.AnalysisJobSource
+				options []analysis.RuntimeOption
 			)
+			closeSources := func() {
+				for _, source := range sources {
+					_ = source.Close()
+				}
+			}
+			for _, analyzer := range loaded.Config.Analysis.Analyzers {
+				workers := analyzerWorkers(analyzer, loaded.Config.Analysis)
+				source, err := schedmq.NewAnalysisJobSource(
+					command.Context(),
+					schedmq.AnalysisJobSourceConfig{
+						URL:         loaded.Resolved.RabbitMQ.URL,
+						QueuePrefix: loaded.Resolved.Scheduler.QueuePrefix,
+						Analyzer:    analyzer.Name,
+						Prefetch:    workers,
+					},
+				)
+				if err != nil {
+					closeSources()
+
+					return err
+				}
+
+				sources = append(sources, source)
+				options = append(options, analysis.WithConsumerPool(source, workers))
+			}
+			defer closeSources()
+
+			runtime, err := analysis.NewRuntime(nil, store, registry, options...)
 			if err != nil {
 				return err
 			}
@@ -97,8 +120,20 @@ func analysisWorkerConcurrency(config config.AnalysisConfig) int {
 	return 4
 }
 
+// analyzerWorkers returns the consumer-goroutine count for one analyzer queue,
+// preferring its per-analyzer Workers setting and falling back to the global
+// analysis worker concurrency.
+func analyzerWorkers(analyzer config.AnalyzerConfig, cfg config.AnalysisConfig) int {
+	if analyzer.Workers > 0 {
+		return analyzer.Workers
+	}
+
+	return analysisWorkerConcurrency(cfg)
+}
+
 func workerRegistryFromConfig(
 	analysisConfig config.AnalysisConfig,
+	manager *analysis.BackendManager,
 ) (*analysis.Registry, error) {
 	defaultRegistry, err := analysis.DefaultRegistry()
 	if err != nil {
@@ -127,7 +162,12 @@ func workerRegistryFromConfig(
 
 			registered = append(registered, analyzer)
 		case "external", "python":
-			analyzer, err := externalAnalyzerFromConfig(configured, spec)
+			analyzer, err := externalAnalyzerFromConfig(
+				configured,
+				spec,
+				manager,
+				analysisConfig,
+			)
 			if err != nil {
 				return nil, err
 			}
@@ -188,18 +228,69 @@ func analyzerSpecFromConfig(configured config.AnalyzerConfig) contracts.Analyzer
 func externalAnalyzerFromConfig(
 	configured config.AnalyzerConfig,
 	spec contracts.AnalyzerSpec,
+	manager *analysis.BackendManager,
+	analysisConfig config.AnalysisConfig,
 ) (analysis.Analyzer, error) {
 	timeout, err := parseAnalyzerTimeout(configured.Timeout)
 	if err != nil {
 		return nil, err
 	}
 
+	startup, err := backendStartupTimeout(configured, analysisConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	return analysis.NewExternalCommandAnalyzer(analysis.ExternalCommandConfig{
-		Spec:    spec,
-		Command: configured.Command,
-		Args:    configured.Args,
-		Timeout: timeout,
+		Spec:           spec,
+		Command:        configured.Command,
+		Args:           configured.Args,
+		Timeout:        timeout,
+		StartupTimeout: startup,
+		MaxInstances:   configured.MaxInstances,
+		Manager:        manager,
 	})
+}
+
+// backendIdleTimeout resolves how long a persistent backend may sit idle before
+// the reaper reclaims its memory. An unset or unparseable value falls back to the
+// manager's own default (one hour), so a missing config never disables reaping.
+func backendIdleTimeout(analysisConfig config.AnalysisConfig) time.Duration {
+	if analysisConfig.BackendIdleTimeout == "" {
+		return 0
+	}
+
+	timeout, err := time.ParseDuration(analysisConfig.BackendIdleTimeout)
+	if err != nil || timeout <= 0 {
+		return 0
+	}
+
+	return timeout
+}
+
+// backendStartupTimeout resolves the model-load deadline for an analyzer backend.
+// A per-analyzer value wins over the analysis-wide default; an unset value returns
+// zero so NewExternalCommandAnalyzer applies its built-in default. A malformed
+// value is reported rather than silently ignored — startup time is safety-critical
+// (too short turns slow model loads into spurious "unavailable" parks).
+func backendStartupTimeout(
+	configured config.AnalyzerConfig,
+	analysisConfig config.AnalysisConfig,
+) (time.Duration, error) {
+	raw := configured.StartupTimeout
+	if raw == "" {
+		raw = analysisConfig.BackendStartupTimeout
+	}
+	if raw == "" {
+		return 0, nil
+	}
+
+	timeout, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse analyzer startup_timeout: %w", err)
+	}
+
+	return timeout, nil
 }
 
 func parseAnalyzerTimeout(raw string) (time.Duration, error) {

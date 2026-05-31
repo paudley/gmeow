@@ -50,6 +50,10 @@ type Config struct {
 	QueuePrefix  string
 	RetryLimit   int
 	RetryBackoff time.Duration
+	// Analyzers is the set of analyzer names that each get their own work and
+	// retry queue, so a slow analyzer's backlog never blocks a fast one. Empty is
+	// tolerated (no analysis work queues declared) for source-import-only callers.
+	Analyzers []string
 }
 
 type Broker struct {
@@ -62,9 +66,9 @@ type topology struct {
 	analysisExchange            string
 	projectionExchange          string
 	sourceImportExchange        string
-	workQueue                   string
+	prefix                      string
+	analyzers                   []string
 	reconcileQueue              string
-	retryQueue                  string
 	failedQueue                 string
 	deadLetterQueue             string
 	projectionQueue             string
@@ -72,6 +76,24 @@ type topology struct {
 	sourceImportRetryQueue      string
 	sourceImportFailedQueue     string
 	sourceImportDeadLetterQueue string
+}
+
+// Per-analyzer queue and routing-key helpers. Work and retry are partitioned by
+// analyzer; failed, dead-letter, and projection stay shared.
+func (top topology) workQueueFor(analyzer string) string {
+	return top.prefix + workSuffix + "." + analyzer
+}
+
+func (top topology) workRoutingKeyFor(analyzer string) string {
+	return workRoutingKey + "." + analyzer
+}
+
+func (top topology) retryQueueFor(analyzer string) string {
+	return top.prefix + retrySuffix + "." + analyzer
+}
+
+func (top topology) retryRoutingKeyFor(analyzer string) string {
+	return retryRoutingKey + "." + analyzer
 }
 
 type queueBinding struct {
@@ -107,7 +129,7 @@ func New(ctx context.Context, cfg Config) (*Broker, error) {
 	broker := &Broker{
 		connection: conn,
 		config:     cfg,
-		topology:   newTopology(cfg.QueuePrefix),
+		topology:   newTopology(cfg.QueuePrefix, cfg.Analyzers),
 	}
 	if err := broker.Declare(ctx); err != nil {
 		conn.Close()
@@ -121,6 +143,7 @@ func New(ctx context.Context, cfg Config) (*Broker, error) {
 func ConfigFromResolved(
 	rabbit config.ResolvedRabbitMQ,
 	scheduler config.ResolvedScheduler,
+	analyzers []config.AnalyzerConfig,
 ) Config {
 	backoff, err := time.ParseDuration(scheduler.RetryBackoff)
 	if err != nil {
@@ -132,28 +155,42 @@ func ConfigFromResolved(
 		RetryLimit:   scheduler.RetryLimit,
 		RetryBackoff: backoff,
 		QueuePrefix:  scheduler.QueuePrefix,
+		Analyzers:    analyzerNames(analyzers),
 	}
+}
+
+func analyzerNames(analyzers []config.AnalyzerConfig) []string {
+	names := make([]string, 0, len(analyzers))
+	for _, analyzer := range analyzers {
+		name := strings.TrimSpace(analyzer.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+
+	return names
 }
 
 func TestConfigFromResolved(
 	rabbit config.ResolvedRabbitMQ,
 	scheduler config.ResolvedScheduler,
+	analyzers []config.AnalyzerConfig,
 ) Config {
-	cfg := ConfigFromResolved(rabbit, scheduler)
+	cfg := ConfigFromResolved(rabbit, scheduler, analyzers)
 	cfg.URL = rabbit.TestURL
 	cfg.QueuePrefix = testQueuePrefix
 
 	return cfg
 }
 
-func newTopology(prefix string) topology {
+func newTopology(prefix string, analyzers []string) topology {
 	return topology{
 		analysisExchange:            prefix + analysisSuffix,
 		projectionExchange:          prefix + projectionExSuffix,
 		sourceImportExchange:        prefix + sourceImportExSuffix,
-		workQueue:                   prefix + workSuffix,
+		prefix:                      prefix,
+		analyzers:                   append([]string(nil), analyzers...),
 		reconcileQueue:              prefix + reconcileSuffix,
-		retryQueue:                  prefix + retrySuffix,
 		failedQueue:                 prefix + failedSuffix,
 		deadLetterQueue:             prefix + deadLetterSuffix,
 		projectionQueue:             prefix + projectionSuffix,
@@ -196,21 +233,6 @@ func (broker *Broker) Declare(ctx context.Context) error {
 	}
 
 	if _, err := channel.QueueDeclare(
-		broker.topology.workQueue,
-		true,
-		false,
-		false,
-		false,
-		amqp.Table{
-			"x-max-priority":            int32(100),
-			"x-dead-letter-exchange":    broker.topology.analysisExchange,
-			"x-dead-letter-routing-key": failedRoutingKey,
-		},
-	); err != nil {
-		return fmt.Errorf("declare work queue: %w", err)
-	}
-
-	if _, err := channel.QueueDeclare(
 		broker.topology.reconcileQueue,
 		true,
 		false,
@@ -219,20 +241,6 @@ func (broker *Broker) Declare(ctx context.Context) error {
 		amqp.Table{"x-max-priority": int32(100)},
 	); err != nil {
 		return fmt.Errorf("declare reconcile queue: %w", err)
-	}
-
-	if _, err := channel.QueueDeclare(
-		broker.topology.retryQueue,
-		true,
-		false,
-		false,
-		false,
-		amqp.Table{
-			"x-dead-letter-exchange":    broker.topology.analysisExchange,
-			"x-dead-letter-routing-key": workRoutingKey,
-		},
-	); err != nil {
-		return fmt.Errorf("declare retry queue: %w", err)
 	}
 
 	if _, err := channel.QueueDeclare(
@@ -273,8 +281,6 @@ func (broker *Broker) Declare(ctx context.Context) error {
 	}
 
 	bindings := []queueBinding{
-		{broker.topology.workQueue, workRoutingKey, broker.topology.analysisExchange},
-		{broker.topology.retryQueue, retryRoutingKey, broker.topology.analysisExchange},
 		{broker.topology.failedQueue, failedRoutingKey, broker.topology.analysisExchange},
 		{
 			broker.topology.deadLetterQueue,
@@ -301,7 +307,91 @@ func (broker *Broker) Declare(ctx context.Context) error {
 		}
 	}
 
+	return broker.declareAnalyzerQueues(channel)
+}
+
+// declareAnalyzerQueues declares, per configured analyzer, a priority work queue
+// (dead-lettering failures to the shared failed queue) and a retry queue whose
+// expired messages dead-letter back to that analyzer's work queue. Partitioning
+// work and retry by analyzer keeps a slow analyzer's backlog from blocking a fast
+// one and preserves per-analyzer retry granularity.
+func (broker *Broker) declareAnalyzerQueues(channel *amqp.Channel) error {
+	for _, analyzer := range broker.topology.analyzers {
+		workQueue := broker.topology.workQueueFor(analyzer)
+		retryQueue := broker.topology.retryQueueFor(analyzer)
+
+		if _, err := channel.QueueDeclare(workQueue, true, false, false, false, amqp.Table{
+			"x-max-priority":            int32(100),
+			"x-dead-letter-exchange":    broker.topology.analysisExchange,
+			"x-dead-letter-routing-key": failedRoutingKey,
+		}); err != nil {
+			return fmt.Errorf("declare work queue %s: %w", workQueue, err)
+		}
+
+		if _, err := channel.QueueDeclare(retryQueue, true, false, false, false, amqp.Table{
+			"x-dead-letter-exchange":    broker.topology.analysisExchange,
+			"x-dead-letter-routing-key": broker.topology.workRoutingKeyFor(analyzer),
+		}); err != nil {
+			return fmt.Errorf("declare retry queue %s: %w", retryQueue, err)
+		}
+
+		if err := channel.QueueBind(
+			workQueue,
+			broker.topology.workRoutingKeyFor(analyzer),
+			broker.topology.analysisExchange,
+			false,
+			nil,
+		); err != nil {
+			return fmt.Errorf("bind work queue %s: %w", workQueue, err)
+		}
+
+		if err := channel.QueueBind(
+			retryQueue,
+			broker.topology.retryRoutingKeyFor(analyzer),
+			broker.topology.analysisExchange,
+			false,
+			nil,
+		); err != nil {
+			return fmt.Errorf("bind retry queue %s: %w", retryQueue, err)
+		}
+	}
+
 	return nil
+}
+
+func (broker *Broker) PurgeAll(ctx context.Context) (int, error) {
+	channel, err := broker.channel(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer channel.Close()
+
+	total := 0
+
+	queues := []string{
+		broker.topology.reconcileQueue,
+		broker.topology.failedQueue,
+		broker.topology.deadLetterQueue,
+		broker.topology.projectionQueue,
+	}
+	for _, analyzer := range broker.topology.analyzers {
+		queues = append(
+			queues,
+			broker.topology.workQueueFor(analyzer),
+			broker.topology.retryQueueFor(analyzer),
+		)
+	}
+
+	for _, queue := range queues {
+		purged, err := channel.QueuePurge(queue, false)
+		if err != nil {
+			return total, fmt.Errorf("purge queue %s: %w", queue, err)
+		}
+
+		total += purged
+	}
+
+	return total, nil
 }
 
 func (broker *Broker) Publish(ctx context.Context, job contracts.AnalyzerJob) error {
@@ -320,7 +410,7 @@ func (broker *Broker) Publish(ctx context.Context, job contracts.AnalyzerJob) er
 		ctx,
 		channel,
 		broker.topology.analysisExchange,
-		workRoutingKey,
+		broker.topology.workRoutingKeyFor(job.Analyzer.Name),
 		amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
@@ -373,14 +463,21 @@ func (broker *Broker) Status(ctx context.Context) (contracts.SchedulerStatus, er
 	}
 	defer channel.Close()
 
-	work, err := channel.QueueInspect(broker.topology.workQueue)
-	if err != nil {
-		return contracts.SchedulerStatus{}, err
-	}
+	pending := 0
+	retry := 0
+	for _, analyzer := range broker.topology.analyzers {
+		work, err := channel.QueueInspect(broker.topology.workQueueFor(analyzer))
+		if err != nil {
+			return contracts.SchedulerStatus{}, err
+		}
 
-	retry, err := channel.QueueInspect(broker.topology.retryQueue)
-	if err != nil {
-		return contracts.SchedulerStatus{}, err
+		retryQ, err := channel.QueueInspect(broker.topology.retryQueueFor(analyzer))
+		if err != nil {
+			return contracts.SchedulerStatus{}, err
+		}
+
+		pending += work.Messages
+		retry += retryQ.Messages
 	}
 
 	failed, err := channel.QueueInspect(broker.topology.failedQueue)
@@ -395,11 +492,44 @@ func (broker *Broker) Status(ctx context.Context) (contracts.SchedulerStatus, er
 
 	return contracts.SchedulerStatus{
 		SchemaVersion: contracts.SchemaVersionPhase00,
-		Pending:       work.Messages,
-		Retry:         retry.Messages,
+		Pending:       pending,
+		Retry:         retry,
 		Failed:        failed.Messages,
 		DeadLetter:    dead.Messages,
 	}, nil
+}
+
+// PerAnalyzerStatus returns the work and retry depth of each analyzer queue so an
+// operator can see which analyzer is backed up.
+func (broker *Broker) PerAnalyzerStatus(
+	ctx context.Context,
+) ([]contracts.AnalyzerQueueDepth, error) {
+	channel, err := broker.channel(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer channel.Close()
+
+	depths := make([]contracts.AnalyzerQueueDepth, 0, len(broker.topology.analyzers))
+	for _, analyzer := range broker.topology.analyzers {
+		work, err := channel.QueueInspect(broker.topology.workQueueFor(analyzer))
+		if err != nil {
+			return nil, err
+		}
+
+		retryQ, err := channel.QueueInspect(broker.topology.retryQueueFor(analyzer))
+		if err != nil {
+			return nil, err
+		}
+
+		depths = append(depths, contracts.AnalyzerQueueDepth{
+			Analyzer: analyzer,
+			Pending:  work.Messages,
+			Retry:    retryQ.Messages,
+		})
+	}
+
+	return depths, nil
 }
 
 func (broker *Broker) DeadLetters(
@@ -416,29 +546,33 @@ func (broker *Broker) FailedJobs(
 	return broker.peekJobs(ctx, broker.topology.failedQueue, limit)
 }
 
-func (broker *Broker) ActiveJobKeys(
-	ctx context.Context,
-	limit int,
-) (map[string]bool, error) {
-	if limit <= 0 {
-		limit = 100000
-	}
-
-	keys := map[string]bool{}
-	for _, queue := range []string{broker.topology.workQueue, broker.topology.retryQueue} {
-		if err := broker.peekJobKeys(ctx, queue, limit, keys); err != nil {
-			return nil, err
-		}
-	}
-
-	return keys, nil
-}
-
 func (broker *Broker) PendingJobs(
 	ctx context.Context,
 	limit int,
 ) ([]contracts.AnalyzerJob, error) {
-	return broker.peekJobs(ctx, broker.topology.workQueue, limit)
+	if limit <= 0 {
+		limit = 20
+	}
+
+	jobs := []contracts.AnalyzerJob{}
+	for _, analyzer := range broker.topology.analyzers {
+		if len(jobs) >= limit {
+			break
+		}
+
+		batch, err := broker.peekJobs(
+			ctx,
+			broker.topology.workQueueFor(analyzer),
+			limit-len(jobs),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		jobs = append(jobs, batch...)
+	}
+
+	return jobs, nil
 }
 
 func (broker *Broker) ReconcilePending(
@@ -468,25 +602,101 @@ func (broker *Broker) ReconcilePending(
 	response := contracts.ReconcilePendingResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 	}
-	if moved, err := broker.republishQueue(
-		ctx,
-		channel,
-		confirms,
-		broker.topology.reconcileQueue,
-		broker.topology.analysisExchange,
-		workRoutingKey,
-		0,
-	); err != nil {
+
+	// Drain any scratch left by a crashed prior run, routing each job back to its
+	// own analyzer's work queue.
+	moved, err := broker.drainReconcileByAnalyzer(ctx, channel, confirms)
+	if err != nil {
 		return response, err
-	} else {
-		response.Republished += moved
 	}
+	response.Republished += moved
 
 	seen := map[string]bool{}
-	for response.Checked < limit {
-		delivery, ok, err := channel.Get(broker.topology.workQueue, false)
+	for _, analyzer := range broker.topology.analyzers {
+		workQueue := broker.topology.workQueueFor(analyzer)
+		for response.Checked < limit {
+			delivery, ok, err := channel.Get(workQueue, false)
+			if err != nil {
+				return response, err
+			}
+			if !ok {
+				break
+			}
+
+			var job contracts.AnalyzerJob
+			if err := json.Unmarshal(delivery.Body, &job); err != nil {
+				_ = delivery.Nack(false, true)
+
+				return response, err
+			}
+			response.Checked++
+
+			satisfied, err := isSatisfied(job)
+			if err != nil {
+				_ = delivery.Nack(false, true)
+
+				return response, err
+			}
+			if satisfied {
+				if err := delivery.Ack(false); err != nil {
+					return response, err
+				}
+				response.DroppedSatisfied++
+
+				continue
+			}
+			if seen[job.IdempotencyKey] {
+				if err := delivery.Ack(false); err != nil {
+					return response, err
+				}
+				response.DroppedDuplicate++
+
+				continue
+			}
+			seen[job.IdempotencyKey] = true
+			response.KeptJobs = append(response.KeptJobs, job)
+
+			if err := publishAndWaitConfirmed(
+				ctx,
+				channel,
+				confirms,
+				"",
+				broker.topology.reconcileQueue,
+				publishingFromDelivery(delivery),
+			); err != nil {
+				_ = delivery.Nack(false, true)
+
+				return response, err
+			}
+			if err := delivery.Ack(false); err != nil {
+				return response, err
+			}
+			response.Kept++
+		}
+	}
+
+	moved, err = broker.drainReconcileByAnalyzer(ctx, channel, confirms)
+	if err != nil {
+		return response, err
+	}
+	response.Republished += moved
+
+	return response, nil
+}
+
+// drainReconcileByAnalyzer moves every job buffered in the shared reconcile
+// scratch queue back to its own analyzer's work queue, so kept jobs return to
+// the correct partition.
+func (broker *Broker) drainReconcileByAnalyzer(
+	ctx context.Context,
+	channel *amqp.Channel,
+	confirms <-chan amqp.Confirmation,
+) (int, error) {
+	moved := 0
+	for {
+		delivery, ok, err := channel.Get(broker.topology.reconcileQueue, false)
 		if err != nil {
-			return response, err
+			return moved, err
 		}
 		if !ok {
 			break
@@ -496,114 +706,15 @@ func (broker *Broker) ReconcilePending(
 		if err := json.Unmarshal(delivery.Body, &job); err != nil {
 			_ = delivery.Nack(false, true)
 
-			return response, err
-		}
-		response.Checked++
-
-		satisfied, err := isSatisfied(job)
-		if err != nil {
-			_ = delivery.Nack(false, true)
-
-			return response, err
-		}
-		if satisfied {
-			if err := delivery.Ack(false); err != nil {
-				return response, err
-			}
-			response.DroppedSatisfied++
-
-			continue
-		}
-		if seen[job.IdempotencyKey] {
-			if err := delivery.Ack(false); err != nil {
-				return response, err
-			}
-			response.DroppedDuplicate++
-
-			continue
-		}
-		seen[job.IdempotencyKey] = true
-		response.KeptJobs = append(response.KeptJobs, job)
-
-		if err := publishAndWaitConfirmed(
-			ctx,
-			channel,
-			confirms,
-			"",
-			broker.topology.reconcileQueue,
-			publishingFromDelivery(delivery),
-		); err != nil {
-			_ = delivery.Nack(false, true)
-
-			return response, err
-		}
-		if err := delivery.Ack(false); err != nil {
-			return response, err
-		}
-		response.Kept++
-	}
-
-	if moved, err := broker.republishQueue(
-		ctx,
-		channel,
-		confirms,
-		broker.topology.reconcileQueue,
-		broker.topology.analysisExchange,
-		workRoutingKey,
-		0,
-	); err != nil {
-		return response, err
-	} else {
-		response.Republished += moved
-	}
-
-	return response, nil
-}
-
-func (broker *Broker) peekJobKeys(
-	ctx context.Context,
-	queue string,
-	limit int,
-	keys map[string]bool,
-) error {
-	jobs, err := broker.peekJobs(ctx, queue, limit)
-	if err != nil {
-		return err
-	}
-	for _, job := range jobs {
-		if job.IdempotencyKey != "" {
-			keys[job.IdempotencyKey] = true
-		}
-	}
-
-	return nil
-}
-
-func (broker *Broker) republishQueue(
-	ctx context.Context,
-	channel *amqp.Channel,
-	confirms <-chan amqp.Confirmation,
-	sourceQueue string,
-	targetExchange string,
-	targetRoutingKey string,
-	limit int,
-) (int, error) {
-	moved := 0
-	for limit <= 0 || moved < limit {
-		delivery, ok, err := channel.Get(sourceQueue, false)
-		if err != nil {
 			return moved, err
 		}
-		if !ok {
-			break
-		}
 
 		if err := publishAndWaitConfirmed(
 			ctx,
 			channel,
 			confirms,
-			targetExchange,
-			targetRoutingKey,
+			broker.topology.analysisExchange,
+			broker.topology.workRoutingKeyFor(job.Analyzer.Name),
 			publishingFromDelivery(delivery),
 		); err != nil {
 			_ = delivery.Nack(false, true)
@@ -814,7 +925,7 @@ func (broker *Broker) RequeueDeadLetters(
 			channel,
 			confirms,
 			broker.topology.analysisExchange,
-			workRoutingKey,
+			broker.topology.workRoutingKeyFor(job.Analyzer.Name),
 			amqp.Publishing{
 				ContentType:  "application/json",
 				DeliveryMode: amqp.Persistent,
@@ -877,7 +988,7 @@ func (broker *Broker) ProcessFailures(
 
 		job.Attempt++
 
-		routingKey := retryRoutingKey
+		routingKey := broker.topology.retryRoutingKeyFor(job.Analyzer.Name)
 		if job.Attempt > broker.config.RetryLimit {
 			routingKey = deadLetterRoutingKey
 		}

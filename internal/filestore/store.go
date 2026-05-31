@@ -24,6 +24,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/zeebo/blake3"
 
+	"blackcat.ca/gmeow/internal/cache"
 	"blackcat.ca/gmeow/internal/contracts"
 )
 
@@ -60,6 +61,11 @@ type FilesystemStore struct {
 	// dictionary training) so they never run concurrently — e.g. repack must not
 	// race gc, and two trainings must not race the dictionary-id allocation.
 	maintenanceMu sync.Mutex
+	// chunkCache holds decompressed, content-verified chunk bytes keyed by hash.
+	// Chunk content is immutable by hash, so the cache needs no invalidation; it
+	// saves a pack read + zstd decode on repeat reads (multi-analyzer same object,
+	// projection re-reads, interface retrieves).
+	chunkCache *cache.SizedLRU[string]
 }
 
 type filesystemKeyLock struct {
@@ -67,10 +73,14 @@ type filesystemKeyLock struct {
 	refs int
 }
 
+// defaultChunkCacheBytes bounds the decompressed-chunk cache (~256 MiB).
+const defaultChunkCacheBytes = 256 << 20
+
 func NewFilesystemStore(root string) *FilesystemStore {
 	return &FilesystemStore{
-		root:  root,
-		packs: newPackCache(defaultPackCacheSize),
+		root:       root,
+		packs:      newPackCache(defaultPackCacheSize),
+		chunkCache: cache.NewSizedLRU[string](defaultChunkCacheBytes),
 	}
 }
 
@@ -165,27 +175,32 @@ func (store *FilesystemStore) Put(
 	return digest, nil
 }
 
+// AttachProvenance records that a source observed an existing object. Re-observing
+// an already-seen object (no new source/version key) is a 100% no-op: it performs
+// no manifest rewrite and no source-index write, and reports changed=false so the
+// caller can skip emitting a change notice. This keeps a bulk re-ingest of known
+// duplicates from amplifying metadata writes or analysis scheduling.
 func (store *FilesystemStore) AttachProvenance(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 	provenance []contracts.Provenance,
-) error {
+) (bool, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
 
 	if err := validateObjectDigest(digest); err != nil {
-		return err
+		return false, err
 	}
 
 	if len(provenance) == 0 {
-		return errors.New("provenance is required")
+		return false, errors.New("provenance is required")
 	}
 
 	for _, item := range provenance {
 		err := validateSourceObjectRef(sourceObjectRefFromProvenance(item))
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 
@@ -194,17 +209,25 @@ func (store *FilesystemStore) AttachProvenance(
 
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil {
-		return fmt.Errorf("read provenance target manifest: %w", err)
+		return false, fmt.Errorf("read provenance target manifest: %w", err)
+	}
+
+	if !provenanceAddsNew(manifest.Provenance, provenance) {
+		return false, nil
 	}
 
 	manifest.Provenance = mergeProvenance(manifest.Provenance, provenance)
 	manifest.UpdatedAt = time.Now().UTC()
 
 	if err := store.writeManifest(digest, manifest); err != nil {
-		return err
+		return false, err
 	}
 
-	return store.recordSourceObjectIndexes(ctx, digest, provenance)
+	if err := store.recordSourceObjectIndexes(ctx, digest, provenance); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 func (store *FilesystemStore) PutCompound(
@@ -365,6 +388,14 @@ func (store *FilesystemStore) writeManifestTo(
 	return sink.set(manifestKey(digest), manifest)
 }
 
+// ReadManifest returns a manifest from metadata storage.
+//
+// Note: a write-through manifest cache was evaluated here but removed — the
+// manifest is mutable (provenance/annotations/version-set facets append), and a
+// lock-free-read cache produced stale reads in the importer's cross-service
+// read-modify-write collision/promotion flow. Pebble's block cache already backs
+// this read, so the only saving would have been JSON decode, which did not
+// justify the staleness risk.
 func (store *FilesystemStore) ReadManifest(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
@@ -1227,17 +1258,40 @@ func mergeFacets(existing, incoming []contracts.Facet) []contracts.Facet {
 	return normalizeFacets(result)
 }
 
+func provenanceMergeKey(item contracts.Provenance) string {
+	return strings.Join([]string{
+		item.SourceKind,
+		item.SourceName,
+		item.ExternalID,
+		item.ExternalVersion,
+	}, "\x00")
+}
+
+// provenanceAddsNew reports whether any incoming provenance carries a
+// source/name/external-id/version key not already present in existing. It is the
+// "did re-observing this object actually change anything?" test: when it is
+// false, re-attaching provenance is a pure no-op.
+func provenanceAddsNew(existing, incoming []contracts.Provenance) bool {
+	existingKeys := make(map[string]bool, len(existing))
+	for _, item := range existing {
+		existingKeys[provenanceMergeKey(item)] = true
+	}
+
+	for _, item := range incoming {
+		if !existingKeys[provenanceMergeKey(item)] {
+			return true
+		}
+	}
+
+	return false
+}
+
 func mergeProvenance(existing, incoming []contracts.Provenance) []contracts.Provenance {
 	seen := map[string]bool{}
 
 	result := make([]contracts.Provenance, 0, len(existing)+len(incoming))
 	for _, item := range append(existing, incoming...) {
-		key := strings.Join([]string{
-			item.SourceKind,
-			item.SourceName,
-			item.ExternalID,
-			item.ExternalVersion,
-		}, "\x00")
+		key := provenanceMergeKey(item)
 		if seen[key] {
 			continue
 		}

@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"blackcat.ca/gmeow/internal/config"
@@ -19,17 +21,22 @@ import (
 	"blackcat.ca/gmeow/internal/filestore"
 )
 
+var errSweepChunkDone = errors.New("sweep chunk limit reached")
+
 type Config struct {
-	ScanInterval time.Duration
-	RetryBackoff time.Duration
-	Priorities   config.SchedulerPriority
+	ScanInterval            time.Duration
+	RetryBackoff            time.Duration
+	SelfHealIdleThreshold   time.Duration
+	Priorities              config.SchedulerPriority
+	BackpressureHighWater   int
+	BackpressureLowWater    int
+	SelfHealChunkSize       int
+	FullyAnnotatedCacheSize int
 }
 
-// Store is the narrow slice of the filestore the scheduler depends on: reading
-// projections and writing analysis annotations. Both the in-process
-// FilesystemStore and the filestore gRPC client satisfy it, so the scheduler can
-// run against the filestore server (the only safe option while filestore-serve
-// holds Pebble's exclusive lock) without depending on the whole Store surface.
+// Store is the narrow slice of the filestore the scheduler reads. The scheduler
+// never writes to FILESTORE — it is a read-only coordinator. Both the in-process
+// FilesystemStore and the filestore gRPC client satisfy it.
 type Store interface {
 	WalkProjection(ctx context.Context, fn filestore.ProjectionFunc) error
 	ProjectionObject(
@@ -42,7 +49,6 @@ type Store interface {
 		analyzerName string,
 		analyzerVersion string,
 	) (bool, error)
-	WriteAnnotation(ctx context.Context, annotation contracts.Annotation) error
 }
 
 type Service struct {
@@ -52,6 +58,13 @@ type Service struct {
 	now       func() time.Time
 	specs     []contracts.AnalyzerSpec
 	config    Config
+
+	fullyAnnotated *lruCache
+
+	mu        sync.Mutex
+	pressured bool
+	writeSeen bool
+	sweepPos  string
 }
 
 type Option func(*Service)
@@ -76,19 +89,42 @@ func NewService(
 		return nil, err
 	}
 
-	service := &Service{
-		store:  store,
-		broker: broker,
-		specs:  normalized,
-		config: cfg,
-		now:    func() time.Time { return time.Now().UTC() },
+	cacheSize := cfg.FullyAnnotatedCacheSize
+	if cacheSize <= 0 {
+		cacheSize = 100000
 	}
+
+	service := &Service{
+		store:          store,
+		broker:         broker,
+		specs:          normalized,
+		config:         cfg,
+		now:            func() time.Time { return time.Now().UTC() },
+		fullyAnnotated: newLRUCache(cacheSize),
+	}
+
 	if service.config.ScanInterval <= 0 {
 		service.config.ScanInterval = 30 * time.Second
 	}
 
 	if service.config.RetryBackoff <= 0 {
 		service.config.RetryBackoff = 30 * time.Second
+	}
+
+	if service.config.BackpressureHighWater <= 0 {
+		service.config.BackpressureHighWater = 10000
+	}
+
+	if service.config.BackpressureLowWater <= 0 {
+		service.config.BackpressureLowWater = 5000
+	}
+
+	if service.config.SelfHealChunkSize <= 0 {
+		service.config.SelfHealChunkSize = 500
+	}
+
+	if service.config.SelfHealIdleThreshold <= 0 {
+		service.config.SelfHealIdleThreshold = 5 * time.Minute
 	}
 
 	for _, option := range options {
@@ -181,6 +217,9 @@ func NormalizeSpecs(specs []contracts.AnalyzerSpec) ([]contracts.AnalyzerSpec, e
 	return normalized, nil
 }
 
+// Scan walks the entire projection and enqueues missing analysis work. This is
+// an explicit operator/admin operation or the bounded self-heal backstop — not
+// the normal driver of analysis work.
 func (service *Service) Scan(
 	ctx context.Context,
 	request contracts.SchedulerScanRequest,
@@ -188,14 +227,13 @@ func (service *Service) Scan(
 	response := contracts.SchedulerScanResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 	}
-	if err := service.broker.Declare(ctx); err != nil {
+
+	err := service.broker.Declare(ctx)
+	if err != nil {
 		return response, err
 	}
 
-	if _, err := service.broker.ProcessFailures(ctx, 100); err != nil {
-		return response, err
-	}
-	activeKeys, err := service.broker.ActiveJobKeys(ctx, 0)
+	_, err = service.broker.ProcessFailures(ctx, 100)
 	if err != nil {
 		return response, err
 	}
@@ -212,30 +250,23 @@ func (service *Service) Scan(
 
 			jobs := service.jobsForObject(object, request)
 			if len(jobs) == 0 {
+				service.fullyAnnotated.Add(string(object.Manifest.ObjectDigest))
 				response.Skipped++
 
 				return nil
 			}
 
-			schedulerAnnotation := schedulerAnnotationFor(object)
 			for _, job := range jobs {
-				enqueued, err := service.enqueueForObject(
-					ctx,
-					job,
-					schedulerAnnotation,
-					activeKeys,
-				)
+				job = service.normalizeJob(job)
+
+				err := service.broker.Publish(ctx, job)
 				if err != nil {
 					response.Failed++
 
 					return err
 				}
 
-				if enqueued {
-					response.Enqueued++
-				} else {
-					response.Skipped++
-				}
+				response.Enqueued++
 			}
 
 			err := service.broker.PublishProjectionRefresh(
@@ -289,50 +320,6 @@ func (service *Service) normalizeJob(job contracts.AnalyzerJob) contracts.Analyz
 	return job
 }
 
-func (service *Service) enqueueForObject(
-	ctx context.Context,
-	job contracts.AnalyzerJob,
-	schedulerAnnotation *contracts.Annotation,
-	activeKeys map[string]bool,
-) (bool, error) {
-	job = service.normalizeJob(job)
-	if activeKeys[job.IdempotencyKey] {
-		return false, nil
-	}
-	if schedulerMarkerActive(
-		*schedulerAnnotation,
-		job,
-		service.now(),
-		service.config.RetryBackoff,
-	) {
-		return false, nil
-	}
-
-	updated := withSchedulerMarker(*schedulerAnnotation, job, "publishing", service.now())
-	err := service.store.WriteAnnotation(ctx, updated)
-	if err != nil {
-		return false, err
-	}
-
-	*schedulerAnnotation = updated
-
-	err = service.broker.Publish(ctx, job)
-	if err != nil {
-		return false, err
-	}
-	activeKeys[job.IdempotencyKey] = true
-
-	updated = withSchedulerMarker(*schedulerAnnotation, job, "enqueued", service.now())
-	err = service.store.WriteAnnotation(ctx, updated)
-	if err != nil {
-		return false, err
-	}
-
-	*schedulerAnnotation = updated
-
-	return true, nil
-}
-
 func (service *Service) Force(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
@@ -344,6 +331,7 @@ func (service *Service) Force(
 	if err != nil {
 		return contracts.SchedulerScanResponse{}, err
 	}
+
 	if !found {
 		return contracts.SchedulerScanResponse{}, fmt.Errorf(
 			"object %s not found",
@@ -369,35 +357,21 @@ func (service *Service) Force(
 		TraceID:       traceID,
 	}
 
-	schedulerAnnotation := schedulerAnnotationFor(object)
-	activeKeys, err := service.broker.ActiveJobKeys(ctx, 0)
-	if err != nil {
-		response.Failed++
+	service.fullyAnnotated.Remove(string(digest))
 
-		return response, err
-	}
 	for _, job := range service.jobsForObject(object, request) {
 		if len(filter) > 0 && !filter[job.Analyzer.Name] {
 			continue
 		}
 
-		enqueued, err := service.enqueueForObject(
-			ctx,
-			job,
-			schedulerAnnotation,
-			activeKeys,
-		)
+		err = service.broker.Publish(ctx, service.normalizeJob(job))
 		if err != nil {
 			response.Failed++
 
 			return response, err
 		}
 
-		if enqueued {
-			response.Enqueued++
-		} else {
-			response.Skipped++
-		}
+		response.Enqueued++
 	}
 
 	if response.Enqueued == 0 && response.Skipped == 0 {
@@ -414,53 +388,52 @@ func (service *Service) NotifyObjectsChanged(
 	response := contracts.SchedulerScanResponse{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 	}
+
 	for _, digest := range request.ObjectDigests {
 		if strings.TrimSpace(string(digest)) == "" {
 			continue
 		}
 
 		response.Scanned++
-		if err := service.broker.PublishProjectionRefresh(ctx, digest); err != nil {
+
+		err := service.broker.PublishProjectionRefresh(ctx, digest)
+		if err != nil {
 			response.Failed++
 
 			return response, err
 		}
 
 		if request.ProjectionOnly {
-			if err := service.markSatisfiedAnalysis(ctx, digest); err != nil {
-				response.Failed++
-
-				return response, err
-			}
 			response.Skipped++
 
 			continue
 		}
 
-		object, found, err := service.projectionObjectForDigest(ctx, digest)
+		if service.fullyAnnotated.Contains(string(digest)) {
+			response.Skipped++
+
+			continue
+		}
+
+		object, found, err := service.store.ProjectionObject(ctx, digest)
 		if err != nil {
 			response.Failed++
 
 			return response, err
 		}
+
 		if !found {
 			response.Failed++
 
 			return response, fmt.Errorf("changed object %s not found in filestore", digest)
 		}
+
 		if len(object.Findings) > 0 {
 			response.Failed++
 
 			continue
 		}
 
-		schedulerAnnotation := schedulerAnnotationFor(object)
-		activeKeys, err := service.broker.ActiveJobKeys(ctx, 0)
-		if err != nil {
-			response.Failed++
-
-			return response, err
-		}
 		scanRequest := contracts.SchedulerScanRequest{
 			SchemaVersion: contracts.SchemaVersionPhase00,
 			PriorityClass: request.PriorityClass,
@@ -468,96 +441,36 @@ func (service *Service) NotifyObjectsChanged(
 			Reason:        firstNonEmpty(request.Reason, "object_changed"),
 			TraceID:       request.TraceID,
 		}
-		for _, job := range service.jobsForObject(object, scanRequest) {
-			enqueued, err := service.enqueueForObject(
-				ctx,
-				job,
-				schedulerAnnotation,
-				activeKeys,
-			)
+		jobs := service.jobsForObject(object, scanRequest)
+		if len(jobs) == 0 {
+			service.fullyAnnotated.Add(string(digest))
+			response.Skipped++
+
+			continue
+		}
+
+		enqueued := false
+
+		for _, job := range jobs {
+			job = service.normalizeJob(job)
+
+			err = service.broker.Publish(ctx, job)
 			if err != nil {
 				response.Failed++
 
 				return response, err
 			}
-			if enqueued {
-				response.Enqueued++
-			} else {
-				response.Skipped++
-			}
+
+			enqueued = true
+			response.Enqueued++
+		}
+
+		if enqueued {
+			service.noteWrite()
 		}
 	}
 
 	return response, nil
-}
-
-func (service *Service) projectionObjectForDigest(
-	ctx context.Context,
-	digest contracts.ObjectDigest,
-) (filestore.ProjectionObject, bool, error) {
-	return service.store.ProjectionObject(ctx, digest)
-}
-
-func (service *Service) markSatisfiedAnalysis(
-	ctx context.Context,
-	digest contracts.ObjectDigest,
-) error {
-	object, found, err := service.projectionObjectForDigest(ctx, digest)
-	if err != nil {
-		return err
-	}
-	if !found || len(object.Findings) > 0 {
-		return nil
-	}
-
-	updated, changed := withCompletedSchedulerMarkers(
-		*schedulerAnnotationFor(object),
-		object,
-		service.now(),
-	)
-	if !changed {
-		return nil
-	}
-
-	return service.store.WriteAnnotation(ctx, updated)
-}
-
-func (service *Service) markQueuedJobs(
-	ctx context.Context,
-	jobs []contracts.AnalyzerJob,
-) error {
-	byDigest := map[contracts.ObjectDigest][]contracts.AnalyzerJob{}
-	for _, job := range jobs {
-		if job.ObjectDigest == "" || job.IdempotencyKey == "" {
-			continue
-		}
-		byDigest[job.ObjectDigest] = append(byDigest[job.ObjectDigest], job)
-	}
-
-	for digest, digestJobs := range byDigest {
-		object, found, err := service.projectionObjectForDigest(ctx, digest)
-		if err != nil {
-			return err
-		}
-		if !found || len(object.Findings) > 0 {
-			continue
-		}
-
-		annotation := schedulerAnnotationFor(object)
-		for _, job := range digestJobs {
-			*annotation = withSchedulerMarker(
-				*annotation,
-				service.normalizeJob(job),
-				"enqueued",
-				service.now(),
-			)
-		}
-		if err := service.store.WriteAnnotation(ctx, *annotation); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func (service *Service) Requeue(
@@ -667,53 +580,125 @@ func (service *Service) ReconcilePending(
 		},
 	)
 	response.SchemaVersion = contracts.SchemaVersionPhase00
-	if err != nil {
-		return response, err
-	}
-	if err := service.markQueuedJobs(ctx, response.KeptJobs); err != nil {
-		return response, err
-	}
 
-	return response, nil
+	return response, err
 }
 
 func (service *Service) Status(ctx context.Context) (contracts.SchedulerStatus, error) {
 	return service.broker.Status(ctx)
 }
 
+// AnalyzerStatus reports the work and retry depth of each analyzer's own queue,
+// so an operator can see which analyzer is backed up rather than only the total.
+func (service *Service) AnalyzerStatus(
+	ctx context.Context,
+) ([]contracts.AnalyzerQueueDepth, error) {
+	return service.broker.PerAnalyzerStatus(ctx)
+}
+
+func (service *Service) PurgeQueues(ctx context.Context) (int, error) {
+	return service.broker.PurgeAll(ctx)
+}
+
+// Pressured reports whether the scheduler's analysis queue depth exceeds the
+// backpressure high-water mark. Sources should pause backfill scheduling when
+// this returns true and resume when it returns false (below low-water).
+func (service *Service) Pressured() bool {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+
+	return service.pressured
+}
+
+func (service *Service) updatePressure(ctx context.Context) {
+	status, err := service.broker.Status(ctx)
+	if err != nil {
+		slog.Error("scheduler pressure check failed", "error", err)
+
+		return
+	}
+
+	depth := status.Pending + status.Retry
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+
+	if service.pressured && depth <= service.config.BackpressureLowWater {
+		service.pressured = false
+		slog.Info("scheduler backpressure released",
+			"depth", depth,
+			"low_water", service.config.BackpressureLowWater,
+		)
+	} else if !service.pressured && depth >= service.config.BackpressureHighWater {
+		service.pressured = true
+		slog.Warn("scheduler backpressure engaged",
+			"depth", depth,
+			"high_water", service.config.BackpressureHighWater,
+		)
+	}
+}
+
+func (service *Service) noteWrite() {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+
+	service.writeSeen = true
+}
+
+func (service *Service) consumeWriteSeen() bool {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+
+	seen := service.writeSeen
+	service.writeSeen = false
+
+	return seen
+}
+
+// Run is the scheduler's background loop. It processes failures and projection
+// refreshes on each tick, checks backpressure, and runs a bounded self-heal
+// sweep when idle after writes have occurred.
 func (service *Service) Run(ctx context.Context) error {
 	ticker := time.NewTicker(service.config.ScanInterval)
 	defer ticker.Stop()
 
+	idleSince := time.Time{}
+	sweepArmed := false
+
 	for {
-		if _, err := service.broker.ProcessFailures(ctx, 100); err != nil {
+		_, err := service.broker.ProcessFailures(ctx, 100)
+		if err != nil {
 			return err
 		}
 
 		if service.projector != nil {
-			if _, err := service.broker.ProcessProjectionRefreshes(
+			_, err = service.broker.ProcessProjectionRefreshes(
 				ctx,
 				100,
 				service.refreshProjectionDigests,
-			); err != nil {
+			)
+			if err != nil {
 				return err
 			}
 		}
 
-		// Self-healing reconciliation: sweep the projection and enqueue analyzer
-		// work for every object still missing it. This is what makes analysis
-		// converge without operator intervention — an object whose change
-		// notification was dropped (e.g. a notify failure during a bulk import)
-		// is picked up on the next sweep. Scan only enqueues missing work and
-		// dedups against in-flight jobs, so re-running it is cheap and idempotent.
-		// A transient scan error is logged, not fatal, so reconciliation keeps
-		// running.
-		if _, err := service.Scan(ctx, contracts.SchedulerScanRequest{
-			SchemaVersion: contracts.SchemaVersionPhase00,
-			RequestedBy:   "scheduler",
-			Reason:        "periodic_reconcile",
-		}); err != nil {
-			slog.Error("scheduler reconcile scan failed", "error", err)
+		service.updatePressure(ctx)
+
+		if service.consumeWriteSeen() {
+			sweepArmed = true
+			idleSince = time.Time{}
+		}
+
+		if sweepArmed && !service.Pressured() {
+			if idleSince.IsZero() {
+				idleSince = service.now()
+			}
+
+			if service.now().Sub(idleSince) >= service.config.SelfHealIdleThreshold {
+				service.selfHealChunk(ctx)
+				sweepArmed = false
+				idleSince = time.Time{}
+			}
 		}
 
 		select {
@@ -724,204 +709,142 @@ func (service *Service) Run(ctx context.Context) error {
 	}
 }
 
+// SelfHealSweep runs a full self-heal sweep for admin/operator use. It resets
+// the cursor and walks the entire projection in bounded chunks.
+func (service *Service) SelfHealSweep(
+	ctx context.Context,
+) (contracts.SchedulerScanResponse, error) {
+	service.mu.Lock()
+	service.sweepPos = ""
+	service.mu.Unlock()
+
+	return service.Scan(ctx, contracts.SchedulerScanRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		PriorityClass: contracts.PriorityRepair,
+		RequestedBy:   "scheduler",
+		Reason:        "self_heal_sweep",
+	})
+}
+
+// selfHealChunk walks a bounded chunk of the projection from the current cursor
+// position, enqueuing missing analysis work. The cursor wraps around with a
+// random start point on first use.
+func (service *Service) selfHealChunk(ctx context.Context) {
+	service.mu.Lock()
+	startPos := service.sweepPos
+	service.mu.Unlock()
+
+	count := 0
+	chunkSize := service.config.SelfHealChunkSize
+	started := false
+	wrapped := false
+	lastDigest := ""
+
+	scanRequest := contracts.SchedulerScanRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		PriorityClass: contracts.PriorityRepair,
+		RequestedBy:   "scheduler",
+		Reason:        "self_heal",
+	}
+
+	if startPos == "" {
+		startPos = randomSweepStart()
+
+		service.mu.Lock()
+		service.sweepPos = startPos
+		service.mu.Unlock()
+	}
+
+	walkErr := service.store.WalkProjection(
+		ctx,
+		func(object filestore.ProjectionObject) error {
+			digest := string(object.Manifest.ObjectDigest)
+
+			if !started {
+				if digest >= startPos {
+					started = true
+				} else {
+					return nil
+				}
+			}
+
+			if count >= chunkSize {
+				return errSweepChunkDone
+			}
+
+			count++
+			lastDigest = digest
+
+			if len(object.Findings) > 0 {
+				return nil
+			}
+
+			jobs := service.jobsForObject(object, scanRequest)
+			if len(jobs) == 0 {
+				service.fullyAnnotated.Add(digest)
+
+				return nil
+			}
+
+			for _, job := range jobs {
+				job = service.normalizeJob(job)
+
+				publishErr := service.broker.Publish(ctx, job)
+				if publishErr != nil {
+					return publishErr
+				}
+			}
+
+			return service.broker.PublishProjectionRefresh(ctx, object.Manifest.ObjectDigest)
+		},
+	)
+
+	if walkErr != nil && !errors.Is(walkErr, errSweepChunkDone) {
+		slog.Error("self-heal chunk failed", "error", walkErr)
+	}
+
+	service.mu.Lock()
+	if count < chunkSize && !wrapped {
+		service.sweepPos = ""
+	} else {
+		service.sweepPos = lastDigest
+	}
+	service.mu.Unlock()
+
+	if count > 0 {
+		slog.Info("self-heal chunk completed", "objects", count, "cursor", lastDigest)
+	}
+}
+
 func (service *Service) refreshProjectionDigests(
 	ctx context.Context,
 	digests []contracts.ObjectDigest,
 ) error {
 	seen := map[contracts.ObjectDigest]bool{}
+
 	for _, digest := range digests {
 		if digest == "" || seen[digest] {
 			continue
 		}
+
 		seen[digest] = true
 
-		object, found, err := service.projectionObjectForDigest(ctx, digest)
+		object, found, err := service.store.ProjectionObject(ctx, digest)
 		if err != nil {
 			return err
 		}
+
 		if !found || len(object.Findings) > 0 {
 			continue
 		}
-		if err := service.projector.ProjectObject(ctx, object); err != nil {
+
+		err = service.projector.ProjectObject(ctx, object)
+		if err != nil {
 			return err
 		}
 	}
 
 	return nil
-}
-
-func schedulerAnnotationFor(object filestore.ProjectionObject) *contracts.Annotation {
-	for _, annotation := range object.Annotations {
-		if annotation.Kind == "scheduler" {
-			return &contracts.Annotation{
-				SchemaVersion: annotation.SchemaVersion,
-				ObjectDigest:  object.Manifest.ObjectDigest,
-				Kind:          "scheduler",
-				GeneratedAt:   annotation.GeneratedAt,
-				Data:          copyMap(annotation.Data),
-			}
-		}
-	}
-
-	return &contracts.Annotation{
-		SchemaVersion: contracts.SchemaVersionPhase00,
-		ObjectDigest:  object.Manifest.ObjectDigest,
-		Kind:          "scheduler",
-		Data:          map[string]any{},
-	}
-}
-
-func schedulerMarkerActive(
-	annotation contracts.Annotation,
-	job contracts.AnalyzerJob,
-	now time.Time,
-	lease time.Duration,
-) bool {
-	marker, ok := schedulerMarkers(annotation)[job.IdempotencyKey]
-	if !ok {
-		return false
-	}
-
-	status, _ := marker["status"].(string)
-	if job.Reason == "repair" && status != "publishing" {
-		reason, _ := marker["reason"].(string)
-
-		return reason == "repair"
-	}
-
-	switch status {
-	case "complete", "dead", "enqueued", "inflight", "retry":
-		return true
-	case "publishing":
-		updatedAt, _ := marker["updated_at"].(string)
-
-		parsed, err := time.Parse(time.RFC3339Nano, updatedAt)
-		if err != nil {
-			return false
-		}
-
-		return now.Sub(parsed) <= lease
-	default:
-		return false
-	}
-}
-
-func withSchedulerMarker(
-	annotation contracts.Annotation,
-	job contracts.AnalyzerJob,
-	status string,
-	now time.Time,
-) contracts.Annotation {
-	annotation.SchemaVersion = contracts.SchemaVersionPhase00
-	annotation.ObjectDigest = job.ObjectDigest
-	annotation.Kind = "scheduler"
-	annotation.GeneratedAt = now
-	data := copyMap(annotation.Data)
-	markers := schedulerMarkers(annotation)
-	markers[job.IdempotencyKey] = map[string]any{
-		"status":           status,
-		"job_id":           job.JobID,
-		"analyzer_name":    job.Analyzer.Name,
-		"analyzer_version": job.Analyzer.Version,
-		"reason":           job.Reason,
-		"attempt":          job.Attempt,
-		"priority_class":   job.PriorityClass,
-		"priority":         job.Priority,
-		"updated_at":       now.Format(time.RFC3339Nano),
-	}
-	data["scheduled_jobs"] = markers
-	annotation.Data = data
-
-	return annotation
-}
-
-func withCompletedSchedulerMarkers(
-	annotation contracts.Annotation,
-	object filestore.ProjectionObject,
-	now time.Time,
-) (contracts.Annotation, bool) {
-	annotation.SchemaVersion = contracts.SchemaVersionPhase00
-	annotation.ObjectDigest = object.Manifest.ObjectDigest
-	annotation.Kind = "scheduler"
-	annotation.GeneratedAt = now
-	data := copyMap(annotation.Data)
-	markers := schedulerMarkers(annotation)
-	changed := false
-	for _, analysis := range object.Annotations {
-		if analysis.Kind != "analysis" ||
-			analysis.AnalyzerName == "" ||
-			analysis.AnalyzerVer == "" ||
-			!analysisOutputSatisfied(analysis) {
-			continue
-		}
-
-		job := contracts.AnalyzerJob{
-			ObjectDigest: object.Manifest.ObjectDigest,
-			Analyzer: contracts.AnalyzerSpec{
-				Name:    analysis.AnalyzerName,
-				Version: analysis.AnalyzerVer,
-			},
-		}
-		key := IdempotencyKey(job)
-		marker := markers[key]
-		if marker != nil && marker["status"] == "complete" {
-			continue
-		}
-
-		markers[key] = map[string]any{
-			"status":           "complete",
-			"job_id":           key,
-			"analyzer_name":    analysis.AnalyzerName,
-			"analyzer_version": analysis.AnalyzerVer,
-			"updated_at":       now.Format(time.RFC3339Nano),
-		}
-		changed = true
-	}
-	if !changed {
-		return annotation, false
-	}
-
-	data["scheduled_jobs"] = markers
-	annotation.Data = data
-
-	return annotation, true
-}
-
-func analysisOutputSatisfied(annotation contracts.Annotation) bool {
-	status, _ := annotation.Data["status"].(string)
-
-	switch status {
-	case "complete", "skipped":
-		return true
-	default:
-		return false
-	}
-}
-
-func schedulerMarkers(annotation contracts.Annotation) map[string]map[string]any {
-	result := map[string]map[string]any{}
-
-	raw, ok := annotation.Data["scheduled_jobs"].(map[string]any)
-	if !ok {
-		return result
-	}
-
-	for key, value := range raw {
-		if marker, ok := value.(map[string]any); ok {
-			result[key] = copyMap(marker)
-		}
-	}
-
-	return result
-}
-
-func copyMap(input map[string]any) map[string]any {
-	output := map[string]any{}
-	for key, value := range input {
-		output[key] = value
-	}
-
-	return output
 }
 
 func (service *Service) jobsForObject(
@@ -1024,6 +947,7 @@ func IdempotencyKey(job contracts.AnalyzerJob) string {
 	if job.Forced {
 		parts = append(parts, "forced", firstNonEmpty(job.TraceID, "forced"))
 	}
+
 	input := strings.Join(parts, "\x00")
 	sum := sha256.Sum256([]byte(input))
 
@@ -1084,6 +1008,19 @@ func firstNonEmpty(values ...string) string {
 	}
 
 	return ""
+}
+
+// randomSweepStart returns a random hex prefix for the self-heal cursor's
+// initial position, giving each restart a different starting point so the
+// sweep doesn't always begin at the same objects.
+func randomSweepStart() string {
+	b := make([]byte, 4)
+
+	for i := range b {
+		b[i] = byte(rand.IntN(256))
+	}
+
+	return hex.EncodeToString(b)
 }
 
 var _ Scheduler = (*Service)(nil)

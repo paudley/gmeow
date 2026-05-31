@@ -13,18 +13,34 @@ import (
 	"sync"
 	"time"
 
+	"blackcat.ca/gmeow/internal/cache"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/observability"
 )
 
+// annotationCacheSize bounds the worker's permanent-positive
+// "analysis already written" cache. Once an annotation exists it never
+// disappears, so a positive answer is cached forever (LRU-bounded) and a
+// redundant job skip-acks from memory without a FILESTORE round-trip.
+const annotationCacheSize = 200000
+
+// consumerPool binds one job source (a per-analyzer queue in production) to the
+// number of consumer goroutines draining it. A slow analyzer's pool blocks only
+// itself; a fast analyzer's pool keeps draining concurrently.
+type consumerPool struct {
+	source      JobSource
+	concurrency int
+}
+
 type Runtime struct {
 	concurrency int
-	source      JobSource
 	store       ObjectStore
 	registry    *Registry
 	now         func() time.Time
 	breaker     *circuitBreaker
+	annotated   *cache.LRU[string, struct{}]
 	parkBackoff time.Duration
+	pools       []consumerPool
 }
 
 type RuntimeOption func(*Runtime)
@@ -35,10 +51,6 @@ func NewRuntime(
 	registry *Registry,
 	options ...RuntimeOption,
 ) (*Runtime, error) {
-	if source == nil {
-		return nil, errors.New("analysis job source is required")
-	}
-
 	if store == nil {
 		return nil, errors.New("analysis filestore is required")
 	}
@@ -49,16 +61,30 @@ func NewRuntime(
 
 	runtime := &Runtime{
 		concurrency: 1,
-		source:      source,
 		store:       store,
 		registry:    registry,
 		now:         func() time.Time { return time.Now().UTC() },
+		annotated:   cache.NewLRU[string, struct{}](annotationCacheSize),
 		parkBackoff: 5 * time.Second,
 	}
 	for _, option := range options {
 		option(runtime)
 	}
 	runtime.breaker = newCircuitBreaker(runtime.now)
+
+	// A constructor source (the single-queue/test case) is the first pool at the
+	// configured concurrency. Production passes nil here and adds one
+	// WithConsumerPool per analyzer queue.
+	if source != nil {
+		runtime.pools = append(
+			[]consumerPool{{source: source, concurrency: runtime.concurrency}},
+			runtime.pools...,
+		)
+	}
+
+	if len(runtime.pools) == 0 {
+		return nil, errors.New("analysis runtime requires at least one job source")
+	}
 
 	return runtime, nil
 }
@@ -81,6 +107,24 @@ func WithConcurrency(concurrency int) RuntimeOption {
 	}
 }
 
+// WithConsumerPool adds a job source consumed by its own pool of goroutines, used
+// to give each analyzer's queue an independent, separately-sized consumer.
+func WithConsumerPool(source JobSource, concurrency int) RuntimeOption {
+	return func(runtime *Runtime) {
+		if source == nil {
+			return
+		}
+		if concurrency <= 0 {
+			concurrency = 1
+		}
+
+		runtime.pools = append(runtime.pools, consumerPool{
+			source:      source,
+			concurrency: concurrency,
+		})
+	}
+}
+
 func WithClock(now func() time.Time) RuntimeOption {
 	return func(runtime *Runtime) {
 		if now != nil {
@@ -89,28 +133,31 @@ func WithClock(now func() time.Time) RuntimeOption {
 	}
 }
 
+// Run drains every consumer pool concurrently: each pool spawns its own
+// consumer goroutines, so a blocked slow-analyzer goroutine never stalls a fast
+// analyzer's pool. It returns on the first pool error or context cancellation.
 func (runtime *Runtime) Run(ctx context.Context) error {
-	if runtime.concurrency <= 1 {
-		return runtime.runLoop(ctx)
-	}
-
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	errs := make(chan error, 1)
+
 	var wait sync.WaitGroup
-	for range runtime.concurrency {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			if err := runtime.runLoop(ctx); err != nil {
-				select {
-				case errs <- err:
-					cancel()
-				default:
+	for _, pool := range runtime.pools {
+		source := pool.source
+		for range pool.concurrency {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				if err := runtime.runLoop(ctx, source); err != nil {
+					select {
+					case errs <- err:
+						cancel()
+					default:
+					}
 				}
-			}
-		}()
+			}()
+		}
 	}
 
 	done := make(chan struct{})
@@ -134,9 +181,9 @@ func (runtime *Runtime) Run(ctx context.Context) error {
 	}
 }
 
-func (runtime *Runtime) runLoop(ctx context.Context) error {
+func (runtime *Runtime) runLoop(ctx context.Context, source JobSource) error {
 	for {
-		receipt, err := runtime.source.Receive(ctx)
+		receipt, err := source.Receive(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return ctx.Err()
@@ -270,6 +317,19 @@ func (runtime *Runtime) Process(ctx context.Context, job contracts.AnalyzerJob) 
 		)
 	}
 
+	annotationCacheKey := analyzerAnnotationKey(job)
+
+	// A redundant job (the common case under at-least-once delivery) skip-acks
+	// from the permanent-positive cache without a FILESTORE round-trip. Forced
+	// jobs always re-run, so they bypass the fast path.
+	if !job.Forced {
+		if _, cached := runtime.annotated.Get(annotationCacheKey); cached {
+			observability.DefaultMetrics().AddCounter("gmeow_skipped_analyzers", 1)
+
+			return nil
+		}
+	}
+
 	complete, err := runtime.store.HasAnalysisAnnotation(
 		ctx,
 		job.ObjectDigest,
@@ -280,9 +340,14 @@ func (runtime *Runtime) Process(ctx context.Context, job contracts.AnalyzerJob) 
 		observability.DefaultMetrics().AddCounter("gmeow_failed_analyzers", 1)
 		return fmt.Errorf("check existing analysis annotation: %w", err)
 	}
-	if complete && !job.Forced {
-		observability.DefaultMetrics().AddCounter("gmeow_skipped_analyzers", 1)
-		return nil
+	if complete {
+		runtime.annotated.Put(annotationCacheKey, struct{}{})
+
+		if !job.Forced {
+			observability.DefaultMetrics().AddCounter("gmeow_skipped_analyzers", 1)
+
+			return nil
+		}
 	}
 
 	annotation, err := analyzer.Analyze(ctx, runtime.store, job)
@@ -296,10 +361,22 @@ func (runtime *Runtime) Process(ctx context.Context, job contracts.AnalyzerJob) 
 		observability.DefaultMetrics().AddCounter("gmeow_failed_analyzers", 1)
 		return fmt.Errorf("write analysis annotation: %w", err)
 	}
+
+	// The annotation is now durably written; record the permanent-positive so
+	// future redundant deliveries of this exact analyzer skip for free.
+	runtime.annotated.Put(annotationCacheKey, struct{}{})
 	observability.DefaultMetrics().
 		ObserveDuration("gmeow_analysis_latency", time.Since(started))
 
 	return nil
+}
+
+// analyzerAnnotationKey identifies a written analysis annotation by object,
+// analyzer, and version — the unit that is permanently present once produced.
+func analyzerAnnotationKey(job contracts.AnalyzerJob) string {
+	return string(job.ObjectDigest) + "\x00" +
+		job.Analyzer.Name + "\x00" +
+		job.Analyzer.Version
 }
 
 func validateJob(job contracts.AnalyzerJob) error {

@@ -232,6 +232,14 @@ type SchedulerStatus struct {
 	DeadLetter    int           `json:"dead_letter"`
 }
 
+// AnalyzerQueueDepth is one analyzer's per-queue depth, for per-analyzer
+// visibility into which analyzer is backed up.
+type AnalyzerQueueDepth struct {
+	Analyzer string `json:"analyzer"`
+	Pending  int    `json:"pending"`
+	Retry    int    `json:"retry"`
+}
+
 type DeadLetterRequest struct {
 	SchemaVersion SchemaVersion `json:"schema_version"`
 	Limit         int           `json:"limit,omitempty"`
@@ -441,6 +449,21 @@ type VectorSearchResult struct {
 }
 
 type VectorSearchResponse struct {
+	Results       []VectorSearchResult `json:"results"`
+	SchemaVersion SchemaVersion        `json:"schema_version"`
+}
+
+// RelatedObjectsRequest asks for the objects most similar to a seed object,
+// scored against the seed's already-stored embeddings (no query-text embedding).
+type RelatedObjectsRequest struct {
+	Digest        ObjectDigest  `json:"digest"`
+	Facet         string        `json:"facet,omitempty"`
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Limit         int           `json:"limit,omitempty"`
+}
+
+type RelatedObjectsResponse struct {
+	Seed          ObjectDigest         `json:"seed_digest"`
 	Results       []VectorSearchResult `json:"results"`
 	SchemaVersion SchemaVersion        `json:"schema_version"`
 }
