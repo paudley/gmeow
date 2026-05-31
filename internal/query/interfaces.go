@@ -77,6 +77,38 @@ type Index interface {
 		ctx context.Context,
 		request contracts.MailIdentityResolveRequest,
 	) (contracts.MailIdentityResolveResponse, error)
+	ContactAggregate(
+		ctx context.Context,
+		request contracts.ContactAggregateRequest,
+	) (contracts.ContactAggregate, error)
+	ContactSearch(
+		ctx context.Context,
+		request contracts.ContactSearchRequest,
+	) (contracts.ContactSearchResponse, error)
+	ResolveContactIdentity(
+		ctx context.Context,
+		request contracts.ContactIdentityResolveRequest,
+	) (contracts.ContactIdentityResolveResponse, error)
+	ContactFacts(
+		ctx context.Context,
+		request contracts.ContactFactRequest,
+	) (contracts.ContactFactResponse, error)
+	ContactIdentityDetails(
+		ctx context.Context,
+		request contracts.ContactIdentityDetailRequest,
+	) (contracts.ContactIdentityDetailResponse, error)
+	ContactNeighborhood(
+		ctx context.Context,
+		request contracts.ContactNeighborhoodRequest,
+	) (contracts.ContactNeighborhoodResponse, error)
+	ContactAnalysisInputs(
+		ctx context.Context,
+		request contracts.ContactAnalysisInputRequest,
+	) (contracts.ContactAnalysisInputResponse, error)
+	ContactMessages(
+		ctx context.Context,
+		request contracts.ContactMessageRequest,
+	) (contracts.ContactMessageResponse, error)
 	JMAPMailboxes(ctx context.Context) ([]contracts.JMAPMailbox, error)
 	JMAPEmailStates(
 		ctx context.Context,

@@ -82,6 +82,45 @@ func TestAnalysisStatusJSONUsesDataKey(t *testing.T) {
 	}
 }
 
+func TestContactIntelligenceJSONUsesContractKeys(t *testing.T) {
+	encoded, err := json.Marshal(ContactIdentityDetailResponse{
+		SchemaVersion: SchemaVersionPhase00,
+		Total:         1,
+		Limit:         10,
+		Results: []ContactIdentityDetail{{
+			MatchedToken:  "apollo@example.test",
+			Token:         "apollo@example.test",
+			TokenHash:     "hash",
+			ContactID:     "contact",
+			StatementHash: "statement",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonContainsKey(encoded, "schema_version") ||
+		!jsonContainsKey(encoded, "results") ||
+		jsonContainsKey(encoded, "SchemaVersion") {
+		t.Fatalf("contact identity response used wrong JSON keys: %s", encoded)
+	}
+
+	var request ContactFactRequest
+	if err := json.Unmarshal([]byte(`{
+		"contact_ids": ["contact"],
+		"fact_kinds": ["email"],
+		"current": true
+	}`), &request); err != nil {
+		t.Fatal(err)
+	}
+	if len(request.ContactIDs) != 1 ||
+		request.ContactIDs[0] != "contact" ||
+		len(request.FactKinds) != 1 ||
+		request.FactKinds[0] != "email" ||
+		!request.Current {
+		t.Fatalf("contact fact request did not unmarshal contract keys: %#v", request)
+	}
+}
+
 func jsonContainsKey(encoded []byte, key string) bool {
 	var value map[string]any
 	if err := json.Unmarshal(encoded, &value); err != nil {
