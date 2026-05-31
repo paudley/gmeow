@@ -722,6 +722,176 @@ func TestContactMessagesProjectMailParticipantObservations(t *testing.T) {
 	}
 }
 
+func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
+	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	migrationsDir := queryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
+
+	store := filestore.NewFilesystemStore(t.TempDir())
+	contactID := "https://patrickaudley.com/#paudley"
+	profile := `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix schema: <https://schema.org/> .
+@prefix bcid: <https://patrickaudley.com/lod#> .
+
+<https://patrickaudley.com/#paudley> a foaf:Person ;
+    foaf:name "Patrick Audley" ;
+    foaf:knows <https://example.test/#apollo> ;
+    schema:affiliation "Blackcat Informatics" ;
+    schema:email <mailto:paudley@blackcat.ca> ;
+    bcid:historicalEmail <mailto:paudley@gt.ca> .
+`
+	if _, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader(profile),
+		MediaType: "text/turtle",
+		Facets: []contracts.Facet{
+			contactentity.Facet(contactentity.MetadataInput{
+				RootSubject: contactID,
+				Format:      "text/turtle",
+			}),
+			{
+				Kind: contracts.RDFSourceBundleFacetKind,
+				Metadata: contactentity.Metadata(contactentity.MetadataInput{
+					RootSubject: contactID,
+					Format:      "text/turtle",
+				}),
+			},
+		},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "fixture",
+			SourceName: "rdf-profile",
+			ExternalID: "contact-intelligence-profile",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	putMailParticipantProjectionFixture(
+		t,
+		ctx,
+		store,
+		"<contact-intelligence@example.test>",
+		"Thu, 28 May 2026 10:30:00 -0600",
+		"Apollo <apollo@example.test>",
+		"Patrick <paudley@blackcat.ca>",
+	)
+
+	index := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
+	if err := index.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	facts, err := index.ContactFacts(ctx, contracts.ContactFactRequest{
+		ContactIDs: []string{contactID},
+		FactKinds:  []string{"email"},
+		Current:    true,
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts.Total != 1 ||
+		len(facts.Facts) != 1 ||
+		facts.Facts[0].Value != "paudley@blackcat.ca" {
+		t.Fatalf("unexpected current email facts: %#v", facts)
+	}
+
+	historical, err := index.ContactFacts(ctx, contracts.ContactFactRequest{
+		ContactIDs: []string{contactID},
+		FactKinds:  []string{"email"},
+		At:         "2001-01-01",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if historical.Total != 2 {
+		t.Fatalf(
+			"expected interval lookup to include open current and historical facts: %#v",
+			historical,
+		)
+	}
+
+	identities, err := index.ContactIdentityDetails(
+		ctx,
+		contracts.ContactIdentityDetailRequest{
+			Identities: []string{"mailto:paudley@blackcat.ca"},
+			Limit:      10,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identities.Total != 1 ||
+		identities.Results[0].ContactID != contactID ||
+		identities.Results[0].MatchedToken != "paudley@blackcat.ca" {
+		t.Fatalf("unexpected identity details: %#v", identities)
+	}
+
+	neighborhood, err := index.ContactNeighborhood(
+		ctx,
+		contracts.ContactNeighborhoodRequest{
+			ContactID: contactID,
+			Limit:     10,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contactNeighborhoodHas(
+		neighborhood.Results,
+		"affiliation",
+		"Blackcat Informatics",
+	) ||
+		!contactNeighborhoodHas(
+			neighborhood.Results,
+			"relationship",
+			"https://example.test/#apollo",
+		) {
+		t.Fatalf("unexpected contact neighborhood: %#v", neighborhood)
+	}
+
+	inputs, err := index.ContactAnalysisInputs(ctx, contracts.ContactAnalysisInputRequest{
+		ContactIDs: []string{contactID},
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputs.Total != 1 ||
+		len(inputs.Results) != 1 ||
+		!strings.Contains(inputs.Results[0].InputText, "Contact: Patrick Audley") ||
+		!strings.Contains(inputs.Results[0].InputText, "email: paudley@blackcat.ca") ||
+		!strings.Contains(
+			inputs.Results[0].InputText,
+			"Counts: 5 facts, 1 messages, 1 participants",
+		) {
+		t.Fatalf("unexpected contact analysis input: %#v", inputs)
+	}
+
+	filteredInputs, err := index.ContactAnalysisInputs(
+		ctx,
+		contracts.ContactAnalysisInputRequest{
+			ContactIDs: []string{contactID},
+			FactKinds:  []string{"affiliation"},
+			Limit:      10,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filteredInputs.Results) != 1 {
+		t.Fatalf("expected one filtered analysis input: %#v", filteredInputs)
+	}
+	if !strings.Contains(
+		filteredInputs.Results[0].InputText,
+		"affiliation: Blackcat Informatics",
+	) ||
+		strings.Contains(filteredInputs.Results[0].InputText, "email: paudley@blackcat.ca") {
+		t.Fatalf("fact kind filter was not applied to analysis input: %#v", filteredInputs)
+	}
+}
+
 func putMailIdentityProjectionFixture(
 	t *testing.T,
 	ctx context.Context,
@@ -862,6 +1032,20 @@ func contactFactValueFor(
 	}
 
 	return contracts.ContactFact{}
+}
+
+func contactNeighborhoodHas(
+	results []contracts.ContactNeighborhoodResult,
+	kind string,
+	value string,
+) bool {
+	for _, result := range results {
+		if result.FactKind == kind && result.Value == value {
+			return true
+		}
+	}
+
+	return false
 }
 
 func queryIntegrationDSN(t *testing.T) string {
