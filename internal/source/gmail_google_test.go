@@ -30,6 +30,7 @@ func TestGmailMessageMetadataIncludesClassificationLabels(t *testing.T) {
 	}
 	if metadata["history_id"] != uint64(42) ||
 		metadata["internal_date"] != int64(1700000000000) ||
+		metadata["received_at"] != "2023-11-14T22:13:20Z" ||
 		metadata["size_estimate"] != int64(1234) {
 		t.Fatalf("expected Gmail service metadata, got %#v", metadata)
 	}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/oauth2/google"
 	gmail "google.golang.org/api/gmail/v1"
@@ -261,6 +262,11 @@ func gmailMessageMetadata(message *gmail.Message) map[string]any {
 		"history_id":    message.HistoryId,
 		"internal_date": message.InternalDate,
 		"size_estimate": message.SizeEstimate,
+	}
+	if message.InternalDate > 0 {
+		metadata["received_at"] = time.UnixMilli(message.InternalDate).
+			UTC().
+			Format(time.RFC3339Nano)
 	}
 	if len(message.ClassificationLabelValues) > 0 {
 		metadata["classification_label_values"] = gmailClassificationLabelValues(

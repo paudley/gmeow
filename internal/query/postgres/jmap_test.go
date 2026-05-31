@@ -103,6 +103,27 @@ func TestParseJMAPTimeUsesMailDateParser(t *testing.T) {
 	}
 }
 
+func TestJMAPReceivedAtUsesOnlyMailMessageTimeFields(t *testing.T) {
+	manifest := contracts.Manifest{}
+	receivedAt := jmapReceivedAt(manifest, map[string]any{
+		"internal_date": int64(1700000000000),
+		"date":          "Wed, 27 May 2026 09:15:00 -0600",
+	})
+	expected := time.Date(2026, 5, 27, 15, 15, 0, 0, time.UTC)
+	if receivedAt == nil || !receivedAt.Equal(expected) {
+		t.Fatalf("receivedAt = %v, want %s", receivedAt, expected)
+	}
+
+	receivedAt = jmapReceivedAt(manifest, map[string]any{
+		"received_at": "2023-11-14T22:13:20Z",
+		"date":        "Wed, 27 May 2026 09:15:00 -0600",
+	})
+	expected = time.Date(2023, 11, 14, 22, 13, 20, 0, time.UTC)
+	if receivedAt == nil || !receivedAt.Equal(expected) {
+		t.Fatalf("receivedAt = %v, want %s", receivedAt, expected)
+	}
+}
+
 func TestJMAPOverlayStatePrefersProjectionAnnotation(t *testing.T) {
 	digest := contracts.ObjectDigest(
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
