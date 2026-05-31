@@ -21,6 +21,7 @@ import (
 
 	"blackcat.ca/gmeow/internal/appsvc"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/facets/contactentity"
 	"blackcat.ca/gmeow/internal/filestore"
 )
 
@@ -463,13 +464,23 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 	profileDigest, err := store.Put(ctx, filestore.PutRequest{
 		Reader:    strings.NewReader(profile),
 		MediaType: "text/turtle",
-		Facets: []contracts.Facet{{
-			Kind: contracts.RDFSourceBundleFacetKind,
-			Metadata: map[string]any{
-				"root_subject": "https://patrickaudley.com/#paudley",
-				"format":       "text/turtle",
+		Facets: []contracts.Facet{
+			contactentity.Facet(contactentity.MetadataInput{
+				RootSubject: "https://patrickaudley.com/#paudley",
+				Format:      "text/turtle",
+				SourceKind:  "fixture",
+				IdentityHints: []string{
+					"mailto:paudley@blackcat.ca",
+				},
+			}),
+			{
+				Kind: contracts.RDFSourceBundleFacetKind,
+				Metadata: contactentity.Metadata(contactentity.MetadataInput{
+					RootSubject: "https://patrickaudley.com/#paudley",
+					Format:      "text/turtle",
+				}),
 			},
-		}},
+		},
 		Provenance: []contracts.Provenance{{
 			SourceKind: "fixture",
 			SourceName: "rdf-profile",
@@ -490,9 +501,11 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 		MediaType: "text/turtle",
 		Facets: []contracts.Facet{{
 			Kind: contracts.RDFClaimBundleFacetKind,
-			Metadata: map[string]any{
-				"format": "text/turtle",
-			},
+			Metadata: contactentity.Metadata(contactentity.MetadataInput{
+				TargetSubject: "https://patrickaudley.com/#paudley",
+				Format:        "text/turtle",
+				ClaimKind:     "correction",
+			}),
 		}},
 		Provenance: []contracts.Provenance{{
 			SourceKind: "fixture",

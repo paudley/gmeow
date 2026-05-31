@@ -9,7 +9,7 @@ const (
 	RDFSourceBundleRole      = "rdf_source_bundle"
 	RDFClaimBundleRole       = "rdf_claim_bundle"
 
-	ContactPersonFacetKind = "contact_person"
+	ContactEntityFacetKind = "contact_entity"
 	ContactSourceRole      = "contact_source"
 	ContactClaimRole       = "contact_claim"
 )
