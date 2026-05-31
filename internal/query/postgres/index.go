@@ -214,6 +214,15 @@ func (index *Index) ProjectObject(
 	ctx context.Context,
 	object filestore.ProjectionObject,
 ) error {
+	return projectIndexObject(ctx, index, object, true)
+}
+
+func projectIndexObject(
+	ctx context.Context,
+	index *Index,
+	object filestore.ProjectionObject,
+	refreshContactProjection bool,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -232,7 +241,14 @@ func (index *Index) ProjectObject(
 		return err
 	}
 
-	if err := projectObjectTx(ctx, tx, object, index.source); err != nil {
+	err = projectObjectTx(
+		ctx,
+		tx,
+		object,
+		index.source,
+		refreshContactProjection,
+	)
+	if err != nil {
 		return err
 	}
 
@@ -342,7 +358,7 @@ func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 			report.Failed++
 		}
 
-		err := index.ProjectObject(ctx, object)
+		err = projectIndexObject(ctx, index, object, false)
 		if err != nil {
 			report.Failed++
 
@@ -355,6 +371,13 @@ func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 
 		return nil
 	})
+	if err != nil {
+		report.Elapsed = time.Since(started)
+
+		return report, err
+	}
+
+	err = refreshContactProjection(ctx, index.pool)
 	if err != nil {
 		report.Elapsed = time.Since(started)
 
@@ -1185,7 +1208,22 @@ func projectObjectTx(
 	tx pgx.Tx,
 	object filestore.ProjectionObject,
 	source query.ProjectionSource,
+	refreshContactProjection bool,
 ) error {
+	rdfProjectionChanged, err := objectHadRDFRowsTx(ctx, tx, object.Manifest.ObjectDigest)
+	if err != nil {
+		return err
+	}
+
+	affectedContacts, err := rdfSubjectsForSourceTx(ctx, tx, object.Manifest.ObjectDigest)
+	if err != nil {
+		return err
+	}
+
+	rdfProjectionChanged = rdfProjectionChanged ||
+		manifestHasFacetKind(object.Manifest, contracts.RDFSourceBundleFacetKind) ||
+		manifestHasFacetKind(object.Manifest, contracts.RDFClaimBundleFacetKind)
+
 	manifestJSON, err := json.Marshal(object.Manifest)
 	if err != nil {
 		return err
@@ -1239,6 +1277,8 @@ func projectObjectTx(
 		"query_object_overlays",
 		"query_summaries",
 		"query_mail_identities",
+		"query_rdf_statement_annotations",
+		"query_rdf_statements",
 	} {
 		if _, err := tx.Exec(
 			ctx,
@@ -1303,6 +1343,25 @@ func projectObjectTx(
 		return err
 	}
 
+	rdfRowsInserted, err := insertRDFRows(ctx, tx, object.Manifest, source)
+	if err != nil {
+		return err
+	}
+
+	if refreshContactProjection && (rdfProjectionChanged || rdfRowsInserted) {
+		newContacts, err := rdfSubjectsForSourceTx(ctx, tx, object.Manifest.ObjectDigest)
+		if err != nil {
+			return err
+		}
+
+		affectedContacts = append(affectedContacts, newContacts...)
+
+		err = refreshContactProjectionForContactsTx(ctx, tx, affectedContacts)
+		if err != nil {
+			return err
+		}
+	}
+
 	if err := seedJMAPEmailStateTx(
 		ctx,
 		tx,
@@ -1321,6 +1380,12 @@ func truncateProjectionTablesSQL() string {
 		"query_projection_state,",
 		"query_summaries,",
 		"query_source_cursors,",
+		"query_contact_rollups,",
+		"query_contact_identity_bindings,",
+		"query_contact_facts,",
+		"query_rdf_statement_annotations,",
+		"query_rdf_statements,",
+		"query_rdf_terms,",
 		"query_objects",
 		"CASCADE",
 	}, " ")
@@ -1350,6 +1415,10 @@ func deleteProjectionRowsSQL(table string) string {
 		return "DELETE FROM query_summaries WHERE object_digest = $1"
 	case "query_mail_identities":
 		return "DELETE FROM query_mail_identities WHERE object_digest = $1"
+	case "query_rdf_statement_annotations":
+		return "DELETE FROM query_rdf_statement_annotations WHERE source_digest = $1"
+	case "query_rdf_statements":
+		return "DELETE FROM query_rdf_statements WHERE source_digest = $1"
 	default:
 		panic("unsupported query projection delete table: " + table)
 	}
@@ -1789,97 +1858,6 @@ func (index *Index) recordProjectionFindings(
 	}
 
 	return nil
-}
-
-type summaryRow struct {
-	metadata map[string]any
-	kind     string
-	text     string
-}
-
-func summaryRowsFrom(
-	manifest contracts.Manifest,
-	annotations []contracts.Annotation,
-) []summaryRow {
-	rows := []summaryRow{}
-
-	for _, annotation := range annotations {
-		if annotation.Kind != "analysis" {
-			continue
-		}
-
-		if summary := stringFromAny(annotation.Data["summary"]); summary != "" {
-			rows = append(rows, summaryRow{
-				kind:     firstNonEmpty(annotation.AnalyzerName, "analysis"),
-				text:     summary,
-				metadata: map[string]any{"analyzer_version": annotation.AnalyzerVer},
-			})
-		}
-	}
-
-	if summary := stringFromAny(manifest.Analysis["summary"]); summary != "" {
-		rows = append(rows, summaryRow{kind: "manifest", text: summary})
-	}
-
-	return rows
-}
-
-func searchText(
-	manifest contracts.Manifest,
-	annotations []contracts.Annotation,
-) string {
-	parts := []string{
-		manifest.ObjectID,
-		manifest.MediaType,
-		strings.Join(manifest.ContentRoles, " "),
-		strings.Join(manifest.Keywords, " "),
-	}
-	for _, title := range manifest.Titles {
-		parts = append(parts, title.Value)
-	}
-
-	for _, facet := range manifest.Facets {
-		parts = append(parts, facet.Kind, facet.Name)
-		if len(facet.Metadata) > 0 {
-			encoded, err := json.Marshal(facet.Metadata)
-			if err == nil {
-				parts = append(parts, string(encoded))
-			}
-		}
-	}
-
-	for _, provenance := range manifest.Provenance {
-		parts = append(
-			parts,
-			provenance.SourceKind,
-			provenance.SourceName,
-			provenance.ExternalID,
-		)
-	}
-
-	encoded, _ := json.Marshal(annotations)
-	parts = append(parts, string(encoded))
-
-	return truncateSearchText(strings.Join(parts, "\n"))
-}
-
-func truncateSearchText(text string) string {
-	if len(text) <= maxSearchTextBytes {
-		return text
-	}
-
-	limit := 0
-	for offset := range text {
-		if offset > maxSearchTextBytes {
-			break
-		}
-		limit = offset
-	}
-	if limit == 0 {
-		return ""
-	}
-
-	return text[:limit]
 }
 
 func normalizedLimit(limit int) int {
