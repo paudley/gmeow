@@ -843,7 +843,11 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 		"affiliation",
 		"Blackcat Informatics",
 	) ||
-		!contactNeighborhoodHas(neighborhood.Results, "relationship", "https://example.test/#apollo") {
+		!contactNeighborhoodHas(
+			neighborhood.Results,
+			"relationship",
+			"https://example.test/#apollo",
+		) {
 		t.Fatalf("unexpected contact neighborhood: %#v", neighborhood)
 	}
 
@@ -875,6 +879,9 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(filteredInputs.Results) != 1 {
+		t.Fatalf("expected one filtered analysis input: %#v", filteredInputs)
 	}
 	if !strings.Contains(
 		filteredInputs.Results[0].InputText,

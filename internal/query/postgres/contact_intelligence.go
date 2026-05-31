@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -17,6 +18,7 @@ import (
 
 const (
 	contactAnalysisInputLimitBytes = 12000
+	contactAnalysisFactLimit       = 200
 	contactFactArgCapacity         = 4
 	contactIdentityArgCapacity     = 2
 )
@@ -261,7 +263,6 @@ func (index *Index) ContactAnalysisInputs(
 			err,
 		)
 	}
-	defer rows.Close()
 
 	results, err := index.contactAnalysisInputResults(ctx, rows, request.FactKinds)
 	if err != nil {
@@ -283,25 +284,38 @@ func (index *Index) contactAnalysisInputResults(
 	factKinds []string,
 ) ([]contracts.ContactAnalysisInputResult, error) {
 	results := []contracts.ContactAnalysisInputResult{}
+	contactIDs := []string{}
 
 	for rows.Next() {
 		result, err := scanContactAnalysisInputRollup(rows)
 		if err != nil {
+			rows.Close()
+
 			return nil, err
 		}
 
-		facts, err := index.contactAnalysisFacts(ctx, result.ContactID, factKinds)
-		if err != nil {
-			return nil, err
-		}
-
-		result.InputText = boundedContactAnalysisText(result, facts)
+		contactIDs = append(contactIDs, result.ContactID)
 		results = append(results, result)
 	}
 
 	err := rows.Err()
+	rows.Close()
+
 	if err != nil {
 		return nil, fmt.Errorf("iterate contact analysis inputs: %w", err)
+	}
+
+	factsByContact, err := index.contactAnalysisFactsBatch(ctx, contactIDs, factKinds)
+	if err != nil {
+		return nil, err
+	}
+
+	for offset := range results {
+		result := &results[offset]
+		result.InputText = boundedContactAnalysisText(
+			*result,
+			factsByContact[result.ContactID],
+		)
 	}
 
 	return results, nil
@@ -450,12 +464,14 @@ func scanContactIdentityDetails(
 }
 
 func matchingIdentityToken(token string, filters []string) string {
+	normalizedToken := contactentity.NormalizeIdentity(token)
+
 	if len(filters) == 0 {
-		return token
+		return firstNonEmpty(normalizedToken, token)
 	}
 
 	for _, filter := range filters {
-		if filter == token {
+		if filter == normalizedToken {
 			return filter
 		}
 	}
@@ -559,34 +575,50 @@ func scanContactAnalysisInputRollup(
 	return result, nil
 }
 
-func (index *Index) contactAnalysisFacts(
+func (index *Index) contactAnalysisFactsBatch(
 	ctx context.Context,
-	contactID string,
+	contactIDs []string,
 	factKinds []string,
-) ([]contracts.ContactFact, error) {
-	args := []any{contactID}
-	where := []string{"f.contact_id = $1"}
+) (map[string][]contracts.ContactFact, error) {
+	contacts := uniqueNonEmptyStrings(contactIDs)
+	if len(contacts) == 0 {
+		return map[string][]contracts.ContactFact{}, nil
+	}
+
+	args := []any{contacts}
+	where := []string{"f.contact_id = ANY($1)"}
 
 	if kinds := uniqueNonEmptyStrings(factKinds); len(kinds) > 0 {
 		args = append(args, kinds)
 		where = append(where, fmt.Sprintf("f.fact_kind = ANY($%d)", len(args)))
 	}
 
+	args = append(args, contactAnalysisFactLimit)
+
 	rows, err := index.pool.Query(ctx, fmt.Sprintf(
-		`SELECT f.source_digest, f.statement_hash, f.contact_id, f.fact_kind,
-		        f.value, f.predicate, f.valid_from, f.valid_until, f.historical
-		   FROM query_contact_facts f
-		  WHERE %s
-		  ORDER BY f.fact_kind, f.value, f.statement_hash
-		  LIMIT 200`,
+		`SELECT source_digest, statement_hash, contact_id, fact_kind,
+value, predicate, valid_from, valid_until, historical
+FROM (
+SELECT f.source_digest, f.statement_hash, f.contact_id, f.fact_kind,
+f.value, f.predicate, f.valid_from, f.valid_until, f.historical,
+row_number() OVER (
+PARTITION BY f.contact_id
+ORDER BY f.fact_kind, f.value, f.statement_hash
+) AS fact_rank
+FROM query_contact_facts f
+WHERE %s
+) ranked_facts
+WHERE fact_rank <= $%d
+ORDER BY contact_id, fact_kind, value, statement_hash`,
 		strings.Join(where, " AND "),
+		len(args),
 	), args...)
 	if err != nil {
-		return nil, fmt.Errorf("query contact analysis facts: %w", err)
+		return nil, fmt.Errorf("query contact analysis fact batch: %w", err)
 	}
 	defer rows.Close()
 
-	facts := []contracts.ContactFact{}
+	factsByContact := map[string][]contracts.ContactFact{}
 
 	for rows.Next() {
 		var fact contracts.ContactFact
@@ -603,18 +635,18 @@ func (index *Index) contactAnalysisFacts(
 			&fact.Historical,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("scan contact analysis fact: %w", err)
+			return nil, fmt.Errorf("scan contact analysis fact batch: %w", err)
 		}
 
-		facts = append(facts, fact)
+		factsByContact[fact.ContactID] = append(factsByContact[fact.ContactID], fact)
 	}
 
 	err = rows.Err()
 	if err != nil {
-		return nil, fmt.Errorf("iterate contact analysis facts: %w", err)
+		return nil, fmt.Errorf("iterate contact analysis fact batch: %w", err)
 	}
 
-	return facts, nil
+	return factsByContact, nil
 }
 
 func boundedContactAnalysisText(
@@ -668,5 +700,10 @@ func boundedContactAnalysisText(
 		return text
 	}
 
-	return text[:contactAnalysisInputLimitBytes]
+	limit := contactAnalysisInputLimitBytes
+	for limit > 0 && !utf8.RuneStart(text[limit]) {
+		limit--
+	}
+
+	return text[:limit]
 }

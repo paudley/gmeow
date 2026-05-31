@@ -83,6 +83,25 @@ func TestAnalysisStatusJSONUsesDataKey(t *testing.T) {
 }
 
 func TestContactIntelligenceJSONUsesContractKeys(t *testing.T) {
+	assertJSONKeys(t, "contact fact response", ContactFactResponse{
+		SchemaVersion: SchemaVersionPhase00,
+		Total:         1,
+		Limit:         10,
+		Facts: []ContactFact{{
+			ContactID:     "contact",
+			FactKind:      "email",
+			Value:         "apollo@example.test",
+			Predicate:     "schema:email",
+			StatementHash: "statement",
+		}},
+	}, []string{"schema_version", "facts", "total", "limit"}, []string{"SchemaVersion"})
+
+	assertJSONKeys(t, "contact identity detail request", ContactIdentityDetailRequest{
+		Identities: []string{"mailto:apollo@example.test"},
+		ContactIDs: []string{"contact"},
+		Limit:      10,
+	}, []string{"identities", "contact_ids", "limit"}, []string{"ContactIDs"})
+
 	encoded, err := json.Marshal(ContactIdentityDetailResponse{
 		SchemaVersion: SchemaVersionPhase00,
 		Total:         1,
@@ -104,6 +123,58 @@ func TestContactIntelligenceJSONUsesContractKeys(t *testing.T) {
 		t.Fatalf("contact identity response used wrong JSON keys: %s", encoded)
 	}
 
+	assertJSONKeys(t, "contact neighborhood request", ContactNeighborhoodRequest{
+		ContactID: "contact",
+		FactKinds: []string{"affiliation"},
+		Limit:     10,
+	}, []string{"contact_id", "fact_kinds", "limit"}, []string{"ContactID"})
+
+	assertJSONKeys(t, "contact neighborhood result", ContactNeighborhoodResult{
+		ContactID:     "contact",
+		FactKind:      "affiliation",
+		Value:         "Blackcat Informatics",
+		Predicate:     "schema:affiliation",
+		StatementHash: "statement",
+	}, []string{"contact_id", "fact_kind", "value", "predicate"}, []string{"ContactID"})
+
+	assertJSONKeys(t, "contact neighborhood response", ContactNeighborhoodResponse{
+		SchemaVersion: SchemaVersionPhase00,
+		Total:         1,
+		Limit:         10,
+		Results: []ContactNeighborhoodResult{{
+			ContactID: "contact",
+			FactKind:  "affiliation",
+			Value:     "Blackcat Informatics",
+			Predicate: "schema:affiliation",
+		}},
+	}, []string{"schema_version", "results", "total", "limit"}, []string{"SchemaVersion"})
+
+	assertJSONKeys(t, "contact analysis input request", ContactAnalysisInputRequest{
+		ContactIDs: []string{"contact"},
+		FactKinds:  []string{"email"},
+		Limit:      10,
+	}, []string{"contact_ids", "fact_kinds", "limit"}, []string{"ContactIDs"})
+
+	assertJSONKeys(t, "contact analysis input result", ContactAnalysisInputResult{
+		ContactID:        "contact",
+		DisplayName:      "Apollo",
+		PrimaryEmail:     "apollo@example.test",
+		InputText:        "Contact: Apollo",
+		FactCount:        1,
+		MessageCount:     2,
+		ParticipantCount: 3,
+	}, []string{"contact_id", "display_name", "primary_email", "input_text"}, []string{"ContactID"})
+
+	assertJSONKeys(t, "contact analysis input response", ContactAnalysisInputResponse{
+		SchemaVersion: SchemaVersionPhase00,
+		Total:         1,
+		Limit:         10,
+		Results: []ContactAnalysisInputResult{{
+			ContactID: "contact",
+			InputText: "Contact: Apollo",
+		}},
+	}, []string{"schema_version", "results", "total", "limit"}, []string{"SchemaVersion"})
+
 	var request ContactFactRequest
 	if err := json.Unmarshal([]byte(`{
 		"contact_ids": ["contact"],
@@ -118,6 +189,31 @@ func TestContactIntelligenceJSONUsesContractKeys(t *testing.T) {
 		request.FactKinds[0] != "email" ||
 		!request.Current {
 		t.Fatalf("contact fact request did not unmarshal contract keys: %#v", request)
+	}
+}
+
+func assertJSONKeys(
+	t *testing.T,
+	name string,
+	value any,
+	required []string,
+	forbidden []string,
+) {
+	t.Helper()
+
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range required {
+		if !jsonContainsKey(encoded, key) {
+			t.Fatalf("%s missing JSON key %q: %s", name, key, encoded)
+		}
+	}
+	for _, key := range forbidden {
+		if jsonContainsKey(encoded, key) {
+			t.Fatalf("%s used wrong JSON key %q: %s", name, key, encoded)
+		}
 	}
 }
 
