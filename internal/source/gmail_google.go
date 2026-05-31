@@ -256,12 +256,55 @@ func (backend *GoogleGmailBackend) GetMessage(
 }
 
 func gmailMessageMetadata(message *gmail.Message) map[string]any {
-	return map[string]any{
+	metadata := map[string]any{
 		"label_ids":     append([]string{}, message.LabelIds...),
 		"history_id":    message.HistoryId,
 		"internal_date": message.InternalDate,
 		"size_estimate": message.SizeEstimate,
 	}
+	if len(message.ClassificationLabelValues) > 0 {
+		metadata["classification_label_values"] = gmailClassificationLabelValues(
+			message.ClassificationLabelValues,
+		)
+	}
+
+	return metadata
+}
+
+func gmailClassificationLabelValues(
+	values []*gmail.ClassificationLabelValue,
+) []map[string]any {
+	labels := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+
+		labels = append(labels, map[string]any{
+			"label_id": value.LabelId,
+			"fields":   gmailClassificationLabelFields(value.Fields),
+		})
+	}
+
+	return labels
+}
+
+func gmailClassificationLabelFields(
+	values []*gmail.ClassificationLabelFieldValue,
+) []map[string]any {
+	fields := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+
+		fields = append(fields, map[string]any{
+			"field_id":  value.FieldId,
+			"selection": value.Selection,
+		})
+	}
+
+	return fields
 }
 
 func (backend *GoogleGmailBackend) ModifyMessage(
