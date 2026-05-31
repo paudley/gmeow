@@ -106,7 +106,7 @@ func TestWorkerRegistrySupportsConfiguredExternalAnalyzer(t *testing.T) {
 			Version:    "python-email-v1",
 			WorkerKind: "python",
 			Command:    "gmeow-intel",
-			Args:       []string{"analyze", "ner.spacy"},
+			Args:       []string{"serve", "ner.spacy"},
 			Timeout:    "30s",
 		}},
 	})
@@ -160,7 +160,7 @@ func TestWorkerRegistryCoversPhaseFourAnalyzerSet(t *testing.T) {
 				Version:    "python-email-v1",
 				WorkerKind: "python",
 				Command:    "gmeow-intel",
-				Args:       []string{"analyze", "ner.spacy"},
+				Args:       []string{"serve", "ner.spacy"},
 				Timeout:    "2m",
 			},
 			{
@@ -168,7 +168,7 @@ func TestWorkerRegistryCoversPhaseFourAnalyzerSet(t *testing.T) {
 				Version:    "python-email-v1",
 				WorkerKind: "python",
 				Command:    "gmeow-intel",
-				Args:       []string{"analyze", "categories.sklearn"},
+				Args:       []string{"serve", "categories.sklearn"},
 				Timeout:    "2m",
 			},
 		},

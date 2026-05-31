@@ -217,8 +217,8 @@ ANALYSIS workers are started with `bin/gmeow-worker --config gmeow.toml run`.
 Workers check FILESTORE for an existing matching analyzer name/version before execution, so
 rescheduled failures or stale RabbitMQ messages skip completed analyzer outputs instead of rerunning
 NER, summaries, embeddings, or categorization.
-Python/model analyzers must be configured as explicit external adapters, for example
-`gmeow-intel analyze ner.spacy` or `gmeow-intel analyze categories.sklearn`; commandless Python
+Python/model analyzers must be configured as explicit persistent external adapters, for example
+`gmeow-intel serve ner.spacy` or `gmeow-intel serve categories.sklearn`; commandless Python
 analyzers fail closed at startup. Configured analyzers must produce real FILESTORE annotations:
 spaCy NER uses `en_core_web_sm`, categorization uses the sklearn/main-branch category engine, and
 model-backed summary/embedding endpoints fail closed when dependencies, endpoints, or quality
