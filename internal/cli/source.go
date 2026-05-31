@@ -350,7 +350,7 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 					schedmq.SourceImportJobSourceConfig{
 						URL:         loaded.Resolved.RabbitMQ.URL,
 						QueuePrefix: loaded.Resolved.Scheduler.QueuePrefix,
-						Prefetch:    concurrency,
+						Prefetch:    importer.Concurrency(),
 					},
 				)
 				if sourceErr != nil {

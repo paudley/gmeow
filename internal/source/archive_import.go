@@ -178,6 +178,12 @@ func (importer *ArchiveImporter) SetConcurrency(workers int) {
 	importer.ingestSem = make(chan struct{}, workers)
 }
 
+// Concurrency reports the effective ingest concurrency after clamping, so
+// callers can size related resources (e.g. queue prefetch) to the same value.
+func (importer *ArchiveImporter) Concurrency() int {
+	return importer.concurrency
+}
+
 // lockMessageID serializes ingestion keyed by Message-ID (sharded). Distinct ids
 // (including distinct generated ids) hash to independent stripes and run freely;
 // identical ids serialize. A hash collision only over-serializes, never corrupts.
@@ -1018,7 +1024,9 @@ func (importer *ArchiveImporter) writeArchiveMessageParts(
 		})
 	}
 	for index, attachment := range message.Attachments {
-		attachmentID := firstNonEmpty(attachment.FileName, fmt.Sprintf("%d", index))
+		// Prefix with the attachment index so two attachments that share a file
+		// name (or both lack one) still get distinct, unambiguous source refs.
+		attachmentID := fmt.Sprintf("%d:%s", index, attachment.FileName)
 		jobs = append(jobs, partIngestJob{
 			object: IngestObject{
 				ObservedAt:   message.ObservedAt,
@@ -1071,15 +1079,15 @@ func (importer *ArchiveImporter) ingestMessageParts(
 	var waitGroup sync.WaitGroup
 
 	for index := range jobs {
-		// Stop acquiring the semaphore and spawning goroutines once the context is
-		// cancelled; remaining jobs would only fail fast inside Ingest anyway.
-		if err := ctx.Err(); err != nil {
+		// Acquire the ingest slot under the context so a cancellation mid-import
+		// unwinds promptly instead of blocking on a full semaphore (and so we stop
+		// spawning goroutines that would only fail fast inside Ingest).
+		if err := importer.acquireIngest(ctx); err != nil {
 			errs[index] = err
 
 			continue
 		}
 		waitGroup.Add(1)
-		importer.acquireIngest()
 		go func(index int) {
 			defer waitGroup.Done()
 			defer importer.releaseIngest()
@@ -1106,9 +1114,16 @@ func (importer *ArchiveImporter) ingestMessageParts(
 	return parts, nil
 }
 
-func (importer *ArchiveImporter) acquireIngest() {
-	if importer.ingestSem != nil {
-		importer.ingestSem <- struct{}{}
+func (importer *ArchiveImporter) acquireIngest(ctx context.Context) error {
+	if importer.ingestSem == nil {
+		return nil
+	}
+
+	select {
+	case importer.ingestSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

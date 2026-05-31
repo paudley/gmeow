@@ -17,6 +17,7 @@ import (
 // source/version reports changed=true.
 func TestAttachProvenanceNoOpWhenAlreadySeen(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
 
 	digest, err := store.Put(ctx, PutRequest{

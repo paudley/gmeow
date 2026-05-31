@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"sort"
 	"strings"
 	"sync"
@@ -117,6 +116,14 @@ func NewService(
 
 	if service.config.BackpressureLowWater <= 0 {
 		service.config.BackpressureLowWater = 5000
+	}
+
+	if service.config.BackpressureLowWater >= service.config.BackpressureHighWater {
+		return nil, fmt.Errorf(
+			"backpressure low-water (%d) must be below high-water (%d)",
+			service.config.BackpressureLowWater,
+			service.config.BackpressureHighWater,
+		)
 	}
 
 	if service.config.SelfHealChunkSize <= 0 {
@@ -727,8 +734,10 @@ func (service *Service) SelfHealSweep(
 }
 
 // selfHealChunk walks a bounded chunk of the projection from the current cursor
-// position, enqueuing missing analysis work. The cursor wraps around with a
-// random start point on first use.
+// position, enqueuing missing analysis work. The cursor advances through the
+// corpus in chunks and restarts from the beginning once it reaches the end, so
+// every object is visited each cycle (re-visits are cheap: the annotation cache
+// and worker idempotency make an already-analyzed object a no-op).
 func (service *Service) selfHealChunk(ctx context.Context) {
 	service.mu.Lock()
 	startPos := service.sweepPos
@@ -744,14 +753,6 @@ func (service *Service) selfHealChunk(ctx context.Context) {
 		PriorityClass: contracts.PriorityRepair,
 		RequestedBy:   "scheduler",
 		Reason:        "self_heal",
-	}
-
-	if startPos == "" {
-		startPos = randomSweepStart()
-
-		service.mu.Lock()
-		service.sweepPos = startPos
-		service.mu.Unlock()
 	}
 
 	walkErr := service.store.WalkProjection(
@@ -1009,19 +1010,6 @@ func firstNonEmpty(values ...string) string {
 	}
 
 	return ""
-}
-
-// randomSweepStart returns a random hex prefix for the self-heal cursor's
-// initial position, giving each restart a different starting point so the
-// sweep doesn't always begin at the same objects.
-func randomSweepStart() string {
-	b := make([]byte, 4)
-
-	for i := range b {
-		b[i] = byte(rand.IntN(256))
-	}
-
-	return hex.EncodeToString(b)
 }
 
 var _ Scheduler = (*Service)(nil)

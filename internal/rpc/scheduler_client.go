@@ -178,15 +178,6 @@ func (client *SchedulerClient) Status(
 	}, nil
 }
 
-func (client *SchedulerClient) Pressured() bool {
-	status, err := client.Status(context.Background())
-	if err != nil {
-		return false
-	}
-
-	return status.Pending+status.Retry >= 10000
-}
-
 func (client *SchedulerClient) SelfHealSweep(
 	ctx context.Context,
 ) (contracts.SchedulerScanResponse, error) {

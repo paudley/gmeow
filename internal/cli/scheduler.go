@@ -609,8 +609,11 @@ func newSchedulerServeCommand(
 			// Run the background reconciliation loop alongside the gRPC server so
 			// analysis self-heals by default: every scan interval it enqueues
 			// analyzer work for any object still missing it, recovering from lost
-			// change notifications without operator intervention.
-			go runSchedulerLoop(command.Context(), service)
+			// change notifications without operator intervention. Tie it to a child
+			// context cancelled on return so it does not leak if Serve exits early.
+			loopCtx, cancelLoop := context.WithCancel(command.Context())
+			defer cancelLoop()
+			go runSchedulerLoop(loopCtx, service)
 
 			return rpc.Serve(command.Context(), endpoint, func(server *grpc.Server) {
 				pb.RegisterSchedulerServiceServer(server, rpc.NewSchedulerServer(service))

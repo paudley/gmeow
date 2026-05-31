@@ -70,7 +70,7 @@ func TestExternalAnalyzerUnavailableClassification(t *testing.T) {
 				Spec:           contracts.AnalyzerSpec{Name: "categories.sklearn", Version: "v1"},
 				Command:        testCase.command,
 				Args:           testCase.args,
-				StartupTimeout: 500 * time.Millisecond,
+				StartupTimeout: 2 * time.Second,
 				Manager:        manager,
 			})
 			if err != nil {

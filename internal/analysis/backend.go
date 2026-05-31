@@ -53,11 +53,12 @@ type BackendManagerConfig struct {
 
 // BackendManager owns the per-analyzer backend pools and the idle reaper.
 type BackendManager struct {
-	cfg   BackendManagerConfig
-	quit  chan struct{}
-	wg    sync.WaitGroup
-	mu    sync.Mutex
-	pools map[string]*backendPool
+	cfg       BackendManagerConfig
+	quit      chan struct{}
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	mu        sync.Mutex
+	pools     map[string]*backendPool
 }
 
 // NewBackendManager starts the idle reaper and returns a manager. Call Close on
@@ -110,21 +111,24 @@ func (manager *BackendManager) Run(
 	return annotation, err
 }
 
-// Close stops the reaper and terminates every backend.
+// Close stops the reaper and terminates every backend. It is safe to call more
+// than once; only the first call closes the quit channel and tears down pools.
 func (manager *BackendManager) Close() {
-	close(manager.quit)
-	manager.wg.Wait()
+	manager.closeOnce.Do(func() {
+		close(manager.quit)
+		manager.wg.Wait()
 
-	manager.mu.Lock()
-	pools := make([]*backendPool, 0, len(manager.pools))
-	for _, pool := range manager.pools {
-		pools = append(pools, pool)
-	}
-	manager.mu.Unlock()
+		manager.mu.Lock()
+		pools := make([]*backendPool, 0, len(manager.pools))
+		for _, pool := range manager.pools {
+			pools = append(pools, pool)
+		}
+		manager.mu.Unlock()
 
-	for _, pool := range pools {
-		pool.closeAll()
-	}
+		for _, pool := range pools {
+			pool.closeAll()
+		}
+	})
 }
 
 func (manager *BackendManager) poolFor(spec BackendSpec) *backendPool {

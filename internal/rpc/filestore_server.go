@@ -44,6 +44,7 @@ type FilestoreServer struct {
 	notifier  ObjectChangeNotifier
 	changes   chan changeNotice
 	batcherWG sync.WaitGroup
+	stopOnce  sync.Once
 	store     filestore.Store
 }
 
@@ -102,8 +103,12 @@ func (server *FilestoreServer) Stop() {
 		return
 	}
 
-	close(server.changes)
-	server.batcherWG.Wait()
+	// Guard against a double Stop (e.g. graceful shutdown plus a deferred Stop):
+	// closing an already-closed channel panics.
+	server.stopOnce.Do(func() {
+		close(server.changes)
+		server.batcherWG.Wait()
+	})
 }
 
 func (server *FilestoreServer) LookupSourceObject(

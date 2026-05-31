@@ -13,7 +13,6 @@ import "sync"
 type node[K comparable, V any] struct {
 	key        K
 	value      V
-	size       int
 	prev, next *node[K, V]
 }
 

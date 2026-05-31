@@ -155,8 +155,7 @@ install-bin: go-build ## Install built gmeow binaries to $(INSTALL_DIR).
 	sudo -n install -m 0755 "$(BIN_DIR)/gmeow" "$(BIN_DIR)/gmeow-admin" "$(BIN_DIR)/gmeow-worker" "$(INSTALL_DIR)/"
 
 deploy: install-bin ## Build, install binaries, and restart the running gmeow services.
-	$(call section,Restarting gmeow services)
-	sudo -n systemctl restart gmeow.target
+	$(MAKE) restart
 
 genproto: ## Regenerate Go protobuf and gRPC stubs from proto/gmeow/v1 (needs bin/ plugins).
 	$(call section,Regenerating protobuf stubs)

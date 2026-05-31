@@ -58,6 +58,14 @@ func (c *SizedLRU[K]) Put(key K, value []byte) {
 	defer c.mu.Unlock()
 
 	if len(value) > c.maxBytes {
+		// Too big to cache; also drop any existing entry so a later Get cannot
+		// return a now-stale prior value for this key.
+		if entry, ok := c.items[key]; ok {
+			c.unlink(entry)
+			c.curBytes -= len(entry.value)
+			delete(c.items, key)
+		}
+
 		return
 	}
 

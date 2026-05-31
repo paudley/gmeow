@@ -1036,7 +1036,9 @@ func (broker *Broker) RouteFailure(
 
 	job.Attempt++
 
-	routingKey := retryRoutingKey
+	// Retry queues are bound per analyzer; the aggregate "analysis.retry" key is
+	// unroutable on this exchange and would silently drop the retry.
+	routingKey := broker.topology.retryRoutingKeyFor(job.Analyzer.Name)
 	if job.Attempt > broker.config.RetryLimit {
 		routingKey = deadLetterRoutingKey
 	}

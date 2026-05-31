@@ -17,6 +17,7 @@ const defaultSimilarMessageLimit = 3
 // the embedding distance to the seed (smaller is more similar).
 type SimilarMessage struct {
 	MessageSummaryListItem
+
 	Distance float64 `json:"distance"`
 }
 
