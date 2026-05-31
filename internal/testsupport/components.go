@@ -187,6 +187,9 @@ func StartSchedulerGRPC(
 	cfg.QueuePrefix = fmt.Sprintf("gmeow.test.%d.", time.Now().UnixNano())
 	cfg.RetryLimit = 1
 	cfg.RetryBackoff = 50 * time.Millisecond
+	for _, spec := range specs {
+		cfg.Analyzers = append(cfg.Analyzers, spec.Name)
+	}
 	broker, err := schedmq.New(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)

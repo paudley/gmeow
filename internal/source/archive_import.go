@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -21,9 +22,12 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/rpc"
 )
 
 const (
@@ -50,6 +54,64 @@ type ArchiveImportRequest struct {
 	Publisher       ArchiveImportPublisher
 	Status          ArchiveImportQueueStatusFunc
 	CapacityDrainer func(context.Context) error
+	// Progress, when set, is called periodically (every ProgressInterval, default
+	// 2s) and once at completion with a running snapshot of import counts so a
+	// caller can render live progress on a long import.
+	Progress         func(ArchiveImportProgress)
+	ProgressInterval time.Duration
+}
+
+// ArchiveImportProgress is a point-in-time snapshot of an in-flight import.
+type ArchiveImportProgress struct {
+	Scanned           int64
+	Parsed            int64
+	Ingested          int64
+	Failures          int64
+	Elapsed           time.Duration
+	MessagesPerSecond float64
+	LastPath          string
+}
+
+// importProgress accumulates live counters shared by the directory walk and the
+// ingest workers. Counters are atomic so progress can be sampled concurrently;
+// lastPath is guarded separately. It is always allocated (counters are cheap);
+// only the periodic emit is gated on a configured callback.
+type importProgress struct {
+	scanned  atomic.Int64
+	parsed   atomic.Int64
+	ingested atomic.Int64
+	failures atomic.Int64
+	start    time.Time
+	mu       sync.Mutex
+	lastPath string
+}
+
+func (progress *importProgress) setLastPath(path string) {
+	progress.mu.Lock()
+	progress.lastPath = path
+	progress.mu.Unlock()
+}
+
+func (progress *importProgress) snapshot() ArchiveImportProgress {
+	elapsed := time.Since(progress.start)
+	ingested := progress.ingested.Load()
+	rate := 0.0
+	if seconds := elapsed.Seconds(); seconds > 0 {
+		rate = float64(ingested) / seconds
+	}
+	progress.mu.Lock()
+	lastPath := progress.lastPath
+	progress.mu.Unlock()
+
+	return ArchiveImportProgress{
+		Scanned:           progress.scanned.Load(),
+		Parsed:            progress.parsed.Load(),
+		Ingested:          ingested,
+		Failures:          progress.failures.Load(),
+		Elapsed:           elapsed,
+		MessagesPerSecond: rate,
+		LastPath:          lastPath,
+	}
 }
 
 type ArchiveImportReport struct {
@@ -83,9 +145,60 @@ type ArchiveImportPublisher interface {
 
 type ArchiveImportQueueStatusFunc func(context.Context) (contracts.SourceImportQueueStatus, error)
 
+// defaultIngestConcurrency bounds the total number of concurrent object Puts a
+// single import drives — across both messages (the direct importRoot fans
+// messages out to a worker pool) and the parts within a message (headers, body,
+// metadata, mime-structure, attachments). One shared semaphore caps the total so
+// the two layers compose without an N×M goroutine blow-up.
+const defaultIngestConcurrency = 8
+
+// messageIDLockShards stripes the per-Message-ID lock that serializes ingestion
+// of messages sharing a Message-ID, so concurrent workers cannot both pass the
+// "canonical not found" check and double-ingest a duplicate as a new canonical.
+const messageIDLockShards = 1024
+
 type ArchiveImporter struct {
-	service *Service
-	store   FilestoreClient
+	service     *Service
+	store       FilestoreClient
+	concurrency int
+	// ingestSem caps concurrent object Puts; nil means unbounded (never, since the
+	// constructor seeds the default). messageLocks serializes same-Message-ID work.
+	ingestSem    chan struct{}
+	messageLocks [messageIDLockShards]sync.Mutex
+}
+
+// SetConcurrency sets how many object Puts the import runs in parallel (across
+// messages and their parts). A value <= 0 restores the default. It is not safe
+// to call concurrently with Import.
+func (importer *ArchiveImporter) SetConcurrency(workers int) {
+	if workers <= 0 {
+		workers = defaultIngestConcurrency
+	}
+	importer.concurrency = workers
+	importer.ingestSem = make(chan struct{}, workers)
+}
+
+// Concurrency reports the effective ingest concurrency after clamping, so
+// callers can size related resources (e.g. queue prefetch) to the same value.
+func (importer *ArchiveImporter) Concurrency() int {
+	return importer.concurrency
+}
+
+// lockMessageID serializes ingestion keyed by Message-ID (sharded). Distinct ids
+// (including distinct generated ids) hash to independent stripes and run freely;
+// identical ids serialize. A hash collision only over-serializes, never corrupts.
+func (importer *ArchiveImporter) lockMessageID(messageID string) func() {
+	shard := &importer.messageLocks[messageIDShard(messageID)]
+	shard.Lock()
+
+	return shard.Unlock
+}
+
+func messageIDShard(messageID string) uint32 {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(messageID))
+
+	return hash.Sum32() % messageIDLockShards
 }
 
 type archiveMessage struct {
@@ -117,12 +230,87 @@ type archiveAttachment struct {
 }
 
 func NewArchiveImporter(store FilestoreClient) (*ArchiveImporter, error) {
-	service, err := NewService(store)
+	// Stamp every object an import creates with medium (repair) analysis priority,
+	// so a bulk import's analysis preempts low-priority backfill but yields to
+	// high-priority inbox sync and search. The decorator covers all import writes
+	// — parts, version records, and the compound message — without threading the
+	// class through each call site.
+	prioritized := archivePriorityClient{
+		FilestoreClient: store,
+		priorityClass:   contracts.PriorityRepair,
+	}
+
+	service, err := NewService(prioritized)
 	if err != nil {
 		return nil, err
 	}
 
-	return &ArchiveImporter{service: service, store: store}, nil
+	return &ArchiveImporter{
+		service:     service,
+		store:       prioritized,
+		concurrency: defaultIngestConcurrency,
+		ingestSem:   make(chan struct{}, defaultIngestConcurrency),
+	}, nil
+}
+
+// archivePriorityClient wraps a FilestoreClient to default the analysis priority
+// class on every write, tagging all objects a bulk producer creates.
+type archivePriorityClient struct {
+	FilestoreClient
+	priorityClass string
+}
+
+func (client archivePriorityClient) Put(
+	ctx context.Context,
+	request rpc.PutRequest,
+) (contracts.ObjectDigest, error) {
+	if request.PriorityClass == "" {
+		request.PriorityClass = client.priorityClass
+	}
+
+	return client.FilestoreClient.Put(ctx, request)
+}
+
+func (client archivePriorityClient) PutCompound(
+	ctx context.Context,
+	request rpc.CompoundPutRequest,
+) (contracts.ObjectDigest, error) {
+	if request.PriorityClass == "" {
+		request.PriorityClass = client.priorityClass
+	}
+
+	return client.FilestoreClient.PutCompound(ctx, request)
+}
+
+func (client archivePriorityClient) AttachProvenance(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	provenance []contracts.Provenance,
+) error {
+	return client.FilestoreClient.AttachProvenanceWithPriority(
+		ctx,
+		digest,
+		provenance,
+		client.priorityClass,
+	)
+}
+
+func (client archivePriorityClient) AttachProvenanceWithPriority(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	provenance []contracts.Provenance,
+	priorityClass string,
+) error {
+	if priorityClass == "" {
+		priorityClass = client.priorityClass
+	}
+
+	return client.FilestoreClient.AttachProvenanceWithPriority(
+		ctx,
+		digest,
+		provenance,
+		priorityClass,
+	)
 }
 
 func (importer *ArchiveImporter) Import(
@@ -137,9 +325,52 @@ func (importer *ArchiveImporter) Import(
 		sourceName = sourceNameFromRoot(request.Roots[0])
 	}
 
-	report := ArchiveImportReport{SourceName: sourceName}
+	runID := archiveImportRunID(request, sourceName)
+	report := ArchiveImportReport{SourceName: sourceName, RunID: runID}
+
+	// Record the run so it is listable and deletable later. Dry runs do not write
+	// anything, so they are not registered. Registry writes are best-effort: a
+	// failure to record must not fail the import itself.
+	if !request.DryRun {
+		record := ImportRunRecord{
+			RunID:      runID,
+			SourceName: sourceName,
+			SourceKind: contracts.MailArchiveSourceKind,
+			Roots:      append([]string{}, request.Roots...),
+			Format:     request.Format,
+			Status:     ImportRunStatusRunning,
+			StartedAt:  time.Now().UTC(),
+			LowNoise:   request.LowNoise,
+		}
+		_ = WriteImportRunRecord(request.StateDir, record)
+		defer func() {
+			record.Status = ImportRunStatusCompleted
+			if len(report.Failures) > 0 {
+				record.Status = ImportRunStatusFailed
+			}
+			record.FinishedAt = time.Now().UTC()
+			record.Scanned = report.Scanned
+			record.Parsed = report.Parsed
+			record.Imported = report.Imported
+			record.Duplicates = report.ExactDuplicates + report.MessageIDDuplicates
+			record.Failures = len(report.Failures)
+			_ = WriteImportRunRecord(request.StateDir, record)
+		}()
+	}
+
+	progress := &importProgress{start: time.Now()}
+	stopProgress := importer.startProgress(ctx, request, progress)
+	defer stopProgress()
+
 	for _, root := range request.Roots {
-		if err := importer.importRoot(ctx, request, sourceName, root, &report); err != nil {
+		if err := importer.importRoot(
+			ctx,
+			request,
+			sourceName,
+			root,
+			&report,
+			progress,
+		); err != nil {
 			report.Failures = append(report.Failures, err.Error())
 		}
 	}
@@ -154,12 +385,55 @@ func (importer *ArchiveImporter) Import(
 	return report, nil
 }
 
+// startProgress launches the periodic progress emitter (if a callback is set)
+// and returns a stop function that halts the ticker, waits for the emitter to
+// exit, and delivers one final snapshot. The stop function is safe to defer.
+func (importer *ArchiveImporter) startProgress(
+	ctx context.Context,
+	request ArchiveImportRequest,
+	progress *importProgress,
+) func() {
+	if request.Progress == nil {
+		return func() {}
+	}
+
+	interval := request.ProgressInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	done := make(chan struct{})
+	finished := make(chan struct{})
+
+	go func() {
+		defer close(finished)
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				request.Progress(progress.snapshot())
+			}
+		}
+	}()
+
+	return func() {
+		ticker.Stop()
+		close(done)
+		<-finished
+		request.Progress(progress.snapshot())
+	}
+}
+
 func (importer *ArchiveImporter) importRoot(
 	ctx context.Context,
 	request ArchiveImportRequest,
 	sourceName string,
 	root string,
 	report *ArchiveImportReport,
+	progress *importProgress,
 ) error {
 	root = filepath.Clean(root)
 	info, err := os.Stat(root)
@@ -174,10 +448,50 @@ func (importer *ArchiveImporter) importRoot(
 		}
 		report.Scanned++
 		report.Parsed++
-		return importer.ingestArchiveMessage(ctx, sourceName, message, request, report)
+		progress.scanned.Add(1)
+		progress.parsed.Add(1)
+		progress.setLastPath(root)
+		ingestErr := importer.ingestArchiveMessage(ctx, sourceName, message, request, report)
+		if ingestErr != nil {
+			progress.failures.Add(1)
+		} else {
+			progress.ingested.Add(1)
+		}
+
+		return ingestErr
 	}
 
-	return filepath.WalkDir(
+	// The directory walk is the single producer: it owns the parse-side counters
+	// on the shared report and feeds parsed messages to a pool of ingest workers,
+	// each of which accumulates ingest-side counters into its own report. The
+	// per-Message-ID lock inside ingestArchiveMessage keeps same-id dedup correct;
+	// the worker reports are merged once the walk and all workers have finished.
+	workers := importer.concurrency
+	if workers < 1 {
+		workers = 1
+	}
+	messages := make(chan archiveMessage, workers)
+	locals := make([]ArchiveImportReport, workers)
+
+	var workerGroup sync.WaitGroup
+	for index := range workers {
+		workerGroup.Add(1)
+		go func(local *ArchiveImportReport) {
+			defer workerGroup.Done()
+			for message := range messages {
+				if err := importer.ingestArchiveMessage(
+					ctx, sourceName, message, request, local,
+				); err != nil {
+					local.Failures = append(local.Failures, err.Error())
+					progress.failures.Add(1)
+				} else {
+					progress.ingested.Add(1)
+				}
+			}
+		}(&locals[index])
+	}
+
+	walkErr := filepath.WalkDir(
 		root,
 		func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -203,18 +517,13 @@ func (importer *ArchiveImporter) importRoot(
 				return nil
 			}
 			report.Scanned++
+			progress.scanned.Add(1)
+			progress.setLastPath(path)
 			if format == ArchiveImportFormatMbox {
 				parseErr := forEachMboxMessage(path, root, func(message archiveMessage) error {
 					report.Parsed++
-					if err := importer.ingestArchiveMessage(
-						ctx,
-						sourceName,
-						message,
-						request,
-						report,
-					); err != nil {
-						report.Failures = append(report.Failures, err.Error())
-					}
+					progress.parsed.Add(1)
+					messages <- message
 
 					return nil
 				})
@@ -233,19 +542,38 @@ func (importer *ArchiveImporter) importRoot(
 				return nil
 			}
 			report.Parsed++
-			if err := importer.ingestArchiveMessage(
-				ctx,
-				sourceName,
-				message,
-				request,
-				report,
-			); err != nil {
-				report.Failures = append(report.Failures, err.Error())
-			}
+			progress.parsed.Add(1)
+			messages <- message
 
 			return nil
 		},
 	)
+
+	close(messages)
+	workerGroup.Wait()
+	for index := range locals {
+		mergeArchiveIngestReport(report, &locals[index])
+	}
+
+	return walkErr
+}
+
+// mergeArchiveIngestReport folds a worker's ingest-side counters and message
+// lists into the shared report. Parse-side counters (Scanned/Parsed/Skipped/
+// ParseFailures) are owned by the single walk goroutine and are not merged here.
+func mergeArchiveIngestReport(dst, src *ArchiveImportReport) {
+	dst.Imported += src.Imported
+	dst.ExactDuplicates += src.ExactDuplicates
+	dst.MessageIDDuplicates += src.MessageIDDuplicates
+	dst.GeneratedMessageIDs += src.GeneratedMessageIDs
+	dst.LowNoiseSkipped += src.LowNoiseSkipped
+	dst.TrivialSkipped += src.TrivialSkipped
+	dst.MinorVersions += src.MinorVersions
+	dst.MajorVersions += src.MajorVersions
+	dst.Promoted += src.Promoted
+	dst.Collisions += src.Collisions
+	dst.SkippedMessageIDs = append(dst.SkippedMessageIDs, src.SkippedMessageIDs...)
+	dst.Failures = append(dst.Failures, src.Failures...)
 }
 
 func (importer *ArchiveImporter) ingestArchiveMessage(
@@ -262,6 +590,12 @@ func (importer *ArchiveImporter) ingestArchiveMessage(
 		report.Imported++
 		return nil
 	}
+
+	// Serialize messages sharing a Message-ID so two workers cannot both observe
+	// "canonical not found" and each ingest it as a new canonical; the second to
+	// acquire the lock then correctly takes the duplicate/variant path.
+	unlock := importer.lockMessageID(message.MessageID)
+	defer unlock()
 
 	identityRef := contracts.SourceObjectRef{
 		SourceKind: contracts.MailIdentitySourceKind,
@@ -671,61 +1005,132 @@ func (importer *ArchiveImporter) writeArchiveMessageParts(
 		},
 	}
 
-	parts := make([]contracts.CompoundPart, 0, len(inputs)+len(message.Attachments))
+	jobs := make([]partIngestJob, 0, len(inputs)+len(message.Attachments))
 	for _, input := range inputs {
-		digest, _, err := importer.service.Ingest(ctx, IngestObject{
-			ObservedAt:   message.ObservedAt,
-			Reader:       bytes.NewReader(input.payload),
-			MediaType:    input.mediaType,
-			SourceKind:   contracts.MailArchiveSourceKind,
-			SourceName:   sourceName,
-			ExternalID:   message.ExternalID + ":" + input.role,
-			ExternalVer:  message.ExternalVersion,
-			SourceHint:   input.role,
-			ContentRoles: []string{input.role},
-			Facets:       input.facets,
+		jobs = append(jobs, partIngestJob{
+			object: IngestObject{
+				ObservedAt:   message.ObservedAt,
+				Reader:       bytes.NewReader(input.payload),
+				MediaType:    input.mediaType,
+				SourceKind:   contracts.MailArchiveSourceKind,
+				SourceName:   sourceName,
+				ExternalID:   message.ExternalID + ":" + input.role,
+				ExternalVer:  message.ExternalVersion,
+				SourceHint:   input.role,
+				ContentRoles: []string{input.role},
+				Facets:       input.facets,
+			},
+			part: contracts.CompoundPart{Role: input.role, Order: input.order},
 		})
-		if err != nil {
-			return nil, err
-		}
-		parts = append(
-			parts,
-			contracts.CompoundPart{Digest: digest, Role: input.role, Order: input.order},
-		)
 	}
 	for index, attachment := range message.Attachments {
-		attachmentID := firstNonEmpty(attachment.FileName, fmt.Sprintf("%d", index))
-		digest, _, err := importer.service.Ingest(ctx, IngestObject{
-			ObservedAt:   message.ObservedAt,
-			Reader:       bytes.NewReader(attachment.Content),
-			MediaType:    firstNonEmpty(attachment.MediaType, "application/octet-stream"),
-			SourceKind:   contracts.MailArchiveSourceKind,
-			SourceName:   sourceName,
-			ExternalID:   fmt.Sprintf("%s:attachment:%s", message.ExternalID, attachmentID),
-			ExternalVer:  message.ExternalVersion,
-			SourceHint:   attachment.FileName,
-			ContentRoles: []string{contracts.MailAttachmentRole},
-			Facets: []contracts.Facet{{
-				Kind: "file",
+		// Prefix with the attachment index so two attachments that share a file
+		// name (or both lack one) still get distinct, unambiguous source refs.
+		attachmentID := fmt.Sprintf("%d:%s", index, attachment.FileName)
+		jobs = append(jobs, partIngestJob{
+			object: IngestObject{
+				ObservedAt:   message.ObservedAt,
+				Reader:       bytes.NewReader(attachment.Content),
+				MediaType:    firstNonEmpty(attachment.MediaType, "application/octet-stream"),
+				SourceKind:   contracts.MailArchiveSourceKind,
+				SourceName:   sourceName,
+				ExternalID:   fmt.Sprintf("%s:attachment:%s", message.ExternalID, attachmentID),
+				ExternalVer:  message.ExternalVersion,
+				SourceHint:   attachment.FileName,
+				ContentRoles: []string{contracts.MailAttachmentRole},
+				Facets: []contracts.Facet{{
+					Kind: "file",
+					Metadata: map[string]any{
+						"display_name": attachment.FileName,
+					},
+				}},
+			},
+			part: contracts.CompoundPart{
+				Role:  contracts.MailAttachmentRole,
+				Order: 10 + index,
 				Metadata: map[string]any{
-					"display_name": attachment.FileName,
+					"filename": attachment.FileName,
 				},
-			}},
-		})
-		if err != nil {
-			return nil, err
-		}
-		parts = append(parts, contracts.CompoundPart{
-			Digest: digest,
-			Role:   contracts.MailAttachmentRole,
-			Order:  10 + index,
-			Metadata: map[string]any{
-				"filename": attachment.FileName,
 			},
 		})
 	}
 
+	return importer.ingestMessageParts(ctx, jobs)
+}
+
+type partIngestJob struct {
+	object IngestObject
+	part   contracts.CompoundPart
+}
+
+// ingestMessageParts ingests a message's parts concurrently and returns them in
+// their original order. The parts are independent content-addressed objects with
+// no inter-part ordering dependency, so overlapping their Puts — especially
+// byte-heavy attachments — is safe; only the resulting slice order matters, so
+// each result is written back by index. Each Put goes through the importer's
+// shared ingest semaphore, so parts and concurrent messages together never exceed
+// the configured ingest concurrency.
+func (importer *ArchiveImporter) ingestMessageParts(
+	ctx context.Context,
+	jobs []partIngestJob,
+) ([]contracts.CompoundPart, error) {
+	parts := make([]contracts.CompoundPart, len(jobs))
+	errs := make([]error, len(jobs))
+	var waitGroup sync.WaitGroup
+
+	for index := range jobs {
+		// Acquire the ingest slot under the context so a cancellation mid-import
+		// unwinds promptly instead of blocking on a full semaphore (and so we stop
+		// spawning goroutines that would only fail fast inside Ingest).
+		if err := importer.acquireIngest(ctx); err != nil {
+			errs[index] = err
+
+			continue
+		}
+		waitGroup.Add(1)
+		go func(index int) {
+			defer waitGroup.Done()
+			defer importer.releaseIngest()
+
+			digest, _, err := importer.service.Ingest(ctx, jobs[index].object)
+			if err != nil {
+				errs[index] = err
+
+				return
+			}
+			part := jobs[index].part
+			part.Digest = digest
+			parts[index] = part
+		}(index)
+	}
+	waitGroup.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return parts, nil
+}
+
+func (importer *ArchiveImporter) acquireIngest(ctx context.Context) error {
+	if importer.ingestSem == nil {
+		return nil
+	}
+
+	select {
+	case importer.ingestSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (importer *ArchiveImporter) releaseIngest() {
+	if importer.ingestSem != nil {
+		<-importer.ingestSem
+	}
 }
 
 func (importer *ArchiveImporter) writeVariantPatches(

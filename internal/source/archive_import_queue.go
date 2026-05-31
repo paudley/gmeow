@@ -101,6 +101,34 @@ func (run ArchiveImportQueuedRun) Run(
 		Processed:  state.Processed,
 	}
 	request.RunID = runID
+
+	if !request.DryRun {
+		record := ImportRunRecord{
+			RunID:      runID,
+			SourceName: sourceName,
+			SourceKind: contracts.MailArchiveSourceKind,
+			Roots:      append([]string{}, request.Roots...),
+			Format:     request.Format,
+			Status:     ImportRunStatusRunning,
+			StartedAt:  time.Now().UTC(),
+			LowNoise:   request.LowNoise,
+		}
+		_ = WriteImportRunRecord(request.StateDir, record)
+		defer func() {
+			record.Status = ImportRunStatusCompleted
+			if len(report.Failures) > 0 {
+				record.Status = ImportRunStatusFailed
+			}
+			record.FinishedAt = time.Now().UTC()
+			record.Scanned = report.Scanned
+			record.Parsed = report.Parsed
+			record.Imported = report.Imported
+			record.Duplicates = report.ExactDuplicates + report.MessageIDDuplicates
+			record.Failures = len(report.Failures)
+			_ = WriteImportRunRecord(request.StateDir, record)
+		}()
+	}
+
 	request.CapacityDrainer = func(ctx context.Context) error {
 		return run.drainOne(ctx, request, sourceName, &state, &report)
 	}
@@ -144,11 +172,43 @@ func (run ArchiveImportQueuedRun) drain(
 	state *archiveImportRunState,
 	report *ArchiveImportReport,
 ) error {
+	start := time.Now()
+	interval := request.ProgressInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	lastEmit := start
+	emit := func(force bool) {
+		if request.Progress == nil {
+			return
+		}
+		if !force && time.Since(lastEmit) < interval {
+			return
+		}
+		lastEmit = time.Now()
+		elapsed := time.Since(start)
+		rate := 0.0
+		if seconds := elapsed.Seconds(); seconds > 0 {
+			rate = float64(report.Processed) / seconds
+		}
+		request.Progress(ArchiveImportProgress{
+			Scanned:           int64(report.Scanned),
+			Parsed:            int64(report.Parsed),
+			Ingested:          int64(report.Processed),
+			Failures:          int64(state.Failures),
+			Elapsed:           elapsed,
+			MessagesPerSecond: rate,
+			LastPath:          state.LastPath,
+		})
+	}
+
 	for report.Processed < report.Enqueued {
 		if err := run.drainOne(ctx, request, sourceName, state, report); err != nil {
 			return err
 		}
+		emit(false)
 	}
+	emit(true)
 
 	return nil
 }

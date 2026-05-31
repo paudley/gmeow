@@ -24,6 +24,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/zeebo/blake3"
 
+	"blackcat.ca/gmeow/internal/cache"
 	"blackcat.ca/gmeow/internal/contracts"
 )
 
@@ -60,6 +61,11 @@ type FilesystemStore struct {
 	// dictionary training) so they never run concurrently — e.g. repack must not
 	// race gc, and two trainings must not race the dictionary-id allocation.
 	maintenanceMu sync.Mutex
+	// chunkCache holds decompressed, content-verified chunk bytes keyed by hash.
+	// Chunk content is immutable by hash, so the cache needs no invalidation; it
+	// saves a pack read + zstd decode on repeat reads (multi-analyzer same object,
+	// projection re-reads, interface retrieves).
+	chunkCache *cache.SizedLRU[string]
 }
 
 type filesystemKeyLock struct {
@@ -67,10 +73,14 @@ type filesystemKeyLock struct {
 	refs int
 }
 
+// defaultChunkCacheBytes bounds the decompressed-chunk cache (~256 MiB).
+const defaultChunkCacheBytes = 256 << 20
+
 func NewFilesystemStore(root string) *FilesystemStore {
 	return &FilesystemStore{
-		root:  root,
-		packs: newPackCache(defaultPackCacheSize),
+		root:       root,
+		packs:      newPackCache(defaultPackCacheSize),
+		chunkCache: cache.NewSizedLRU[string](defaultChunkCacheBytes),
 	}
 }
 
@@ -86,9 +96,23 @@ func (store *FilesystemStore) Put(
 		return "", err
 	}
 
+	// One commit batch buffers the whole object's metadata (chunk index, recipe,
+	// manifest, recovery sidecar, source indexes) so it commits with a single
+	// pack fsync + a single Pebble Sync instead of one fsync per chunk and per
+	// key — the dominant cost when bulk-importing millions of small mail objects.
+	cb, err := store.newCommitBatch()
+	if err != nil {
+		return "", err
+	}
+	defer cb.close()
+
 	// Stream the content into the chunk store, computing identity in one pass —
 	// the whole object is never buffered, so multi-gigabyte media/files are safe.
-	digest, uncompressedSHA256, size, err := store.storeBlobReader(ctx, request.Reader)
+	digest, uncompressedSHA256, size, err := store.storeBlobReaderBatched(
+		ctx,
+		cb,
+		request.Reader,
+	)
 	if err != nil {
 		return "", err
 	}
@@ -117,11 +141,12 @@ func (store *FilesystemStore) Put(
 		return "", fmt.Errorf("read existing manifest: %w", manifestErr)
 	}
 
-	if err := store.writeManifest(digest, manifest); err != nil {
+	if err := store.writeManifestTo(cb, digest, manifest); err != nil {
 		return "", fmt.Errorf("write manifest: %w", err)
 	}
-	if err := store.writePackedRecovery(
+	if err := store.writePackedRecoveryTo(
 		ctx,
+		cb,
 		digest,
 		recoverySidecarForStreamed(
 			digest,
@@ -134,38 +159,48 @@ func (store *FilesystemStore) Put(
 	); err != nil {
 		return "", fmt.Errorf("write packed recovery sidecar: %w", err)
 	}
-	if err := store.recordSourceObjectIndexes(
+	if err := store.recordSourceObjectIndexesTo(
 		ctx,
+		cb,
 		digest,
 		request.Provenance,
 	); err != nil {
 		return "", err
 	}
 
+	if err := cb.commit(); err != nil {
+		return "", fmt.Errorf("commit object %s: %w", digest, err)
+	}
+
 	return digest, nil
 }
 
+// AttachProvenance records that a source observed an existing object. Re-observing
+// an already-seen object (no new source/version key) is a 100% no-op: it performs
+// no manifest rewrite and no source-index write, and reports changed=false so the
+// caller can skip emitting a change notice. This keeps a bulk re-ingest of known
+// duplicates from amplifying metadata writes or analysis scheduling.
 func (store *FilesystemStore) AttachProvenance(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 	provenance []contracts.Provenance,
-) error {
+) (bool, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
 
 	if err := validateObjectDigest(digest); err != nil {
-		return err
+		return false, err
 	}
 
 	if len(provenance) == 0 {
-		return errors.New("provenance is required")
+		return false, errors.New("provenance is required")
 	}
 
 	for _, item := range provenance {
 		err := validateSourceObjectRef(sourceObjectRefFromProvenance(item))
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 
@@ -174,17 +209,25 @@ func (store *FilesystemStore) AttachProvenance(
 
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil {
-		return fmt.Errorf("read provenance target manifest: %w", err)
+		return false, fmt.Errorf("read provenance target manifest: %w", err)
+	}
+
+	if !provenanceAddsNew(manifest.Provenance, provenance) {
+		return false, nil
 	}
 
 	manifest.Provenance = mergeProvenance(manifest.Provenance, provenance)
 	manifest.UpdatedAt = time.Now().UTC()
 
 	if err := store.writeManifest(digest, manifest); err != nil {
-		return err
+		return false, err
 	}
 
-	return store.recordSourceObjectIndexes(ctx, digest, provenance)
+	if err := store.recordSourceObjectIndexes(ctx, digest, provenance); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 func (store *FilesystemStore) PutCompound(
@@ -239,8 +282,20 @@ func (store *FilesystemStore) PutCompound(
 		relationships,
 		contracts.Compound{IsCompound: true, Parts: parts},
 	)
+	// Batch the compound object's content envelope, manifest, recovery sidecar,
+	// and source indexes into one synced commit. The compound-parent index is a
+	// guarded read-merge-write per child part, so it stays a separate write after
+	// the object commits (its non-atomicity relative to the object is unchanged
+	// from the pre-batch code, which also wrote it last).
+	cb, err := store.newCommitBatch()
+	if err != nil {
+		return "", err
+	}
+	defer cb.close()
+
 	if err := store.writeObject(
 		ctx,
+		cb,
 		digest,
 		envelope,
 		request.SourceHint,
@@ -248,13 +303,18 @@ func (store *FilesystemStore) PutCompound(
 	); err != nil {
 		return "", err
 	}
-	if err := store.recordSourceObjectIndexes(
+	if err := store.recordSourceObjectIndexesTo(
 		ctx,
+		cb,
 		digest,
 		request.Provenance,
 	); err != nil {
 		return "", err
 	}
+	if err := cb.commit(); err != nil {
+		return "", fmt.Errorf("commit compound object %s: %w", digest, err)
+	}
+
 	if err := store.recordCompoundParentIndexes(ctx, digest, parts); err != nil {
 		return "", err
 	}
@@ -317,9 +377,25 @@ func (store *FilesystemStore) writeManifest(
 	digest contracts.ObjectDigest,
 	manifest contracts.Manifest,
 ) error {
-	return store.metaPut(manifestKey(digest), manifest)
+	return store.writeManifestTo(store.syncSink(), digest, manifest)
 }
 
+func (store *FilesystemStore) writeManifestTo(
+	sink metaSink,
+	digest contracts.ObjectDigest,
+	manifest contracts.Manifest,
+) error {
+	return sink.set(manifestKey(digest), manifest)
+}
+
+// ReadManifest returns a manifest from metadata storage.
+//
+// Note: a write-through manifest cache was evaluated here but removed — the
+// manifest is mutable (provenance/annotations/version-set facets append), and a
+// lock-free-read cache produced stale reads in the importer's cross-service
+// read-modify-write collision/promotion flow. Pebble's block cache already backs
+// this read, so the only saving would have been JSON decode, which did not
+// justify the staleness risk.
 func (store *FilesystemStore) ReadManifest(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
@@ -638,6 +714,7 @@ func (store *FilesystemStore) WalkSourceCursors(
 
 func (store *FilesystemStore) writeObject(
 	ctx context.Context,
+	cb *commitBatch,
 	digest contracts.ObjectDigest,
 	content []byte,
 	sourceHint string,
@@ -672,10 +749,10 @@ func (store *FilesystemStore) writeObject(
 	}
 
 	if !blobExists {
-		return store.commitNewObject(ctx, digest, content, sourceHint, manifest)
+		return store.commitNewObject(ctx, cb, digest, content, sourceHint, manifest)
 	}
 
-	return store.writeManifest(digest, manifest)
+	return store.writeManifestTo(cb, digest, manifest)
 }
 
 // commitNewObject stores content in the content-addressed chunk store, records
@@ -685,6 +762,7 @@ func (store *FilesystemStore) writeObject(
 // points at missing content.
 func (store *FilesystemStore) commitNewObject(
 	ctx context.Context,
+	cb *commitBatch,
 	digest contracts.ObjectDigest,
 	content []byte,
 	sourceHint string,
@@ -694,18 +772,19 @@ func (store *FilesystemStore) commitNewObject(
 		return err
 	}
 
-	if err := store.storeBlobContent(ctx, digest, content); err != nil {
+	if err := store.storeBlobContentBatched(ctx, cb, digest, content); err != nil {
 		return fmt.Errorf("store blob content: %w", err)
 	}
 
-	if err := store.writeManifest(digest, manifest); err != nil {
+	if err := store.writeManifestTo(cb, digest, manifest); err != nil {
 		return fmt.Errorf("write manifest: %w", err)
 	}
 
 	// Content lives in the chunk store, so there is no single compressed blob;
 	// the recovery sidecar records uncompressed identity only (compressed=nil).
-	if err := store.writePackedRecovery(
+	if err := store.writePackedRecoveryTo(
 		ctx,
+		cb,
 		digest,
 		recoverySidecarFor(digest, content, nil, sourceHint, manifest),
 	); err != nil {
@@ -1179,17 +1258,40 @@ func mergeFacets(existing, incoming []contracts.Facet) []contracts.Facet {
 	return normalizeFacets(result)
 }
 
+func provenanceMergeKey(item contracts.Provenance) string {
+	return strings.Join([]string{
+		item.SourceKind,
+		item.SourceName,
+		item.ExternalID,
+		item.ExternalVersion,
+	}, "\x00")
+}
+
+// provenanceAddsNew reports whether any incoming provenance carries a
+// source/name/external-id/version key not already present in existing. It is the
+// "did re-observing this object actually change anything?" test: when it is
+// false, re-attaching provenance is a pure no-op.
+func provenanceAddsNew(existing, incoming []contracts.Provenance) bool {
+	existingKeys := make(map[string]bool, len(existing))
+	for _, item := range existing {
+		existingKeys[provenanceMergeKey(item)] = true
+	}
+
+	for _, item := range incoming {
+		if !existingKeys[provenanceMergeKey(item)] {
+			return true
+		}
+	}
+
+	return false
+}
+
 func mergeProvenance(existing, incoming []contracts.Provenance) []contracts.Provenance {
 	seen := map[string]bool{}
 
 	result := make([]contracts.Provenance, 0, len(existing)+len(incoming))
 	for _, item := range append(existing, incoming...) {
-		key := strings.Join([]string{
-			item.SourceKind,
-			item.SourceName,
-			item.ExternalID,
-			item.ExternalVersion,
-		}, "\x00")
+		key := provenanceMergeKey(item)
 		if seen[key] {
 			continue
 		}

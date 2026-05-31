@@ -29,7 +29,7 @@ type Store interface {
 		ctx context.Context,
 		digest contracts.ObjectDigest,
 		provenance []contracts.Provenance,
-	) error
+	) (bool, error)
 	PutCompound(
 		ctx context.Context,
 		request CompoundPutRequest,
@@ -78,6 +78,10 @@ type Store interface {
 	) (StorageBreakdownReport, error)
 	ResolvePath(ctx context.Context, request PathResolveRequest) (PathResolveReport, error)
 	DeleteObject(ctx context.Context, digest contracts.ObjectDigest) error
+	DeleteImport(
+		ctx context.Context,
+		sourceKind, sourceName string,
+	) (DeleteImportReport, error)
 	Gc(ctx context.Context) (GCReport, error)
 	Repack(ctx context.Context) (RepackReport, error)
 	TrainDictionary(ctx context.Context, sampleLimit int) (TrainDictionaryReport, error)

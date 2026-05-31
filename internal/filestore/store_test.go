@@ -202,7 +202,7 @@ func TestAttachProvenanceEnablesZeroPayloadLookup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AttachProvenance(ctx, digest, []contracts.Provenance{{
+	if _, err := store.AttachProvenance(ctx, digest, []contracts.Provenance{{
 		SourceKind:      "camera",
 		SourceName:      "front-door",
 		ExternalID:      "segment-42",

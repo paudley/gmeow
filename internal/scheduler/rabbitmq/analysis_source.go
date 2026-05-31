@@ -21,7 +21,23 @@ import (
 type AnalysisJobSourceConfig struct {
 	URL         string
 	QueuePrefix string
-	Prefetch    int
+	// Analyzer names the analyzer whose per-analyzer work queue this source
+	// consumes. Empty consumes the unsuffixed work queue (legacy/aggregate).
+	Analyzer string
+	Prefetch int
+}
+
+// AnalysisWorkQueue returns the work queue name for one analyzer under a prefix.
+func AnalysisWorkQueue(prefix, analyzer string) string {
+	if strings.TrimSpace(prefix) == "" {
+		prefix = defaultQueuePrefix
+	}
+
+	if strings.TrimSpace(analyzer) == "" {
+		return prefix + workSuffix
+	}
+
+	return prefix + workSuffix + "." + analyzer
 }
 
 type AnalysisJobSource struct {
@@ -136,7 +152,7 @@ func (source *AnalysisJobSource) ensureConsumer(ctx context.Context) error {
 
 	deliveries, err := channel.ConsumeWithContext(
 		ctx,
-		source.config.QueuePrefix+workSuffix,
+		AnalysisWorkQueue(source.config.QueuePrefix, source.config.Analyzer),
 		"",
 		false,
 		false,

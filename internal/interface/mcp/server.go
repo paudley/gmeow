@@ -49,6 +49,11 @@ type messageSummaryInput struct {
 	MessageID string `json:"message_id" jsonschema:"RFC Message-ID value"`
 }
 
+type similarMessagesInput struct {
+	Digest contracts.ObjectDigest `json:"digest"          jsonschema:"FILESTORE message digest to find similar messages for"`
+	Limit  int                    `json:"limit,omitempty" jsonschema:"maximum similar messages to return (default 3)"`
+}
+
 func New(services *appsvc.Services) (*Server, error) {
 	if services == nil {
 		return nil, errors.New("MCP app services are required")
@@ -112,6 +117,19 @@ func New(services *appsvc.Services) (*Server, error) {
 			}
 
 			return toonSummarySearch(response), nil
+		},
+	)
+	addToonTool(
+		server,
+		"similar_messages",
+		"find the messages most similar to a given message using its stored embeddings",
+		func(ctx context.Context, input similarMessagesInput) (any, error) {
+			response, err := services.SimilarMessages(ctx, string(input.Digest), input.Limit)
+			if err != nil {
+				return nil, err
+			}
+
+			return toonSimilarMessages(response), nil
 		},
 	)
 	addToonToolWithRequest(
@@ -200,117 +218,6 @@ func New(services *appsvc.Services) (*Server, error) {
 			return toonOperationForTool("graph_explore", response), nil
 		},
 	)
-	addToonToolWithRequest(server, "analysis_status", "inspect analysis status",
-		func(
-			ctx context.Context,
-			request *mcp.CallToolRequest,
-			input contracts.AnalysisStatusRequest,
-		) (any, error) {
-			response, err := services.AnalysisStatusOperation(
-				ctx,
-				input,
-				mcpProgressSink(ctx, request),
-			)
-			if err != nil {
-				return nil, err
-			}
-
-			return toonOperationForTool("analysis_status", response), nil
-		},
-	)
-	addToonToolWithRequest(server, "force_analysis", "force analyzer scheduling",
-		func(
-			ctx context.Context,
-			request *mcp.CallToolRequest,
-			input appsvc.ForceAnalysisRequest,
-		) (any, error) {
-			response, err := services.ForceAnalysisOperation(
-				ctx,
-				input,
-				mcpProgressSink(ctx, request),
-			)
-			if err != nil {
-				return nil, err
-			}
-
-			return toonOperationForTool("force_analysis", response), nil
-		},
-	)
-	addToonToolWithRequest(
-		server,
-		"operation_status",
-		"inspect a durable interface operation",
-		func(
-			ctx context.Context,
-			_ *mcp.CallToolRequest,
-			input contracts.OperationStatusRequest,
-		) (any, error) {
-			response, err := services.OperationStatus(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-
-			return toonOperation(response), nil
-		},
-	)
-	addToonToolWithRequest(
-		server,
-		"operation_result",
-		"retrieve a completed durable interface operation result",
-		func(
-			ctx context.Context,
-			_ *mcp.CallToolRequest,
-			input contracts.OperationResultRequest,
-		) (any, error) {
-			response, err := services.OperationResult(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-
-			return toonOperationResult(response), nil
-		},
-	)
-	addToonToolWithRequest(
-		server,
-		"operation_resume",
-		"resume waiting for a durable interface operation",
-		func(
-			ctx context.Context,
-			request *mcp.CallToolRequest,
-			input contracts.OperationResultRequest,
-		) (any, error) {
-			response, err := services.OperationResume(ctx, input, mcpProgressSink(ctx, request))
-			if err != nil {
-				return nil, err
-			}
-
-			return toonOperationResume(response), nil
-		},
-	)
-	addToonTool(
-		server,
-		"source_action",
-		"apply a source-specific action",
-		func(ctx context.Context, input appsvc.SourceActionRequest) (any, error) {
-			response, err := services.SourceAction(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-
-			return toonSourceAction(response), nil
-		},
-	)
-	addToonTool(server, "ops_status", "inspect operational status",
-		func(ctx context.Context, _ map[string]any) (any, error) {
-			response, err := services.OpsStatus(ctx)
-			if err != nil {
-				return nil, err
-			}
-
-			return toonOpsStatus(response), nil
-		},
-	)
-
 	return &Server{server: server}, nil
 }
 

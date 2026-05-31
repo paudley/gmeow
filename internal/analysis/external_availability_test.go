@@ -6,12 +6,21 @@ package analysis
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
+	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
 )
 
+// TestExternalAnalyzerUnavailableClassification exercises the failure
+// classification through the full Analyze path now that external analyzers run as
+// persistent backends. The boundary moved from per-object exit codes to backend
+// lifecycle: a backend that never becomes ready is genuinely down (park ⇒
+// ErrAnalyzerUnavailable), while a ready backend that dies mid-request is a
+// job-specific failure (bounded retry ⇒ ordinary error), so a poison object can
+// never wedge the tag.
 func TestExternalAnalyzerUnavailableClassification(t *testing.T) {
 	ctx := context.Background()
 	store := filestore.NewFilesystemStore(t.TempDir())
@@ -29,19 +38,40 @@ func TestExternalAnalyzerUnavailableClassification(t *testing.T) {
 			unavailable: true,
 		},
 		{
-			name:        "clean non-zero exit is job-specific",
-			command:     "sh",
-			args:        []string{"-c", "exit 3"},
+			name:    "starts but never reports ready is unavailable",
+			command: os.Args[0],
+			args: []string{
+				"-test.run=TestHelperProcess",
+				"--",
+				backendModeFlag,
+				"no-ready",
+			},
+			unavailable: true,
+		},
+		{
+			name:    "ready then crashes mid-request is job-specific",
+			command: os.Args[0],
+			args: []string{
+				"-test.run=TestHelperProcess",
+				"--",
+				backendModeFlag,
+				"crash-on-request",
+			},
 			unavailable: false,
 		},
 	}
 
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
+			manager := NewBackendManager(BackendManagerConfig{})
+			t.Cleanup(manager.Close)
+
 			analyzer, err := NewExternalCommandAnalyzer(ExternalCommandConfig{
-				Spec:    contracts.AnalyzerSpec{Name: "categories.sklearn", Version: "v1"},
-				Command: testCase.command,
-				Args:    testCase.args,
+				Spec:           contracts.AnalyzerSpec{Name: "categories.sklearn", Version: "v1"},
+				Command:        testCase.command,
+				Args:           testCase.args,
+				StartupTimeout: 2 * time.Second,
+				Manager:        manager,
 			})
 			if err != nil {
 				t.Fatal(err)

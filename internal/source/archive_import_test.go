@@ -5,6 +5,7 @@ package source
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,122 @@ import (
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/testsupport"
 )
+
+// TestArchiveImportParallelDedupsDuplicateMessageIDs locks the inter-message
+// parallelism invariant: 10 distinct Message-IDs with 5 identical copies each
+// must collapse to exactly 10 canonical objects regardless of ingest concurrency
+// — the per-Message-ID lock prevents two workers both ingesting a duplicate as a
+// new canonical, so the parallel result matches the serial one.
+func TestArchiveImportParallelDedupsDuplicateMessageIDs(t *testing.T) {
+	ctx := context.Background()
+
+	buildCorpus := func(root string) {
+		for id := range 10 {
+			body := fmt.Sprintf(
+				"Message-ID: <dup-%d@example.test>\r\nFrom: s@example.test\r\n"+
+					"To: r@example.test\r\nSubject: subject %d\r\n\r\nbody %d\r\n",
+				id, id, id,
+			)
+			for copyN := range 5 {
+				writeTestFile(
+					t,
+					filepath.Join(root, fmt.Sprintf("m%d-%d.eml", id, copyN)),
+					body,
+				)
+			}
+		}
+	}
+
+	runImport := func(concurrency int) ArchiveImportReport {
+		filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+		defer filestoreService.Close()
+		root := t.TempDir()
+		buildCorpus(root)
+		importer, err := NewArchiveImporter(filestoreService.Client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		importer.SetConcurrency(concurrency)
+		report, err := importer.Import(ctx, ArchiveImportRequest{
+			SourceName: "archive",
+			Roots:      []string{root},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return report
+	}
+
+	serial := runImport(1)
+	parallel := runImport(8)
+
+	if serial.Imported != 10 {
+		t.Fatalf(
+			"serial: expected 10 canonical imports, got %d (%#v)",
+			serial.Imported,
+			serial,
+		)
+	}
+	if parallel.Imported != serial.Imported {
+		t.Fatalf(
+			"parallel created a different canonical count: serial=%d parallel=%d",
+			serial.Imported, parallel.Imported,
+		)
+	}
+	if parallel.Scanned != 50 {
+		t.Fatalf("expected 50 scanned, got %d (%#v)", parallel.Scanned, parallel)
+	}
+	if dupes := parallel.MessageIDDuplicates + parallel.ExactDuplicates; dupes != 40 {
+		t.Fatalf("expected 40 duplicates, got %d (%#v)", dupes, parallel)
+	}
+}
+
+// TestArchiveImportRecordsRunForListing confirms a completed import writes a
+// listable run record (status, counts, source) into the state directory.
+func TestArchiveImportRecordsRunForListing(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	stateDir := t.TempDir()
+	writeTestFile(
+		t,
+		filepath.Join(root, "m.eml"),
+		"Message-ID: <run@example.test>\r\nSubject: s\r\n\r\nbody\r\n",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "arc",
+		Roots:      []string{root},
+		StateDir:   stateDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := ListImportRunRecords(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 run record, got %d", len(records))
+	}
+	record := records[0]
+	if record.RunID != report.RunID {
+		t.Fatalf("run id mismatch: record=%s report=%s", record.RunID, report.RunID)
+	}
+	if record.Status != ImportRunStatusCompleted {
+		t.Fatalf("expected completed status, got %q", record.Status)
+	}
+	if record.SourceName != "arc" || record.Imported != 1 {
+		t.Fatalf("unexpected record: %#v", record)
+	}
+}
 
 func TestArchiveImportMaildirReadOnlyAndGeneratedMessageID(t *testing.T) {
 	ctx := context.Background()

@@ -212,6 +212,13 @@ func (canonicalQueryService) SourceCursors(
 	return contracts.SourceCursorResponse{}, nil
 }
 
+func (canonicalQueryService) RelatedObjects(
+	context.Context,
+	contracts.RelatedObjectsRequest,
+) (contracts.RelatedObjectsResponse, error) {
+	return contracts.RelatedObjectsResponse{}, nil
+}
+
 type canonicalQueryWithoutAnalysisService struct {
 	canonicalQueryService
 }

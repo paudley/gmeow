@@ -155,7 +155,11 @@ func (store *FilesystemStore) TryAcquireSourceIngest(
 		}
 	}
 
-	if err := store.metaPut(key, claim); err != nil {
+	// Claims are ephemeral TTL'd coordination, not durable object state, so they
+	// are written without an fsync (see metaPutNoSync) — the dominant per-object
+	// fsync cost during a bulk import once the object writes themselves are
+	// batched.
+	if err := store.metaPutNoSync(key, claim); err != nil {
 		return contracts.SourceIngestClaim{}, false, err
 	}
 
@@ -217,7 +221,8 @@ func (store *FilesystemStore) ReleaseSourceIngest(
 			return errors.New("source ingest claim is owned by another writer")
 		}
 
-		return store.metaDelete(key)
+		// Ephemeral coordination state: released without an fsync (see acquire).
+		return store.metaDeleteNoSync(key)
 	}
 
 	// Legacy on-disk lock fallback for a pre-migration root.
@@ -337,6 +342,15 @@ func (store *FilesystemStore) recordSourceObjectIndexes(
 	digest contracts.ObjectDigest,
 	provenance []contracts.Provenance,
 ) error {
+	return store.recordSourceObjectIndexesTo(ctx, store.syncSink(), digest, provenance)
+}
+
+func (store *FilesystemStore) recordSourceObjectIndexesTo(
+	ctx context.Context,
+	sink metaSink,
+	digest contracts.ObjectDigest,
+	provenance []contracts.Provenance,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -364,10 +378,10 @@ func (store *FilesystemStore) recordSourceObjectIndexes(
 			ObjectDigest: digest,
 			UpdatedAt:    updatedAt,
 		}
-		if err := store.writePackedSourceObjectIndex(ctx, entry); err != nil {
+		if err := store.writePackedSourceObjectIndexTo(ctx, sink, entry); err != nil {
 			return err
 		}
-		if err := store.writePackedSourceAlias(ctx, ref, digest); err != nil {
+		if err := store.writePackedSourceAliasTo(ctx, sink, ref, digest); err != nil {
 			return err
 		}
 	}

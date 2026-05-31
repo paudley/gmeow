@@ -114,6 +114,57 @@ func (server *QueryServer) Search(
 	}, nil
 }
 
+func (server *QueryServer) ObjectBreakdown(
+	ctx context.Context,
+	_ *pb.ObjectBreakdownRequest,
+) (*pb.ObjectBreakdownResponse, error) {
+	breakdown, err := server.index.ObjectBreakdown(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return toPBObjectBreakdown(breakdown), nil
+}
+
+func toPBObjectBreakdown(
+	breakdown contracts.ObjectBreakdown,
+) *pb.ObjectBreakdownResponse {
+	return &pb.ObjectBreakdownResponse{
+		TotalObjects:        breakdown.TotalObjects,
+		TotalSizeBytes:      breakdown.TotalSizeBytes,
+		CompoundObjects:     breakdown.CompoundObjects,
+		SimpleObjects:       breakdown.SimpleObjects,
+		ObjectsWithAnalysis: breakdown.ObjectsWithAnalysis,
+		ByFacet:             toPBBreakdownCounts(breakdown.ByFacet),
+		BySource:            toPBBreakdownSources(breakdown.BySource),
+		ByMediaType:         toPBBreakdownCounts(breakdown.ByMediaType),
+		ByIdentityStrategy:  toPBBreakdownCounts(breakdown.ByIdentityStrategy),
+		ByAnalyzer:          toPBBreakdownCounts(breakdown.ByAnalyzer),
+	}
+}
+
+func toPBBreakdownCounts(rows []contracts.BreakdownCount) []*pb.BreakdownCount {
+	out := make([]*pb.BreakdownCount, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, &pb.BreakdownCount{Label: row.Label, Count: row.Count})
+	}
+
+	return out
+}
+
+func toPBBreakdownSources(rows []contracts.BreakdownSource) []*pb.BreakdownSource {
+	out := make([]*pb.BreakdownSource, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, &pb.BreakdownSource{
+			SourceKind: row.SourceKind,
+			SourceName: row.SourceName,
+			Objects:    row.Objects,
+		})
+	}
+
+	return out
+}
+
 func (server *QueryServer) ResolveMailIdentity(
 	ctx context.Context,
 	request *pb.MailIdentityResolveRequest,
@@ -284,6 +335,40 @@ func (server *QueryServer) VectorSearch(
 
 	return &pb.VectorSearchResponse{
 		SchemaVersion: int32(response.SchemaVersion),
+		Results:       results,
+	}, nil
+}
+
+func (server *QueryServer) RelatedObjects(
+	ctx context.Context,
+	request *pb.RelatedObjectsRequest,
+) (*pb.RelatedObjectsResponse, error) {
+	response, err := server.index.RelatedObjects(ctx, contracts.RelatedObjectsRequest{
+		SchemaVersion: contracts.SchemaVersion(request.GetSchemaVersion()),
+		Digest:        contracts.ObjectDigest(request.GetDigest()),
+		Facet:         request.GetFacet(),
+		Limit:         int(request.GetLimit()),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]*pb.VectorSearchResult, 0, len(response.Results))
+	for _, result := range response.Results {
+		results = append(results, &pb.VectorSearchResult{
+			ObjectDigest: string(result.ObjectDigest),
+			Model:        result.Model,
+			EmbeddingId:  result.EmbeddingID,
+			Kind:         result.Kind,
+			SourceDigest: string(result.SourceDigest),
+			TextPreview:  result.TextPreview,
+			Distance:     result.Distance,
+		})
+	}
+
+	return &pb.RelatedObjectsResponse{
+		SchemaVersion: int32(response.SchemaVersion),
+		SeedDigest:    string(response.Seed),
 		Results:       results,
 	}, nil
 }

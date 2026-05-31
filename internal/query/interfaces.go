@@ -40,6 +40,7 @@ type Index interface {
 		ctx context.Context,
 		request contracts.SearchRequest,
 	) (contracts.SearchResponse, error)
+	ObjectBreakdown(ctx context.Context) (contracts.ObjectBreakdown, error)
 	Structure(
 		ctx context.Context,
 		digest contracts.ObjectDigest,
@@ -60,6 +61,10 @@ type Index interface {
 		ctx context.Context,
 		request contracts.VectorSearchRequest,
 	) (contracts.VectorSearchResponse, error)
+	RelatedObjects(
+		ctx context.Context,
+		request contracts.RelatedObjectsRequest,
+	) (contracts.RelatedObjectsResponse, error)
 	SourceCursors(
 		ctx context.Context,
 		request contracts.SourceCursorRequest,

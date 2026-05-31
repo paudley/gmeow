@@ -11,12 +11,14 @@ service QueryService {
   rpc ProjectObject(ProjectObjectRequest) returns (Empty);
   rpc ProjectSourceCursor(ProjectSourceCursorRequest) returns (Empty);
   rpc Search(SearchRequest) returns (SearchResponse);
+  rpc ObjectBreakdown(ObjectBreakdownRequest) returns (ObjectBreakdownResponse);
   rpc ResolveMailIdentity(MailIdentityResolveRequest) returns (MailIdentityResolveResponse);
   rpc Structure(StructureRequest) returns (StructureResponse);
   rpc Relationships(RelationshipRequest) returns (RelationshipResponse);
   rpc Graph(GraphRequest) returns (GraphResponse);
   rpc AnalysisStatus(AnalysisStatusRequest) returns (AnalysisStatusResponse);
   rpc VectorSearch(VectorSearchRequest) returns (VectorSearchResponse);
+  rpc RelatedObjects(RelatedObjectsRequest) returns (RelatedObjectsResponse);
   rpc SourceCursors(SourceCursorRequest) returns (SourceCursorResponse);
   rpc JMAPMailboxes(JMAPMailboxRequest) returns (JMAPMailboxResponse);
   rpc JMAPEmailStates(JMAPEmailStateRequest) returns (JMAPEmailStateResponse);
@@ -40,6 +42,32 @@ service QueryService {
 message ProjectRequest {
   Manifest manifest = 1;
   repeated Annotation annotations = 2;
+}
+
+message ObjectBreakdownRequest {}
+
+message BreakdownCount {
+  string label = 1;
+  int64 count = 2;
+}
+
+message BreakdownSource {
+  string source_kind = 1;
+  string source_name = 2;
+  int64 objects = 3;
+}
+
+message ObjectBreakdownResponse {
+  int64 total_objects = 1;
+  int64 total_size_bytes = 2;
+  int64 compound_objects = 3;
+  int64 simple_objects = 4;
+  int64 objects_with_analysis = 5;
+  repeated BreakdownCount by_facet = 6;
+  repeated BreakdownSource by_source = 7;
+  repeated BreakdownCount by_media_type = 8;
+  repeated BreakdownCount by_identity_strategy = 9;
+  repeated BreakdownCount by_analyzer = 10;
 }
 
 message ProjectObjectRequest { ProjectionObject object = 1; }
@@ -169,6 +197,22 @@ message VectorSearchResult {
 message VectorSearchResponse {
   int32 schema_version = 1;
   repeated VectorSearchResult results = 2;
+}
+
+// RelatedObjects finds the objects most similar to a seed object using its
+// already-stored embeddings (no query-text embedding needed). It powers a
+// "more like this message" surface.
+message RelatedObjectsRequest {
+  int32 schema_version = 1;
+  string digest = 2;
+  string facet = 3;
+  int32 limit = 4;
+}
+
+message RelatedObjectsResponse {
+  int32 schema_version = 1;
+  string seed_digest = 2;
+  repeated VectorSearchResult results = 3;
 }
 
 message SourceCursorRequest {

@@ -18,14 +18,24 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"blackcat.ca/gmeow/internal/cache"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
 )
 
+const (
+	// clientContentCacheBytes bounds the client-side immutable object-content
+	// cache (~64 MiB), and clientContentMaxObjectBytes caps which objects are
+	// eligible so a large attachment is never fully buffered just to cache it.
+	clientContentCacheBytes     = 64 << 20
+	clientContentMaxObjectBytes = 1 << 20
+)
+
 type FilestoreClient struct {
-	connection *grpc.ClientConn
-	client     pb.FilestoreServiceClient
+	connection   *grpc.ClientConn
+	client       pb.FilestoreServiceClient
+	contentCache *cache.SizedLRU[string]
 }
 
 func NewFilestoreClient(
@@ -38,8 +48,9 @@ func NewFilestoreClient(
 	}
 
 	return &FilestoreClient{
-		connection: connection,
-		client:     pb.NewFilestoreServiceClient(connection),
+		connection:   connection,
+		client:       pb.NewFilestoreServiceClient(connection),
+		contentCache: cache.NewSizedLRU[string](clientContentCacheBytes),
 	}, nil
 }
 
@@ -159,6 +170,16 @@ func (client *FilestoreClient) Open(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 ) (io.ReadCloser, error) {
+	// Object content is immutable by digest: a cache hit is always valid and
+	// returns without a gRPC stream.
+	if cached, ok := client.contentCache.Get(string(digest)); ok {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		return io.NopCloser(bytes.NewReader(cached)), nil
+	}
+
 	streamCtx, cancel := context.WithCancel(ctx)
 	stream, err := client.client.Open(
 		streamCtx,
@@ -170,14 +191,24 @@ func (client *FilestoreClient) Open(
 		return nil, err
 	}
 
-	return &objectStreamReader{stream: stream, cancel: cancel}, nil
+	return &objectStreamReader{
+		stream:    stream,
+		cancel:    cancel,
+		client:    client,
+		digest:    string(digest),
+		cacheable: true,
+	}, nil
 }
 
 type objectStreamReader struct {
-	stream pb.FilestoreService_OpenClient
-	cancel context.CancelFunc
-	buffer bytes.Buffer
-	closed bool
+	stream    pb.FilestoreService_OpenClient
+	cancel    context.CancelFunc
+	client    *FilestoreClient
+	digest    string
+	accum     []byte
+	cacheable bool
+	closed    bool
+	buffer    bytes.Buffer
 }
 
 func (reader *objectStreamReader) Read(target []byte) (int, error) {
@@ -191,14 +222,40 @@ func (reader *objectStreamReader) Read(target []byte) (int, error) {
 	for reader.buffer.Len() == 0 {
 		chunk, err := reader.stream.Recv()
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				reader.cacheOnComplete()
+			}
+
 			return 0, err
 		}
 		if len(chunk.GetData()) > 0 {
+			reader.accumulate(chunk.GetData())
 			_, _ = reader.buffer.Write(chunk.GetData())
 		}
 	}
 
 	return reader.buffer.Read(target)
+}
+
+// accumulate buffers received bytes so a fully-read small object can be cached.
+// Once the object exceeds the per-object cap, accumulation stops and the partial
+// buffer is dropped so a large object is never held in memory just to cache it.
+func (reader *objectStreamReader) accumulate(data []byte) {
+	if !reader.cacheable {
+		return
+	}
+
+	reader.accum = append(reader.accum, data...)
+	if len(reader.accum) > clientContentMaxObjectBytes {
+		reader.cacheable = false
+		reader.accum = nil
+	}
+}
+
+func (reader *objectStreamReader) cacheOnComplete() {
+	if reader.cacheable && reader.client != nil && len(reader.accum) > 0 {
+		reader.client.contentCache.Put(reader.digest, reader.accum)
+	}
 }
 
 func (reader *objectStreamReader) Close() error {
@@ -281,6 +338,7 @@ func (client *FilestoreClient) Put(
 		Start: &pb.PutObjectStart{
 			MediaType:     request.MediaType,
 			SourceHint:    request.SourceHint,
+			PriorityClass: request.PriorityClass,
 			ContentRoles:  append([]string{}, request.ContentRoles...),
 			Facets:        facets,
 			Provenance:    provenance,
@@ -329,6 +387,15 @@ func (client *FilestoreClient) AttachProvenance(
 	digest contracts.ObjectDigest,
 	provenance []contracts.Provenance,
 ) error {
+	return client.AttachProvenanceWithPriority(ctx, digest, provenance, "")
+}
+
+func (client *FilestoreClient) AttachProvenanceWithPriority(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	provenance []contracts.Provenance,
+	priorityClass string,
+) error {
 	converted, err := ToPBProvenance(provenance)
 	if err != nil {
 		return err
@@ -337,8 +404,9 @@ func (client *FilestoreClient) AttachProvenance(
 	_, err = client.client.AttachProvenance(
 		ctx,
 		&pb.AttachProvenanceRequest{
-			Digest:     string(digest),
-			Provenance: converted,
+			Digest:        string(digest),
+			Provenance:    converted,
+			PriorityClass: priorityClass,
 		},
 	)
 
@@ -368,6 +436,7 @@ func (client *FilestoreClient) PutCompound(
 		ObjectId:      request.ObjectID,
 		MediaType:     request.MediaType,
 		SourceHint:    request.SourceHint,
+		PriorityClass: request.PriorityClass,
 		ContentRoles:  append([]string{}, request.ContentRoles...),
 		Facets:        facets,
 		Provenance:    provenance,
@@ -470,6 +539,25 @@ func (client *FilestoreClient) DeleteObject(
 	)
 
 	return err
+}
+
+func (client *FilestoreClient) DeleteImport(
+	ctx context.Context,
+	sourceKind, sourceName string,
+) (filestore.DeleteImportReport, error) {
+	response, err := client.client.DeleteImport(ctx, &pb.DeleteImportRequest{
+		SourceKind: sourceKind,
+		SourceName: sourceName,
+	})
+	if err != nil {
+		return filestore.DeleteImportReport{}, err
+	}
+
+	return filestore.DeleteImportReport{
+		ObjectsScanned:     int(response.GetObjectsScanned()),
+		ObjectsDeleted:     int(response.GetObjectsDeleted()),
+		ProvenanceDetached: int(response.GetProvenanceDetached()),
+	}, nil
 }
 
 func (client *FilestoreClient) Gc(ctx context.Context) (filestore.GCReport, error) {
@@ -640,6 +728,7 @@ type PutRequest struct {
 	Reader        io.Reader
 	MediaType     string
 	SourceHint    string
+	PriorityClass string
 	ContentRoles  []string
 	Facets        []contracts.Facet
 	Provenance    []contracts.Provenance
@@ -650,6 +739,7 @@ type CompoundPutRequest struct {
 	ObjectID      string
 	MediaType     string
 	SourceHint    string
+	PriorityClass string
 	ContentRoles  []string
 	Facets        []contracts.Facet
 	Provenance    []contracts.Provenance

@@ -1263,6 +1263,13 @@ func (jmapQueryFixture) SourceCursors(
 	return contracts.SourceCursorResponse{}, nil
 }
 
+func (jmapQueryFixture) RelatedObjects(
+	context.Context,
+	contracts.RelatedObjectsRequest,
+) (contracts.RelatedObjectsResponse, error) {
+	return contracts.RelatedObjectsResponse{}, nil
+}
+
 type objectReaderFixture struct {
 	manifests    map[contracts.ObjectDigest]contracts.Manifest
 	content      map[contracts.ObjectDigest]string

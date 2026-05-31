@@ -32,7 +32,7 @@ func TestSpecsFromConfigAppliesKnownAnalyzerConstraints(t *testing.T) {
 	}
 }
 
-func TestScanEnqueuesMissingWorkIdempotently(t *testing.T) {
+func TestScanEnqueuesMissingWork(t *testing.T) {
 	ctx := context.Background()
 	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
 		Name:       "text.extract",
@@ -41,7 +41,7 @@ func TestScanEnqueuesMissingWorkIdempotently(t *testing.T) {
 	}})
 	digest := putTextObject(t, ctx, filestoreService, "hello")
 
-	first, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
+	response, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
 		SchemaVersion: contracts.SchemaVersionPhase00,
 		PriorityClass: contracts.PriorityBackground,
 		RequestedBy:   "test",
@@ -50,27 +50,9 @@ func TestScanEnqueuesMissingWorkIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
-		SchemaVersion: contracts.SchemaVersionPhase00,
-		PriorityClass: contracts.PriorityBackground,
-		RequestedBy:   "test",
-		Reason:        "scan",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, err := schedulerService.Client.Status(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Enqueued != 1 || second.Enqueued != 0 || status.Pending != 1 {
-		t.Fatalf(
-			"expected one effective job across repeated scans for %s, first=%#v second=%#v status=%#v",
-			digest,
-			first,
-			second,
-			status,
-		)
+
+	if response.Enqueued != 1 {
+		t.Fatalf("expected one enqueued job for %s, got %#v", digest, response)
 	}
 }
 
@@ -193,7 +175,34 @@ func TestNotifyObjectsChangedProjectionOnlyDoesNotEnqueueAnalyzers(t *testing.T)
 	}
 }
 
-func TestProjectionNotificationMarksSatisfiedAnalysisComplete(t *testing.T) {
+func TestNotifyObjectsChangedSchedulesOnlyMissingAnalyzerWork(t *testing.T) {
+	ctx := context.Background()
+	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
+		Name:       "text.extract",
+		Version:    "1",
+		MediaTypes: []string{"text/plain"},
+	}})
+	digest := putTextObject(t, ctx, filestoreService, "object changed")
+
+	response, err := schedulerService.Client.NotifyObjectsChanged(
+		ctx,
+		contracts.ObjectChangeRequest{
+			SchemaVersion: contracts.SchemaVersionPhase00,
+			ObjectDigests: []contracts.ObjectDigest{digest},
+			RequestedBy:   "filestore",
+			Reason:        "object_changed",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if response.Enqueued != 1 {
+		t.Fatalf("expected missing work to be enqueued: %#v", response)
+	}
+}
+
+func TestNotifySkipsFullyAnnotatedViaLRU(t *testing.T) {
 	ctx := context.Background()
 	spec := contracts.AnalyzerSpec{
 		Name:       "text.extract",
@@ -205,15 +214,8 @@ func TestProjectionNotificationMarksSatisfiedAnalysisComplete(t *testing.T) {
 		ctx,
 		[]contracts.AnalyzerSpec{spec},
 	)
-	digest := putTextObject(t, ctx, filestoreService, "projection complete")
+	digest := putTextObject(t, ctx, filestoreService, "fully done")
 
-	first, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Enqueued != 1 {
-		t.Fatalf("expected initial work, got %#v", first)
-	}
 	if err := filestoreService.Client.WriteAnnotation(ctx, contracts.Annotation{
 		ObjectDigest:  digest,
 		Kind:          "analysis",
@@ -224,62 +226,6 @@ func TestProjectionNotificationMarksSatisfiedAnalysisComplete(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-
-	response, err := schedulerService.Client.NotifyObjectsChanged(
-		ctx,
-		contracts.ObjectChangeRequest{
-			SchemaVersion:  contracts.SchemaVersionPhase00,
-			ObjectDigests:  []contracts.ObjectDigest{digest},
-			RequestedBy:    "filestore",
-			Reason:         "projection_refresh",
-			ProjectionOnly: true,
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.Enqueued != 0 || response.Failed != 0 {
-		t.Fatalf("projection completion must not enqueue analyzers: %#v", response)
-	}
-
-	foundCompleteMarker := false
-	if err := filestoreService.Store.WalkProjection(
-		ctx,
-		func(object filestore.ProjectionObject) error {
-			if object.Manifest.ObjectDigest != digest {
-				return nil
-			}
-			for _, annotation := range object.Annotations {
-				if annotation.Kind != "scheduler" {
-					continue
-				}
-				markers, _ := annotation.Data["scheduled_jobs"].(map[string]any)
-				for _, value := range markers {
-					marker, _ := value.(map[string]any)
-					if marker["analyzer_name"] == spec.Name && marker["status"] == "complete" {
-						foundCompleteMarker = true
-					}
-				}
-			}
-
-			return nil
-		},
-	); err != nil {
-		t.Fatal(err)
-	}
-	if !foundCompleteMarker {
-		t.Fatal("expected scheduler ledger marker to be complete")
-	}
-}
-
-func TestNotifyObjectsChangedSchedulesOnlyMissingAnalyzerWork(t *testing.T) {
-	ctx := context.Background()
-	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
-		Name:       "text.extract",
-		Version:    "1",
-		MediaTypes: []string{"text/plain"},
-	}})
-	digest := putTextObject(t, ctx, filestoreService, "object changed")
 
 	first, err := schedulerService.Client.NotifyObjectsChanged(
 		ctx,
@@ -293,6 +239,11 @@ func TestNotifyObjectsChangedSchedulesOnlyMissingAnalyzerWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	if first.Enqueued != 0 {
+		t.Fatalf("expected no work for fully annotated object: %#v", first)
+	}
+
 	second, err := schedulerService.Client.NotifyObjectsChanged(
 		ctx,
 		contracts.ObjectChangeRequest{
@@ -305,84 +256,57 @@ func TestNotifyObjectsChangedSchedulesOnlyMissingAnalyzerWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := schedulerService.Client.Status(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Enqueued != 1 || second.Enqueued != 0 || status.Pending != 1 {
-		t.Fatalf(
-			"object change notification was not analyzer-idempotent: first=%#v second=%#v status=%#v",
-			first,
-			second,
-			status,
-		)
+
+	if second.Enqueued != 0 || second.Skipped != 1 {
+		t.Fatalf("LRU should short-circuit second notify: %#v", second)
 	}
 }
 
-func TestInteractiveScanDoesNotDuplicateScheduledBackgroundWork(t *testing.T) {
+func TestForceEvictsLRUAndEnqueues(t *testing.T) {
 	ctx := context.Background()
-	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
+	spec := contracts.AnalyzerSpec{
 		Name:       "text.extract",
 		Version:    "1",
 		MediaTypes: []string{"text/plain"},
-	}})
-	putTextObject(t, ctx, filestoreService, "hello")
+	}
+	filestoreService, schedulerService := startScheduler(
+		t,
+		ctx,
+		[]contracts.AnalyzerSpec{spec},
+	)
+	digest := putTextObject(t, ctx, filestoreService, "force me")
 
-	background, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
-		PriorityClass: contracts.PriorityBackground,
-		RequestedBy:   "scheduler",
-	})
-	if err != nil {
+	if err := filestoreService.Client.WriteAnnotation(ctx, contracts.Annotation{
+		ObjectDigest:  digest,
+		Kind:          "analysis",
+		AnalyzerName:  spec.Name,
+		AnalyzerVer:   spec.Version,
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Data:          map[string]any{"status": "complete"},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	interactive, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
-		PriorityClass: contracts.PriorityInteractive,
-		RequestedBy:   "interface",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, err := schedulerService.Client.Status(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if background.Enqueued != 1 || interactive.Enqueued != 0 || status.Pending != 1 {
-		t.Fatalf(
-			"expected interactive scan to reuse scheduled work, background=%#v interactive=%#v status=%#v",
-			background,
-			interactive,
-			status,
-		)
-	}
-}
 
-func TestForceUsesSchedulerMarkersForIdempotency(t *testing.T) {
-	ctx := context.Background()
-	filestoreService, schedulerService := startScheduler(t, ctx, []contracts.AnalyzerSpec{{
-		Name:       "text.extract",
-		Version:    "1",
-		MediaTypes: []string{"text/plain"},
-	}})
-	digest := putTextObject(t, ctx, filestoreService, "hello")
+	_, err := schedulerService.Client.NotifyObjectsChanged(
+		ctx,
+		contracts.ObjectChangeRequest{
+			SchemaVersion: contracts.SchemaVersionPhase00,
+			ObjectDigests: []contracts.ObjectDigest{digest},
+			RequestedBy:   "filestore",
+			Reason:        "object_changed",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	first, err := schedulerService.Client.Force(ctx, digest, nil, "operator", "trace")
+	response, err := schedulerService.Client.Force(ctx, digest, nil, "operator", "trace")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := schedulerService.Client.Force(ctx, digest, nil, "operator", "trace")
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, err := schedulerService.Client.Status(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Enqueued != 1 || second.Enqueued != 0 || status.Pending != 1 {
-		t.Fatalf("forced reanalysis was not idempotent: first=%#v second=%#v status=%#v",
-			first,
-			second,
-			status,
-		)
+
+	if response.Enqueued != 1 {
+		t.Fatalf("force should enqueue despite LRU: %#v", response)
 	}
 }
 
@@ -419,7 +343,7 @@ func TestDeadLetterRequeueMovesJobsBackToPending(t *testing.T) {
 	}
 }
 
-func TestStalePublishingMarkerIsRetried(t *testing.T) {
+func TestSchedulerDoesNotWriteToFilestore(t *testing.T) {
 	ctx := context.Background()
 	spec := contracts.AnalyzerSpec{
 		Name:       "text.extract",
@@ -431,45 +355,49 @@ func TestStalePublishingMarkerIsRetried(t *testing.T) {
 		ctx,
 		[]contracts.AnalyzerSpec{spec},
 	)
-	digest := putTextObject(t, ctx, filestoreService, "hello")
-	job := contracts.AnalyzerJob{
-		ObjectDigest:  digest,
-		Analyzer:      spec,
-		PriorityClass: contracts.PriorityBackground,
-		RequestedBy:   "scheduler",
-		Reason:        "missing",
-		CreatedAt:     time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC),
-	}
-	job.IdempotencyKey = scheduler.IdempotencyKey(job)
-	if err := filestoreService.Client.WriteAnnotation(ctx, contracts.Annotation{
+	digest := putTextObject(t, ctx, filestoreService, "no writes")
+
+	_, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{
 		SchemaVersion: contracts.SchemaVersionPhase00,
-		ObjectDigest:  digest,
-		Kind:          "scheduler",
-		GeneratedAt:   time.Date(2026, 5, 25, 11, 0, 0, 0, time.UTC),
-		Data: map[string]any{"scheduled_jobs": map[string]any{
-			job.IdempotencyKey: map[string]any{
-				"status": "publishing",
-				"updated_at": time.Date(2026, 5, 25, 11, 0, 0, 0, time.UTC).
-					Format(time.RFC3339Nano),
-			},
-		}},
-	}); err != nil {
+		RequestedBy:   "test",
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	response, err := schedulerService.Client.Scan(ctx, contracts.SchedulerScanRequest{})
+	_, err = schedulerService.Client.NotifyObjectsChanged(
+		ctx,
+		contracts.ObjectChangeRequest{
+			SchemaVersion: contracts.SchemaVersionPhase00,
+			ObjectDigests: []contracts.ObjectDigest{digest},
+			RequestedBy:   "filestore",
+			Reason:        "object_changed",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := schedulerService.Client.Status(ctx)
+
+	var schedulerAnnotationFound bool
+
+	err = filestoreService.Store.WalkProjection(
+		ctx,
+		func(object filestore.ProjectionObject) error {
+			for _, annotation := range object.Annotations {
+				if annotation.Kind == "scheduler" {
+					schedulerAnnotationFound = true
+				}
+			}
+
+			return nil
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Enqueued != 1 || status.Pending != 1 {
-		t.Fatalf("expected stale publishing marker to be retried, response=%#v status=%#v",
-			response,
-			status,
-		)
+
+	if schedulerAnnotationFound {
+		t.Fatal("scheduler must not write annotations to FILESTORE")
 	}
 }
 

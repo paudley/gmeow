@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -34,6 +35,7 @@ func newQueryCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newQueryRebuildCommand(out, configPath))
 	command.AddCommand(newQueryProjectChangedCommand(out, configPath))
 	command.AddCommand(newQueryProjectCommand(out, configPath))
+	command.AddCommand(newQueryBreakdownCommand(out, configPath))
 	command.AddCommand(newQuerySearchCommand(out, configPath))
 	command.AddCommand(newQueryMailMissingGmailCommand(out, configPath))
 	command.AddCommand(newQueryAgeCommand(out, configPath))
@@ -188,6 +190,98 @@ func newQueryRebuildCommand(out io.Writer, configPath *string) *cobra.Command {
 		StringVar(&confirmInstance, "confirm-instance", "", "confirm production-like instance id before rebuilding")
 
 	return command
+}
+
+func newQueryBreakdownCommand(out io.Writer, configPath *string) *cobra.Command {
+	var jsonOutput bool
+
+	command := &cobra.Command{
+		Use:   "breakdown",
+		Short: "Detailed aggregate breakdown of projected objects (facets, sources, media types, analysis)",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+
+			client, err := rpc.NewQueryClient(
+				command.Context(),
+				rpcEndpoint(loaded.Resolved.RPC.Query),
+			)
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+
+			breakdown, err := client.ObjectBreakdown(command.Context())
+			if err != nil {
+				return err
+			}
+
+			if jsonOutput {
+				encoded, err := json.MarshalIndent(breakdown, "", "  ")
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(out, string(encoded))
+
+				return err
+			}
+
+			return printObjectBreakdown(out, breakdown)
+		},
+	}
+	command.Flags().BoolVar(&jsonOutput, "json", false, "emit the breakdown as JSON")
+
+	return command
+}
+
+func printObjectBreakdown(out io.Writer, breakdown contracts.ObjectBreakdown) error {
+	analyzedPct := 0.0
+	if breakdown.TotalObjects > 0 {
+		analyzedPct = 100 * float64(
+			breakdown.ObjectsWithAnalysis,
+		) / float64(
+			breakdown.TotalObjects,
+		)
+	}
+
+	fmt.Fprintf(out, "objects:            %d\n", breakdown.TotalObjects)
+	fmt.Fprintf(out, "  compound:         %d\n", breakdown.CompoundObjects)
+	fmt.Fprintf(out, "  simple:           %d\n", breakdown.SimpleObjects)
+	fmt.Fprintf(out, "content bytes:      %d\n", breakdown.TotalSizeBytes)
+	fmt.Fprintf(
+		out,
+		"with analysis:      %d (%.1f%%)\n",
+		breakdown.ObjectsWithAnalysis,
+		analyzedPct,
+	)
+
+	writer := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+	section := func(title string, rows []contracts.BreakdownCount) {
+		fmt.Fprintf(writer, "\n%s\t\n", title)
+		for _, row := range rows {
+			label := row.Label
+			if label == "" {
+				label = "(none)"
+			}
+			fmt.Fprintf(writer, "  %s\t%d\n", label, row.Count)
+		}
+	}
+
+	section("BY FACET", breakdown.ByFacet)
+
+	fmt.Fprintf(writer, "\nBY SOURCE\t\n")
+	for _, row := range breakdown.BySource {
+		fmt.Fprintf(writer, "  %s/%s\t%d\n", row.SourceKind, row.SourceName, row.Objects)
+	}
+
+	section("BY MEDIA TYPE", breakdown.ByMediaType)
+	section("BY IDENTITY STRATEGY", breakdown.ByIdentityStrategy)
+	section("BY ANALYZER", breakdown.ByAnalyzer)
+
+	return writer.Flush()
 }
 
 func newQueryProjectChangedCommand(out io.Writer, configPath *string) *cobra.Command {

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const modelRequestTimeout = 60 * time.Second
+const modelRequestTimeout = 20 * time.Minute
 
 type modelGate struct {
 	slots chan struct{}

@@ -13,6 +13,7 @@ GMEOW ?= $(GO) run ./cmd/gmeow
 GMEOW_ADMIN ?= $(GO) run ./cmd/gmeow-admin
 CONFIG ?= gmeow.toml
 BIN_DIR ?= bin
+INSTALL_DIR ?= /usr/local/bin
 
 empty :=
 space := $(empty) $(empty)
@@ -47,7 +48,7 @@ define warn
 	@printf '  $(YELLOW)!$(RESET) %s\n' "$(1)"
 endef
 
-.PHONY: help advice install update lock doctor check quick-check test compile type-check build clean go-format go-vet go-test go-build go-check genproto python-intel-test python-intel-build release-check release-audit status submodules ethos-install
+.PHONY: help advice install update lock doctor check quick-check test compile type-check build clean go-format go-vet go-test go-build go-check genproto python-intel-test python-intel-build release-check release-audit status submodules ethos-install restart install-bin deploy
 
 help: ## Show this help screen.
 	@printf '\n$(BOLD)Gmeow$(RESET) $(DIM)local Gmail MCP/REST intelligence server$(RESET)\n\n'
@@ -60,6 +61,10 @@ help: ## Show this help screen.
 	@printf '\n$(BOLD)Development Checks$(RESET)\n'
 	@awk 'BEGIN{FS=":.*##"} /^[a-zA-Z0-9_.-]+:.*##/ { \
 		if ($$1 ~ /^(check|quick-check|test|compile|type-check|build|clean|go-format|go-vet|go-test|go-build|go-check|python-intel-test|python-intel-build|release-check|release-audit)$$/) printf "  $(GREEN)%-24s$(RESET) %s\n", $$1, $$2 \
+	}' $(MAKEFILE_LIST)
+	@printf '\n$(BOLD)Operations$(RESET)\n'
+	@awk 'BEGIN{FS=":.*##"} /^[a-zA-Z0-9_.-]+:.*##/ { \
+		if ($$1 ~ /^(install-bin|deploy|restart|status|genproto)$$/) printf "  $(GREEN)%-24s$(RESET) %s\n", $$1, $$2 \
 	}' $(MAKEFILE_LIST)
 	@printf '\n$(BOLD)Examples$(RESET)\n'
 	@printf '  make install\n'
@@ -140,6 +145,17 @@ go-build: ## Build Go binaries.
 	$(call section,Building Go binaries)
 	mkdir -p "$(BIN_DIR)"
 	$(GO) build -o "$(BIN_DIR)/" ./cmd/gmeow ./cmd/gmeow-admin ./cmd/gmeow-worker
+
+restart: ## Restart the running gmeow systemd services (no rebuild).
+	$(call section,Restarting gmeow services)
+	sudo -n systemctl restart gmeow.target
+
+install-bin: go-build ## Install built gmeow binaries to $(INSTALL_DIR).
+	$(call section,Installing gmeow binaries to $(INSTALL_DIR))
+	sudo -n install -m 0755 "$(BIN_DIR)/gmeow" "$(BIN_DIR)/gmeow-admin" "$(BIN_DIR)/gmeow-worker" "$(INSTALL_DIR)/"
+
+deploy: install-bin ## Build, install binaries, and restart the running gmeow services.
+	$(MAKE) restart
 
 genproto: ## Regenerate Go protobuf and gRPC stubs from proto/gmeow/v1 (needs bin/ plugins).
 	$(call section,Regenerating protobuf stubs)

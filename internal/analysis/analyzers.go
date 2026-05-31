@@ -307,6 +307,27 @@ func analysisText(
 	digest contracts.ObjectDigest,
 	manifest contracts.Manifest,
 ) (string, int, error) {
+	cacheKey := extractedTextKey(digest, manifest)
+	if cached, ok := extractedTextCache.Get(cacheKey); ok {
+		return cached.text, cached.bytes, nil
+	}
+
+	text, byteCount, err := computeAnalysisText(ctx, store, digest, manifest)
+	if err != nil {
+		return "", 0, err
+	}
+
+	extractedTextCache.Put(cacheKey, extractedText{text: text, bytes: byteCount})
+
+	return text, byteCount, nil
+}
+
+func computeAnalysisText(
+	ctx context.Context,
+	store ObjectStore,
+	digest contracts.ObjectDigest,
+	manifest contracts.Manifest,
+) (string, int, error) {
 	if !manifest.Compound.IsCompound {
 		content, _, err := readObject(ctx, store, digest)
 		if err != nil {

@@ -180,6 +180,13 @@ func (operationQuery) SourceCursors(
 	return contracts.SourceCursorResponse{}, nil
 }
 
+func (operationQuery) RelatedObjects(
+	context.Context,
+	contracts.RelatedObjectsRequest,
+) (contracts.RelatedObjectsResponse, error) {
+	return contracts.RelatedObjectsResponse{}, nil
+}
+
 type blockingOperationQuery struct {
 	calls   atomic.Int32
 	once    sync.Once
@@ -235,6 +242,13 @@ func (query *blockingOperationQuery) SourceCursors(
 	request contracts.SourceCursorRequest,
 ) (contracts.SourceCursorResponse, error) {
 	return operationQuery{}.SourceCursors(ctx, request)
+}
+
+func (query *blockingOperationQuery) RelatedObjects(
+	ctx context.Context,
+	request contracts.RelatedObjectsRequest,
+) (contracts.RelatedObjectsResponse, error) {
+	return operationQuery{}.RelatedObjects(ctx, request)
 }
 
 type operationObjects struct{}

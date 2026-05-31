@@ -178,6 +178,16 @@ func (client *SchedulerClient) Status(
 	}, nil
 }
 
+func (client *SchedulerClient) SelfHealSweep(
+	ctx context.Context,
+) (contracts.SchedulerScanResponse, error) {
+	return client.Scan(ctx, contracts.SchedulerScanRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		RequestedBy:   "scheduler",
+		Reason:        "self_heal_sweep",
+	})
+}
+
 func fromPBSchedulerScanResponse(
 	response *pb.SchedulerScanResponse,
 ) contracts.SchedulerScanResponse {

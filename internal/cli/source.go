@@ -8,14 +8,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 
 	"blackcat.ca/gmeow/internal/config"
+	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
 	schedmq "blackcat.ca/gmeow/internal/scheduler/rabbitmq"
@@ -25,6 +29,56 @@ import (
 
 var configuredSourceRetryDelay = 30 * time.Second
 
+// schedulerPressureGate reports the scheduler's analysis backpressure to the
+// source with the same high/low-water hysteresis the scheduler applies
+// internally: it engages at or above the high-water mark and only releases once
+// depth falls to the low-water mark, so backfill does not flap on and off near
+// a single threshold. It satisfies source.PressureReporter.
+type schedulerPressureGate struct {
+	client    *rpc.SchedulerClient
+	mu        sync.Mutex
+	highWater int
+	lowWater  int
+	pressured bool
+}
+
+func newSchedulerPressureGate(
+	client *rpc.SchedulerClient,
+	resolved config.ResolvedScheduler,
+) *schedulerPressureGate {
+	high := resolved.BackpressureHighWater
+	if high <= 0 {
+		high = 10000
+	}
+
+	low := resolved.BackpressureLowWater
+	if low <= 0 || low > high {
+		low = high / 2
+	}
+
+	return &schedulerPressureGate{client: client, highWater: high, lowWater: low}
+}
+
+func (gate *schedulerPressureGate) Pressured(ctx context.Context) (bool, error) {
+	status, err := gate.client.Status(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	depth := status.Pending + status.Retry
+
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+
+	if gate.pressured && depth <= gate.lowWater {
+		gate.pressured = false
+	} else if !gate.pressured && depth >= gate.highWater {
+		gate.pressured = true
+	}
+
+	return gate.pressured, nil
+}
+
 func newSourceCommand(out io.Writer, configPath *string) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "source",
@@ -32,7 +86,168 @@ func newSourceCommand(out io.Writer, configPath *string) *cobra.Command {
 	}
 	command.AddCommand(newSourceBackfillCommand(out, configPath))
 	command.AddCommand(newSourceImportCommand(out, configPath))
+	command.AddCommand(newSourceListImportsCommand(out, configPath))
+	command.AddCommand(newSourceDeleteImportCommand(out, configPath))
 	command.AddCommand(newSourceServeCommand(out, configPath, "serve"))
+
+	return command
+}
+
+func newSourceDeleteImportCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		confirmInstance string
+		stateDir        string
+	)
+
+	command := &cobra.Command{
+		Use:   "delete-import <run-id>",
+		Short: "Remove an import's provenance; objects with no remaining source are reclaimable by gc",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			ctx := command.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"source delete-import",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+
+			runID := args[0]
+			dir := archiveImportStateDir(loaded, stateDir)
+			record, found, err := source.LoadImportRunRecord(dir, runID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return fmt.Errorf("import run %q not found in %s", runID, dir)
+			}
+
+			filestoreClient, err := rpc.NewFilestoreClient(
+				ctx,
+				rpcEndpoint(loaded.Resolved.RPC.Filestore),
+			)
+			if err != nil {
+				return err
+			}
+			defer filestoreClient.Close()
+
+			report, err := filestoreClient.DeleteImport(
+				ctx,
+				record.SourceKind,
+				record.SourceName,
+			)
+			if err != nil {
+				return err
+			}
+
+			record.Status = source.ImportRunStatusDeleted
+			if writeErr := source.WriteImportRunRecord(dir, record); writeErr != nil {
+				return writeErr
+			}
+
+			encoded, err := json.MarshalIndent(report, "", "  ")
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(out, string(encoded)); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(
+				out,
+				"run marked deleted; run 'gmeow-admin filestore gc' to reclaim freed chunks",
+			)
+
+			return err
+		},
+	}
+	command.Flags().StringVar(
+		&confirmInstance,
+		"confirm-instance",
+		"",
+		"required production-like instance id confirmation",
+	)
+	command.Flags().StringVar(
+		&stateDir,
+		"state-dir",
+		"",
+		"import run state directory; defaults to system.data_dir/import-runs",
+	)
+
+	return command
+}
+
+func newSourceListImportsCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		jsonOutput bool
+		stateDir   string
+	)
+
+	command := &cobra.Command{
+		Use:   "list-imports",
+		Short: "List recorded archive import runs",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+
+			records, err := source.ListImportRunRecords(archiveImportStateDir(loaded, stateDir))
+			if err != nil {
+				return err
+			}
+
+			if jsonOutput {
+				encoded, err := json.MarshalIndent(records, "", "  ")
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(out, string(encoded))
+
+				return err
+			}
+
+			if len(records) == 0 {
+				_, err := fmt.Fprintln(out, "no import runs recorded")
+
+				return err
+			}
+
+			writer := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(writer, "RUN ID\tSOURCE\tSTATUS\tIMPORTED\tDUP\tFAIL\tSTARTED\tROOTS")
+			for _, record := range records {
+				fmt.Fprintf(
+					writer,
+					"%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\n",
+					record.RunID,
+					record.SourceName,
+					record.Status,
+					record.Imported,
+					record.Duplicates,
+					record.Failures,
+					record.StartedAt.Local().Format("2006-01-02 15:04"),
+					strings.Join(record.Roots, ","),
+				)
+			}
+
+			return writer.Flush()
+		},
+	}
+	command.Flags().BoolVar(&jsonOutput, "json", false, "emit the import runs as JSON")
+	command.Flags().StringVar(
+		&stateDir,
+		"state-dir",
+		"",
+		"import run state directory; defaults to system.data_dir/import-runs",
+	)
 
 	return command
 }
@@ -47,6 +262,8 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 		lowNoise        bool
 		resume          bool
 		queueHighWater  int
+		concurrency     int
+		quiet           bool
 	)
 
 	command := &cobra.Command{
@@ -85,6 +302,7 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			importer.SetConcurrency(concurrency)
 			request := source.ArchiveImportRequest{
 				SourceName:     sourceName,
 				Format:         format,
@@ -95,6 +313,21 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 				StateDir:       archiveImportStateDir(loaded, stateDir),
 				QueueHighWater: queueHighWater,
 			}
+			// Live progress goes to stderr so --json stdout stays clean.
+			if !quiet {
+				request.Progress = func(progress source.ArchiveImportProgress) {
+					fmt.Fprintf(
+						os.Stderr,
+						"\rimport: scanned=%d parsed=%d ingested=%d failures=%d %.0f msg/s elapsed=%s   ",
+						progress.Scanned,
+						progress.Parsed,
+						progress.Ingested,
+						progress.Failures,
+						progress.MessagesPerSecond,
+						progress.Elapsed.Round(time.Second),
+					)
+				}
+			}
 			var report source.ArchiveImportReport
 			if dryRun {
 				report, err = importer.Import(ctx, request)
@@ -104,6 +337,7 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 					schedmq.ConfigFromResolved(
 						loaded.Resolved.RabbitMQ,
 						loaded.Resolved.Scheduler,
+						loaded.Config.Analysis.Analyzers,
 					),
 				)
 				if brokerErr != nil {
@@ -116,7 +350,7 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 					schedmq.SourceImportJobSourceConfig{
 						URL:         loaded.Resolved.RabbitMQ.URL,
 						QueuePrefix: loaded.Resolved.Scheduler.QueuePrefix,
-						Prefetch:    1,
+						Prefetch:    importer.Concurrency(),
 					},
 				)
 				if sourceErr != nil {
@@ -129,6 +363,10 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 					Importer: importer,
 					Source:   sourceImportJobSourceAdapter{source: jobSource},
 				}.Run(ctx, request)
+			}
+			if !quiet {
+				// Terminate the in-place progress line before the report prints.
+				fmt.Fprintln(os.Stderr)
 			}
 			if printErr := printArchiveImportReport(out, report); printErr != nil {
 				return printErr
@@ -151,6 +389,10 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 		StringVar(&stateDir, "state-dir", "", "local import run state directory; defaults to system.data_dir/import-runs")
 	command.Flags().
 		IntVar(&queueHighWater, "queue-high-water", 10000, "pause discovery while source import queue depth is at or above this value")
+	command.Flags().
+		IntVar(&concurrency, "concurrency", 8, "object Puts run in parallel across messages and their parts (and queued-import broker prefetch)")
+	command.Flags().
+		BoolVar(&quiet, "quiet", false, "suppress the live progress line on stderr")
 	command.Flags().StringVar(
 		&confirmInstance,
 		"confirm-instance",
@@ -227,6 +469,22 @@ func newSourceServeCommand(
 			if err != nil {
 				return err
 			}
+
+			// Wire the scheduler's backpressure signal so the configured backfill
+			// pauses when the analysis queue is deep and resumes once it drains —
+			// the source self-throttles instead of firehosing the work queue.
+			schedulerClient, err := rpc.NewSchedulerClient(
+				ctx,
+				rpcEndpoint(loaded.Resolved.RPC.Scheduler),
+			)
+			if err != nil {
+				return err
+			}
+			defer schedulerClient.Close()
+			sourceService.SetPressureReporter(
+				newSchedulerPressureGate(schedulerClient, loaded.Resolved.Scheduler),
+			)
+
 			sourceServer, err := sourcegrpc.NewServer(adapter, sourceService)
 			if err != nil {
 				return err
@@ -363,10 +621,11 @@ func newSourceBackfillCommand(out io.Writer, configPath *string) *cobra.Command 
 			}
 
 			report, err := sourceService.RunBackfill(ctx, adapter, source.BackfillRequest{
-				Cursor:      cursor,
-				PageSize:    pageSize,
-				MaxPages:    maxPages,
-				Concurrency: concurrency,
+				Cursor:        cursor,
+				PriorityClass: contracts.PriorityBackground,
+				PageSize:      pageSize,
+				MaxPages:      maxPages,
+				Concurrency:   concurrency,
 			})
 			if printErr := printBackfillReport(out, adapter, report); printErr != nil {
 				return printErr
@@ -492,11 +751,14 @@ func runConfiguredBackfill(
 				"mode":  firstNonEmpty(sourceConfig.Backfill.Mode, "full"),
 				"query": sourceConfig.Backfill.Query,
 			},
-			CursorKey:   firstNonEmpty(sourceConfig.Backfill.CursorKey, "backfill"),
-			PageSize:    sourceConfig.Backfill.PageSize,
-			MaxPages:    sourceConfig.Backfill.MaxPages,
-			Concurrency: sourceConfig.Backfill.Concurrency,
-			Resume:      sourceConfig.Backfill.Resume,
+			// Backfill is low priority and the one producer that pauses under
+			// analysis backpressure.
+			PriorityClass: contracts.PriorityBackground,
+			CursorKey:     firstNonEmpty(sourceConfig.Backfill.CursorKey, "backfill"),
+			PageSize:      sourceConfig.Backfill.PageSize,
+			MaxPages:      sourceConfig.Backfill.MaxPages,
+			Concurrency:   sourceConfig.Backfill.Concurrency,
+			Resume:        sourceConfig.Backfill.Resume,
 		})
 		if err != nil && ctx.Err() == nil {
 			fmt.Printf(
@@ -546,11 +808,14 @@ func runConfiguredInboxRefresh(
 				"mode":  "full",
 				"query": query,
 			},
-			CursorKey:   "inbox_refresh",
-			PageSize:    sourceConfig.InboxRefresh.PageSize,
-			MaxPages:    sourceConfig.InboxRefresh.MaxPages,
-			Concurrency: sourceConfig.InboxRefresh.Concurrency,
-			Resume:      false,
+			// Inbox refresh is high priority and runs at full speed: it never pauses
+			// under analysis backpressure, and its analysis preempts backfill's.
+			PriorityClass: contracts.PriorityFreshIngest,
+			CursorKey:     "inbox_refresh",
+			PageSize:      sourceConfig.InboxRefresh.PageSize,
+			MaxPages:      sourceConfig.InboxRefresh.MaxPages,
+			Concurrency:   sourceConfig.InboxRefresh.Concurrency,
+			Resume:        false,
 		})
 		if err != nil {
 			if ctx.Err() != nil {

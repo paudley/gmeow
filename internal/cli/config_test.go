@@ -10,8 +10,24 @@ import (
 	"strings"
 	"testing"
 
+	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/config"
 )
+
+// testWorkerRegistry builds a worker registry with a real backend manager whose
+// reaper goroutine is torn down when the test ends. External analyzers now require
+// a manager, so registry-construction tests route through this helper.
+func testWorkerRegistry(
+	t *testing.T,
+	analysisConfig config.AnalysisConfig,
+) (*analysis.Registry, error) {
+	t.Helper()
+
+	manager := analysis.NewBackendManager(analysis.BackendManagerConfig{})
+	t.Cleanup(manager.Close)
+
+	return workerRegistryFromConfig(analysisConfig, manager)
+}
 
 func TestAdminConfigValidate(t *testing.T) {
 	path := writeEncryptedCLIConfig(t)
@@ -84,7 +100,7 @@ func TestAdminSecretUnsetRefusesReferencedSecret(t *testing.T) {
 }
 
 func TestWorkerRegistrySupportsConfiguredExternalAnalyzer(t *testing.T) {
-	registry, err := workerRegistryFromConfig(config.AnalysisConfig{
+	registry, err := testWorkerRegistry(t, config.AnalysisConfig{
 		Analyzers: []config.AnalyzerConfig{{
 			Name:       "ner.spacy",
 			Version:    "python-email-v1",
@@ -107,7 +123,7 @@ func TestWorkerRegistrySupportsConfiguredExternalAnalyzer(t *testing.T) {
 }
 
 func TestWorkerRegistryRejectsPythonAnalyzerWithoutExplicitAdapter(t *testing.T) {
-	_, err := workerRegistryFromConfig(config.AnalysisConfig{
+	_, err := testWorkerRegistry(t, config.AnalysisConfig{
 		Analyzers: []config.AnalyzerConfig{{
 			Name:       "ner.spacy",
 			Version:    "python-email-v1",
@@ -123,7 +139,7 @@ func TestWorkerRegistryRejectsPythonAnalyzerWithoutExplicitAdapter(t *testing.T)
 }
 
 func TestWorkerRegistryCoversPhaseFourAnalyzerSet(t *testing.T) {
-	registry, err := workerRegistryFromConfig(config.AnalysisConfig{
+	registry, err := testWorkerRegistry(t, config.AnalysisConfig{
 		Embeddings: config.EmbeddingConfig{
 			Endpoint: "http://127.0.0.1:8090/v1/embeddings",
 			Model:    "test-embed",
@@ -177,7 +193,7 @@ func TestWorkerRegistryCoversPhaseFourAnalyzerSet(t *testing.T) {
 }
 
 func TestWorkerRegistryRequiresEmbeddingEndpointConfig(t *testing.T) {
-	_, err := workerRegistryFromConfig(config.AnalysisConfig{
+	_, err := testWorkerRegistry(t, config.AnalysisConfig{
 		Analyzers: []config.AnalyzerConfig{{
 			Name:       "embedding.endpoint",
 			Version:    "phase04-email-v2",
@@ -193,7 +209,7 @@ func TestWorkerRegistryRequiresEmbeddingEndpointConfig(t *testing.T) {
 }
 
 func TestWorkerRegistryRequiresSummaryEndpointConfig(t *testing.T) {
-	_, err := workerRegistryFromConfig(config.AnalysisConfig{
+	_, err := testWorkerRegistry(t, config.AnalysisConfig{
 		Analyzers: []config.AnalyzerConfig{{
 			Name:       "summary.model",
 			Version:    "phase04-email-v2",
