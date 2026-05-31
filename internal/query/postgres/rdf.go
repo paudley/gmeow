@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/mail"
@@ -45,9 +46,23 @@ type rdfStatement struct {
 }
 
 type rdfAnnotation struct {
+	statement rdfStatement
 	predicate rdfTerm
 	object    rdfTerm
 	hash      string
+}
+
+type sourceStatementKey struct {
+	sourceDigest  contracts.ObjectDigest
+	statementHash string
+}
+
+type transactionBeginner interface {
+	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
+}
+
+type contactSearchCounter interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 type contactProjectionStatement struct {
@@ -94,7 +109,7 @@ func insertRDFRows(
 
 	reader, ok := source.(embeddingObjectReader)
 	if !ok {
-		return true, nil
+		return false, nil
 	}
 
 	opened, err := reader.Open(ctx, manifest.ObjectDigest)
@@ -108,7 +123,11 @@ func insertRDFRows(
 		return true, fmt.Errorf("read RDF bundle %s: %w", manifest.ObjectDigest, err)
 	}
 
-	statements, annotations := parseRDFBundle(string(content))
+	statements, annotations, err := parseRDFBundle(string(content))
+	if err != nil {
+		return true, fmt.Errorf("parse RDF bundle %s: %w", manifest.ObjectDigest, err)
+	}
+
 	for index, statement := range statements {
 		err := insertRDFStatement(
 			ctx,
@@ -134,7 +153,7 @@ func insertRDFRows(
 		}
 	}
 
-	return true, refreshContactProjectionTx(ctx, transaction)
+	return true, nil
 }
 
 func objectHadRDFRowsTx(
@@ -188,8 +207,7 @@ func insertRDFStatement(
 		   statement_hash, source_digest, subject_term_id, predicate_term_id,
 		   object_term_id, statement_order, projected_at
 		 ) VALUES($1,$2,$3,$4,$5,$6,now())
-		 ON CONFLICT(statement_hash) DO UPDATE SET
-		   source_digest = excluded.source_digest,
+		 ON CONFLICT(source_digest, statement_hash) DO UPDATE SET
 		   subject_term_id = excluded.subject_term_id,
 		   predicate_term_id = excluded.predicate_term_id,
 		   object_term_id = excluded.object_term_id,
@@ -270,7 +288,7 @@ func upsertRDFTerm(
 	return termID, nil
 }
 
-func parseRDFBundle(content string) ([]rdfStatement, []rdfAnnotation) {
+func parseRDFBundle(content string) ([]rdfStatement, []rdfAnnotation, error) {
 	parser := rdfBundleParser{
 		prefixes: map[string]string{
 			"rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
@@ -283,7 +301,12 @@ func parseRDFBundle(content string) ([]rdfStatement, []rdfAnnotation) {
 		parser.consume(scanner.Text())
 	}
 
-	return parser.statements, parser.annotations
+	err := scanner.Err()
+	if err != nil {
+		return nil, nil, fmt.Errorf("scan RDF bundle: %w", err)
+	}
+
+	return parser.statements, parser.annotations, nil
 }
 
 func (parser *rdfBundleParser) consume(raw string) {
@@ -334,14 +357,16 @@ func (parser *rdfBundleParser) consumeRDFStar(line string) bool {
 
 	annotation, found := parseRDFStarAnnotation(line, parser.prefixes)
 	if found {
+		parser.statements = append(parser.statements, annotation.statement)
 		parser.annotations = append(parser.annotations, annotation)
 
 		return true
 	}
 
-	hash, found := parseRDFStarSubjectHash(line, parser.prefixes)
+	statement, found := parseRDFStarSubject(line, parser.prefixes)
 	if found {
-		parser.currentAnnotation = hash
+		parser.statements = append(parser.statements, statement)
+		parser.currentAnnotation = statement.hash
 	}
 
 	return true
@@ -518,34 +543,11 @@ func parseRDFStarAnnotation(
 	line string,
 	prefixes map[string]string,
 ) (rdfAnnotation, bool) {
-	inner, rest, cutFound := strings.Cut(strings.TrimPrefix(line, "<<"), ">>")
+	statement, rest, cutFound := parseRDFStarStatement(line, prefixes)
 	if !cutFound {
 		return rdfAnnotation{}, false
 	}
 
-	subjectToken, restInner := splitFirstToken(inner)
-	predicateToken, objectText := splitFirstToken(restInner)
-
-	subject, parsed := parseRDFTerm(subjectToken, prefixes)
-	if !parsed {
-		return rdfAnnotation{}, false
-	}
-
-	predicate, parsed := parsePredicateTerm(predicateToken, prefixes)
-	if !parsed {
-		return rdfAnnotation{}, false
-	}
-
-	object, parsed := parseRDFTerm(objectText, prefixes)
-	if !parsed {
-		return rdfAnnotation{}, false
-	}
-
-	statement := rdfStatement{
-		subject:   subject,
-		predicate: predicate,
-		object:    object,
-	}
 	annotationPredicateToken, annotationObjectText := splitFirstToken(rest)
 
 	annotationPredicate, parsed := parsePredicateTerm(annotationPredicateToken, prefixes)
@@ -559,16 +561,29 @@ func parseRDFStarAnnotation(
 	}
 
 	return rdfAnnotation{
+		statement: statement,
 		hash:      rdfStatementHash(statement),
 		predicate: annotationPredicate,
 		object:    annotationObject,
 	}, true
 }
 
-func parseRDFStarSubjectHash(line string, prefixes map[string]string) (string, bool) {
-	inner, rest, cutFound := strings.Cut(strings.TrimPrefix(line, "<<"), ">>")
+func parseRDFStarSubject(line string, prefixes map[string]string) (rdfStatement, bool) {
+	statement, rest, cutFound := parseRDFStarStatement(line, prefixes)
 	if !cutFound || strings.TrimSpace(strings.TrimSuffix(rest, ";")) != "" {
-		return "", false
+		return rdfStatement{}, false
+	}
+
+	return statement, true
+}
+
+func parseRDFStarStatement(
+	line string,
+	prefixes map[string]string,
+) (rdfStatement, string, bool) {
+	inner, rest, cutFound := strings.Cut(strings.TrimPrefix(line, "<<"), ">>")
+	if !cutFound {
+		return rdfStatement{}, "", false
 	}
 
 	subjectToken, restInner := splitFirstToken(inner)
@@ -576,24 +591,27 @@ func parseRDFStarSubjectHash(line string, prefixes map[string]string) (string, b
 
 	subject, parsed := parseRDFTerm(subjectToken, prefixes)
 	if !parsed {
-		return "", false
+		return rdfStatement{}, "", false
 	}
 
 	predicate, parsed := parsePredicateTerm(predicateToken, prefixes)
 	if !parsed {
-		return "", false
+		return rdfStatement{}, "", false
 	}
 
 	object, parsed := parseRDFTerm(objectText, prefixes)
 	if !parsed {
-		return "", false
+		return rdfStatement{}, "", false
 	}
 
-	return rdfStatementHash(rdfStatement{
+	statement := rdfStatement{
 		subject:   subject,
 		predicate: predicate,
 		object:    object,
-	}), true
+	}
+	statement.hash = rdfStatementHash(statement)
+
+	return statement, rest, true
 }
 
 func parseRDFAnnotationLine(
@@ -661,8 +679,7 @@ func parseRDFTerm(token string, prefixes map[string]string) (rdfTerm, bool) {
 }
 
 func parseLiteralTerm(token string) rdfTerm {
-	value := strings.TrimPrefix(token, "\"")
-	value, suffix, _ := strings.Cut(value, "\"")
+	value, suffix := splitLiteralValue(token)
 
 	term := rdfTerm{kind: "literal", value: value}
 	if after, ok := strings.CutPrefix(suffix, "@"); ok {
@@ -674,6 +691,31 @@ func parseLiteralTerm(token string) rdfTerm {
 	}
 
 	return term
+}
+
+func splitLiteralValue(token string) (string, string) {
+	value := strings.TrimPrefix(token, "\"")
+	escaped := false
+
+	for index, char := range value {
+		if escaped {
+			escaped = false
+
+			continue
+		}
+
+		if char == '\\' {
+			escaped = true
+
+			continue
+		}
+
+		if char == '"' {
+			return value[:index], value[index+1:]
+		}
+	}
+
+	return value, ""
 }
 
 func cleanRDFToken(token string) string {
@@ -725,7 +767,7 @@ func splitQuotedToken(line string) (string, string) {
 		}
 
 		end := index + splitQuoteOffset
-		for end < len(line) && !unicode.IsSpace(rune(line[end])) {
+		for end < len(line) && !isASCIIWhitespace(line[end]) {
 			end++
 		}
 
@@ -733,6 +775,15 @@ func splitQuotedToken(line string) (string, string) {
 	}
 
 	return line, ""
+}
+
+func isASCIIWhitespace(char byte) bool {
+	switch char {
+	case ' ', '\t', '\n', '\r', '\v', '\f':
+		return true
+	default:
+		return false
+	}
 }
 
 func splitRDFObjects(line string) []string {
@@ -816,6 +867,34 @@ func refreshContactProjectionTx(ctx context.Context, transaction pgx.Tx) error {
 	return refreshContactRollupsTx(ctx, transaction)
 }
 
+func refreshContactProjection(ctx context.Context, beginner transactionBeginner) error {
+	transaction, err := beginner.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin contact projection refresh: %w", err)
+	}
+
+	defer rollbackProjectionTx(ctx, transaction)
+
+	err = refreshContactProjectionTx(ctx, transaction)
+	if err != nil {
+		return err
+	}
+
+	err = transaction.Commit(ctx)
+	if err != nil {
+		return fmt.Errorf("commit contact projection refresh: %w", err)
+	}
+
+	return nil
+}
+
+func rollbackProjectionTx(ctx context.Context, transaction pgx.Tx) {
+	err := transaction.Rollback(ctx)
+	if err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		return
+	}
+}
+
 func contactProjectionStatements(
 	ctx context.Context,
 	transaction pgx.Tx,
@@ -866,10 +945,10 @@ func contactProjectionStatements(
 func contactProjectionAnnotations(
 	ctx context.Context,
 	transaction pgx.Tx,
-) (map[string]map[string]string, error) {
+) (map[sourceStatementKey]map[string]string, error) {
 	rows, err := transaction.Query(
 		ctx,
-		`SELECT a.statement_hash, pred.term_value, obj.term_value
+		`SELECT a.source_digest, a.statement_hash, pred.term_value, obj.term_value
 		   FROM query_rdf_statement_annotations a
 		   JOIN query_rdf_terms pred ON pred.term_id = a.annotation_predicate_term_id
 		   JOIN query_rdf_terms obj ON obj.term_id = a.annotation_object_term_id`,
@@ -879,21 +958,27 @@ func contactProjectionAnnotations(
 	}
 	defer rows.Close()
 
-	annotations := map[string]map[string]string{}
+	annotations := map[sourceStatementKey]map[string]string{}
 
 	for rows.Next() {
+		var sourceDigest contracts.ObjectDigest
+
 		var hash, predicate, object string
 
-		err = rows.Scan(&hash, &predicate, &object)
+		err = rows.Scan(&sourceDigest, &hash, &predicate, &object)
 		if err != nil {
 			return nil, fmt.Errorf("scan RDF annotation for contact projection: %w", err)
 		}
 
-		if annotations[hash] == nil {
-			annotations[hash] = map[string]string{}
+		key := sourceStatementKey{
+			sourceDigest:  sourceDigest,
+			statementHash: hash,
+		}
+		if annotations[key] == nil {
+			annotations[key] = map[string]string{}
 		}
 
-		annotations[hash][predicate] = object
+		annotations[key][predicate] = object
 	}
 
 	err = rows.Err()
@@ -928,7 +1013,7 @@ func contactTypeObject(value string) bool {
 
 func contactFactsFromStatements(
 	statements []contactProjectionStatement,
-	annotations map[string]map[string]string,
+	annotations map[sourceStatementKey]map[string]string,
 	contacts map[string]bool,
 ) []contactProjectionFact {
 	facts := []contactProjectionFact{}
@@ -957,7 +1042,12 @@ func contactFactsFromStatements(
 			predicate:     statement.predicate,
 			historical:    historical,
 		}
-		for predicate, object := range annotations[statement.statementHash] {
+
+		key := sourceStatementKey{
+			sourceDigest:  statement.sourceDigest,
+			statementHash: statement.statementHash,
+		}
+		for predicate, object := range annotations[key] {
 			switch {
 			case strings.HasSuffix(predicate, "hasBeginning") ||
 				strings.HasSuffix(predicate, "validFrom"):
@@ -1054,9 +1144,13 @@ func insertContactFact(
 		 ON CONFLICT(contact_id, fact_kind, value_hash, statement_hash) DO UPDATE SET
 		   value = excluded.value,
 		   predicate = excluded.predicate,
-		   source_digest = excluded.source_digest,
-		   valid_from = excluded.valid_from,
-		   valid_until = excluded.valid_until,
+		   source_digest = CASE
+		     WHEN excluded.valid_from <> '' OR excluded.valid_until <> ''
+		     THEN excluded.source_digest
+		     ELSE query_contact_facts.source_digest
+		   END,
+		   valid_from = COALESCE(NULLIF(excluded.valid_from, ''), query_contact_facts.valid_from),
+		   valid_until = COALESCE(NULLIF(excluded.valid_until, ''), query_contact_facts.valid_until),
 		   historical = excluded.historical,
 		   metadata_json = excluded.metadata_json`,
 		fact.contactID,
@@ -1075,32 +1169,54 @@ func insertContactFact(
 		return fmt.Errorf("insert contact fact projection: %w", err)
 	}
 
-	if fact.factKind == contactFactEmail {
-		token := normalizeContactEmail(fact.value)
-		if token != "" {
-			_, err = transaction.Exec(
-				ctx,
-				`INSERT INTO query_contact_identity_bindings(
-				   token_hash, token, contact_id, statement_hash, valid_from,
-				   valid_until, source_digest
-				 ) VALUES($1,$2,$3,$4,$5,$6,$7)
-				 ON CONFLICT(token_hash, contact_id, statement_hash) DO UPDATE SET
-				   token = excluded.token,
-				   valid_from = excluded.valid_from,
-				   valid_until = excluded.valid_until,
-				   source_digest = excluded.source_digest`,
-				hashString(token),
-				token,
-				fact.contactID,
-				fact.statementHash,
-				fact.validFrom,
-				fact.validUntil,
-				fact.sourceDigest,
-			)
-			if err != nil {
-				return fmt.Errorf("insert contact identity binding projection: %w", err)
-			}
-		}
+	if fact.factKind != contactFactEmail {
+		return nil
+	}
+
+	return insertContactIdentityBinding(ctx, transaction, fact)
+}
+
+func insertContactIdentityBinding(
+	ctx context.Context,
+	transaction pgx.Tx,
+	fact contactProjectionFact,
+) error {
+	token := normalizeContactEmail(fact.value)
+	if token == "" {
+		return nil
+	}
+
+	_, err := transaction.Exec(
+		ctx,
+		`INSERT INTO query_contact_identity_bindings(
+		   token_hash, token, contact_id, statement_hash, valid_from,
+		   valid_until, source_digest
+		 ) VALUES($1,$2,$3,$4,$5,$6,$7)
+		 ON CONFLICT(token_hash, contact_id, statement_hash) DO UPDATE SET
+		   token = excluded.token,
+		   valid_from = COALESCE(
+		     NULLIF(excluded.valid_from, ''),
+		     query_contact_identity_bindings.valid_from
+		   ),
+		   valid_until = COALESCE(
+		     NULLIF(excluded.valid_until, ''),
+		     query_contact_identity_bindings.valid_until
+		   ),
+		   source_digest = CASE
+		     WHEN excluded.valid_from <> '' OR excluded.valid_until <> ''
+		     THEN excluded.source_digest
+		     ELSE query_contact_identity_bindings.source_digest
+		   END`,
+		hashString(token),
+		token,
+		fact.contactID,
+		fact.statementHash,
+		fact.validFrom,
+		fact.validUntil,
+		fact.sourceDigest,
+	)
+	if err != nil {
+		return fmt.Errorf("insert contact identity binding projection: %w", err)
 	}
 
 	return nil
@@ -1165,6 +1281,14 @@ func (index *Index) ContactAggregate(
 		&aggregate.FactCount,
 	)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return contracts.ContactAggregate{
+				ContactID:     contactID,
+				Facts:         []contracts.ContactFact{},
+				SchemaVersion: contracts.SchemaVersionPhase00,
+			}, nil
+		}
+
 		return contracts.ContactAggregate{}, fmt.Errorf("read contact aggregate: %w", err)
 	}
 
@@ -1232,17 +1356,22 @@ func (index *Index) ContactSearch(
 	limit := normalizedLimit(request.Limit)
 
 	offset := max(request.Offset, 0)
+	whereSQL := strings.Join(where, " AND ")
+
+	total, err := countContactSearch(ctx, index.pool, whereSQL, args)
+	if err != nil {
+		return contracts.ContactSearchResponse{}, err
+	}
 
 	args = append(args, limit, offset)
 
 	rows, err := index.pool.Query(ctx, fmt.Sprintf(
-		`SELECT contact_id, display_name, primary_email, fact_count,
-		        count(*) OVER() AS total
+		`SELECT contact_id, display_name, primary_email, fact_count
 		   FROM query_contact_rollups
 		  WHERE %s
 		  ORDER BY display_name, contact_id
 		  LIMIT $%d OFFSET $%d`,
-		strings.Join(where, " AND "),
+		whereSQL,
 		len(args)-1,
 		len(args),
 	), args...)
@@ -1252,7 +1381,6 @@ func (index *Index) ContactSearch(
 	defer rows.Close()
 
 	results := []contracts.ContactSearchResult{}
-	total := 0
 
 	for rows.Next() {
 		var result contracts.ContactSearchResult
@@ -1262,7 +1390,6 @@ func (index *Index) ContactSearch(
 			&result.DisplayName,
 			&result.PrimaryEmail,
 			&result.FactCount,
-			&total,
 		)
 		if err != nil {
 			return contracts.ContactSearchResponse{}, fmt.Errorf("scan contact search: %w", err)
@@ -1289,6 +1416,26 @@ func (index *Index) ContactSearch(
 	}
 
 	return response, nil
+}
+
+func countContactSearch(
+	ctx context.Context,
+	counter contactSearchCounter,
+	whereSQL string,
+	args []any,
+) (int, error) {
+	total := 0
+
+	err := counter.QueryRow(
+		ctx,
+		`SELECT count(*)::integer FROM query_contact_rollups WHERE `+whereSQL,
+		args...,
+	).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("count contacts: %w", err)
+	}
+
+	return total, nil
 }
 
 func (index *Index) ResolveContactIdentity(

@@ -214,6 +214,15 @@ func (index *Index) ProjectObject(
 	ctx context.Context,
 	object filestore.ProjectionObject,
 ) error {
+	return projectIndexObject(ctx, index, object, true)
+}
+
+func projectIndexObject(
+	ctx context.Context,
+	index *Index,
+	object filestore.ProjectionObject,
+	refreshContactProjection bool,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -232,7 +241,14 @@ func (index *Index) ProjectObject(
 		return err
 	}
 
-	if err := projectObjectTx(ctx, tx, object, index.source); err != nil {
+	err = projectObjectTx(
+		ctx,
+		tx,
+		object,
+		index.source,
+		refreshContactProjection,
+	)
+	if err != nil {
 		return err
 	}
 
@@ -342,7 +358,7 @@ func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 			report.Failed++
 		}
 
-		err := index.ProjectObject(ctx, object)
+		err = projectIndexObject(ctx, index, object, false)
 		if err != nil {
 			report.Failed++
 
@@ -355,6 +371,13 @@ func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 
 		return nil
 	})
+	if err != nil {
+		report.Elapsed = time.Since(started)
+
+		return report, err
+	}
+
+	err = refreshContactProjection(ctx, index.pool)
 	if err != nil {
 		report.Elapsed = time.Since(started)
 
@@ -1185,6 +1208,7 @@ func projectObjectTx(
 	tx pgx.Tx,
 	object filestore.ProjectionObject,
 	source query.ProjectionSource,
+	refreshContactProjection bool,
 ) error {
 	rdfProjectionChanged, err := objectHadRDFRowsTx(ctx, tx, object.Manifest.ObjectDigest)
 	if err != nil {
@@ -1319,7 +1343,7 @@ func projectObjectTx(
 		return err
 	}
 
-	if rdfProjectionChanged && !rdfRowsInserted {
+	if refreshContactProjection && (rdfProjectionChanged || rdfRowsInserted) {
 		err := refreshContactProjectionTx(ctx, tx)
 		if err != nil {
 			return err
@@ -1349,6 +1373,7 @@ func truncateProjectionTablesSQL() string {
 		"query_contact_facts,",
 		"query_rdf_statement_annotations,",
 		"query_rdf_statements,",
+		"query_rdf_terms,",
 		"query_objects",
 		"CASCADE",
 	}, " ")

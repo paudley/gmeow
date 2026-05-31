@@ -438,7 +438,7 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 		t.Fatalf("unexpected contact identity resolution: %#v", resolved)
 	}
 	search, err := index.ContactSearch(ctx, contracts.ContactSearchRequest{
-		Query: "linked",
+		Query: "blackcat",
 		Limit: 5,
 	})
 	if err != nil {
@@ -446,7 +446,18 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 	}
 	if search.Total != 1 ||
 		search.Results[0].ContactID != "https://patrickaudley.com/#paudley" {
-		t.Fatalf("unknown RDF predicate was not searchable through rollup: %#v", search)
+		t.Fatalf("contact email was not searchable through rollup: %#v", search)
+	}
+	emptyPage, err := index.ContactSearch(ctx, contracts.ContactSearchRequest{
+		Query:  "blackcat",
+		Limit:  5,
+		Offset: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyPage.Total != 1 || len(emptyPage.Results) != 0 {
+		t.Fatalf("empty page lost contact search total: %#v", emptyPage)
 	}
 
 	structure, err := index.Structure(ctx, profileDigest)

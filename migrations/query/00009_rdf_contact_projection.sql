@@ -9,14 +9,15 @@ CREATE TABLE IF NOT EXISTS query_rdf_terms (
 );
 
 CREATE TABLE IF NOT EXISTS query_rdf_statements (
-  statement_hash TEXT PRIMARY KEY,
   source_digest TEXT NOT NULL REFERENCES query_objects(object_digest) ON DELETE CASCADE,
+  statement_hash TEXT NOT NULL,
   subject_term_id BIGINT NOT NULL REFERENCES query_rdf_terms(term_id),
   predicate_term_id BIGINT NOT NULL REFERENCES query_rdf_terms(term_id),
   object_term_id BIGINT NOT NULL REFERENCES query_rdf_terms(term_id),
   graph_name TEXT NOT NULL DEFAULT '',
   statement_order INTEGER NOT NULL DEFAULT 0,
-  projected_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  projected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (source_digest, statement_hash)
 );
 
 CREATE TABLE IF NOT EXISTS query_rdf_statement_annotations (
@@ -30,7 +31,10 @@ CREATE TABLE IF NOT EXISTS query_rdf_statement_annotations (
     statement_hash,
     annotation_predicate_term_id,
     annotation_object_term_id
-  )
+  ),
+  FOREIGN KEY (source_digest, statement_hash)
+    REFERENCES query_rdf_statements(source_digest, statement_hash)
+    ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS query_contact_facts (

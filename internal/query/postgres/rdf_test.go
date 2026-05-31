@@ -19,7 +19,10 @@ func TestParseRDFBundlePreservesUnknownAndRDFStarAnnotations(t *testing.T) {
 << <https://patrickaudley.com/#paudley> bcid:historicalEmail <mailto:paudley@gt.ca> >>
     time:hasEnd "2004-06-30"^^<http://www.w3.org/2001/XMLSchema#date> .
 `
-	statements, annotations := parseRDFBundle(content)
+	statements, annotations, err := parseRDFBundle(content)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(statements) < 5 {
 		t.Fatalf("expected parsed statements, got %#v", statements)
 	}
@@ -48,6 +51,16 @@ func TestParseRDFBundlePreservesUnknownAndRDFStarAnnotations(t *testing.T) {
 			annotations[0].hash,
 			emailHash,
 		)
+	}
+}
+
+func TestParseLiteralTermPreservesEscapedQuotes(t *testing.T) {
+	term := parseLiteralTerm(`"Patrick \"Pat\" Audley"@en`)
+	if term.value != `Patrick \"Pat\" Audley` {
+		t.Fatalf("escaped literal was not preserved: %#v", term)
+	}
+	if term.language != "en" {
+		t.Fatalf("language tag was not preserved: %#v", term)
 	}
 }
 

@@ -15,12 +15,14 @@ const (
 )
 
 type RDFStatement struct {
-	SourceDigest  ObjectDigest `json:"source_digest,omitempty"`
-	StatementHash string       `json:"statement_hash"`
-	Subject       string       `json:"subject"`
-	Predicate     string       `json:"predicate"`
-	Object        string       `json:"object"`
-	ObjectKind    string       `json:"object_kind"`
+	ObjectLanguage string       `json:"object_language,omitempty"`
+	ObjectDatatype string       `json:"object_datatype,omitempty"`
+	SourceDigest   ObjectDigest `json:"source_digest,omitempty"`
+	StatementHash  string       `json:"statement_hash"`
+	Subject        string       `json:"subject"`
+	Predicate      string       `json:"predicate"`
+	Object         string       `json:"object"`
+	ObjectKind     string       `json:"object_kind"`
 }
 
 type ContactFact struct {
