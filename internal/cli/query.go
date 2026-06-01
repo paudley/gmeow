@@ -5,8 +5,6 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -56,7 +53,6 @@ func newQueryContactCommand(out io.Writer, configPath *string) *cobra.Command {
 		Short: "Manage contact intelligence projections",
 	}
 	command.AddCommand(newQueryContactAnalyzeCommand(out, configPath))
-	command.AddCommand(newQueryContactSimilarCommand(out, configPath))
 
 	return command
 }
@@ -67,6 +63,7 @@ func newQueryContactAnalyzeCommand(out io.Writer, configPath *string) *cobra.Com
 		factKinds  []string
 		limit      int
 		offset     int
+		forced     bool
 	)
 
 	command := &cobra.Command{
@@ -92,7 +89,7 @@ func newQueryContactAnalyzeCommand(out io.Writer, configPath *string) *cobra.Com
 				return err
 			}
 
-			response, err := analyzeContacts(
+			response, err := analysis.AnalyzeContacts(
 				command.Context(),
 				index,
 				analyzer,
@@ -101,6 +98,7 @@ func newQueryContactAnalyzeCommand(out io.Writer, configPath *string) *cobra.Com
 					FactKinds:  factKinds,
 					Limit:      limit,
 					Offset:     offset,
+					Forced:     forced,
 				},
 			)
 			return writeAppJSON(out, response, err)
@@ -111,207 +109,10 @@ func newQueryContactAnalyzeCommand(out io.Writer, configPath *string) *cobra.Com
 		StringSliceVar(&factKinds, "fact-kind", nil, "contact fact kind filter")
 	command.Flags().IntVar(&limit, "limit", 50, "maximum contacts to analyze")
 	command.Flags().IntVar(&offset, "offset", 0, "contact offset")
+	command.Flags().
+		BoolVar(&forced, "force", false, "recompute current contact embeddings")
 
 	return command
-}
-
-func newQueryContactSimilarCommand(out io.Writer, configPath *string) *cobra.Command {
-	var (
-		model string
-		limit int
-	)
-
-	command := &cobra.Command{
-		Use:   "similar <contact-id>",
-		Short: "Find contacts with nearby contact embeddings",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(command *cobra.Command, args []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			result, err := index.SimilarContacts(
-				command.Context(),
-				contracts.SimilarContactsRequest{
-					ContactID: args[0],
-					Model:     model,
-					Limit:     limit,
-				},
-			)
-			return writeAppJSON(out, result, err)
-		},
-	}
-	command.Flags().StringVar(&model, "model", "", "embedding model filter")
-	command.Flags().IntVar(&limit, "limit", 20, "maximum similar contacts")
-
-	return command
-}
-
-func analyzeContacts(
-	ctx context.Context,
-	index *querypg.Index,
-	analyzer *analysis.EmbeddingAnalyzer,
-	request contracts.ContactAnalysisRequest,
-) (contracts.ContactAnalysisResponse, error) {
-	inputs, err := index.ContactAnalysisInputs(ctx, contracts.ContactAnalysisInputRequest{
-		ContactIDs: request.ContactIDs,
-		FactKinds:  request.FactKinds,
-		Limit:      request.Limit,
-		Offset:     request.Offset,
-	})
-	if err != nil {
-		return contracts.ContactAnalysisResponse{}, err
-	}
-
-	results := make([]contracts.ContactAnalysisResult, 0, len(inputs.Results))
-	for _, input := range inputs.Results {
-		result, err := analyzeContactInput(ctx, index, analyzer, input)
-		if err != nil {
-			return contracts.ContactAnalysisResponse{}, err
-		}
-		results = append(results, result)
-	}
-
-	response := contracts.ContactAnalysisResponse{
-		SchemaVersion: contracts.SchemaVersionPhase00,
-		Results:       results,
-		Total:         inputs.Total,
-		Limit:         inputs.Limit,
-		Offset:        inputs.Offset,
-	}
-	for _, result := range results {
-		if result.Status == "complete" {
-			response.Analyzed++
-		} else {
-			response.Skipped++
-		}
-	}
-
-	return response, nil
-}
-
-func analyzeContactInput(
-	ctx context.Context,
-	index *querypg.Index,
-	analyzer *analysis.EmbeddingAnalyzer,
-	input contracts.ContactAnalysisInputResult,
-) (contracts.ContactAnalysisResult, error) {
-	inputText := strings.TrimSpace(input.InputText)
-	if inputText == "" {
-		inputHash := contactInputHash(inputText)
-		record := contactEmbeddingRecord(
-			input,
-			analyzer,
-			inputHash,
-			"skipped",
-			nil,
-			"",
-			false,
-		)
-		if err := index.StoreContactEmbedding(ctx, record); err != nil {
-			return contracts.ContactAnalysisResult{}, err
-		}
-
-		return contactAnalysisResult(record), nil
-	}
-
-	vector, text, truncated, err := analyzer.EmbedText(ctx, inputText)
-	if err != nil {
-		return contracts.ContactAnalysisResult{}, err
-	}
-	inputHash := contactInputHash(text)
-	record := contactEmbeddingRecord(
-		input,
-		analyzer,
-		inputHash,
-		"complete",
-		float64VectorToFloat32(vector),
-		text,
-		truncated,
-	)
-	if err := index.StoreContactEmbedding(ctx, record); err != nil {
-		return contracts.ContactAnalysisResult{}, err
-	}
-
-	return contactAnalysisResult(record), nil
-}
-
-func contactEmbeddingRecord(
-	input contracts.ContactAnalysisInputResult,
-	analyzer *analysis.EmbeddingAnalyzer,
-	inputHash string,
-	status string,
-	vector []float32,
-	text string,
-	truncated bool,
-) contracts.ContactEmbeddingUpsert {
-	return contracts.ContactEmbeddingUpsert{
-		GeneratedAt:     time.Now().UTC(),
-		ContactID:       input.ContactID,
-		AnalyzerName:    analysis.EmbeddingName,
-		AnalyzerVersion: analysis.Phase04Version,
-		Status:          status,
-		Model:           analyzer.Model(),
-		InputHash:       inputHash,
-		InputBytes:      len(input.InputText),
-		TextPreview:     previewContactInput(text),
-		Vector:          vector,
-		Metadata: map[string]any{
-			"truncated":         truncated,
-			"fact_count":        input.FactCount,
-			"message_count":     input.MessageCount,
-			"participant_count": input.ParticipantCount,
-		},
-	}
-}
-
-func contactAnalysisResult(
-	record contracts.ContactEmbeddingUpsert,
-) contracts.ContactAnalysisResult {
-	return contracts.ContactAnalysisResult{
-		ContactID:  record.ContactID,
-		Status:     record.Status,
-		InputHash:  record.InputHash,
-		Model:      record.Model,
-		Dimensions: len(record.Vector),
-	}
-}
-
-func contactInputHash(text string) string {
-	sum := sha256.Sum256([]byte(text))
-
-	return hex.EncodeToString(sum[:])
-}
-
-func float64VectorToFloat32(values []float64) []float32 {
-	converted := make([]float32, 0, len(values))
-	for _, value := range values {
-		converted = append(converted, float32(value))
-	}
-
-	return converted
-}
-
-func previewContactInput(text string) string {
-	text = strings.TrimSpace(text)
-	if len(text) <= 240 {
-		return text
-	}
-
-	limit := 0
-	for index := range text {
-		if index > 240 {
-			break
-		}
-		limit = index
-	}
-	if limit == 0 {
-		return ""
-	}
-
-	return text[:limit]
 }
 
 func newQueryTokenCommand(out io.Writer, configPath *string) *cobra.Command {

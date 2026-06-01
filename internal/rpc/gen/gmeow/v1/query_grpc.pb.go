@@ -31,6 +31,18 @@ const (
 	QueryService_AnalysisStatus_FullMethodName            = "/gmeow.v1.QueryService/AnalysisStatus"
 	QueryService_VectorSearch_FullMethodName              = "/gmeow.v1.QueryService/VectorSearch"
 	QueryService_RelatedObjects_FullMethodName            = "/gmeow.v1.QueryService/RelatedObjects"
+	QueryService_ContactSearch_FullMethodName             = "/gmeow.v1.QueryService/ContactSearch"
+	QueryService_ContactAggregate_FullMethodName          = "/gmeow.v1.QueryService/ContactAggregate"
+	QueryService_ResolveContactIdentity_FullMethodName    = "/gmeow.v1.QueryService/ResolveContactIdentity"
+	QueryService_ContactFacts_FullMethodName              = "/gmeow.v1.QueryService/ContactFacts"
+	QueryService_ContactIdentityDetails_FullMethodName    = "/gmeow.v1.QueryService/ContactIdentityDetails"
+	QueryService_ContactNeighborhood_FullMethodName       = "/gmeow.v1.QueryService/ContactNeighborhood"
+	QueryService_ContactAnalysisInputs_FullMethodName     = "/gmeow.v1.QueryService/ContactAnalysisInputs"
+	QueryService_ContactAnalysisStatus_FullMethodName     = "/gmeow.v1.QueryService/ContactAnalysisStatus"
+	QueryService_StoreContactEmbedding_FullMethodName     = "/gmeow.v1.QueryService/StoreContactEmbedding"
+	QueryService_ContactVectorSearch_FullMethodName       = "/gmeow.v1.QueryService/ContactVectorSearch"
+	QueryService_SimilarContacts_FullMethodName           = "/gmeow.v1.QueryService/SimilarContacts"
+	QueryService_ContactMessages_FullMethodName           = "/gmeow.v1.QueryService/ContactMessages"
 	QueryService_SourceCursors_FullMethodName             = "/gmeow.v1.QueryService/SourceCursors"
 	QueryService_JMAPMailboxes_FullMethodName             = "/gmeow.v1.QueryService/JMAPMailboxes"
 	QueryService_JMAPEmailStates_FullMethodName           = "/gmeow.v1.QueryService/JMAPEmailStates"
@@ -67,6 +79,18 @@ type QueryServiceClient interface {
 	AnalysisStatus(ctx context.Context, in *AnalysisStatusRequest, opts ...grpc.CallOption) (*AnalysisStatusResponse, error)
 	VectorSearch(ctx context.Context, in *VectorSearchRequest, opts ...grpc.CallOption) (*VectorSearchResponse, error)
 	RelatedObjects(ctx context.Context, in *RelatedObjectsRequest, opts ...grpc.CallOption) (*RelatedObjectsResponse, error)
+	ContactSearch(ctx context.Context, in *ContactSearchRequest, opts ...grpc.CallOption) (*ContactSearchResponse, error)
+	ContactAggregate(ctx context.Context, in *ContactAggregateRequest, opts ...grpc.CallOption) (*ContactAggregateResponse, error)
+	ResolveContactIdentity(ctx context.Context, in *ContactIdentityResolveRequest, opts ...grpc.CallOption) (*ContactIdentityResolveResponse, error)
+	ContactFacts(ctx context.Context, in *ContactFactRequest, opts ...grpc.CallOption) (*ContactFactResponse, error)
+	ContactIdentityDetails(ctx context.Context, in *ContactIdentityDetailRequest, opts ...grpc.CallOption) (*ContactIdentityDetailResponse, error)
+	ContactNeighborhood(ctx context.Context, in *ContactNeighborhoodRequest, opts ...grpc.CallOption) (*ContactNeighborhoodResponse, error)
+	ContactAnalysisInputs(ctx context.Context, in *ContactAnalysisInputRequest, opts ...grpc.CallOption) (*ContactAnalysisInputResponse, error)
+	ContactAnalysisStatus(ctx context.Context, in *ContactAnalysisStatusRequest, opts ...grpc.CallOption) (*ContactAnalysisStatusResponse, error)
+	StoreContactEmbedding(ctx context.Context, in *ContactEmbeddingUpsert, opts ...grpc.CallOption) (*Empty, error)
+	ContactVectorSearch(ctx context.Context, in *ContactVectorSearchRequest, opts ...grpc.CallOption) (*ContactVectorSearchResponse, error)
+	SimilarContacts(ctx context.Context, in *SimilarContactsRequest, opts ...grpc.CallOption) (*SimilarContactsResponse, error)
+	ContactMessages(ctx context.Context, in *ContactMessageRequest, opts ...grpc.CallOption) (*ContactMessageResponse, error)
 	SourceCursors(ctx context.Context, in *SourceCursorRequest, opts ...grpc.CallOption) (*SourceCursorResponse, error)
 	JMAPMailboxes(ctx context.Context, in *JMAPMailboxRequest, opts ...grpc.CallOption) (*JMAPMailboxResponse, error)
 	JMAPEmailStates(ctx context.Context, in *JMAPEmailStateRequest, opts ...grpc.CallOption) (*JMAPEmailStateResponse, error)
@@ -209,6 +233,126 @@ func (c *queryServiceClient) RelatedObjects(ctx context.Context, in *RelatedObje
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RelatedObjectsResponse)
 	err := c.cc.Invoke(ctx, QueryService_RelatedObjects_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ContactSearch(ctx context.Context, in *ContactSearchRequest, opts ...grpc.CallOption) (*ContactSearchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContactSearchResponse)
+	err := c.cc.Invoke(ctx, QueryService_ContactSearch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ContactAggregate(ctx context.Context, in *ContactAggregateRequest, opts ...grpc.CallOption) (*ContactAggregateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContactAggregateResponse)
+	err := c.cc.Invoke(ctx, QueryService_ContactAggregate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ResolveContactIdentity(ctx context.Context, in *ContactIdentityResolveRequest, opts ...grpc.CallOption) (*ContactIdentityResolveResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContactIdentityResolveResponse)
+	err := c.cc.Invoke(ctx, QueryService_ResolveContactIdentity_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ContactFacts(ctx context.Context, in *ContactFactRequest, opts ...grpc.CallOption) (*ContactFactResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContactFactResponse)
+	err := c.cc.Invoke(ctx, QueryService_ContactFacts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ContactIdentityDetails(ctx context.Context, in *ContactIdentityDetailRequest, opts ...grpc.CallOption) (*ContactIdentityDetailResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContactIdentityDetailResponse)
+	err := c.cc.Invoke(ctx, QueryService_ContactIdentityDetails_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ContactNeighborhood(ctx context.Context, in *ContactNeighborhoodRequest, opts ...grpc.CallOption) (*ContactNeighborhoodResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContactNeighborhoodResponse)
+	err := c.cc.Invoke(ctx, QueryService_ContactNeighborhood_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ContactAnalysisInputs(ctx context.Context, in *ContactAnalysisInputRequest, opts ...grpc.CallOption) (*ContactAnalysisInputResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContactAnalysisInputResponse)
+	err := c.cc.Invoke(ctx, QueryService_ContactAnalysisInputs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ContactAnalysisStatus(ctx context.Context, in *ContactAnalysisStatusRequest, opts ...grpc.CallOption) (*ContactAnalysisStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContactAnalysisStatusResponse)
+	err := c.cc.Invoke(ctx, QueryService_ContactAnalysisStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) StoreContactEmbedding(ctx context.Context, in *ContactEmbeddingUpsert, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, QueryService_StoreContactEmbedding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ContactVectorSearch(ctx context.Context, in *ContactVectorSearchRequest, opts ...grpc.CallOption) (*ContactVectorSearchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContactVectorSearchResponse)
+	err := c.cc.Invoke(ctx, QueryService_ContactVectorSearch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) SimilarContacts(ctx context.Context, in *SimilarContactsRequest, opts ...grpc.CallOption) (*SimilarContactsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SimilarContactsResponse)
+	err := c.cc.Invoke(ctx, QueryService_SimilarContacts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryServiceClient) ContactMessages(ctx context.Context, in *ContactMessageRequest, opts ...grpc.CallOption) (*ContactMessageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContactMessageResponse)
+	err := c.cc.Invoke(ctx, QueryService_ContactMessages_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -411,6 +555,18 @@ type QueryServiceServer interface {
 	AnalysisStatus(context.Context, *AnalysisStatusRequest) (*AnalysisStatusResponse, error)
 	VectorSearch(context.Context, *VectorSearchRequest) (*VectorSearchResponse, error)
 	RelatedObjects(context.Context, *RelatedObjectsRequest) (*RelatedObjectsResponse, error)
+	ContactSearch(context.Context, *ContactSearchRequest) (*ContactSearchResponse, error)
+	ContactAggregate(context.Context, *ContactAggregateRequest) (*ContactAggregateResponse, error)
+	ResolveContactIdentity(context.Context, *ContactIdentityResolveRequest) (*ContactIdentityResolveResponse, error)
+	ContactFacts(context.Context, *ContactFactRequest) (*ContactFactResponse, error)
+	ContactIdentityDetails(context.Context, *ContactIdentityDetailRequest) (*ContactIdentityDetailResponse, error)
+	ContactNeighborhood(context.Context, *ContactNeighborhoodRequest) (*ContactNeighborhoodResponse, error)
+	ContactAnalysisInputs(context.Context, *ContactAnalysisInputRequest) (*ContactAnalysisInputResponse, error)
+	ContactAnalysisStatus(context.Context, *ContactAnalysisStatusRequest) (*ContactAnalysisStatusResponse, error)
+	StoreContactEmbedding(context.Context, *ContactEmbeddingUpsert) (*Empty, error)
+	ContactVectorSearch(context.Context, *ContactVectorSearchRequest) (*ContactVectorSearchResponse, error)
+	SimilarContacts(context.Context, *SimilarContactsRequest) (*SimilarContactsResponse, error)
+	ContactMessages(context.Context, *ContactMessageRequest) (*ContactMessageResponse, error)
 	SourceCursors(context.Context, *SourceCursorRequest) (*SourceCursorResponse, error)
 	JMAPMailboxes(context.Context, *JMAPMailboxRequest) (*JMAPMailboxResponse, error)
 	JMAPEmailStates(context.Context, *JMAPEmailStateRequest) (*JMAPEmailStateResponse, error)
@@ -474,6 +630,42 @@ func (UnimplementedQueryServiceServer) VectorSearch(context.Context, *VectorSear
 }
 func (UnimplementedQueryServiceServer) RelatedObjects(context.Context, *RelatedObjectsRequest) (*RelatedObjectsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RelatedObjects not implemented")
+}
+func (UnimplementedQueryServiceServer) ContactSearch(context.Context, *ContactSearchRequest) (*ContactSearchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ContactSearch not implemented")
+}
+func (UnimplementedQueryServiceServer) ContactAggregate(context.Context, *ContactAggregateRequest) (*ContactAggregateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ContactAggregate not implemented")
+}
+func (UnimplementedQueryServiceServer) ResolveContactIdentity(context.Context, *ContactIdentityResolveRequest) (*ContactIdentityResolveResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveContactIdentity not implemented")
+}
+func (UnimplementedQueryServiceServer) ContactFacts(context.Context, *ContactFactRequest) (*ContactFactResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ContactFacts not implemented")
+}
+func (UnimplementedQueryServiceServer) ContactIdentityDetails(context.Context, *ContactIdentityDetailRequest) (*ContactIdentityDetailResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ContactIdentityDetails not implemented")
+}
+func (UnimplementedQueryServiceServer) ContactNeighborhood(context.Context, *ContactNeighborhoodRequest) (*ContactNeighborhoodResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ContactNeighborhood not implemented")
+}
+func (UnimplementedQueryServiceServer) ContactAnalysisInputs(context.Context, *ContactAnalysisInputRequest) (*ContactAnalysisInputResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ContactAnalysisInputs not implemented")
+}
+func (UnimplementedQueryServiceServer) ContactAnalysisStatus(context.Context, *ContactAnalysisStatusRequest) (*ContactAnalysisStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ContactAnalysisStatus not implemented")
+}
+func (UnimplementedQueryServiceServer) StoreContactEmbedding(context.Context, *ContactEmbeddingUpsert) (*Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method StoreContactEmbedding not implemented")
+}
+func (UnimplementedQueryServiceServer) ContactVectorSearch(context.Context, *ContactVectorSearchRequest) (*ContactVectorSearchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ContactVectorSearch not implemented")
+}
+func (UnimplementedQueryServiceServer) SimilarContacts(context.Context, *SimilarContactsRequest) (*SimilarContactsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SimilarContacts not implemented")
+}
+func (UnimplementedQueryServiceServer) ContactMessages(context.Context, *ContactMessageRequest) (*ContactMessageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ContactMessages not implemented")
 }
 func (UnimplementedQueryServiceServer) SourceCursors(context.Context, *SourceCursorRequest) (*SourceCursorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SourceCursors not implemented")
@@ -762,6 +954,222 @@ func _QueryService_RelatedObjects_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(QueryServiceServer).RelatedObjects(ctx, req.(*RelatedObjectsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ContactSearch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactSearchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ContactSearch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ContactSearch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ContactSearch(ctx, req.(*ContactSearchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ContactAggregate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactAggregateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ContactAggregate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ContactAggregate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ContactAggregate(ctx, req.(*ContactAggregateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ResolveContactIdentity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactIdentityResolveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ResolveContactIdentity(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ResolveContactIdentity_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ResolveContactIdentity(ctx, req.(*ContactIdentityResolveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ContactFacts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactFactRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ContactFacts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ContactFacts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ContactFacts(ctx, req.(*ContactFactRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ContactIdentityDetails_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactIdentityDetailRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ContactIdentityDetails(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ContactIdentityDetails_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ContactIdentityDetails(ctx, req.(*ContactIdentityDetailRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ContactNeighborhood_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactNeighborhoodRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ContactNeighborhood(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ContactNeighborhood_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ContactNeighborhood(ctx, req.(*ContactNeighborhoodRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ContactAnalysisInputs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactAnalysisInputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ContactAnalysisInputs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ContactAnalysisInputs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ContactAnalysisInputs(ctx, req.(*ContactAnalysisInputRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ContactAnalysisStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactAnalysisStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ContactAnalysisStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ContactAnalysisStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ContactAnalysisStatus(ctx, req.(*ContactAnalysisStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_StoreContactEmbedding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactEmbeddingUpsert)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).StoreContactEmbedding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_StoreContactEmbedding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).StoreContactEmbedding(ctx, req.(*ContactEmbeddingUpsert))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ContactVectorSearch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactVectorSearchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ContactVectorSearch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ContactVectorSearch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ContactVectorSearch(ctx, req.(*ContactVectorSearchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_SimilarContacts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SimilarContactsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).SimilarContacts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_SimilarContacts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).SimilarContacts(ctx, req.(*SimilarContactsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryService_ContactMessages_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContactMessageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryServiceServer).ContactMessages(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryService_ContactMessages_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryServiceServer).ContactMessages(ctx, req.(*ContactMessageRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1144,6 +1552,54 @@ var QueryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RelatedObjects",
 			Handler:    _QueryService_RelatedObjects_Handler,
+		},
+		{
+			MethodName: "ContactSearch",
+			Handler:    _QueryService_ContactSearch_Handler,
+		},
+		{
+			MethodName: "ContactAggregate",
+			Handler:    _QueryService_ContactAggregate_Handler,
+		},
+		{
+			MethodName: "ResolveContactIdentity",
+			Handler:    _QueryService_ResolveContactIdentity_Handler,
+		},
+		{
+			MethodName: "ContactFacts",
+			Handler:    _QueryService_ContactFacts_Handler,
+		},
+		{
+			MethodName: "ContactIdentityDetails",
+			Handler:    _QueryService_ContactIdentityDetails_Handler,
+		},
+		{
+			MethodName: "ContactNeighborhood",
+			Handler:    _QueryService_ContactNeighborhood_Handler,
+		},
+		{
+			MethodName: "ContactAnalysisInputs",
+			Handler:    _QueryService_ContactAnalysisInputs_Handler,
+		},
+		{
+			MethodName: "ContactAnalysisStatus",
+			Handler:    _QueryService_ContactAnalysisStatus_Handler,
+		},
+		{
+			MethodName: "StoreContactEmbedding",
+			Handler:    _QueryService_StoreContactEmbedding_Handler,
+		},
+		{
+			MethodName: "ContactVectorSearch",
+			Handler:    _QueryService_ContactVectorSearch_Handler,
+		},
+		{
+			MethodName: "SimilarContacts",
+			Handler:    _QueryService_SimilarContacts_Handler,
+		},
+		{
+			MethodName: "ContactMessages",
+			Handler:    _QueryService_ContactMessages_Handler,
 		},
 		{
 			MethodName: "SourceCursors",

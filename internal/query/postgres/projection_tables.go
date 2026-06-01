@@ -12,6 +12,8 @@ func truncateProjectionTablesSQL() string {
 		"query_summaries,",
 		"query_source_cursors,",
 		"query_mail_participants,",
+		"query_contact_embeddings,",
+		"query_contact_analysis,",
 		"query_contact_rollups,",
 		"query_contact_identity_bindings,",
 		"query_contact_facts,",

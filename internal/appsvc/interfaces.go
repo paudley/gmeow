@@ -71,6 +71,45 @@ type JMAPQueryReader interface {
 	) (contracts.JMAPEmailState, error)
 }
 
+type ContactQueryReader interface {
+	ContactAggregate(
+		ctx context.Context,
+		request contracts.ContactAggregateRequest,
+	) (contracts.ContactAggregate, error)
+	ContactSearch(
+		ctx context.Context,
+		request contracts.ContactSearchRequest,
+	) (contracts.ContactSearchResponse, error)
+	ResolveContactIdentity(
+		ctx context.Context,
+		request contracts.ContactIdentityResolveRequest,
+	) (contracts.ContactIdentityResolveResponse, error)
+	ContactFacts(
+		ctx context.Context,
+		request contracts.ContactFactRequest,
+	) (contracts.ContactFactResponse, error)
+	ContactIdentityDetails(
+		ctx context.Context,
+		request contracts.ContactIdentityDetailRequest,
+	) (contracts.ContactIdentityDetailResponse, error)
+	ContactNeighborhood(
+		ctx context.Context,
+		request contracts.ContactNeighborhoodRequest,
+	) (contracts.ContactNeighborhoodResponse, error)
+	ContactMessages(
+		ctx context.Context,
+		request contracts.ContactMessageRequest,
+	) (contracts.ContactMessageResponse, error)
+	ContactVectorSearch(
+		ctx context.Context,
+		request contracts.ContactVectorSearchRequest,
+	) (contracts.ContactVectorSearchResponse, error)
+	SimilarContacts(
+		ctx context.Context,
+		request contracts.SimilarContactsRequest,
+	) (contracts.SimilarContactsResponse, error)
+}
+
 type TokenValidator interface {
 	ValidateBearerToken(ctx context.Context, token string) (string, bool, error)
 }
