@@ -905,6 +905,19 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
+		ContactID:       contactID,
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "complete",
+		Model:           "other-model",
+		InputHash:       "aaa-other-seed",
+		TextPreview:     "Patrick Audley other model",
+		Vector:          []float32{0, 1, 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
 		ContactID:       "https://example.test/#apollo",
 		AnalyzerName:    "embedding.endpoint",
 		AnalyzerVersion: "phase04-email-v2",
@@ -941,6 +954,9 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 	if len(similar.Results) != 1 ||
 		similar.Results[0].ContactID != "https://example.test/#apollo" {
 		t.Fatalf("unexpected similar contacts: %#v", similar)
+	}
+	if similar.Results[0].Model != "fixture-model" {
+		t.Fatalf("similar contact ignored model filter: %#v", similar)
 	}
 }
 

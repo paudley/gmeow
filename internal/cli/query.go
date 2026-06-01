@@ -299,7 +299,18 @@ func previewContactInput(text string) string {
 		return text
 	}
 
-	return text[:240]
+	limit := 0
+	for index := range text {
+		if index > 240 {
+			break
+		}
+		limit = index
+	}
+	if limit == 0 {
+		return ""
+	}
+
+	return text[:limit]
 }
 
 func newQueryTokenCommand(out io.Writer, configPath *string) *cobra.Command {

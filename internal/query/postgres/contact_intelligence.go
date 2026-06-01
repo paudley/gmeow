@@ -895,9 +895,14 @@ func (index *Index) SimilarContacts(
 	}
 
 	args := []any{contactID}
+	seedWhere := []string{
+		"contact_id = $1",
+		"embedding IS NOT NULL",
+	}
 	where := []string{"candidate.embedding IS NOT NULL"}
 	if request.Model != "" {
 		args = append(args, request.Model)
+		seedWhere = append(seedWhere, fmt.Sprintf("model = $%d", len(args)))
 		where = append(where, fmt.Sprintf("candidate.model = $%d", len(args)))
 	}
 
@@ -906,7 +911,7 @@ func (index *Index) SimilarContacts(
 		"WITH seed AS (\n"+
 			"  SELECT model, dimensions, embedding\n"+
 			"    FROM query_contact_embeddings\n"+
-			"   WHERE contact_id = $1 AND embedding IS NOT NULL\n"+
+			"   WHERE %s\n"+
 			"   ORDER BY embedding_id\n"+
 			"   LIMIT 1\n"+
 			")\n"+
@@ -934,6 +939,7 @@ func (index *Index) SimilarContacts(
 			"  LEFT JOIN query_contact_rollups r ON r.contact_id = best.contact_id\n"+
 			" ORDER BY best.distance, best.contact_id\n"+
 			" LIMIT $%d",
+		strings.Join(seedWhere, " AND "),
 		strings.Join(where, " AND "),
 		len(args),
 	)
