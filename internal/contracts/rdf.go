@@ -91,6 +91,104 @@ type ContactIdentityResolveResponse struct {
 	SchemaVersion SchemaVersion `json:"schema_version"`
 }
 
+type ContactFactRequest struct {
+	At         string   `json:"at,omitempty"`
+	From       string   `json:"from,omitempty"`
+	Until      string   `json:"until,omitempty"`
+	ContactIDs []string `json:"contact_ids,omitempty"`
+	FactKinds  []string `json:"fact_kinds,omitempty"`
+	Limit      int      `json:"limit,omitempty"`
+	Offset     int      `json:"offset,omitempty"`
+	Current    bool     `json:"current,omitempty"`
+}
+
+type ContactFactResponse struct {
+	Facts         []ContactFact `json:"facts"`
+	SchemaVersion SchemaVersion `json:"schema_version"`
+	Total         int           `json:"total"`
+	Limit         int           `json:"limit"`
+	Offset        int           `json:"offset"`
+}
+
+type ContactIdentityDetailRequest struct {
+	Identities []string `json:"identities,omitempty"`
+	ContactIDs []string `json:"contact_ids,omitempty"`
+	Limit      int      `json:"limit,omitempty"`
+	Offset     int      `json:"offset,omitempty"`
+}
+
+type ContactIdentityDetail struct {
+	SourceDigest  ObjectDigest `json:"source_digest,omitempty"`
+	MatchedToken  string       `json:"matched_token"`
+	Token         string       `json:"token"`
+	TokenHash     string       `json:"token_hash"`
+	ContactID     string       `json:"contact_id"`
+	StatementHash string       `json:"statement_hash"`
+	ValidFrom     string       `json:"valid_from,omitempty"`
+	ValidUntil    string       `json:"valid_until,omitempty"`
+}
+
+type ContactIdentityDetailResponse struct {
+	Results       []ContactIdentityDetail `json:"results"`
+	SchemaVersion SchemaVersion           `json:"schema_version"`
+	Total         int                     `json:"total"`
+	Limit         int                     `json:"limit"`
+	Offset        int                     `json:"offset"`
+}
+
+type ContactNeighborhoodRequest struct {
+	ContactID string   `json:"contact_id"`
+	FactKinds []string `json:"fact_kinds,omitempty"`
+	Limit     int      `json:"limit,omitempty"`
+	Offset    int      `json:"offset,omitempty"`
+}
+
+type ContactNeighborhoodResult struct {
+	SourceDigest  ObjectDigest `json:"source_digest,omitempty"`
+	StatementHash string       `json:"statement_hash,omitempty"`
+	ContactID     string       `json:"contact_id"`
+	FactKind      string       `json:"fact_kind"`
+	Value         string       `json:"value"`
+	Predicate     string       `json:"predicate"`
+	ValidFrom     string       `json:"valid_from,omitempty"`
+	ValidUntil    string       `json:"valid_until,omitempty"`
+}
+
+type ContactNeighborhoodResponse struct {
+	Results       []ContactNeighborhoodResult `json:"results"`
+	SchemaVersion SchemaVersion               `json:"schema_version"`
+	Total         int                         `json:"total"`
+	Limit         int                         `json:"limit"`
+	Offset        int                         `json:"offset"`
+}
+
+type ContactAnalysisInputRequest struct {
+	ContactIDs []string `json:"contact_ids,omitempty"`
+	FactKinds  []string `json:"fact_kinds,omitempty"`
+	Limit      int      `json:"limit,omitempty"`
+	Offset     int      `json:"offset,omitempty"`
+}
+
+type ContactAnalysisInputResult struct {
+	ContactID        string    `json:"contact_id"`
+	FirstSeenAt      time.Time `json:"first_seen_at,omitzero"`
+	LastSeenAt       time.Time `json:"last_seen_at,omitzero"`
+	DisplayName      string    `json:"display_name,omitempty"`
+	PrimaryEmail     string    `json:"primary_email,omitempty"`
+	InputText        string    `json:"input_text"`
+	FactCount        int       `json:"fact_count"`
+	MessageCount     int       `json:"message_count"`
+	ParticipantCount int       `json:"participant_count"`
+}
+
+type ContactAnalysisInputResponse struct {
+	Results       []ContactAnalysisInputResult `json:"results"`
+	SchemaVersion SchemaVersion                `json:"schema_version"`
+	Total         int                          `json:"total"`
+	Limit         int                          `json:"limit"`
+	Offset        int                          `json:"offset"`
+}
+
 type ContactMessageRequest struct {
 	ContactID string `json:"contact_id"`
 	Role      string `json:"role,omitempty"`
