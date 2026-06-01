@@ -39,6 +39,9 @@ type StorageBreakdownFile struct {
 	LogicalBytes   int64                  `json:"logical_bytes"`
 	AllocatedBytes int64                  `json:"allocated_bytes"`
 	Estimated      bool                   `json:"estimated"`
+	DictID         string                 `json:"dict_id,omitempty"`
+	DictIDs        []string               `json:"dict_ids,omitempty"`
+	ChunkCount     int                    `json:"chunk_count,omitempty"`
 	ReferencedBy   contracts.ObjectDigest `json:"referenced_by,omitempty"`
 	CompoundRole   string                 `json:"compound_role,omitempty"`
 	CompoundOrder  int                    `json:"compound_order,omitempty"`
@@ -323,10 +326,17 @@ func (store *FilesystemStore) addObjectLogicalEntries(
 		return err
 	}
 	if ok {
+		chunkCount, dictID, dictIDs, err := store.recipeDictionarySummary(recipe)
+		if err != nil {
+			return err
+		}
 		store.addLogicalEntry(report, storageFileContext{
 			ObjectDigest:  digest,
 			Role:          "content",
 			Path:          chunkPacksDir,
+			DictID:        dictID,
+			DictIDs:       dictIDs,
+			ChunkCount:    chunkCount,
 			ReferencedBy:  referencedBy,
 			CompoundRole:  compoundRole,
 			CompoundOrder: compoundOrder,
@@ -335,6 +345,34 @@ func (store *FilesystemStore) addObjectLogicalEntries(
 	}
 
 	return nil
+}
+
+func (store *FilesystemStore) recipeDictionarySummary(
+	recipe objectRecipeEntry,
+) (int, string, []string, error) {
+	seen := make(map[string]bool)
+	dictIDs := make([]string, 0, len(recipe.ChunkHashes))
+	for _, chunkHash := range recipe.ChunkHashes {
+		entry, ok, err := store.lookupChunk(chunkHash)
+		if err != nil {
+			return 0, "", nil, err
+		}
+		if !ok {
+			continue
+		}
+		if entry.DictID == "" || seen[entry.DictID] {
+			continue
+		}
+		seen[entry.DictID] = true
+		dictIDs = append(dictIDs, entry.DictID)
+	}
+	sort.Strings(dictIDs)
+	dictID := ""
+	if len(dictIDs) == 1 {
+		dictID = dictIDs[0]
+	}
+
+	return len(recipe.ChunkHashes), dictID, dictIDs, nil
 }
 
 // addLogicalEntry appends a logical (non-file) storage entry whose bytes come
@@ -354,6 +392,9 @@ func (store *FilesystemStore) addLogicalEntry(
 		LogicalBytes:   logical,
 		AllocatedBytes: logical,
 		Estimated:      true,
+		DictID:         context.DictID,
+		DictIDs:        append([]string{}, context.DictIDs...),
+		ChunkCount:     context.ChunkCount,
 		ReferencedBy:   context.ReferencedBy,
 		CompoundRole:   context.CompoundRole,
 		CompoundOrder:  context.CompoundOrder,
@@ -365,6 +406,9 @@ type storageFileContext struct {
 	ObjectDigest  contracts.ObjectDigest
 	Role          string
 	Path          string
+	DictID        string
+	DictIDs       []string
+	ChunkCount    int
 	ReferencedBy  contracts.ObjectDigest
 	CompoundRole  string
 	CompoundOrder int

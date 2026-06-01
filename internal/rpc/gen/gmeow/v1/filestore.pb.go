@@ -1794,6 +1794,9 @@ type StorageBreakdownFile struct {
 	CompoundRole   string                 `protobuf:"bytes,8,opt,name=compound_role,json=compoundRole,proto3" json:"compound_role,omitempty"`
 	CompoundOrder  int32                  `protobuf:"varint,9,opt,name=compound_order,json=compoundOrder,proto3" json:"compound_order,omitempty"`
 	RecursivePart  bool                   `protobuf:"varint,10,opt,name=recursive_part,json=recursivePart,proto3" json:"recursive_part,omitempty"`
+	DictId         string                 `protobuf:"bytes,11,opt,name=dict_id,json=dictId,proto3" json:"dict_id,omitempty"`
+	DictIds        []string               `protobuf:"bytes,12,rep,name=dict_ids,json=dictIds,proto3" json:"dict_ids,omitempty"`
+	ChunkCount     int32                  `protobuf:"varint,13,opt,name=chunk_count,json=chunkCount,proto3" json:"chunk_count,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1896,6 +1899,27 @@ func (x *StorageBreakdownFile) GetRecursivePart() bool {
 		return x.RecursivePart
 	}
 	return false
+}
+
+func (x *StorageBreakdownFile) GetDictId() string {
+	if x != nil {
+		return x.DictId
+	}
+	return ""
+}
+
+func (x *StorageBreakdownFile) GetDictIds() []string {
+	if x != nil {
+		return x.DictIds
+	}
+	return nil
+}
+
+func (x *StorageBreakdownFile) GetChunkCount() int32 {
+	if x != nil {
+		return x.ChunkCount
+	}
+	return 0
 }
 
 type StorageBreakdownResponse struct {
@@ -3173,7 +3197,7 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\bfindings\x18\x03 \x03(\v2\x17.gmeow.v1.VerifyFindingR\bfindings\"Z\n" +
 	"\x17StorageBreakdownRequest\x12\x16\n" +
 	"\x06digest\x18\x01 \x01(\tR\x06digest\x12'\n" +
-	"\x0frecursive_parts\x18\x02 \x01(\bR\x0erecursiveParts\"\xe7\x02\n" +
+	"\x0frecursive_parts\x18\x02 \x01(\bR\x0erecursiveParts\"\xbc\x03\n" +
 	"\x14StorageBreakdownFile\x12#\n" +
 	"\robject_digest\x18\x01 \x01(\tR\fobjectDigest\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x12\n" +
@@ -3185,7 +3209,11 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\rcompound_role\x18\b \x01(\tR\fcompoundRole\x12%\n" +
 	"\x0ecompound_order\x18\t \x01(\x05R\rcompoundOrder\x12%\n" +
 	"\x0erecursive_part\x18\n" +
-	" \x01(\bR\rrecursivePart\"\x86\x03\n" +
+	" \x01(\bR\rrecursivePart\x12\x17\n" +
+	"\adict_id\x18\v \x01(\tR\x06dictId\x12\x19\n" +
+	"\bdict_ids\x18\f \x03(\tR\adictIds\x12\x1f\n" +
+	"\vchunk_count\x18\r \x01(\x05R\n" +
+	"chunkCount\"\x86\x03\n" +
 	"\x18StorageBreakdownResponse\x12\x1f\n" +
 	"\vroot_digest\x18\x01 \x01(\tR\n" +
 	"rootDigest\x124\n" +

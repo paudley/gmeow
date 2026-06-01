@@ -24,13 +24,12 @@ RFC822/EML directories. The importer treats each root as read-only: it never
 changes maildir flags, mbox separators, NNML state, client index files, or
 archive metadata.
 
-Non-dry-run archive import is queue-backed. `gmeow-admin source import` walks
-the requested roots directly, enqueues one scheduler-owned source-import job per
-message, and drains those jobs in the foreground. Mbox discovery records message
+Non-dry-run archive import is direct. `gmeow-admin source import` first walks
+the requested roots locally for an accurate message count, then parses each
+message and writes it to FILESTORE over gRPC. Mbox discovery records message
 offsets and workers parse one mbox message at a time, so large mbox files are
-not materialized in memory. Local progress state lives under
-`system.data_dir/import-runs` by default; it is operational resume state, not
-authoritative mail data.
+not materialized in memory. Local run records live under `system.data_dir/import-runs`
+by default; they are operator-facing summaries, not authoritative mail data.
 
 Archive import jobs write the same `mail_message` compound shape used by Gmail:
 headers, canonical text body, MIME structure metadata, archive metadata, and

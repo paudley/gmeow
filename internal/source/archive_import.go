@@ -60,6 +60,7 @@ type ArchiveImportRequest struct {
 
 // ArchiveImportProgress is a point-in-time snapshot of an in-flight import.
 type ArchiveImportProgress struct {
+	Total             int64
 	Scanned           int64
 	Parsed            int64
 	Ingested          int64
@@ -74,6 +75,7 @@ type ArchiveImportProgress struct {
 // lastPath is guarded separately. It is always allocated (counters are cheap);
 // only the periodic emit is gated on a configured callback.
 type importProgress struct {
+	total    int64
 	scanned  atomic.Int64
 	parsed   atomic.Int64
 	ingested atomic.Int64
@@ -101,6 +103,7 @@ func (progress *importProgress) snapshot() ArchiveImportProgress {
 	progress.mu.Unlock()
 
 	return ArchiveImportProgress{
+		Total:             progress.total,
 		Scanned:           progress.scanned.Load(),
 		Parsed:            progress.parsed.Load(),
 		Ingested:          ingested,
@@ -338,7 +341,11 @@ func (importer *ArchiveImporter) Import(
 		}()
 	}
 
-	progress := &importProgress{start: time.Now()}
+	total, err := countArchiveImportMessages(ctx, request)
+	if err != nil {
+		return report, err
+	}
+	progress := &importProgress{total: total, start: time.Now()}
 	stopProgress := importer.startProgress(ctx, request, progress)
 	defer stopProgress()
 
@@ -363,6 +370,91 @@ func (importer *ArchiveImporter) Import(
 	}
 
 	return report, nil
+}
+
+func countArchiveImportMessages(
+	ctx context.Context,
+	request ArchiveImportRequest,
+) (int64, error) {
+	var total int64
+	for _, root := range request.Roots {
+		count, err := countArchiveRootMessages(ctx, filepath.Clean(root), request.Format)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+
+	return total, nil
+}
+
+func countArchiveRootMessages(
+	ctx context.Context,
+	root, requestedFormat string,
+) (int64, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return 0, err
+	}
+	if !info.IsDir() {
+		format := detectArchiveFileFormat(root, root, requestedFormat)
+		return countArchiveFileMessages(root, format)
+	}
+
+	var total int64
+	err = filepath.WalkDir(
+		root,
+		func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if shouldSkipArchiveDir(entry.Name()) {
+					return filepath.SkipDir
+				}
+
+				return nil
+			}
+			if shouldSkipArchiveFile(entry.Name()) {
+				return nil
+			}
+
+			format := detectArchiveFileFormat(path, root, requestedFormat)
+			count, err := countArchiveFileMessages(path, format)
+			if err != nil {
+				return nil
+			}
+			total += count
+
+			return nil
+		},
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	return total, nil
+}
+
+func countArchiveFileMessages(path, format string) (int64, error) {
+	switch format {
+	case "":
+		return 0, nil
+	case ArchiveImportFormatMbox:
+		var count int64
+		err := forEachMboxMessageOffset(path, func(int64, int64) error {
+			count++
+
+			return nil
+		})
+
+		return count, err
+	default:
+		return 1, nil
+	}
 }
 
 // startProgress launches the periodic progress emitter (if a callback is set)

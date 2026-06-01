@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -195,6 +196,113 @@ func TestArchiveImportMaildirReadOnlyAndGeneratedMessageID(t *testing.T) {
 	}
 }
 
+func TestArchiveImportExactReimportDoesNotMutateFilestore(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	messagePath := filepath.Join(root, "cur", "1:2,S")
+	writeTestFile(t, filepath.Join(root, "tmp", ".keep"), "")
+	writeTestFile(t, filepath.Join(root, "new", ".keep"), "")
+	writeTestFile(
+		t,
+		messagePath,
+		"Message-ID: <exact@example.test>\nFrom: a@example.test\nTo: b@example.test\nSubject: Exact\n\nsame body\n",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReport, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstReport.Imported != 1 {
+		t.Fatalf("expected first import to write one canonical message, got %#v", firstReport)
+	}
+
+	canonical, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind: contracts.MailIdentitySourceKind,
+			SourceName: contracts.MailIdentitySourceName,
+			ExternalID: "<exact@example.test>",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected canonical message lookup")
+	}
+	before := archiveObjectManifests(t, ctx, filestoreService, canonical)
+
+	secondReport, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondReport.Imported != 0 ||
+		secondReport.ExactDuplicates != 0 ||
+		secondReport.MessageIDDuplicates != 1 {
+		t.Fatalf("expected exact reimport to be a duplicate no-op, got %#v", secondReport)
+	}
+
+	after := archiveObjectManifests(t, ctx, filestoreService, canonical)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf(
+			"exact reimport mutated filestore manifests\nbefore=%#v\nafter=%#v",
+			before,
+			after,
+		)
+	}
+}
+
+func TestArchiveImportProgressIncludesPrecountTotal(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	writeTestFile(
+		t,
+		filepath.Join(root, "one.eml"),
+		"Message-ID: <one@example.test>\nSubject: one\n\none\n",
+	)
+	writeTestFile(
+		t,
+		filepath.Join(root, "two.eml"),
+		"Message-ID: <two@example.test>\nSubject: two\n\ntwo\n",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final ArchiveImportProgress
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{root},
+		Progress: func(progress ArchiveImportProgress) {
+			final = progress
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Imported != 2 {
+		t.Fatalf("expected two imports, got %#v", report)
+	}
+	if final.Total != 2 || final.Ingested != 2 {
+		t.Fatalf("expected final progress 2/2, got %#v", final)
+	}
+}
+
 func TestArchiveImportMboxNNMLAndCollisionVariant(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
@@ -376,6 +484,37 @@ func TestArchiveImportVariantDoesNotOverwriteCanonicalParts(t *testing.T) {
 	if metadata["subject"] != "canonical" {
 		t.Fatalf("canonical metadata was overwritten: %#v", metadata)
 	}
+}
+
+func archiveObjectManifests(
+	t *testing.T,
+	ctx context.Context,
+	filestoreService *testsupport.FilestoreService,
+	canonical contracts.ObjectDigest,
+) map[contracts.ObjectDigest]contracts.Manifest {
+	t.Helper()
+
+	structure, err := filestoreService.Store.GetStructure(ctx, canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digests := map[contracts.ObjectDigest]bool{canonical: true}
+	for _, parts := range structure.PartsByRole {
+		for _, part := range parts {
+			digests[part.Digest] = true
+		}
+	}
+
+	manifests := make(map[contracts.ObjectDigest]contracts.Manifest, len(digests))
+	for digest := range digests {
+		manifest, err := filestoreService.Store.ReadManifest(ctx, digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifests[digest] = manifest
+	}
+
+	return manifests
 }
 
 func TestArchiveImportLowNoiseSkipsBodyLineMatchesWithoutProvenance(t *testing.T) {
