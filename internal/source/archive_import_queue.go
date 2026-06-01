@@ -23,9 +23,12 @@ const (
 	defaultArchiveImportQueueHighWater = 10000
 	archiveImportStateFile             = "state.json"
 	sourceImportFailureProcessLimit    = 100
+	sourceImportOtherRunBackoff        = 250 * time.Millisecond
 )
 
 var errSourceImportDeadLettered = errors.New("source import dead-lettered jobs")
+
+var errSourceImportOtherRunJob = errors.New("source import job belongs to another run")
 
 type ArchiveImportJobReceipt interface {
 	Job() contracts.SourceImportJob
@@ -283,6 +286,15 @@ func (run ArchiveImportQueuedRun) drain(
 
 	for report.Processed < report.Enqueued {
 		err := run.drainOne(ctx, request, sourceName, state, report)
+		if errors.Is(err, errSourceImportOtherRunJob) {
+			waitErr := waitArchiveImportOtherRun(ctx)
+			if waitErr != nil {
+				return waitErr
+			}
+
+			continue
+		}
+
 		if err != nil {
 			return err
 		}
@@ -314,7 +326,12 @@ func (run ArchiveImportQueuedRun) drainOne(
 			return err
 		}
 
-		return nil
+		return fmt.Errorf(
+			"%w: got %q want %q",
+			errSourceImportOtherRunJob,
+			job.RunID,
+			report.RunID,
+		)
 	}
 
 	if err := run.Importer.ProcessSourceImportJob(
@@ -363,6 +380,18 @@ func (run ArchiveImportQueuedRun) drainOne(
 	state.Processed = report.Processed
 
 	return saveArchiveImportState(request.StateDir, *state)
+}
+
+func waitArchiveImportOtherRun(ctx context.Context) error {
+	timer := time.NewTimer(sourceImportOtherRunBackoff)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for other source import run: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (run ArchiveImportQueuedRun) receiveSourceImportJob(

@@ -797,11 +797,17 @@ func ingestGmailPart(
 		case <-ctx.Done():
 			return "", fmt.Errorf("wait for concurrent gmail part ingest: %w", ctx.Err())
 		case <-timer.C:
-			return "", fmt.Errorf("wait for concurrent gmail part ingest: %w", err)
+			return "", fmt.Errorf(
+				"wait for concurrent gmail part ingest: %w",
+				context.DeadlineExceeded,
+			)
 		case <-ticker.C:
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return "", fmt.Errorf("wait for concurrent gmail part ingest: %w", err)
+				return "", fmt.Errorf(
+					"wait for concurrent gmail part ingest: %w",
+					context.DeadlineExceeded,
+				)
 			}
 
 			lookupCtx, cancelLookup := context.WithTimeout(ctx, remaining)
@@ -810,6 +816,13 @@ func ingestGmailPart(
 			cancelLookup()
 
 			if lookupErr != nil {
+				if errors.Is(lookupErr, context.DeadlineExceeded) {
+					return "", fmt.Errorf(
+						"wait for concurrent gmail part ingest: %w",
+						context.DeadlineExceeded,
+					)
+				}
+
 				return "", fmt.Errorf("lookup concurrent gmail part: %w", lookupErr)
 			}
 

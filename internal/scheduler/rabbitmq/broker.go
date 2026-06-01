@@ -1644,7 +1644,16 @@ func waitRabbitMQPublishConfirmed(
 
 	for {
 		select {
-		case returned := <-returns:
+		case returned, ok := <-returns:
+			if !ok {
+				return fmt.Errorf(
+					"%w: exchange=%q routing_key=%q",
+					errRabbitMQConfirmClosed,
+					exchange,
+					routingKey,
+				)
+			}
+
 			return fmt.Errorf(
 				"%w: exchange=%q routing_key=%q reply=%s",
 				errRabbitMQPublishReturned,
@@ -1754,7 +1763,10 @@ func (broker *Broker) channel(ctx context.Context) (*amqp.Channel, error) {
 
 	var lastErr error
 
-	for range rabbitMQChannelOpenAttempts {
+	attemptsRemaining := rabbitMQChannelOpenAttempts
+	for attemptsRemaining > 0 {
+		attemptsRemaining--
+
 		conn, err := broker.currentConnection()
 		if err != nil {
 			return nil, err
