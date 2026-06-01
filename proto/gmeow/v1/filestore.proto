@@ -141,6 +141,9 @@ message StorageBreakdownFile {
   string compound_role = 8;
   int32 compound_order = 9;
   bool recursive_part = 10;
+  string dict_id = 11;
+  repeated string dict_ids = 12;
+  int32 chunk_count = 13;
 }
 message StorageBreakdownResponse {
   string root_digest = 1;

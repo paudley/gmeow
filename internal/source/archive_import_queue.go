@@ -274,6 +274,7 @@ func (run ArchiveImportQueuedRun) drain(
 		}
 
 		request.Progress(ArchiveImportProgress{
+			Total:             int64(report.Enqueued),
 			Scanned:           int64(report.Scanned),
 			Parsed:            int64(report.Parsed),
 			Ingested:          int64(report.Processed),

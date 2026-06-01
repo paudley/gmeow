@@ -11,6 +11,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -577,7 +578,7 @@ func writeStorageBreakdownHuman(
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(
 		table,
-		"ROLE\tOBJECT\tLOGICAL\tALLOCATED\tPATH",
+		"ROLE\tOBJECT\tLOGICAL\tALLOCATED\tCHUNKS\tDICT\tPATH",
 	); err != nil {
 		return err
 	}
@@ -586,13 +587,16 @@ func writeStorageBreakdownHuman(
 		if file.RecursivePart {
 			role = "part:" + firstNonEmptyString(file.CompoundRole, role)
 		}
+		dictID := storageDictionaryLabel(file)
 		if _, err := fmt.Fprintf(
 			table,
-			"%s\t%s\t%d\t%d\t%s\n",
+			"%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
 			role,
 			file.ObjectDigest,
 			file.LogicalBytes,
 			file.AllocatedBytes,
+			storageChunkCountLabel(file),
+			dictID,
 			file.Path,
 		); err != nil {
 			return err
@@ -600,6 +604,25 @@ func writeStorageBreakdownHuman(
 	}
 
 	return table.Flush()
+}
+
+func storageChunkCountLabel(file filestore.StorageBreakdownFile) string {
+	if file.ChunkCount <= 0 {
+		return "-"
+	}
+
+	return strconv.Itoa(file.ChunkCount)
+}
+
+func storageDictionaryLabel(file filestore.StorageBreakdownFile) string {
+	if file.DictID != "" {
+		return file.DictID
+	}
+	if len(file.DictIDs) > 0 {
+		return strings.Join(file.DictIDs, ",")
+	}
+
+	return "-"
 }
 
 func validateCLIDigest(digest contracts.ObjectDigest) error {
