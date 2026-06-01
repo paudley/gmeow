@@ -341,9 +341,14 @@ func (importer *ArchiveImporter) Import(
 		}()
 	}
 
-	total, err := countArchiveImportMessages(ctx, request)
-	if err != nil {
-		return report, err
+	total := int64(0)
+	if request.Progress != nil {
+		var err error
+		total, err = countArchiveImportMessages(ctx, request)
+		if err != nil {
+			report.Failures = append(report.Failures, err.Error())
+			return report, err
+		}
 	}
 	progress := &importProgress{total: total, start: time.Now()}
 	stopProgress := importer.startProgress(ctx, request, progress)
@@ -379,10 +384,13 @@ func countArchiveImportMessages(
 	var total int64
 	for _, root := range request.Roots {
 		count, err := countArchiveRootMessages(ctx, filepath.Clean(root), request.Format)
-		if err != nil {
-			return 0, err
-		}
 		total += count
+		if err != nil {
+			if err := ctx.Err(); err != nil {
+				return total, err
+			}
+			continue
+		}
 	}
 
 	return total, nil
@@ -398,6 +406,9 @@ func countArchiveRootMessages(
 	}
 	if !info.IsDir() {
 		format := detectArchiveFileFormat(root, root, requestedFormat)
+		if format == "" {
+			return 1, nil
+		}
 		return countArchiveFileMessages(root, format)
 	}
 
@@ -406,7 +417,7 @@ func countArchiveRootMessages(
 		root,
 		func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
-				return nil
+				return walkErr
 			}
 			if err := ctx.Err(); err != nil {
 				return err
@@ -424,16 +435,16 @@ func countArchiveRootMessages(
 
 			format := detectArchiveFileFormat(path, root, requestedFormat)
 			count, err := countArchiveFileMessages(path, format)
-			if err != nil {
-				return nil
-			}
 			total += count
+			if err != nil {
+				return err
+			}
 
 			return nil
 		},
 	)
 	if err != nil {
-		return 0, err
+		return total, err
 	}
 
 	return total, nil

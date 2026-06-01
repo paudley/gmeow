@@ -6,6 +6,7 @@ package rpc
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -531,6 +532,13 @@ func ToPBStorageBreakdown(
 ) *pb.StorageBreakdownResponse {
 	files := make([]*pb.StorageBreakdownFile, 0, len(report.Files))
 	for _, file := range report.Files {
+		chunkCount := file.ChunkCount
+		if chunkCount < 0 {
+			chunkCount = 0
+		}
+		if chunkCount > math.MaxInt32 {
+			chunkCount = math.MaxInt32
+		}
 		files = append(files, &pb.StorageBreakdownFile{
 			ObjectDigest:   string(file.ObjectDigest),
 			Role:           file.Role,
@@ -540,7 +548,7 @@ func ToPBStorageBreakdown(
 			Estimated:      file.Estimated,
 			DictId:         file.DictID,
 			DictIds:        append([]string{}, file.DictIDs...),
-			ChunkCount:     int32(file.ChunkCount),
+			ChunkCount:     int32(chunkCount),
 			ReferencedBy:   string(file.ReferencedBy),
 			CompoundRole:   file.CompoundRole,
 			CompoundOrder:  int32(file.CompoundOrder),

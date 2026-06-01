@@ -11,6 +11,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -610,7 +611,7 @@ func storageChunkCountLabel(file filestore.StorageBreakdownFile) string {
 		return "-"
 	}
 
-	return fmt.Sprintf("%d", file.ChunkCount)
+	return strconv.Itoa(file.ChunkCount)
 }
 
 func storageDictionaryLabel(file filestore.StorageBreakdownFile) string {
