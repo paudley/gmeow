@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"blackcat.ca/gmeow/internal/appsvc"
+	"blackcat.ca/gmeow/internal/contactio"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/facets/contactentity"
 	"blackcat.ca/gmeow/internal/filestore"
@@ -583,6 +584,58 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 	}
 	if _, err := index.Structure(ctx, correctionDigest); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestContactImportVCardProjectsFactsAndRollup(t *testing.T) {
+	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	migrationsDir := queryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
+
+	store := filestore.NewFilesystemStore(t.TempDir())
+	importObject, _, err := contactio.BuildImportObject(
+		contactio.FormatVCard,
+		"synthetic-contacts",
+		"alice.vcf",
+		[]byte(
+			"BEGIN:VCARD\nVERSION:4.0\nFN:Alice Example\nEMAIL:alice@example.test\nORG:Example Org\nEND:VCARD\n",
+		),
+		time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:       strings.NewReader(importObject.Content),
+		MediaType:    importObject.MediaType,
+		ContentRoles: []string{contracts.RDFSourceBundleRole, contracts.ContactSourceRole},
+		Facets:       importObject.Facets,
+		Provenance: []contracts.Provenance{{
+			SourceKind: importObject.SourceKind,
+			SourceName: importObject.SourceName,
+			ExternalID: importObject.ExternalID,
+			ObservedAt: importObject.ObservedAt,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	index := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
+	projectStoredObject(t, ctx, index, store, digest)
+
+	aggregate, err := index.ContactAggregate(ctx, contracts.ContactAggregateRequest{
+		ContactID: "mailto:alice@example.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregate.DisplayName != "Alice Example" ||
+		aggregate.PrimaryEmail != "alice@example.test" ||
+		contactFactValueFor(aggregate.Facts, "affiliation", "Example Org").Value == "" {
+		t.Fatalf("imported vCard did not project contact rollup: %#v", aggregate)
 	}
 }
 
