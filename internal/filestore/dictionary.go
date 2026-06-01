@@ -31,8 +31,8 @@ type dictionaryCache struct {
 	loaded       bool
 	encoders     map[string]*zstd.Encoder
 	decoders     map[string]*zstd.Decoder
-	bootstrap    sync.Once
-	bootstrapErr error
+	bootstrapMu  sync.Mutex
+	bootstrapped bool
 }
 
 type activeDictionary struct {
@@ -64,54 +64,56 @@ type defaultDictionary struct {
 	bytes       []byte
 }
 
-var defaultDictionaries = []defaultDictionary{
-	{
-		id:          "1001",
-		family:      DictionaryFamilyMailHeaders,
-		version:     "bootstrap-v1",
-		description: "Bootstrap dictionary seed for RFC 822-style mail headers.",
-		bytes: []byte(
-			"From: To: Cc: Bcc: Date: Subject: Message-ID: In-Reply-To: References:\r\n" +
-				"Content-Type: text/plain; charset=utf-8\r\nMIME-Version: 1.0\r\n",
-		),
-	},
-	{
-		id:          "1002",
-		family:      DictionaryFamilyMailBodyPlain,
-		version:     "bootstrap-v1",
-		description: "Bootstrap dictionary seed for plain-text mail bodies.",
-		bytes: []byte(
-			"hello thanks regards wrote forwarded message original message " +
-				"unsubscribe mailing list attachment meeting update\r\n\r\n",
-		),
-	},
-	{
-		id:          "1003",
-		family:      DictionaryFamilyMailBodyHTML,
-		version:     "bootstrap-v1",
-		description: "Bootstrap dictionary seed for HTML mail bodies.",
-		bytes: []byte(
-			"<html><body><div><p><br><table><tr><td><span style=\"font-family\">" +
-				"</span></td></tr></table></div></body></html>",
-		),
-	},
-	{
-		id:          "1004",
-		family:      DictionaryFamilyGmeowMailJSON,
-		version:     "bootstrap-v1",
-		description: "Bootstrap dictionary seed for Gmeow mail JSON records.",
-		bytes: []byte(
-			`{"schema_version":0,"message_id":"","thread_id":"","labels":[],"headers":{},` +
-				`"body_media_type":"text/plain","attachments":[],"parts":[]}`,
-		),
-	},
-	{
-		id:          "1005",
-		family:      DictionaryFamilyPatchText,
-		version:     "bootstrap-v1",
-		description: "Bootstrap dictionary seed for patch/diff text.",
-		bytes:       []byte("diff --git a/ b/\nindex --- +++ @@ -1,1 +1,1 @@\n"),
-	},
+func defaultDictionarySeeds() []defaultDictionary {
+	return []defaultDictionary{
+		{
+			id:          "1001",
+			family:      DictionaryFamilyMailHeaders,
+			version:     "bootstrap-v1",
+			description: "Bootstrap dictionary seed for RFC 822-style mail headers.",
+			bytes: []byte(
+				"From: To: Cc: Bcc: Date: Subject: Message-ID: In-Reply-To: References:\r\n" +
+					"Content-Type: text/plain; charset=utf-8\r\nMIME-Version: 1.0\r\n",
+			),
+		},
+		{
+			id:          "1002",
+			family:      DictionaryFamilyMailBodyPlain,
+			version:     "bootstrap-v1",
+			description: "Bootstrap dictionary seed for plain-text mail bodies.",
+			bytes: []byte(
+				"hello thanks regards wrote forwarded message original message " +
+					"unsubscribe mailing list attachment meeting update\r\n\r\n",
+			),
+		},
+		{
+			id:          "1003",
+			family:      DictionaryFamilyMailBodyHTML,
+			version:     "bootstrap-v1",
+			description: "Bootstrap dictionary seed for HTML mail bodies.",
+			bytes: []byte(
+				"<html><body><div><p><br><table><tr><td><span style=\"font-family\">" +
+					"</span></td></tr></table></div></body></html>",
+			),
+		},
+		{
+			id:          "1004",
+			family:      DictionaryFamilyGmeowMailJSON,
+			version:     "bootstrap-v1",
+			description: "Bootstrap dictionary seed for Gmeow mail JSON records.",
+			bytes: []byte(
+				`{"schema_version":0,"message_id":"","thread_id":"","labels":[],"headers":{},` +
+					`"body_media_type":"text/plain","attachments":[],"parts":[]}`,
+			),
+		},
+		{
+			id:          "1005",
+			family:      DictionaryFamilyPatchText,
+			version:     "bootstrap-v1",
+			description: "Bootstrap dictionary seed for patch/diff text.",
+			bytes:       []byte("diff --git a/ b/\nindex --- +++ @@ -1,1 +1,1 @@\n"),
+		},
+	}
 }
 
 func (store *FilesystemStore) activeDictionary(
@@ -146,11 +148,19 @@ func (store *FilesystemStore) activeDictionary(
 }
 
 func (store *FilesystemStore) ensureDictionaryBootstrap() error {
-	store.dicts.bootstrap.Do(func() {
-		store.dicts.bootstrapErr = store.bootstrapDefaultDictionaries()
-	})
+	store.dicts.bootstrapMu.Lock()
+	defer store.dicts.bootstrapMu.Unlock()
 
-	return store.dicts.bootstrapErr
+	if store.dicts.bootstrapped {
+		return nil
+	}
+
+	if err := store.bootstrapDefaultDictionaries(); err != nil {
+		return err
+	}
+	store.dicts.bootstrapped = true
+
+	return nil
 }
 
 func (store *FilesystemStore) bootstrapDefaultDictionaries() error {
@@ -163,8 +173,8 @@ func (store *FilesystemStore) bootstrapDefaultDictionaries() error {
 		SchemaVersion: 1,
 		Dictionaries:  map[string]dictionaryRegistryRecord{},
 	}
-	for _, dictionary := range defaultDictionaries {
-		if !defaultEnabledDictionaryFamilies[dictionary.family] {
+	for _, dictionary := range defaultDictionarySeeds() {
+		if !defaultEnabledDictionaryFamily(dictionary.family) {
 			continue
 		}
 		path := store.dictionaryPath(dictionary.id)
@@ -184,6 +194,15 @@ func (store *FilesystemStore) bootstrapDefaultDictionaries() error {
 			Description: dictionary.description,
 			InstalledAt: now,
 		}
+	}
+
+	if err := store.writeDictionaryRegistry(registry); err != nil {
+		return err
+	}
+	for _, dictionary := range defaultDictionarySeeds() {
+		if !defaultEnabledDictionaryFamily(dictionary.family) {
+			continue
+		}
 		if err := atomicWriteFile(
 			store.dictionaryCurrentPath(dictionary.family),
 			[]byte(dictionary.id),
@@ -193,25 +212,54 @@ func (store *FilesystemStore) bootstrapDefaultDictionaries() error {
 		}
 	}
 
-	return store.writeDictionaryRegistry(registry)
+	return nil
 }
 
 func (store *FilesystemStore) hasDictionaryState() bool {
-	for _, path := range []string{
-		store.dictionaryRegistryPath(),
-		filepath.Join(store.root, dictionariesDir, currentDictMarker),
-		filepath.Join(store.root, dictionariesDir, dictFilesDir),
-	} {
-		if _, err := os.Stat(path); err == nil {
-			return true
-		}
+	return store.registryHasDictionaryState() ||
+		fileHasTrimmedContent(
+			filepath.Join(store.root, dictionariesDir, currentDictMarker),
+		) ||
+		directoryHasEntries(store.dictionaryCurrentDir()) ||
+		directoryHasEntries(filepath.Join(store.root, dictionariesDir, dictFilesDir))
+}
+
+func (store *FilesystemStore) registryHasDictionaryState() bool {
+	data, err := os.ReadFile(store.dictionaryRegistryPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return false
 	}
-	if entries, err := os.ReadDir(store.dictionaryCurrentDir()); err == nil &&
-		len(entries) > 0 {
+	if err != nil {
+		return true
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return false
+	}
+
+	var registry dictionaryRegistry
+	if err := json.Unmarshal(data, &registry); err != nil {
 		return true
 	}
 
-	return false
+	return len(registry.Dictionaries) > 0
+}
+
+func fileHasTrimmedContent(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+
+	return strings.TrimSpace(string(data)) != ""
+}
+
+func directoryHasEntries(path string) bool {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false
+	}
+
+	return len(entries) > 0
 }
 
 func (store *FilesystemStore) loadActiveDictionariesLocked() (
@@ -246,41 +294,59 @@ func (store *FilesystemStore) loadActiveDictionariesLocked() (
 			continue
 		}
 		marker := filepath.Join(currentDir, entry.Name())
-		data, err := os.ReadFile(marker)
+		dictionary, ok, err := store.loadActiveDictionaryMarker(registry, marker, family)
 		if err != nil {
 			return nil, err
 		}
-		id := strings.TrimSpace(string(data))
-		if id == "" {
-			continue
-		}
-		record, ok := registry.Dictionaries[id]
-		if !ok {
-			return nil, fmt.Errorf("dictionary %q has no registry record", id)
-		}
-		if record.Family != family {
-			return nil, fmt.Errorf(
-				"dictionary %q registry family %q does not match marker family %q",
-				id,
-				record.Family,
-				family,
-			)
-		}
-		dictBytes, err := os.ReadFile(store.dictionaryPath(id))
-		if err != nil {
-			return nil, err
-		}
-		if len(dictBytes) < 8 {
-			return nil, fmt.Errorf("dictionary %q is too small", id)
-		}
-		active[family] = activeDictionary{
-			id:     id,
-			family: family,
-			bytes:  dictBytes,
+		if ok {
+			active[family] = dictionary
 		}
 	}
 
 	return active, nil
+}
+
+func (store *FilesystemStore) loadActiveDictionaryMarker(
+	registry dictionaryRegistry,
+	marker string,
+	family string,
+) (activeDictionary, bool, error) {
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		return activeDictionary{}, false, err
+	}
+	id := strings.TrimSpace(string(data))
+	if id == "" {
+		return activeDictionary{}, false, nil
+	}
+	record, ok := registry.Dictionaries[id]
+	if !ok {
+		return activeDictionary{}, false, fmt.Errorf(
+			"dictionary %q has no registry record",
+			id,
+		)
+	}
+	if record.Family != family {
+		return activeDictionary{}, false, fmt.Errorf(
+			"dictionary %q registry family %q does not match marker family %q",
+			id,
+			record.Family,
+			family,
+		)
+	}
+	dictBytes, err := store.readDictionaryBytes(id)
+	if err != nil {
+		return activeDictionary{}, false, err
+	}
+	if len(dictBytes) == 0 {
+		return activeDictionary{}, false, fmt.Errorf("dictionary %q is empty", id)
+	}
+
+	return activeDictionary{
+		id:     id,
+		family: family,
+		bytes:  dictBytes,
+	}, true, nil
 }
 
 // reloadDictionaries forces the next activeDictionary call to re-read the

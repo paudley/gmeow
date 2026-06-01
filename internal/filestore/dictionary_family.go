@@ -5,7 +5,6 @@ package filestore
 
 import (
 	"mime"
-	"path/filepath"
 	"strings"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -22,37 +21,13 @@ const (
 	DictionaryFamilyStructuredXML       = "structured-xml"
 	DictionaryFamilyYAMLToml            = "yaml-toml"
 	DictionaryFamilyHTMLCSSJS           = "html-css-js"
+	DictionaryFamilyDocumentMarkup      = "document-markup"
 	DictionaryFamilySourceCode          = "source-code"
 	DictionaryFamilyLogsLineOriented    = "logs-line-oriented"
 	DictionaryFamilyCSVTSV              = "csv-tsv"
 	DictionaryFamilyRDFTurtle           = "rdf-turtle"
 	DictionaryFamilyBinarySerialization = "protobuf-msgpack-cbor-avro"
 )
-
-var defaultEnabledDictionaryFamilies = map[string]bool{
-	DictionaryFamilyMailHeaders:   true,
-	DictionaryFamilyMailBodyPlain: true,
-	DictionaryFamilyMailBodyHTML:  true,
-	DictionaryFamilyGmeowMailJSON: true,
-	DictionaryFamilyPatchText:     true,
-}
-
-var trainableDictionaryFamilies = []string{
-	DictionaryFamilyMailHeaders,
-	DictionaryFamilyMailBodyPlain,
-	DictionaryFamilyMailBodyHTML,
-	DictionaryFamilyGmeowMailJSON,
-	DictionaryFamilyPatchText,
-	DictionaryFamilyStructuredJSON,
-	DictionaryFamilyStructuredXML,
-	DictionaryFamilyYAMLToml,
-	DictionaryFamilyHTMLCSSJS,
-	DictionaryFamilySourceCode,
-	DictionaryFamilyLogsLineOriented,
-	DictionaryFamilyCSVTSV,
-	DictionaryFamilyRDFTurtle,
-	DictionaryFamilyBinarySerialization,
-}
 
 func dictionaryFamilyForObject(mediaType string, contentRoles []string) string {
 	normalized := normalizedMediaType(mediaType)
@@ -199,18 +174,53 @@ func genericTextFamily(mediaType string) string {
 		return DictionaryFamilyCSVTSV
 	case "text/yaml", "text/x-yaml", "text/toml":
 		return DictionaryFamilyYAMLToml
-	case "text/markdown", "text/x-rst", "text/x-log":
+	case "text/markdown", "text/x-rst":
+		return DictionaryFamilyDocumentMarkup
+	case "text/x-log":
 		return DictionaryFamilyLogsLineOriented
 	}
 
 	return DictionaryFamilyLogsLineOriented
 }
 
+func defaultEnabledDictionaryFamily(family string) bool {
+	switch family {
+	case DictionaryFamilyMailHeaders,
+		DictionaryFamilyMailBodyPlain,
+		DictionaryFamilyMailBodyHTML,
+		DictionaryFamilyGmeowMailJSON,
+		DictionaryFamilyPatchText:
+		return true
+	default:
+		return false
+	}
+}
+
+func trainableDictionaryFamilyList() []string {
+	return []string{
+		DictionaryFamilyMailHeaders,
+		DictionaryFamilyMailBodyPlain,
+		DictionaryFamilyMailBodyHTML,
+		DictionaryFamilyGmeowMailJSON,
+		DictionaryFamilyPatchText,
+		DictionaryFamilyStructuredJSON,
+		DictionaryFamilyStructuredXML,
+		DictionaryFamilyYAMLToml,
+		DictionaryFamilyHTMLCSSJS,
+		DictionaryFamilyDocumentMarkup,
+		DictionaryFamilySourceCode,
+		DictionaryFamilyLogsLineOriented,
+		DictionaryFamilyCSVTSV,
+		DictionaryFamilyRDFTurtle,
+		DictionaryFamilyBinarySerialization,
+	}
+}
+
 func dictionaryFamilyEligibleForTraining(family string) bool {
 	if family == "" || family == DictionaryFamilyOpaqueBinary {
 		return false
 	}
-	for _, candidate := range trainableDictionaryFamilies {
+	for _, candidate := range trainableDictionaryFamilyList() {
 		if family == candidate {
 			return true
 		}
@@ -225,5 +235,15 @@ func sanitizeDictionaryFamily(family string) string {
 		return ""
 	}
 
-	return filepath.Base(family)
+	var sanitized strings.Builder
+	for _, char := range family {
+		if (char >= 'a' && char <= 'z') ||
+			(char >= '0' && char <= '9') ||
+			char == '-' ||
+			char == '_' {
+			sanitized.WriteRune(char)
+		}
+	}
+
+	return sanitized.String()
 }

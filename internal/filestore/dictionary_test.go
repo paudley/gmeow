@@ -54,11 +54,40 @@ func TestDictionaryFamilyClassifier(t *testing.T) {
 			mediaType: "image/png",
 			want:      DictionaryFamilyOpaqueBinary,
 		},
+		{
+			name:      "markdown is document markup",
+			mediaType: "text/markdown; charset=utf-8",
+			want:      DictionaryFamilyDocumentMarkup,
+		},
+		{
+			name:      "rst is document markup",
+			mediaType: "text/x-rst",
+			want:      DictionaryFamilyDocumentMarkup,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := dictionaryFamilyForObject(tc.mediaType, tc.roles)
 			if got != tc.want {
 				t.Fatalf("family = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeDictionaryFamily(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		family string
+		want   string
+	}{
+		{name: "lowercase trim", family: " Mail-RFC822-Headers ", want: "mail-rfc822-headers"},
+		{name: "path separators", family: "../mail-rfc822-headers", want: "mail-rfc822-headers"},
+		{name: "dots removed", family: "..", want: ""},
+		{name: "underscore retained", family: "custom_family", want: "custom_family"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeDictionaryFamily(tc.family); got != tc.want {
+				t.Fatalf("sanitizeDictionaryFamily(%q) = %q, want %q", tc.family, got, tc.want)
 			}
 		})
 	}
@@ -196,6 +225,42 @@ func TestDefaultDictionariesBootstrapFreshStore(t *testing.T) {
 	}
 }
 
+func TestDefaultDictionariesBootstrapIgnoresEmptyStateDirs(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+
+	if err := os.MkdirAll(
+		filepath.Join(store.root, dictionariesDir, dictFilesDir),
+		0o750,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(store.dictionaryCurrentDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	digest, err := store.Put(ctx, PutRequest{
+		Reader:       strings.NewReader("From: a@example.test\r\nSubject: hello\r\n\r\n"),
+		MediaType:    "text/rfc822-headers",
+		ContentRoles: []string{contracts.MailHeadersRole},
+		Facets:       []contracts.Facet{{Kind: "email_part"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipe, ok, err := store.readRecipe(digest)
+	if err != nil || !ok {
+		t.Fatalf("recipe: ok=%t err=%v", ok, err)
+	}
+	entry, found, err := store.lookupChunk(recipe.ChunkHashes[0])
+	if err != nil || !found {
+		t.Fatalf("chunk index: found=%t err=%v", found, err)
+	}
+	if entry.DictID == "" || entry.DictFamily != DictionaryFamilyMailHeaders {
+		t.Fatalf("empty dictionary dirs blocked bootstrap: %#v", entry)
+	}
+}
+
 func TestLegacyGlobalDictionaryChunkRemainsReadable(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 
@@ -248,5 +313,50 @@ func TestLegacyGlobalDictionaryChunkRemainsReadable(t *testing.T) {
 	got, ok, err := store.readBlobContent(digest)
 	if err != nil || !ok || !bytes.Equal(got, content) {
 		t.Fatalf("legacy dictionary content did not round-trip: ok=%t err=%v", ok, err)
+	}
+}
+
+func TestActiveDictionaryLoadsLegacyDictionaryPath(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+
+	dictDir := filepath.Join(store.root, dictionariesDir)
+	if err := os.MkdirAll(dictDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	dictionary := []byte("legacy active dictionary")
+	if err := os.WriteFile(
+		filepath.Join(dictDir, "11.dict"),
+		dictionary,
+		0o640,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.writeDictionaryRegistry(dictionaryRegistry{
+		SchemaVersion: 1,
+		Dictionaries: map[string]dictionaryRegistryRecord{
+			"11": {
+				ID:       "11",
+				Family:   DictionaryFamilyMailHeaders,
+				Version:  "legacy",
+				Filename: "11.dict",
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(
+		store.dictionaryCurrentPath(DictionaryFamilyMailHeaders),
+		[]byte("11"),
+		0o640,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	id, got, err := store.activeDictionary(DictionaryFamilyMailHeaders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "11" || !bytes.Equal(got, dictionary) {
+		t.Fatalf("active legacy dictionary = id %q bytes %q", id, got)
 	}
 }

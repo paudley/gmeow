@@ -6,6 +6,7 @@ package filestore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"testing"
@@ -103,6 +104,59 @@ func TestTrainDictionaryInstallsAndAdopts(t *testing.T) {
 	got := openAll(t, ctx, store, digest)
 	if !bytes.Contains(got, []byte("new body")) {
 		t.Fatalf("dictionary-compressed object did not round-trip: %q", got)
+	}
+}
+
+func TestTrainDictionaryEmptyRequestTrainsAllFamilies(t *testing.T) {
+	if _, err := exec.LookPath("zstd"); err != nil {
+		t.Skip("zstd binary not available")
+	}
+
+	ctx := context.Background()
+	store := NewFilesystemStore(t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
+
+	for index := range 32 {
+		body := fmt.Sprintf(
+			"From: sender%[1]d@example.test\r\nTo: list@example.test\r\n"+
+				"Subject: all families %[1]d\r\n\r\nHello team, item %[1]d update.\r\n",
+			index,
+		)
+		if _, err := store.Put(ctx, PutRequest{
+			Reader:       bytes.NewReader([]byte(body)),
+			MediaType:    "text/rfc822-headers",
+			ContentRoles: []string{contracts.MailHeadersRole},
+			Facets:       []contracts.Facet{{Kind: "email_part"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report, err := store.TrainDictionary(ctx, TrainDictionaryRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) == 0 {
+		t.Fatalf("expected family training results: %#v", report)
+	}
+	if report.Results[0].Family != DictionaryFamilyMailHeaders {
+		t.Fatalf("unexpected family results: %#v", report.Results)
+	}
+}
+
+func TestTrainDictionaryTooFewSamplesUsesSentinel(t *testing.T) {
+	if _, err := exec.LookPath("zstd"); err != nil {
+		t.Skip("zstd binary not available")
+	}
+
+	store := NewFilesystemStore(t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, err := store.TrainDictionary(context.Background(), TrainDictionaryRequest{
+		Family: DictionaryFamilyMailHeaders,
+	})
+	if !errors.Is(err, ErrTooFewSamples) {
+		t.Fatalf("TrainDictionary error = %v, want ErrTooFewSamples", err)
 	}
 }
 

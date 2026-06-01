@@ -6,6 +6,7 @@ package filestore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +24,8 @@ const (
 	dictMaxBytes           = 112640
 	minDictSamples         = 16
 )
+
+var ErrTooFewSamples = errors.New("too few samples to train dictionary")
 
 type TrainDictionaryRequest struct {
 	Family      string `json:"family,omitempty"`
@@ -68,11 +71,10 @@ func (store *FilesystemStore) TrainDictionary(
 		return TrainDictionaryReport{}, err
 	}
 
-	if request.AllFamilies {
+	family := sanitizeDictionaryFamily(request.Family)
+	if request.AllFamilies || family == "" {
 		return store.trainAllDictionaryFamilies(ctx, request.SampleLimit)
 	}
-
-	family := sanitizeDictionaryFamily(request.Family)
 	if !dictionaryFamilyEligibleForTraining(family) {
 		return TrainDictionaryReport{}, fmt.Errorf(
 			"dictionary family %q is not trainable",
@@ -99,22 +101,19 @@ func (store *FilesystemStore) trainAllDictionaryFamilies(
 
 	results := []TrainDictionaryFamilyReport{}
 	for _, family := range families {
-		sampleCount, countErr := store.dictionarySampleCount(ctx, family, sampleLimit)
-		if countErr != nil {
-			return TrainDictionaryReport{}, countErr
-		}
-		if sampleCount < minDictSamples {
-			continue
-		}
 		result, trainErr := store.trainDictionaryFamily(ctx, family, sampleLimit)
 		if trainErr != nil {
+			if errors.Is(trainErr, ErrTooFewSamples) {
+				continue
+			}
 			return TrainDictionaryReport{}, trainErr
 		}
 		results = append(results, result)
 	}
 	if len(results) == 0 {
 		return TrainDictionaryReport{}, fmt.Errorf(
-			"need at least %d small-object samples in one trainable dictionary family",
+			"%w: need at least %d small-object samples in one trainable dictionary family",
+			ErrTooFewSamples,
 			minDictSamples,
 		)
 	}
@@ -144,7 +143,8 @@ func (store *FilesystemStore) trainDictionaryFamily(
 	}
 	if len(samplePaths) < minDictSamples {
 		return TrainDictionaryFamilyReport{}, fmt.Errorf(
-			"need at least %d small-object samples to train dictionary family %q, found %d",
+			"%w: need at least %d small-object samples to train dictionary family %q, found %d",
+			ErrTooFewSamples,
 			minDictSamples,
 			family,
 			len(samplePaths),
@@ -236,7 +236,11 @@ func (store *FilesystemStore) writeDictionarySamples(
 		}
 
 		digest := contracts.ObjectDigest(strings.TrimPrefix(key, "r/"))
-		if !store.objectMatchesDictionaryFamily(ctx, digest, family) {
+		matches, err := store.objectMatchesDictionaryFamily(ctx, digest, family)
+		if err != nil {
+			return err
+		}
+		if !matches {
 			return nil
 		}
 
@@ -267,28 +271,20 @@ func (store *FilesystemStore) objectMatchesDictionaryFamily(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 	family string,
-) bool {
+) (bool, error) {
 	manifest, err := store.ReadManifest(ctx, digest)
 	if err != nil {
-		return false
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+
+		return false, nil
 	}
 
-	return dictionaryFamilyForObject(manifest.MediaType, manifest.ContentRoles) == family
-}
-
-func (store *FilesystemStore) dictionarySampleCount(
-	ctx context.Context,
-	family string,
-	sampleLimit int,
-) (int, error) {
-	sampleDir, err := os.MkdirTemp("", "gmdict-count-")
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = os.RemoveAll(sampleDir) }()
-
-	paths, err := store.writeDictionarySamples(ctx, sampleDir, sampleLimit, family)
-	return len(paths), err
+	return dictionaryFamilyForObject(
+		manifest.MediaType,
+		manifest.ContentRoles,
+	) == family, nil
 }
 
 func (store *FilesystemStore) dictionaryFamiliesWithSamples(
@@ -302,6 +298,7 @@ func (store *FilesystemStore) dictionaryFamiliesWithSamples(
 	defer func() { _ = snapshot.Close() }()
 
 	seen := map[string]bool{}
+	trainableFamilies := trainableDictionaryFamilyList()
 	err = snapshotIterPrefix(snapshot, "r/", func(key string, value []byte) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -317,13 +314,17 @@ func (store *FilesystemStore) dictionaryFamiliesWithSamples(
 		digest := contracts.ObjectDigest(strings.TrimPrefix(key, "r/"))
 		manifest, err := store.ReadManifest(ctx, digest)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+
 			return nil
 		}
 		family := dictionaryFamilyForObject(manifest.MediaType, manifest.ContentRoles)
 		if dictionaryFamilyEligibleForTraining(family) {
 			seen[family] = true
 		}
-		if len(seen) >= len(trainableDictionaryFamilies) ||
+		if len(seen) >= len(trainableFamilies) ||
 			len(seen) >= sampleLimit {
 			return nil
 		}
@@ -335,7 +336,7 @@ func (store *FilesystemStore) dictionaryFamiliesWithSamples(
 	}
 
 	families := make([]string, 0, len(seen))
-	for _, family := range trainableDictionaryFamilies {
+	for _, family := range trainableFamilies {
 		if seen[family] {
 			families = append(families, family)
 		}
