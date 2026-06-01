@@ -80,15 +80,13 @@ not already-complete NER, categorization, embedding, header, or metadata output.
 Retry, exponential backoff, and dead-letter routing live entirely in RabbitMQ —
 never in FILESTORE markers.
 
-## Source Import Jobs
+## Source Import Boundary
 
-Archive import uses scheduler-owned source-import queues. The admin source import
-command is a foreground producer and worker: it walks operator-supplied archive
-roots, publishes one durable job per RFC822 message or mbox offset, and consumes
-those jobs until the run completes. Jobs are idempotent by source name, root,
-relative path, format, and offset. Failed jobs route through the same
-retry/backoff/dead-letter policy as analyzer work, but use separate queues so
-large imports do not block analysis.
+Archive import does not use SCHEDULER-owned queues. The admin source import
+command walks operator-supplied archive roots locally, parses messages, and
+writes them directly to FILESTORE over gRPC. FILESTORE is the first durable
+boundary for imported mail; the scheduler is involved only after FILESTORE emits
+object-change notifications for stored or changed objects.
 
 ANALYSIS workers consume scheduler-delivered jobs and ack only after durable
 FILESTORE writes. If a worker crashes before ack, RabbitMQ redelivers. If a

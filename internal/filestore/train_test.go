@@ -80,10 +80,40 @@ func TestTrainDictionaryInstallsAndAdopts(t *testing.T) {
 			report.DictionaryID,
 		)
 	}
+	breakdown, err := store.StorageBreakdown(ctx, StorageBreakdownRequest{
+		Digest: digest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDictionaryStorageRow(t, breakdown, digest, report.DictionaryID)
 
 	// And the object still reads back intact through the dictionary decoder.
 	got := openAll(t, ctx, store, digest)
 	if !bytes.Contains(got, []byte("new body")) {
 		t.Fatalf("dictionary-compressed object did not round-trip: %q", got)
 	}
+}
+
+func assertDictionaryStorageRow(
+	t *testing.T,
+	report StorageBreakdownReport,
+	digest contracts.ObjectDigest,
+	dictID string,
+) {
+	t.Helper()
+	for _, file := range report.Files {
+		if file.ObjectDigest != digest || file.Role != "content" {
+			continue
+		}
+		if file.DictID != dictID ||
+			len(file.DictIDs) != 1 ||
+			file.DictIDs[0] != dictID ||
+			file.ChunkCount == 0 {
+			t.Fatalf("unexpected dictionary storage row: %#v", file)
+		}
+
+		return
+	}
+	t.Fatalf("missing dictionary storage row for %s: %#v", digest, report.Files)
 }

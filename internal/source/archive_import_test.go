@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -195,6 +196,176 @@ func TestArchiveImportMaildirReadOnlyAndGeneratedMessageID(t *testing.T) {
 	}
 }
 
+func TestArchiveImportExactReimportDoesNotMutateFilestore(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	messagePath := filepath.Join(root, "cur", "1:2,S")
+	writeTestFile(t, filepath.Join(root, "tmp", ".keep"), "")
+	writeTestFile(t, filepath.Join(root, "new", ".keep"), "")
+	writeTestFile(
+		t,
+		messagePath,
+		"Message-ID: <exact@example.test>\nFrom: a@example.test\nTo: b@example.test\nSubject: Exact\n\nsame body\n",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReport, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstReport.Imported != 1 {
+		t.Fatalf("expected first import to write one canonical message, got %#v", firstReport)
+	}
+
+	canonical, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind: contracts.MailIdentitySourceKind,
+			SourceName: contracts.MailIdentitySourceName,
+			ExternalID: "<exact@example.test>",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected canonical message lookup")
+	}
+	before := archiveObjectManifests(t, ctx, filestoreService, canonical)
+
+	secondReport, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondReport.Imported != 0 ||
+		secondReport.ExactDuplicates != 0 ||
+		secondReport.MessageIDDuplicates != 1 {
+		t.Fatalf("expected exact reimport to be a duplicate no-op, got %#v", secondReport)
+	}
+
+	after := archiveObjectManifests(t, ctx, filestoreService, canonical)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf(
+			"exact reimport mutated filestore manifests\nbefore=%#v\nafter=%#v",
+			before,
+			after,
+		)
+	}
+}
+
+func TestArchiveImportProgressIncludesPrecountTotal(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	writeTestFile(
+		t,
+		filepath.Join(root, "one.eml"),
+		"Message-ID: <one@example.test>\nSubject: one\n\none\n",
+	)
+	writeTestFile(
+		t,
+		filepath.Join(root, "two.eml"),
+		"Message-ID: <two@example.test>\nSubject: two\n\ntwo\n",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final ArchiveImportProgress
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{root},
+		Progress: func(progress ArchiveImportProgress) {
+			final = progress
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Imported != 2 {
+		t.Fatalf("expected two imports, got %#v", report)
+	}
+	if final.Total != 2 || final.Ingested != 2 {
+		t.Fatalf("expected final progress 2/2, got %#v", final)
+	}
+}
+
+func TestArchiveImportPrecountSingleFileMirrorsImportRoot(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "message")
+	writeTestFile(t, path, "X-Test: one\n\nbody\n")
+
+	count, err := countArchiveRootMessages(
+		context.Background(),
+		path,
+		ArchiveImportFormatAuto,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected single non-directory root to count as one message, got %d", count)
+	}
+}
+
+func TestArchiveImportPrecountKeepsPartialMboxCountOnScannerError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "Inbox")
+	writeTestFile(t, path, strings.Join([]string{
+		"From sender@example.test Sat Jan 01 00:00:00 2000",
+		"Message-ID: <one@example.test>",
+		"Subject: one",
+		"",
+		"first body",
+		"From sender@example.test Sat Jan 01 00:00:01 2000",
+		strings.Repeat("x", 33*1024*1024),
+	}, "\n"))
+
+	count, err := countArchiveRootMessages(
+		context.Background(),
+		path,
+		ArchiveImportFormatMbox,
+	)
+	if err == nil {
+		t.Fatal("expected scanner error")
+	}
+	if count != 1 {
+		t.Fatalf("expected partial mbox count to keep first message, got %d", count)
+	}
+}
+
+func TestArchiveImportPrecountSkipsBadRoots(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(
+		t,
+		filepath.Join(root, "one.eml"),
+		"Message-ID: <one@example.test>\nSubject: one\n\none\n",
+	)
+
+	count, err := countArchiveImportMessages(context.Background(), ArchiveImportRequest{
+		Roots: []string{filepath.Join(root, "missing"), root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected count from valid root only, got %d", count)
+	}
+}
+
 func TestArchiveImportMboxNNMLAndCollisionVariant(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
@@ -376,6 +547,37 @@ func TestArchiveImportVariantDoesNotOverwriteCanonicalParts(t *testing.T) {
 	if metadata["subject"] != "canonical" {
 		t.Fatalf("canonical metadata was overwritten: %#v", metadata)
 	}
+}
+
+func archiveObjectManifests(
+	t *testing.T,
+	ctx context.Context,
+	filestoreService *testsupport.FilestoreService,
+	canonical contracts.ObjectDigest,
+) map[contracts.ObjectDigest]contracts.Manifest {
+	t.Helper()
+
+	structure, err := filestoreService.Store.GetStructure(ctx, canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digests := map[contracts.ObjectDigest]bool{canonical: true}
+	for _, parts := range structure.PartsByRole {
+		for _, part := range parts {
+			digests[part.Digest] = true
+		}
+	}
+
+	manifests := make(map[contracts.ObjectDigest]contracts.Manifest, len(digests))
+	for digest := range digests {
+		manifest, err := filestoreService.Store.ReadManifest(ctx, digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifests[digest] = manifest
+	}
+
+	return manifests
 }
 
 func TestArchiveImportLowNoiseSkipsBodyLineMatchesWithoutProvenance(t *testing.T) {

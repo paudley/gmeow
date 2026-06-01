@@ -192,9 +192,10 @@ Historical archive mail import is available through
 read-only inputs: gmeow never rewrites maildir flags, mbox files, NNML folders,
 or source archive metadata. Imported messages use normalized RFC Message-ID as
 the primary dedupe key; messages without one receive deterministic
-`gmeow-generated` Message-IDs. Non-dry-run archive import is queue-backed:
-the command walks the roots, enqueues one scheduler-owned source-import job per
-message, and drains those jobs in the foreground. Local run state defaults to
+`gmeow-generated` Message-IDs. Non-dry-run archive import is direct: the
+command first walks the roots locally for an accurate message count, then parses
+each message and writes it to FILESTORE over gRPC. Re-running the same import is
+safe because exact matches are FILESTORE no-ops. Local run records default to
 `system.data_dir/import-runs` and can be overridden with `--state-dir`.
 `--low-noise` records compact archive membership for existing Message-ID/body-line
 matches and trivial archive differences without rewriting canonical message

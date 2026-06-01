@@ -149,9 +149,18 @@ func TestSourceImportCommandIncludesLowNoise(t *testing.T) {
 	if !strings.Contains(out.String(), "low-noise") {
 		t.Fatalf("help output missing low-noise flag:\n%s", out.String())
 	}
-	for _, flag := range []string{"state-dir", "resume", "queue-high-water"} {
+	for _, flag := range []string{"state-dir", "concurrency"} {
 		if !strings.Contains(out.String(), flag) {
 			t.Fatalf("help output missing %s flag:\n%s", flag, out.String())
+		}
+	}
+	for _, removed := range []string{"resume", "queue-high-water"} {
+		if strings.Contains(out.String(), removed) {
+			t.Fatalf(
+				"help output still exposes queued import flag %s:\n%s",
+				removed,
+				out.String(),
+			)
 		}
 	}
 }
