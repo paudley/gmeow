@@ -64,6 +64,77 @@ func TestAdminCommandIncludesMailMissingGmailReport(t *testing.T) {
 	}
 }
 
+func TestAdminCommandIncludesContactQuerySurface(t *testing.T) {
+	var out bytes.Buffer
+	command := NewAdminCommand(&out, strings.NewReader(""))
+	command.SetOut(&out)
+	command.SetArgs([]string{"query", "contact", "--help"})
+
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	output := out.String()
+	for _, commandName := range []string{
+		"search",
+		"aggregate",
+		"resolve",
+		"identities",
+		"facts",
+		"neighborhood",
+		"messages",
+		"similar",
+		"vector-search",
+		"analysis-inputs",
+		"analysis-status",
+		"analyze",
+	} {
+		if !strings.Contains(output, commandName) {
+			t.Fatalf("help output missing contact %s:\n%s", commandName, output)
+		}
+	}
+}
+
+func TestParseFloat32CSV(t *testing.T) {
+	vector, err := parseFloat32CSV("1, 2.5,-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := []float32{1, 2.5, -3}
+	if len(vector) != len(expected) {
+		t.Fatalf("unexpected vector length: %#v", vector)
+	}
+	for index := range expected {
+		if vector[index] != expected[index] {
+			t.Fatalf("unexpected vector at %d: %#v", index, vector)
+		}
+	}
+}
+
+func TestParseFloat32CSVRejectsEmptyAndMalformedValues(t *testing.T) {
+	for _, raw := range []string{"", " ", "1,nope"} {
+		if _, err := parseFloat32CSV(raw); err == nil {
+			t.Fatalf("expected %q to fail", raw)
+		}
+	}
+}
+
+func TestContactVectorSearchRequiresVectorFlag(t *testing.T) {
+	var out bytes.Buffer
+	command := NewAdminCommand(&out, strings.NewReader(""))
+	command.SetOut(&out)
+	command.SetArgs([]string{"query", "contact", "vector-search"})
+
+	err := command.Execute()
+	if err == nil {
+		t.Fatal("expected missing vector flag to fail")
+	}
+	if !strings.Contains(err.Error(), `required flag(s) "vector" not set`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestSourceImportCommandIncludesLowNoise(t *testing.T) {
 	var out bytes.Buffer
 	command := NewAdminCommand(&out, strings.NewReader(""))
