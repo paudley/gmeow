@@ -4,7 +4,9 @@
 package postgres
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"blackcat.ca/gmeow/internal/contracts"
@@ -60,7 +62,7 @@ func searchText(
 	for _, facet := range manifest.Facets {
 		parts = append(parts, facet.Kind, facet.Name)
 		if len(facet.Metadata) > 0 {
-			encoded, err := json.Marshal(facet.Metadata)
+			encoded, err := marshalPostgresJSON(facet.Metadata)
 			if err == nil {
 				parts = append(parts, string(encoded))
 			}
@@ -76,12 +78,58 @@ func searchText(
 		)
 	}
 
-	encoded, err := json.Marshal(annotations)
+	encoded, err := marshalPostgresJSON(annotations)
 	if err == nil {
 		parts = append(parts, string(encoded))
 	}
 
-	return truncateSearchText(strings.Join(parts, "\n"))
+	return truncateSearchText(stripPostgresNUL(strings.Join(parts, "\n")))
+}
+
+func marshalPostgresJSON(value any) ([]byte, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode postgres json payload: %w", err)
+	}
+
+	return stripPostgresNULJSONEscapes(encoded), nil
+}
+
+func stripPostgresNULJSONEscapes(encoded []byte) []byte {
+	if !bytes.Contains(encoded, []byte(`\u0000`)) {
+		return encoded
+	}
+
+	result := make([]byte, 0, len(encoded))
+	for offset := 0; offset < len(encoded); offset++ {
+		if isPostgresNULJSONEscape(encoded, offset) {
+			offset += len(`\u0000`) - 1
+
+			continue
+		}
+
+		result = append(result, encoded[offset])
+	}
+
+	return result
+}
+
+func isPostgresNULJSONEscape(encoded []byte, offset int) bool {
+	if offset+len(`\u0000`) > len(encoded) ||
+		!bytes.Equal(encoded[offset:offset+len(`\u0000`)], []byte(`\u0000`)) {
+		return false
+	}
+
+	backslashes := 0
+	for cursor := offset - 1; cursor >= 0 && encoded[cursor] == '\\'; cursor-- {
+		backslashes++
+	}
+
+	return backslashes%2 == 0
+}
+
+func stripPostgresNUL(value string) string {
+	return strings.ReplaceAll(value, "\x00", "")
 }
 
 func truncateSearchText(text string) string {

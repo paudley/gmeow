@@ -19,12 +19,21 @@ import (
 
 type SourceImportPublisher interface {
 	PublishSourceImportJob(context.Context, contracts.SourceImportJob) error
+	RunSourceImportFailureQueues(ctx context.Context) error
 	ProcessSourceImportFailures(context.Context, int) (int, error)
 	SourceImportStatus(context.Context) (contracts.SourceImportQueueStatus, error)
 }
 
+const sourceImportFailureQueueLimit = 100
+
+const sourceImportFailureQueueRunnerCount = 2
+
+var errSourceImportDeadLetter = errors.New(
+	"source import dead-letter queue received job",
+)
+
 func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
-	if err := channel.ExchangeDeclare(
+	err := channel.ExchangeDeclare(
 		broker.topology.sourceImportExchange,
 		"direct",
 		true,
@@ -32,7 +41,8 @@ func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
 		false,
 		false,
 		nil,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("declare source import exchange: %w", err)
 	}
 
@@ -50,6 +60,7 @@ func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
 	); err != nil {
 		return fmt.Errorf("declare source import work queue: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.sourceImportRetryQueue,
 		true,
@@ -63,6 +74,7 @@ func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
 	); err != nil {
 		return fmt.Errorf("declare source import retry queue: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.sourceImportFailedQueue,
 		true,
@@ -73,6 +85,7 @@ func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
 	); err != nil {
 		return fmt.Errorf("declare source import failed queue: %w", err)
 	}
+
 	if _, err := channel.QueueDeclare(
 		broker.topology.sourceImportDeadLetterQueue,
 		true,
@@ -119,11 +132,15 @@ type SourceImportJobSourceConfig struct {
 }
 
 type SourceImportJobSource struct {
-	connection *amqp.Connection
-	channel    *amqp.Channel
-	deliveries <-chan amqp.Delivery
-	config     SourceImportJobSourceConfig
-	mutex      sync.Mutex
+	connection      *amqp.Connection
+	channel         *amqp.Channel
+	deliveries      <-chan amqp.Delivery
+	publishChannel  *amqp.Channel
+	publishConfirms <-chan amqp.Confirmation
+	publishReturns  <-chan amqp.Return
+	config          SourceImportJobSourceConfig
+	mutex           sync.Mutex
+	publishMutex    sync.Mutex
 }
 
 func NewSourceImportJobSource(
@@ -133,9 +150,11 @@ func NewSourceImportJobSource(
 	if strings.TrimSpace(config.URL) == "" {
 		return nil, errors.New("scheduler rabbitmq url is required")
 	}
+
 	if strings.TrimSpace(config.QueuePrefix) == "" {
 		config.QueuePrefix = defaultQueuePrefix
 	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -159,15 +178,8 @@ func (broker *Broker) PublishSourceImportJob(
 		return err
 	}
 
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return err
-	}
-	defer channel.Close()
-
-	return publishConfirmed(
+	return broker.publishPersistent(
 		ctx,
-		channel,
 		broker.topology.sourceImportExchange,
 		sourceImportWorkRoutingKey,
 		amqp.Publishing{
@@ -175,7 +187,7 @@ func (broker *Broker) PublishSourceImportJob(
 			DeliveryMode: amqp.Persistent,
 			MessageId:    job.IdempotencyKey,
 			Timestamp:    time.Now().UTC(),
-			Priority:     uint8(clampPriority(job.Priority)),
+			Priority:     clampPriority(job.Priority),
 			Headers: amqp.Table{
 				"idempotency_key": job.IdempotencyKey,
 				"attempt":         int32(job.Attempt),
@@ -189,25 +201,33 @@ func (broker *Broker) PublishSourceImportJob(
 func (broker *Broker) SourceImportStatus(
 	ctx context.Context,
 ) (contracts.SourceImportQueueStatus, error) {
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return contracts.SourceImportQueueStatus{}, err
-	}
-	defer channel.Close()
+	var work, retry, failed, dead amqp.Queue
 
-	work, err := channel.QueueInspect(broker.topology.sourceImportWorkQueue)
-	if err != nil {
-		return contracts.SourceImportQueueStatus{}, err
-	}
-	retry, err := channel.QueueInspect(broker.topology.sourceImportRetryQueue)
-	if err != nil {
-		return contracts.SourceImportQueueStatus{}, err
-	}
-	failed, err := channel.QueueInspect(broker.topology.sourceImportFailedQueue)
-	if err != nil {
-		return contracts.SourceImportQueueStatus{}, err
-	}
-	dead, err := channel.QueueInspect(broker.topology.sourceImportDeadLetterQueue)
+	err := broker.withAdmin(ctx, func(channel *amqp.Channel) error {
+		var inspectErr error
+
+		work, inspectErr = inspectQueue(channel, broker.topology.sourceImportWorkQueue)
+		if inspectErr != nil {
+			return inspectErr
+		}
+
+		retry, inspectErr = inspectQueue(channel, broker.topology.sourceImportRetryQueue)
+		if inspectErr != nil {
+			return inspectErr
+		}
+
+		failed, inspectErr = inspectQueue(channel, broker.topology.sourceImportFailedQueue)
+		if inspectErr != nil {
+			return inspectErr
+		}
+
+		dead, inspectErr = inspectQueue(channel, broker.topology.sourceImportDeadLetterQueue)
+		if inspectErr != nil {
+			return inspectErr
+		}
+
+		return nil
+	})
 	if err != nil {
 		return contracts.SourceImportQueueStatus{}, err
 	}
@@ -221,6 +241,28 @@ func (broker *Broker) SourceImportStatus(
 	}, nil
 }
 
+func (broker *Broker) RunSourceImportFailureQueues(ctx context.Context) error {
+	errc := make(chan error, sourceImportFailureQueueRunnerCount)
+
+	go func() {
+		errc <- broker.runSourceImportFailedQueue(ctx)
+	}()
+	go func() {
+		errc <- broker.watchSourceImportDeadLetterQueue(ctx)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("run source import failure queues: %w", ctx.Err())
+	case err := <-errc:
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+}
+
 func (broker *Broker) ProcessSourceImportFailures(
 	ctx context.Context,
 	limit int,
@@ -229,70 +271,116 @@ func (broker *Broker) ProcessSourceImportFailures(
 		limit = 100
 	}
 
-	channel, err := broker.channel(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer channel.Close()
-	confirms, err := enablePublishConfirms(channel)
-	if err != nil {
-		return 0, err
-	}
-
 	processed := 0
-	for processed < limit {
-		delivery, ok, err := channel.Get(
-			broker.topology.sourceImportFailedQueue,
-			false,
-		)
-		if err != nil {
-			return processed, err
+
+	consumeErr := broker.withConsumer(ctx, func(channel *amqp.Channel) error {
+		for processed < limit {
+			delivery, received, getErr := broker.receiveDelivery(
+				ctx,
+				broker.topology.sourceImportFailedQueue,
+				processed == 0,
+			)
+			if getErr != nil {
+				return getErr
+			}
+
+			if !received {
+				break
+			}
+
+			var job contracts.SourceImportJob
+
+			unmarshalErr := json.Unmarshal(delivery.Body, &job)
+			if unmarshalErr != nil {
+				return nackAfterError(
+					delivery,
+					fmt.Errorf("decode failed source import job: %w", unmarshalErr),
+				)
+			}
+
+			job.Attempt++
+
+			routingKey := sourceImportRetryRoutingKey
+			if job.Attempt > broker.config.RetryLimit {
+				routingKey = sourceImportDeadLetterRoutingKey
+			}
+
+			body, marshalErr := json.Marshal(job)
+			if marshalErr != nil {
+				return nackAfterError(
+					delivery,
+					fmt.Errorf("encode retried source import job: %w", marshalErr),
+				)
+			}
+
+			publishErr := broker.publishPersistent(
+				ctx,
+				broker.topology.sourceImportExchange,
+				routingKey,
+				broker.sourceImportRetryPublishing(job, body),
+			)
+			if publishErr != nil {
+				return nackAfterError(delivery, publishErr)
+			}
+
+			ackErr := ackDelivery(delivery)
+			if ackErr != nil {
+				return ackErr
+			}
+
+			processed++
 		}
-		if !ok {
-			break
-		}
 
-		var job contracts.SourceImportJob
-		if err := json.Unmarshal(delivery.Body, &job); err != nil {
-			_ = delivery.Nack(false, true)
-
-			return processed, err
-		}
-
-		job.Attempt++
-		routingKey := sourceImportRetryRoutingKey
-		if job.Attempt > broker.config.RetryLimit {
-			routingKey = sourceImportDeadLetterRoutingKey
-		}
-
-		body, err := json.Marshal(job)
-		if err != nil {
-			_ = delivery.Nack(false, true)
-
-			return processed, err
-		}
-
-		if err := publishAndWaitConfirmed(
-			ctx,
-			channel,
-			confirms,
-			broker.topology.sourceImportExchange,
-			routingKey,
-			broker.sourceImportRetryPublishing(job, body),
-		); err != nil {
-			_ = delivery.Nack(false, true)
-
-			return processed, err
-		}
-
-		if err := delivery.Ack(false); err != nil {
-			return processed, err
-		}
-
-		processed++
+		return nil
+	})
+	if consumeErr != nil {
+		return processed, consumeErr
 	}
 
 	return processed, nil
+}
+
+func (broker *Broker) runSourceImportFailedQueue(ctx context.Context) error {
+	for {
+		_, err := broker.ProcessSourceImportFailures(ctx, sourceImportFailureQueueLimit)
+		if err != nil {
+			return fmt.Errorf("process source import failed queue: %w", err)
+		}
+	}
+}
+
+func (broker *Broker) watchSourceImportDeadLetterQueue(ctx context.Context) error {
+	for {
+		delivery, received, err := broker.receiveDelivery(
+			ctx,
+			broker.topology.sourceImportDeadLetterQueue,
+			true,
+		)
+		if err != nil {
+			return fmt.Errorf("receive source import dead-letter queue: %w", err)
+		}
+
+		if !received {
+			continue
+		}
+
+		var job contracts.SourceImportJob
+
+		unmarshalErr := json.Unmarshal(delivery.Body, &job)
+		if unmarshalErr != nil {
+			return nackAfterError(
+				delivery,
+				fmt.Errorf("decode source import dead-letter job: %w", unmarshalErr),
+			)
+		}
+
+		nackErr := nackDelivery(delivery, true)
+		if nackErr != nil {
+			return nackErr
+		}
+
+		return fmt.Errorf("%w: %s", errSourceImportDeadLetter, job.IdempotencyKey)
+	}
 }
 
 func (broker *Broker) sourceImportRetryPublishing(
@@ -300,6 +388,7 @@ func (broker *Broker) sourceImportRetryPublishing(
 	body []byte,
 ) amqp.Publishing {
 	backoff := broker.retryBackoff(job.Attempt)
+
 	headers := amqp.Table{
 		"idempotency_key": job.IdempotencyKey,
 		"attempt":         int32(job.Attempt),
@@ -314,7 +403,7 @@ func (broker *Broker) sourceImportRetryPublishing(
 		DeliveryMode: amqp.Persistent,
 		MessageId:    job.IdempotencyKey,
 		Timestamp:    time.Now().UTC(),
-		Priority:     uint8(clampPriority(job.Priority)),
+		Priority:     clampPriority(job.Priority),
 		Headers:      headers,
 		Body:         body,
 	}
@@ -328,7 +417,8 @@ func (broker *Broker) sourceImportRetryPublishing(
 func (source *SourceImportJobSource) Receive(
 	ctx context.Context,
 ) (SourceImportReceipt, error) {
-	if err := source.ensureConsumer(ctx); err != nil {
+	err := source.ensureConsumer(ctx)
+	if err != nil {
 		return nil, err
 	}
 
@@ -341,7 +431,9 @@ func (source *SourceImportJobSource) Receive(
 		}
 
 		var job contracts.SourceImportJob
-		if err := json.Unmarshal(delivery.Body, &job); err != nil {
+
+		err := json.Unmarshal(delivery.Body, &job)
+		if err != nil {
 			_ = delivery.Nack(false, false)
 
 			return nil, fmt.Errorf("decode source import job: %w", err)
@@ -356,20 +448,35 @@ func (source *SourceImportJobSource) Receive(
 }
 
 func (source *SourceImportJobSource) Close() error {
-	source.mutex.Lock()
-	defer source.mutex.Unlock()
+	source.publishMutex.Lock()
 
 	var err error
+	if source.publishChannel != nil {
+		err = source.publishChannel.Close()
+		source.publishChannel = nil
+		source.publishConfirms = nil
+		source.publishReturns = nil
+	}
+	source.publishMutex.Unlock()
+
+	source.mutex.Lock()
+
 	if source.channel != nil {
-		err = source.channel.Close()
+		if closeErr := source.channel.Close(); err == nil {
+			err = closeErr
+		}
+
 		source.channel = nil
 	}
+
 	if source.connection != nil {
 		if closeErr := source.connection.Close(); err == nil {
 			err = closeErr
 		}
+
 		source.connection = nil
 	}
+	source.mutex.Unlock()
 
 	return err
 }
@@ -381,8 +488,13 @@ func (source *SourceImportJobSource) ensureConsumer(ctx context.Context) error {
 	if source.deliveries != nil {
 		return nil
 	}
+
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+
+	if source.connection == nil {
+		return errBrokerClosed
 	}
 
 	channel, err := source.connection.Channel()
@@ -394,14 +506,14 @@ func (source *SourceImportJobSource) ensureConsumer(ctx context.Context) error {
 	if prefetch <= 0 {
 		prefetch = 1
 	}
+
 	if err := channel.Qos(prefetch, 0, false); err != nil {
 		_ = channel.Close()
 
 		return fmt.Errorf("set scheduler rabbitmq source import qos: %w", err)
 	}
 
-	deliveries, err := channel.ConsumeWithContext(
-		ctx,
+	deliveries, err := channel.Consume(
 		source.config.QueuePrefix+sourceImportWorkSuffix,
 		"",
 		false,
@@ -430,66 +542,125 @@ func (source *SourceImportJobSource) publishFailure(
 	if cause != nil {
 		job.Failure = cause.Error()
 	}
+
 	body, err := json.Marshal(job)
 	if err != nil {
 		return err
 	}
-
-	channel, err := source.connection.Channel()
-	if err != nil {
-		return fmt.Errorf("open scheduler rabbitmq source import failure channel: %w", err)
-	}
-	defer channel.Close()
-
-	if err := channel.Confirm(false); err != nil {
-		return fmt.Errorf("enable scheduler rabbitmq source import failure confirms: %w", err)
-	}
-	confirms := channel.NotifyPublish(make(chan amqp.Confirmation, 1))
-	closed := channel.NotifyClose(make(chan *amqp.Error, 1))
 
 	headers := amqp.Table{"attempt": int32(job.Attempt)}
 	if cause != nil {
 		headers["failure"] = cause.Error()
 	}
 
-	if err := channel.PublishWithContext(
+	return source.publishFailurePersistent(
 		ctx,
 		source.config.QueuePrefix+sourceImportExSuffix,
 		sourceImportFailedRoutingKey,
-		false,
-		false,
 		amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
 			MessageId:    job.IdempotencyKey,
 			Timestamp:    time.Now().UTC(),
-			Priority:     uint8(clampPriority(job.Priority)),
+			Priority:     clampPriority(job.Priority),
 			Headers:      headers,
 			Body:         body,
 		},
-	); err != nil {
+	)
+}
+
+func (source *SourceImportJobSource) publishFailurePersistent(
+	ctx context.Context,
+	exchange string,
+	routingKey string,
+	publishing amqp.Publishing,
+) error {
+	source.publishMutex.Lock()
+	defer source.publishMutex.Unlock()
+
+	channel, err := source.publisher(ctx)
+	if err != nil {
 		return err
 	}
 
-	select {
-	case confirmation, ok := <-confirms:
-		if !ok {
-			return errors.New("source import failure confirm channel closed before confirmation")
-		}
-		if !confirmation.Ack {
-			return errors.New("source import failure publish was not confirmed")
-		}
+	err = channel.PublishWithContext(ctx, exchange, routingKey, true, false, publishing)
+	if err != nil {
+		source.resetPublisher()
 
-		return nil
-	case closeErr := <-closed:
-		if closeErr != nil {
-			return fmt.Errorf(
-				"source import failure publish channel closed before confirmation: %w",
-				closeErr,
-			)
-		}
-		return errors.New("source import failure publish channel closed before confirmation")
+		return fmt.Errorf("publish scheduler rabbitmq source import failure: %w", err)
 	}
+
+	err = waitRabbitMQPublishConfirmed(
+		ctx,
+		exchange,
+		routingKey,
+		source.publishConfirms,
+		source.publishReturns,
+	)
+	if err != nil {
+		source.resetPublisher()
+
+		return err
+	}
+
+	return nil
+}
+
+func (source *SourceImportJobSource) publisher(
+	ctx context.Context,
+) (*amqp.Channel, error) {
+	if source.publishChannel != nil {
+		return source.publishChannel, nil
+	}
+
+	err := ctx.Err()
+	if err != nil {
+		return nil, fmt.Errorf("publish source import failure: %w", err)
+	}
+
+	source.mutex.Lock()
+	if source.connection == nil {
+		source.mutex.Unlock()
+
+		return nil, errBrokerClosed
+	}
+
+	channel, err := source.connection.Channel()
+	source.mutex.Unlock()
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"open scheduler rabbitmq source import failure channel: %w",
+			err,
+		)
+	}
+
+	confirms, returns, err := configureRabbitMQPublisher(channel)
+	if err != nil {
+		_ = channel.Close()
+
+		return nil, err
+	}
+
+	source.publishChannel = channel
+	source.publishConfirms = confirms
+	source.publishReturns = returns
+
+	return channel, nil
+}
+
+func (source *SourceImportJobSource) resetPublisher() {
+	if source.publishChannel == nil {
+		return
+	}
+
+	channel := source.publishChannel
+
+	source.publishChannel = nil
+	source.publishConfirms = nil
+	source.publishReturns = nil
+
+	closeRabbitMQChannelAsync(channel)
 }
 
 type SourceImportJobReceipt struct {
@@ -528,6 +699,7 @@ func (receipt *SourceImportJobReceipt) Retry(ctx context.Context, cause error) e
 	if err != nil {
 		receipt.source.mutex.Lock()
 		defer receipt.source.mutex.Unlock()
+
 		_ = receipt.delivery.Nack(false, true)
 
 		return err

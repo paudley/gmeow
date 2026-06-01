@@ -29,6 +29,8 @@ import (
 
 var configuredSourceRetryDelay = 30 * time.Second
 
+const schedulerPressureCheckTimeout = 5 * time.Second
+
 // schedulerPressureGate reports the scheduler's analysis backpressure to the
 // source with the same high/low-water hysteresis the scheduler applies
 // internally: it engages at or above the high-water mark and only releases once
@@ -60,7 +62,10 @@ func newSchedulerPressureGate(
 }
 
 func (gate *schedulerPressureGate) Pressured(ctx context.Context) (bool, error) {
-	status, err := gate.client.Status(ctx)
+	checkCtx, cancel := context.WithTimeout(ctx, schedulerPressureCheckTimeout)
+	defer cancel()
+
+	status, err := gate.client.Status(checkCtx)
 	if err != nil {
 		return false, err
 	}

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,11 @@ type GmailAdapter struct {
 	name    string
 }
 
+const (
+	concurrentGmailPartWaitTimeout = 5 * time.Second
+	concurrentGmailPartPoll        = 100 * time.Millisecond
+)
+
 type GmailSearchHit struct {
 	MessageID string
 	Version   string
@@ -53,8 +59,8 @@ type GmailListRequest struct {
 }
 
 type GmailListPage struct {
-	Hits           []GmailSearchHit
 	NextPageToken  string
+	Hits           []GmailSearchHit
 	ResultEstimate int
 }
 
@@ -65,33 +71,33 @@ type GmailHistoryRequest struct {
 }
 
 type GmailHistoryPage struct {
-	MessageIDs      []string
 	NextPageToken   string
 	LatestHistoryID string
+	MessageIDs      []string
 	Expired         bool
 }
 
 type GmailAttachment struct {
-	Content   []byte
 	FileName  string
 	MediaType string
 	ID        string
 	Version   string
+	Content   []byte
 }
 
 type GmailMessage struct {
 	ObservedAt   time.Time
 	Headers      map[string]string
 	Metadata     map[string]any
-	RawMessage   []byte
-	Body         []byte
-	Attachments  []GmailAttachment
 	MessageID    string
 	Version      string
 	ThreadID     string
 	Subject      string
 	Snippet      string
 	BodyMediaTyp string
+	RawMessage   []byte
+	Body         []byte
+	Attachments  []GmailAttachment
 }
 
 func NewGmailAdapter(name string, backend GmailBackend) (*GmailAdapter, error) {
@@ -175,6 +181,7 @@ func (adapter *GmailAdapter) Pull(
 ) ([]IngestObject, contracts.SourceCursor, error) {
 	cursor := cloneCursor(request.Cursor)
 	mode := firstNonEmpty(stringValue(cursor["mode"]), "full")
+
 	limit := request.Limit
 	if limit <= 0 {
 		limit = 100
@@ -208,6 +215,7 @@ func (adapter *GmailAdapter) pullFull(
 		stringValue(cursor["page_token"]) != "",
 		limit,
 	)
+
 	page, err := adapter.backend.ListMessages(ctx, GmailListRequest{
 		Query:     query,
 		PageToken: stringValue(cursor["page_token"]),
@@ -215,8 +223,10 @@ func (adapter *GmailAdapter) pullFull(
 	})
 	if err != nil {
 		cursor["last_error"] = err.Error()
+
 		return nil, adapter.cursor(cursor), err
 	}
+
 	log.Printf(
 		"source gmail list: completed source=%s/%s hits=%d next_page=%t result_estimate=%d",
 		adapter.Kind(),
@@ -231,6 +241,7 @@ func (adapter *GmailAdapter) pullFull(
 		cursor["failed_message_ids"] = []string{failedID}
 		cursor["failed_count"] = 1
 		cursor["last_error"] = err.Error()
+
 		return nil, adapter.cursor(cursor), err
 	}
 
@@ -240,6 +251,7 @@ func (adapter *GmailAdapter) pullFull(
 	cursor["result_estimate"] = page.ResultEstimate
 	cursor["completed"] = page.NextPageToken == ""
 	cursor["last_error"] = ""
+
 	if len(page.Hits) > 0 {
 		last := page.Hits[len(page.Hits)-1]
 		cursor["last_message_id"] = last.MessageID
@@ -269,11 +281,14 @@ func (adapter *GmailAdapter) pullHistory(
 	})
 	if err != nil {
 		cursor["last_error"] = err.Error()
+
 		return nil, adapter.cursor(cursor), err
 	}
+
 	if page.Expired {
 		cursor["history_expired"] = true
 		cursor["last_error"] = "gmail history cursor expired"
+
 		return nil, adapter.cursor(cursor), errors.New(
 			"gmail history cursor expired; run full backfill",
 		)
@@ -284,6 +299,7 @@ func (adapter *GmailAdapter) pullHistory(
 		cursor["failed_message_ids"] = []string{failedID}
 		cursor["failed_count"] = 1
 		cursor["last_error"] = err.Error()
+
 		return nil, adapter.cursor(cursor), err
 	}
 
@@ -292,10 +308,12 @@ func (adapter *GmailAdapter) pullHistory(
 	cursor["latest_history_id"] = firstNonEmpty(page.LatestHistoryID, anchor)
 	cursor["history_expired"] = false
 	cursor["completed"] = page.NextPageToken == ""
+
 	cursor["last_error"] = ""
 	if page.NextPageToken == "" && page.LatestHistoryID != "" {
 		cursor["history_anchor"] = page.LatestHistoryID
 	}
+
 	if len(page.MessageIDs) > 0 {
 		cursor["last_message_id"] = page.MessageIDs[len(page.MessageIDs)-1]
 	}
@@ -311,18 +329,23 @@ func (adapter *GmailAdapter) hydrateHits(
 	objects := make([]IngestObject, 0, len(hits))
 	for _, hit := range hits {
 		log.Printf("source gmail hydrate: started message_id=%s", hit.MessageID)
+
 		message, err := adapter.backend.GetMessage(ctx, hit.MessageID)
 		if err != nil {
 			return nil, hit.MessageID, err
 		}
+
 		if message.Version == "" {
 			message.Version = hit.Version
 		}
+
 		object, err := adapter.messageObject(ctx, service, message)
 		if err != nil {
 			return nil, hit.MessageID, err
 		}
+
 		log.Printf("source gmail hydrate: completed message_id=%s", hit.MessageID)
+
 		objects = append(objects, object)
 	}
 
@@ -337,15 +360,19 @@ func (adapter *GmailAdapter) hydrateMessageIDs(
 	objects := make([]IngestObject, 0, len(messageIDs))
 	for _, messageID := range messageIDs {
 		log.Printf("source gmail hydrate: started message_id=%s", messageID)
+
 		message, err := adapter.backend.GetMessage(ctx, messageID)
 		if err != nil {
 			return nil, messageID, err
 		}
+
 		object, err := adapter.messageObject(ctx, service, message)
 		if err != nil {
 			return nil, messageID, err
 		}
+
 		log.Printf("source gmail hydrate: completed message_id=%s", messageID)
+
 		objects = append(objects, object)
 	}
 
@@ -381,6 +408,7 @@ func (adapter *GmailAdapter) SearchAndHydrate(
 			ExternalID:      results[index].ExternalID,
 			ExternalVersion: results[index].ExternalVersion,
 		}
+
 		digest, found, err := service.LookupSourceObject(ctx, ref)
 		if err != nil {
 			return nil, err
@@ -396,6 +424,7 @@ func (adapter *GmailAdapter) SearchAndHydrate(
 		if err != nil {
 			return nil, err
 		}
+
 		if message.Version == "" {
 			message.Version = results[index].ExternalVersion
 		}
@@ -486,6 +515,7 @@ func (adapter *GmailAdapter) messageObject(
 	}
 
 	parts := []contracts.CompoundPart{}
+
 	if service != nil {
 		created, err := adapter.writeMessageParts(ctx, service, message, canonical, observed)
 		if err != nil {
@@ -496,6 +526,7 @@ func (adapter *GmailAdapter) messageObject(
 	}
 
 	objectID := "mail_message:" + canonical.MessageID
+
 	return IngestObject{
 		ObservedAt:  observed,
 		SourceKind:  adapter.Kind(),
@@ -642,13 +673,20 @@ func (adapter *GmailAdapter) writeMessageParts(
 			message.MessageID,
 			input.role,
 		)
-		digest, _, err := service.Ingest(ctx, IngestObject{
+		ref := contracts.SourceObjectRef{
+			SourceKind:      adapter.Kind(),
+			SourceName:      adapter.name,
+			ExternalID:      message.MessageID + ":" + input.role,
+			ExternalVersion: message.Version,
+		}
+
+		digest, err := ingestGmailPart(ctx, service, ref, IngestObject{
 			ObservedAt:   observed,
 			Reader:       bytes.NewReader(input.payload),
 			MediaType:    input.mediaType,
-			SourceKind:   adapter.Kind(),
-			SourceName:   adapter.name,
-			ExternalID:   message.MessageID + ":" + input.role,
+			SourceKind:   ref.SourceKind,
+			SourceName:   ref.SourceName,
+			ExternalID:   ref.ExternalID,
 			ExternalVer:  message.Version,
 			SourceHint:   input.role,
 			ContentRoles: []string{input.role},
@@ -657,6 +695,7 @@ func (adapter *GmailAdapter) writeMessageParts(
 		if err != nil {
 			return nil, fmt.Errorf("ingest gmail message part %q: %w", input.role, err)
 		}
+
 		log.Printf(
 			"source gmail part write: completed message_id=%s role=%s digest=%s",
 			message.MessageID,
@@ -675,21 +714,28 @@ func (adapter *GmailAdapter) writeMessageParts(
 		attachmentID := firstNonEmpty(
 			attachment.ID,
 			attachment.FileName,
-			fmt.Sprintf("%d", index),
+			strconv.Itoa(index),
 		)
 		log.Printf(
 			"source gmail part write: started message_id=%s role=attachment attachment_id=%s",
 			message.MessageID,
 			attachmentID,
 		)
-		digest, _, err := service.Ingest(ctx, IngestObject{
+		ref := contracts.SourceObjectRef{
+			SourceKind:      adapter.Kind(),
+			SourceName:      adapter.name,
+			ExternalID:      message.MessageID + ":attachment:" + attachmentID,
+			ExternalVersion: firstNonEmpty(attachment.Version, message.Version),
+		}
+
+		digest, err := ingestGmailPart(ctx, service, ref, IngestObject{
 			ObservedAt:   observed,
 			Reader:       bytes.NewReader(attachment.Content),
 			MediaType:    firstNonEmpty(attachment.MediaType, "application/octet-stream"),
-			SourceKind:   adapter.Kind(),
-			SourceName:   adapter.name,
-			ExternalID:   message.MessageID + ":attachment:" + attachmentID,
-			ExternalVer:  firstNonEmpty(attachment.Version, message.Version),
+			SourceKind:   ref.SourceKind,
+			SourceName:   ref.SourceName,
+			ExternalID:   ref.ExternalID,
+			ExternalVer:  ref.ExternalVersion,
 			SourceHint:   attachment.FileName,
 			ContentRoles: []string{"attachment"},
 			Facets: []contracts.Facet{{
@@ -702,6 +748,7 @@ func (adapter *GmailAdapter) writeMessageParts(
 		if err != nil {
 			return nil, fmt.Errorf("ingest gmail attachment %q: %w", attachmentID, err)
 		}
+
 		log.Printf(
 			"source gmail part write: completed message_id=%s role=attachment attachment_id=%s digest=%s",
 			message.MessageID,
@@ -720,6 +767,70 @@ func (adapter *GmailAdapter) writeMessageParts(
 	}
 
 	return parts, nil
+}
+
+func ingestGmailPart(
+	ctx context.Context,
+	service IngestService,
+	ref contracts.SourceObjectRef,
+	object IngestObject,
+) (contracts.ObjectDigest, error) {
+	digest, _, err := service.Ingest(ctx, object)
+	if err == nil {
+		return digest, nil
+	}
+
+	if !errors.Is(err, ErrSourceIngestInProgress) {
+		return "", fmt.Errorf("ingest gmail part: %w", err)
+	}
+
+	deadline := time.Now().Add(concurrentGmailPartWaitTimeout)
+
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+
+	ticker := time.NewTicker(concurrentGmailPartPoll)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("wait for concurrent gmail part ingest: %w", ctx.Err())
+		case <-timer.C:
+			return "", fmt.Errorf(
+				"wait for concurrent gmail part ingest: %w",
+				context.DeadlineExceeded,
+			)
+		case <-ticker.C:
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return "", fmt.Errorf(
+					"wait for concurrent gmail part ingest: %w",
+					context.DeadlineExceeded,
+				)
+			}
+
+			lookupCtx, cancelLookup := context.WithTimeout(ctx, remaining)
+			digest, found, lookupErr := service.LookupSourceObject(lookupCtx, ref)
+
+			cancelLookup()
+
+			if lookupErr != nil {
+				if errors.Is(lookupErr, context.DeadlineExceeded) {
+					return "", fmt.Errorf(
+						"wait for concurrent gmail part ingest: %w",
+						context.DeadlineExceeded,
+					)
+				}
+
+				return "", fmt.Errorf("lookup concurrent gmail part: %w", lookupErr)
+			}
+
+			if found {
+				return digest, nil
+			}
+		}
+	}
 }
 
 func gmailAttachments(
@@ -812,6 +923,7 @@ func stringSliceValue(value any) []string {
 				values = append(values, value)
 			}
 		}
+
 		return values
 	default:
 		return nil

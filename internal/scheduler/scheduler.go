@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +19,12 @@ import (
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
+)
+
+const (
+	objectChangeProcessLimit = 100
+	schedulerWorkerCount     = 3
+	failureProcessLimit      = 100
 )
 
 var errSweepChunkDone = errors.New("sweep chunk limit reached")
@@ -51,19 +58,17 @@ type Store interface {
 }
 
 type Service struct {
-	store     Store
-	broker    Broker
-	projector ProjectionRefresher
-	now       func() time.Time
-	specs     []contracts.AnalyzerSpec
-	config    Config
-
+	store          Store
+	broker         Broker
+	projector      ProjectionRefresher
+	now            func() time.Time
 	fullyAnnotated *lruCache
-
-	mu        sync.Mutex
-	pressured bool
-	writeSeen bool
-	sweepPos  string
+	sweepPos       string
+	specs          []contracts.AnalyzerSpec
+	config         Config
+	mu             sync.Mutex
+	pressured      bool
+	writeSeen      bool
 }
 
 type Option func(*Service)
@@ -258,6 +263,7 @@ func (service *Service) Scan(
 			jobs := service.jobsForObject(object, request)
 			if len(jobs) == 0 {
 				service.fullyAnnotated.Add(string(object.Manifest.ObjectDigest))
+
 				response.Skipped++
 
 				return nil
@@ -396,86 +402,44 @@ func (service *Service) NotifyObjectsChanged(
 		SchemaVersion: contracts.SchemaVersionPhase00,
 	}
 
+	normalized := request
+	normalized.SchemaVersion = contracts.SchemaVersionPhase00
+	normalized.ObjectDigests = make(
+		[]contracts.ObjectDigest,
+		0,
+		len(request.ObjectDigests),
+	)
+	seen := make(map[contracts.ObjectDigest]struct{}, len(request.ObjectDigests))
+
 	for _, digest := range request.ObjectDigests {
 		if strings.TrimSpace(string(digest)) == "" {
 			continue
 		}
 
+		if _, ok := seen[digest]; ok {
+			continue
+		}
+
+		seen[digest] = struct{}{}
+
+		normalized.ObjectDigests = append(normalized.ObjectDigests, digest)
 		response.Scanned++
-
-		err := service.broker.PublishProjectionRefresh(ctx, digest)
-		if err != nil {
-			response.Failed++
-
-			return response, err
-		}
-
-		if request.ProjectionOnly {
-			response.Skipped++
-
-			continue
-		}
-
-		if service.fullyAnnotated.Contains(string(digest)) {
-			response.Skipped++
-
-			continue
-		}
-
-		object, found, err := service.store.ProjectionObject(ctx, digest)
-		if err != nil {
-			response.Failed++
-
-			return response, err
-		}
-
-		if !found {
-			response.Failed++
-
-			return response, fmt.Errorf("changed object %s not found in filestore", digest)
-		}
-
-		if len(object.Findings) > 0 {
-			response.Failed++
-
-			continue
-		}
-
-		scanRequest := contracts.SchedulerScanRequest{
-			SchemaVersion: contracts.SchemaVersionPhase00,
-			PriorityClass: request.PriorityClass,
-			RequestedBy:   firstNonEmpty(request.RequestedBy, "filestore"),
-			Reason:        firstNonEmpty(request.Reason, "object_changed"),
-			TraceID:       request.TraceID,
-		}
-		jobs := service.jobsForObject(object, scanRequest)
-		if len(jobs) == 0 {
-			service.fullyAnnotated.Add(string(digest))
-			response.Skipped++
-
-			continue
-		}
-
-		enqueued := false
-
-		for _, job := range jobs {
-			job = service.normalizeJob(job)
-
-			err = service.broker.Publish(ctx, job)
-			if err != nil {
-				response.Failed++
-
-				return response, err
-			}
-
-			enqueued = true
-			response.Enqueued++
-		}
-
-		if enqueued {
-			service.noteWrite()
-		}
 	}
+
+	if len(normalized.ObjectDigests) == 0 {
+		return response, nil
+	}
+
+	err := service.broker.PublishObjectChanges(ctx, normalized)
+	if err != nil {
+		response.Failed = response.Scanned
+
+		return response, fmt.Errorf("publish object change notification: %w", err)
+	}
+
+	response.Enqueued = len(normalized.ObjectDigests)
+
+	service.noteWrite()
 
 	return response, nil
 }
@@ -662,57 +626,37 @@ func (service *Service) consumeWriteSeen() bool {
 	return seen
 }
 
-// Run is the scheduler's background loop. It processes failures and projection
-// refreshes on each tick, checks backpressure, and runs a bounded self-heal
-// sweep when idle after writes have occurred.
+// Run starts the scheduler's background workers. Queue workers block on RabbitMQ
+// delivery streams and process work as fast as RabbitMQ and downstream IO allow.
+// The only periodic worker is the low-priority self-heal backstop.
 func (service *Service) Run(ctx context.Context) error {
-	ticker := time.NewTicker(service.config.ScanInterval)
-	defer ticker.Stop()
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	idleSince := time.Time{}
-	sweepArmed := false
+	errc := make(chan error, schedulerWorkerCount)
 
-	for {
-		_, err := service.broker.ProcessFailures(ctx, 100)
-		if err != nil {
-			return err
+	go func() {
+		errc <- service.runFailureQueue(runCtx)
+	}()
+	go func() {
+		errc <- service.runObjectChangeQueue(runCtx)
+	}()
+	go func() {
+		errc <- service.runSelfHeal(runCtx)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("run scheduler: %w", ctx.Err())
+	case err := <-errc:
+		cancel()
+
+		ctxErr := ctx.Err()
+		if ctxErr != nil {
+			return fmt.Errorf("run scheduler: %w", ctxErr)
 		}
 
-		if service.projector != nil {
-			_, err = service.broker.ProcessProjectionRefreshes(
-				ctx,
-				100,
-				service.refreshProjectionDigests,
-			)
-			if err != nil {
-				return err
-			}
-		}
-
-		service.updatePressure(ctx)
-
-		if service.consumeWriteSeen() {
-			sweepArmed = true
-			idleSince = time.Time{}
-		}
-
-		if sweepArmed && !service.Pressured() {
-			if idleSince.IsZero() {
-				idleSince = service.now()
-			}
-
-			if service.now().Sub(idleSince) >= service.config.SelfHealIdleThreshold {
-				service.selfHealChunk(ctx)
-				sweepArmed = false
-				idleSince = time.Time{}
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
+		return err
 	}
 }
 
@@ -818,33 +762,205 @@ func (service *Service) selfHealChunk(ctx context.Context) {
 	}
 }
 
-func (service *Service) refreshProjectionDigests(
+func (service *Service) ProcessObjectChanges(
 	ctx context.Context,
-	digests []contracts.ObjectDigest,
-) error {
-	seen := map[contracts.ObjectDigest]bool{}
+	limit int,
+) (int, error) {
+	processed, err := service.broker.ProcessObjectChanges(
+		ctx,
+		limit,
+		service.processObjectChanges,
+	)
+	if err != nil {
+		return processed, fmt.Errorf("process object changes: %w", err)
+	}
 
-	for _, digest := range digests {
-		if digest == "" || seen[digest] {
-			continue
-		}
+	return processed, nil
+}
 
-		seen[digest] = true
-
-		object, found, err := service.store.ProjectionObject(ctx, digest)
+func (service *Service) runFailureQueue(ctx context.Context) error {
+	for {
+		_, err := service.broker.ProcessFailures(ctx, failureProcessLimit)
 		if err != nil {
-			return err
+			return fmt.Errorf("process failure queue: %w", err)
+		}
+	}
+}
+
+func (service *Service) runObjectChangeQueue(ctx context.Context) error {
+	for {
+		_, err := service.ProcessObjectChanges(ctx, objectChangeProcessLimit)
+		if err != nil {
+			return fmt.Errorf("process object change queue: %w", err)
+		}
+	}
+}
+
+func (service *Service) runSelfHeal(ctx context.Context) error {
+	ticker := time.NewTicker(service.config.ScanInterval)
+	defer ticker.Stop()
+
+	idleSince := time.Time{}
+	sweepArmed := false
+
+	for {
+		service.updatePressure(ctx)
+
+		if service.consumeWriteSeen() {
+			sweepArmed = true
+			idleSince = time.Time{}
 		}
 
-		if !found || len(object.Findings) > 0 {
-			continue
+		if sweepArmed && !service.Pressured() {
+			if idleSince.IsZero() {
+				idleSince = service.now()
+			}
+
+			if service.now().Sub(idleSince) >= service.config.SelfHealIdleThreshold {
+				service.selfHealChunk(ctx)
+
+				sweepArmed = false
+				idleSince = time.Time{}
+			}
 		}
 
-		err = service.projector.ProjectObject(ctx, object)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("run self-heal: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (service *Service) processObjectChanges(
+	ctx context.Context,
+	requests []contracts.ObjectChangeRequest,
+) error {
+	projected := map[contracts.ObjectDigest]bool{}
+
+	for _, request := range requests {
+		err := service.processObjectChangeRequest(ctx, request, projected)
 		if err != nil {
 			return err
 		}
 	}
+
+	return nil
+}
+
+func (service *Service) processObjectChangeRequest(
+	ctx context.Context,
+	request contracts.ObjectChangeRequest,
+	projected map[contracts.ObjectDigest]bool,
+) error {
+	scanRequest := objectChangeScanRequest(request)
+
+	for _, digest := range request.ObjectDigests {
+		if strings.TrimSpace(string(digest)) == "" {
+			continue
+		}
+
+		err := service.processObjectChangeDigest(
+			ctx,
+			digest,
+			request,
+			scanRequest,
+			projected,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func objectChangeScanRequest(
+	request contracts.ObjectChangeRequest,
+) contracts.SchedulerScanRequest {
+	return contracts.SchedulerScanRequest{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		PriorityClass: request.PriorityClass,
+		RequestedBy:   firstNonEmpty(request.RequestedBy, "filestore"),
+		Reason:        firstNonEmpty(request.Reason, "object_changed"),
+		TraceID:       request.TraceID,
+	}
+}
+
+func (service *Service) processObjectChangeDigest(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	request contracts.ObjectChangeRequest,
+	scanRequest contracts.SchedulerScanRequest,
+	projected map[contracts.ObjectDigest]bool,
+) error {
+	object, found, err := service.store.ProjectionObject(ctx, digest)
+	if err != nil {
+		return fmt.Errorf("load changed object %s: %w", digest, err)
+	}
+
+	if !found || len(object.Findings) > 0 {
+		return nil
+	}
+
+	err = service.projectObjectChange(ctx, object, projected)
+	if err != nil {
+		return err
+	}
+
+	if request.ProjectionOnly || service.fullyAnnotated.Contains(string(digest)) {
+		return nil
+	}
+
+	return service.enqueueObjectChangeAnalysis(ctx, object, scanRequest)
+}
+
+func (service *Service) projectObjectChange(
+	ctx context.Context,
+	object filestore.ProjectionObject,
+	projected map[contracts.ObjectDigest]bool,
+) error {
+	digest := object.Manifest.ObjectDigest
+	if service.projector == nil || projected[digest] {
+		return nil
+	}
+
+	err := service.projector.ProjectObject(ctx, object)
+	if err != nil {
+		return fmt.Errorf("project changed object %s: %w", digest, err)
+	}
+
+	projected[digest] = true
+
+	return nil
+}
+
+func (service *Service) enqueueObjectChangeAnalysis(
+	ctx context.Context,
+	object filestore.ProjectionObject,
+	scanRequest contracts.SchedulerScanRequest,
+) error {
+	digest := object.Manifest.ObjectDigest
+
+	jobs := service.jobsForObject(object, scanRequest)
+	if len(jobs) == 0 {
+		service.fullyAnnotated.Add(string(digest))
+
+		return nil
+	}
+
+	for _, job := range jobs {
+		err := service.broker.Publish(ctx, service.normalizeJob(job))
+		if err != nil {
+			return fmt.Errorf(
+				"publish analysis job for changed object %s: %w",
+				digest,
+				err,
+			)
+		}
+	}
+
+	service.noteWrite()
 
 	return nil
 }
@@ -993,13 +1109,7 @@ func containsAny(wanted, available []string) bool {
 }
 
 func containsString(values []string, value string) bool {
-	for _, item := range values {
-		if item == value {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(values, value)
 }
 
 func firstNonEmpty(values ...string) string {

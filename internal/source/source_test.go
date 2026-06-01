@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/contracts"
@@ -98,6 +99,41 @@ func TestIngestSourceClaimSerializesHydration(t *testing.T) {
 	}
 }
 
+func TestIngestGmailPartWaitsForConcurrentSourceMapping(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	ref := contracts.SourceObjectRef{
+		SourceKind:      "gmail",
+		SourceName:      "primary",
+		ExternalID:      "message-1:rfc822_headers",
+		ExternalVersion: "v1",
+	}
+	service := &concurrentPartIngestService{
+		ref:    ref,
+		digest: "digest-1",
+		ready:  make(chan struct{}),
+	}
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		close(service.ready)
+	}()
+
+	digest, err := ingestGmailPart(ctx, service, ref, IngestObject{
+		Reader:      strings.NewReader("headers"),
+		SourceKind:  ref.SourceKind,
+		SourceName:  ref.SourceName,
+		ExternalID:  ref.ExternalID,
+		ExternalVer: ref.ExternalVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != service.digest {
+		t.Fatalf("expected concurrent source digest %q, got %q", service.digest, digest)
+	}
+}
+
 func TestBackfillSkipsConcurrentSourceIngestClaim(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
@@ -118,6 +154,36 @@ func TestBackfillSkipsConcurrentSourceIngestClaim(t *testing.T) {
 	if report.Processed != 2 || report.Created != 1 || report.Skipped != 1 ||
 		report.Failed != 0 {
 		t.Fatalf("unexpected duplicate ingest report: %#v", report)
+	}
+}
+
+type concurrentPartIngestService struct {
+	ref    contracts.SourceObjectRef
+	digest contracts.ObjectDigest
+	ready  chan struct{}
+}
+
+func (service *concurrentPartIngestService) Ingest(
+	context.Context,
+	IngestObject,
+) (contracts.ObjectDigest, bool, error) {
+	return "", false, ErrSourceIngestInProgress
+}
+
+func (service *concurrentPartIngestService) LookupSourceObject(
+	ctx context.Context,
+	ref contracts.SourceObjectRef,
+) (contracts.ObjectDigest, bool, error) {
+	if ref != service.ref {
+		return "", false, nil
+	}
+	select {
+	case <-ctx.Done():
+		return "", false, ctx.Err()
+	case <-service.ready:
+		return service.digest, true, nil
+	default:
+		return "", false, nil
 	}
 }
 

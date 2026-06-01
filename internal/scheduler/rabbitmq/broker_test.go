@@ -300,7 +300,7 @@ func TestAnalysisJobSourcePersistsFailureCauseInFailedJob(t *testing.T) {
 	}
 }
 
-func TestProcessProjectionRefreshesRefreshesQueuedDigests(t *testing.T) {
+func TestProcessObjectChangesRefreshesQueuedDigests(t *testing.T) {
 	cfg := testRabbitMQConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -320,11 +320,13 @@ func TestProcessProjectionRefreshesRefreshesQueuedDigests(t *testing.T) {
 	}
 	var refreshed []contracts.ObjectDigest
 
-	processed, err := broker.ProcessProjectionRefreshes(
+	processed, err := broker.ProcessObjectChanges(
 		ctx,
 		100,
-		func(_ context.Context, digests []contracts.ObjectDigest) error {
-			refreshed = append(refreshed, digests...)
+		func(_ context.Context, requests []contracts.ObjectChangeRequest) error {
+			for _, request := range requests {
+				refreshed = append(refreshed, request.ObjectDigests...)
+			}
 
 			return nil
 		},
