@@ -890,6 +890,58 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 		strings.Contains(filteredInputs.Results[0].InputText, "email: paudley@blackcat.ca") {
 		t.Fatalf("fact kind filter was not applied to analysis input: %#v", filteredInputs)
 	}
+
+	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
+		ContactID:       contactID,
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "complete",
+		Model:           "fixture-model",
+		InputHash:       "input-pa",
+		TextPreview:     "Patrick Audley",
+		Vector:          []float32{1, 0, 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
+		ContactID:       "https://example.test/#apollo",
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "complete",
+		Model:           "fixture-model",
+		InputHash:       "input-apollo",
+		TextPreview:     "Apollo",
+		Vector:          []float32{0.8, 0.1, 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vector, err := index.ContactVectorSearch(ctx, contracts.ContactVectorSearchRequest{
+		Vector: []float32{1, 0, 0},
+		Model:  "fixture-model",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vector.Results) == 0 || vector.Results[0].ContactID != contactID {
+		t.Fatalf("unexpected contact vector search: %#v", vector)
+	}
+
+	similar, err := index.SimilarContacts(ctx, contracts.SimilarContactsRequest{
+		ContactID: contactID,
+		Model:     "fixture-model",
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(similar.Results) != 1 ||
+		similar.Results[0].ContactID != "https://example.test/#apollo" {
+		t.Fatalf("unexpected similar contacts: %#v", similar)
+	}
 }
 
 func putMailIdentityProjectionFixture(
