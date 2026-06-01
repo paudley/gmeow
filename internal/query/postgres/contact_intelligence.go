@@ -772,23 +772,12 @@ func (index *Index) StoreContactEmbedding(
 		embeddingID := contactEmbeddingID(record)
 		_, err = tx.Exec(
 			ctx,
-			`DELETE FROM query_contact_embeddings
-			  WHERE contact_id = $1 AND model = $2 AND embedding_id <> $3`,
-			contactID,
-			record.Model,
-			embeddingID,
-		)
-		if err != nil {
-			return fmt.Errorf("delete stale contact embeddings: %w", err)
-		}
-
-		_, err = tx.Exec(
-			ctx,
 			`INSERT INTO query_contact_embeddings(
 			   contact_id, model, embedding_id, input_hash, text_preview,
 			   metadata_json, dimensions, embedding
 			 ) VALUES($1,$2,$3,$4,$5,$6,$7,$8::vector)
-			 ON CONFLICT(contact_id, model, embedding_id) DO UPDATE SET
+			 ON CONFLICT(contact_id, model) DO UPDATE SET
+			   embedding_id = excluded.embedding_id,
 			   input_hash = excluded.input_hash,
 			   text_preview = excluded.text_preview,
 			   metadata_json = excluded.metadata_json,

@@ -1,13 +1,5 @@
 -- +goose Up
--- +goose StatementBegin
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
-    RAISE EXCEPTION 'required PostgreSQL extension "vector" is not enabled';
-  END IF;
-END
-$$;
--- +goose StatementEnd
+CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS query_contact_analysis (
   contact_id TEXT NOT NULL,
@@ -31,7 +23,7 @@ CREATE TABLE IF NOT EXISTS query_contact_embeddings (
   metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   dimensions INTEGER NOT NULL DEFAULT 0,
   embedding vector,
-  PRIMARY KEY (contact_id, model, embedding_id)
+  PRIMARY KEY (contact_id, model)
 );
 
 CREATE INDEX IF NOT EXISTS query_contact_analysis_contact_idx
