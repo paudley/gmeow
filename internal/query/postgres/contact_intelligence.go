@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -837,6 +838,8 @@ func (index *Index) ContactAnalysisStatus(
 
 	limit := normalizedLimit(request.Limit)
 	offset := max(request.Offset, 0)
+	limitPlaceholder := len(args) + 1
+	offsetPlaceholder := len(args) + 2
 	args = append(args, limit, offset)
 	rows, err := index.pool.Query(
 		ctx,
@@ -847,10 +850,10 @@ func (index *Index) ContactAnalysisStatus(
 			" AND ",
 		)+`
 		  ORDER BY generated_at DESC NULLS LAST, contact_id, analyzer_name
-		  LIMIT $`+fmt.Sprint(
-			len(args)-1,
-		)+` OFFSET $`+fmt.Sprint(
-			len(args),
+		  LIMIT $`+strconv.Itoa(
+			limitPlaceholder,
+		)+` OFFSET $`+strconv.Itoa(
+			offsetPlaceholder,
 		),
 		args...,
 	)

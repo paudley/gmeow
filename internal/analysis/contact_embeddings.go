@@ -13,6 +13,8 @@ import (
 	"blackcat.ca/gmeow/internal/contracts"
 )
 
+const contactPreviewByteLimit = 240
+
 type ContactEmbeddingStore interface {
 	ContactAnalysisInputs(
 		ctx context.Context,
@@ -222,9 +224,9 @@ func contactInputHash(text string) string {
 }
 
 func float64VectorToFloat32(values []float64) []float32 {
-	converted := make([]float32, 0, len(values))
-	for _, value := range values {
-		converted = append(converted, float32(value))
+	converted := make([]float32, len(values))
+	for index, value := range values {
+		converted[index] = float32(value)
 	}
 
 	return converted
@@ -232,13 +234,13 @@ func float64VectorToFloat32(values []float64) []float32 {
 
 func previewContactInput(text string) string {
 	text = strings.TrimSpace(text)
-	if len(text) <= 240 {
+	if len(text) <= contactPreviewByteLimit {
 		return text
 	}
 
 	limit := 0
 	for index := range text {
-		if index > 240 {
+		if index > contactPreviewByteLimit {
 			break
 		}
 		limit = index
