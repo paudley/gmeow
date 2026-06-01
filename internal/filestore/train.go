@@ -6,115 +6,202 @@ package filestore
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"blackcat.ca/gmeow/internal/contracts"
 )
 
 const (
 	defaultDictSampleLimit = 1024
-	// dictSampleMaxBytes bounds which objects are sampled for training — the
-	// dictionary targets many small similar records (email parts), not media.
-	dictSampleMaxBytes = 16 * 1024
-	// dictMaxBytes caps the trained dictionary size (~110 KB, the zstd norm).
-	dictMaxBytes = 112640
-	// minDictSamples is the floor below which training is not worthwhile.
-	minDictSamples = 16
+	dictSampleMaxBytes     = 16 * 1024
+	dictMaxBytes           = 112640
+	minDictSamples         = 16
 )
 
-// TrainDictionaryReport summarizes a dictionary training run.
+type TrainDictionaryRequest struct {
+	Family      string `json:"family,omitempty"`
+	AllFamilies bool   `json:"all_families,omitempty"`
+	SampleLimit int    `json:"sample_limit,omitempty"`
+}
+
 type TrainDictionaryReport struct {
+	DictionaryID    string                        `json:"dictionary_id,omitempty"`
+	DictionaryBytes int64                         `json:"dictionary_bytes,omitempty"`
+	Family          string                        `json:"family,omitempty"`
+	Samples         int                           `json:"samples,omitempty"`
+	Results         []TrainDictionaryFamilyReport `json:"results,omitempty"`
+}
+
+type TrainDictionaryFamilyReport struct {
 	DictionaryID    string `json:"dictionary_id"`
 	DictionaryBytes int64  `json:"dictionary_bytes"`
+	Family          string `json:"family"`
 	Samples         int    `json:"samples"`
 }
 
-// TrainDictionary samples small-object content from a metadata snapshot, trains
-// a zstd dictionary over it (shelling out to the `zstd --train` cover trainer),
-// installs it as the new current dictionary, and refreshes the in-process cache
-// so new chunks compress against it immediately. Existing chunks adopt it on the
-// next Repack. It fails closed if the zstd binary is unavailable or too few
-// samples exist.
 func (store *FilesystemStore) TrainDictionary(
 	ctx context.Context,
-	sampleLimit int,
+	request TrainDictionaryRequest,
 ) (TrainDictionaryReport, error) {
 	if err := ctx.Err(); err != nil {
 		return TrainDictionaryReport{}, err
 	}
 
-	// Serialize with other maintenance passes so the dictionary-id allocation and
-	// `current` marker flip cannot race a concurrent training (or a repack).
 	store.maintenanceMu.Lock()
 	defer store.maintenanceMu.Unlock()
 
-	if sampleLimit <= 0 {
-		sampleLimit = defaultDictSampleLimit
+	if request.SampleLimit <= 0 {
+		request.SampleLimit = defaultDictSampleLimit
 	}
-
 	if _, err := exec.LookPath("zstd"); err != nil {
 		return TrainDictionaryReport{}, fmt.Errorf(
 			"zstd binary is required to train a dictionary: %w", err,
 		)
 	}
+	if err := store.ensureDictionaryBootstrap(); err != nil {
+		return TrainDictionaryReport{}, err
+	}
 
-	sampleDir, err := os.MkdirTemp("", "gmdict-samples-")
+	if request.AllFamilies {
+		return store.trainAllDictionaryFamilies(ctx, request.SampleLimit)
+	}
+
+	family := sanitizeDictionaryFamily(request.Family)
+	if !dictionaryFamilyEligibleForTraining(family) {
+		return TrainDictionaryReport{}, fmt.Errorf(
+			"dictionary family %q is not trainable",
+			request.Family,
+		)
+	}
+
+	result, err := store.trainDictionaryFamily(ctx, family, request.SampleLimit)
 	if err != nil {
 		return TrainDictionaryReport{}, err
+	}
+
+	return reportFromFamilyResults([]TrainDictionaryFamilyReport{result}), nil
+}
+
+func (store *FilesystemStore) trainAllDictionaryFamilies(
+	ctx context.Context,
+	sampleLimit int,
+) (TrainDictionaryReport, error) {
+	families, err := store.dictionaryFamiliesWithSamples(ctx, sampleLimit)
+	if err != nil {
+		return TrainDictionaryReport{}, err
+	}
+
+	results := []TrainDictionaryFamilyReport{}
+	for _, family := range families {
+		sampleCount, countErr := store.dictionarySampleCount(ctx, family, sampleLimit)
+		if countErr != nil {
+			return TrainDictionaryReport{}, countErr
+		}
+		if sampleCount < minDictSamples {
+			continue
+		}
+		result, trainErr := store.trainDictionaryFamily(ctx, family, sampleLimit)
+		if trainErr != nil {
+			return TrainDictionaryReport{}, trainErr
+		}
+		results = append(results, result)
+	}
+	if len(results) == 0 {
+		return TrainDictionaryReport{}, fmt.Errorf(
+			"need at least %d small-object samples in one trainable dictionary family",
+			minDictSamples,
+		)
+	}
+
+	return reportFromFamilyResults(results), nil
+}
+
+func (store *FilesystemStore) trainDictionaryFamily(
+	ctx context.Context,
+	family string,
+	sampleLimit int,
+) (TrainDictionaryFamilyReport, error) {
+	sampleDir, err := os.MkdirTemp("", "gmdict-samples-")
+	if err != nil {
+		return TrainDictionaryFamilyReport{}, err
 	}
 	defer func() { _ = os.RemoveAll(sampleDir) }()
 
-	samplePaths, err := store.writeDictionarySamples(ctx, sampleDir, sampleLimit)
+	samplePaths, err := store.writeDictionarySamples(
+		ctx,
+		sampleDir,
+		sampleLimit,
+		family,
+	)
 	if err != nil {
-		return TrainDictionaryReport{}, err
+		return TrainDictionaryFamilyReport{}, err
 	}
 	if len(samplePaths) < minDictSamples {
-		return TrainDictionaryReport{}, fmt.Errorf(
-			"need at least %d small-object samples to train a dictionary, found %d",
-			minDictSamples, len(samplePaths),
+		return TrainDictionaryFamilyReport{}, fmt.Errorf(
+			"need at least %d small-object samples to train dictionary family %q, found %d",
+			minDictSamples,
+			family,
+			len(samplePaths),
 		)
 	}
 
 	nextID, err := store.nextDictionaryID()
 	if err != nil {
-		return TrainDictionaryReport{}, err
+		return TrainDictionaryFamilyReport{}, err
 	}
 	dictPath := store.dictionaryPath(nextID)
 	if err := os.MkdirAll(filepath.Dir(dictPath), 0o750); err != nil {
-		return TrainDictionaryReport{}, err
+		return TrainDictionaryFamilyReport{}, err
 	}
 
 	args := append([]string{"--train"}, samplePaths...)
 	args = append(args, "-o", dictPath, fmt.Sprintf("--maxdict=%d", dictMaxBytes))
 	output, runErr := exec.CommandContext(ctx, "zstd", args...).CombinedOutput()
 	if runErr != nil {
-		return TrainDictionaryReport{}, fmt.Errorf(
+		return TrainDictionaryFamilyReport{}, fmt.Errorf(
 			"zstd --train failed: %w: %s", runErr, strings.TrimSpace(string(output)),
 		)
 	}
 
 	info, err := os.Stat(dictPath)
 	if err != nil {
-		return TrainDictionaryReport{}, err
+		return TrainDictionaryFamilyReport{}, err
 	}
-
-	// Flip the current marker atomically, then refresh the in-process cache so
-	// new chunks adopt the dictionary without a restart.
-	marker := filepath.Join(store.root, dictionariesDir, currentDictMarker)
-	if err := atomicWriteFile(marker, []byte(nextID), 0o640); err != nil {
-		return TrainDictionaryReport{}, err
+	registry, err := store.readDictionaryRegistry()
+	if err != nil {
+		return TrainDictionaryFamilyReport{}, err
+	}
+	registry.Dictionaries[nextID] = dictionaryRegistryRecord{
+		ID:          nextID,
+		Family:      family,
+		Version:     "trained-" + time.Now().UTC().Format("20060102T150405Z"),
+		Filename:    filepath.Join(dictFilesDir, nextID+".dict"),
+		Description: "Operator-trained dictionary for " + family,
+		InstalledAt: time.Now().UTC(),
+		Samples:     len(samplePaths),
+	}
+	if err := store.writeDictionaryRegistry(registry); err != nil {
+		return TrainDictionaryFamilyReport{}, err
+	}
+	if err := atomicWriteFile(
+		store.dictionaryCurrentPath(family),
+		[]byte(nextID),
+		0o640,
+	); err != nil {
+		return TrainDictionaryFamilyReport{}, err
 	}
 	store.reloadDictionaries()
 
-	return TrainDictionaryReport{
+	return TrainDictionaryFamilyReport{
 		DictionaryID:    nextID,
 		DictionaryBytes: info.Size(),
+		Family:          family,
 		Samples:         len(samplePaths),
 	}, nil
 }
@@ -123,6 +210,7 @@ func (store *FilesystemStore) writeDictionarySamples(
 	ctx context.Context,
 	sampleDir string,
 	sampleLimit int,
+	family string,
 ) ([]string, error) {
 	snapshot, err := store.metaSnapshot()
 	if err != nil {
@@ -148,6 +236,10 @@ func (store *FilesystemStore) writeDictionarySamples(
 		}
 
 		digest := contracts.ObjectDigest(strings.TrimPrefix(key, "r/"))
+		if !store.objectMatchesDictionaryFamily(ctx, digest, family) {
+			return nil
+		}
+
 		content, ok, readErr := store.readBlobContent(digest)
 		if readErr != nil {
 			return readErr
@@ -156,7 +248,6 @@ func (store *FilesystemStore) writeDictionarySamples(
 			return nil
 		}
 
-		// Samples are object content (e.g. email bodies); keep them owner-only.
 		path := filepath.Join(sampleDir, fmt.Sprintf("%06d.sample", len(samplePaths)))
 		if err := os.WriteFile(path, content, 0o600); err != nil {
 			return err
@@ -172,20 +263,132 @@ func (store *FilesystemStore) writeDictionarySamples(
 	return samplePaths, nil
 }
 
-func (store *FilesystemStore) nextDictionaryID() (string, error) {
-	marker := filepath.Join(store.root, dictionariesDir, currentDictMarker)
-	data, err := os.ReadFile(marker)
-	if errors.Is(err, os.ErrNotExist) {
-		return "1", nil
+func (store *FilesystemStore) objectMatchesDictionaryFamily(
+	ctx context.Context,
+	digest contracts.ObjectDigest,
+	family string,
+) bool {
+	manifest, err := store.ReadManifest(ctx, digest)
+	if err != nil {
+		return false
 	}
+
+	return dictionaryFamilyForObject(manifest.MediaType, manifest.ContentRoles) == family
+}
+
+func (store *FilesystemStore) dictionarySampleCount(
+	ctx context.Context,
+	family string,
+	sampleLimit int,
+) (int, error) {
+	sampleDir, err := os.MkdirTemp("", "gmdict-count-")
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = os.RemoveAll(sampleDir) }()
+
+	paths, err := store.writeDictionarySamples(ctx, sampleDir, sampleLimit, family)
+	return len(paths), err
+}
+
+func (store *FilesystemStore) dictionaryFamiliesWithSamples(
+	ctx context.Context,
+	sampleLimit int,
+) ([]string, error) {
+	snapshot, err := store.metaSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = snapshot.Close() }()
+
+	seen := map[string]bool{}
+	err = snapshotIterPrefix(snapshot, "r/", func(key string, value []byte) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+
+		var recipe objectRecipeEntry
+		if err := json.Unmarshal(value, &recipe); err != nil {
+			return err
+		}
+		if recipe.ContentBytes <= 0 || recipe.ContentBytes > dictSampleMaxBytes {
+			return nil
+		}
+		digest := contracts.ObjectDigest(strings.TrimPrefix(key, "r/"))
+		manifest, err := store.ReadManifest(ctx, digest)
+		if err != nil {
+			return nil
+		}
+		family := dictionaryFamilyForObject(manifest.MediaType, manifest.ContentRoles)
+		if dictionaryFamilyEligibleForTraining(family) {
+			seen[family] = true
+		}
+		if len(seen) >= len(trainableDictionaryFamilies) ||
+			len(seen) >= sampleLimit {
+			return nil
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	families := make([]string, 0, len(seen))
+	for _, family := range trainableDictionaryFamilies {
+		if seen[family] {
+			families = append(families, family)
+		}
+	}
+
+	return families, nil
+}
+
+func (store *FilesystemStore) nextDictionaryID() (string, error) {
+	registry, err := store.readDictionaryRegistry()
 	if err != nil {
 		return "", err
 	}
 
-	current, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 32)
-	if err != nil {
-		return "", fmt.Errorf("invalid current dictionary id %q: %w", string(data), err)
+	var maxID uint64
+	for id := range registry.Dictionaries {
+		parsed, err := strconv.ParseUint(id, 10, 32)
+		if err != nil {
+			return "", fmt.Errorf("invalid dictionary id %q: %w", id, err)
+		}
+		if parsed > maxID {
+			maxID = parsed
+		}
+	}
+	if data, err := os.ReadFile(
+		filepath.Join(store.root, dictionariesDir, currentDictMarker),
+	); err == nil {
+		parsed, parseErr := strconv.ParseUint(
+			strings.TrimSpace(string(data)),
+			10,
+			32,
+		)
+		if parseErr != nil {
+			return "", fmt.Errorf("invalid current dictionary id %q: %w", string(data), parseErr)
+		}
+		if parsed > maxID {
+			maxID = parsed
+		}
 	}
 
-	return strconv.FormatUint(current+1, 10), nil
+	return strconv.FormatUint(maxID+1, 10), nil
+}
+
+func reportFromFamilyResults(
+	results []TrainDictionaryFamilyReport,
+) TrainDictionaryReport {
+	report := TrainDictionaryReport{Results: results}
+	if len(results) > 0 {
+		report.DictionaryID = results[0].DictionaryID
+		report.DictionaryBytes = results[0].DictionaryBytes
+		report.Family = results[0].Family
+		report.Samples = results[0].Samples
+	}
+
+	return report
 }

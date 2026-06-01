@@ -134,11 +134,24 @@ active pack and deleting the old pack (the chunk index is updated before deletio
 and reads retry on a superseded pack, so repack is also online-safe). Run `gc`
 before `repack`.
 
-`gmeow-admin filestore train-dictionary` samples small objects, trains a zstd
-dictionary via the `zstd` binary, installs it as the current dictionary, and
-refreshes the in-process cache so new chunks compress against it immediately;
-existing chunks adopt it on the next `repack`. It fails closed if `zstd` is
-absent.
+FILESTORE selects zstd dictionaries by dictionary family, not by one global
+active dictionary. The classifier uses MIME type plus known content roles to
+separate coherent small-object families such as mail headers, mail bodies,
+Gmeow mail JSON, patches, structured JSON/XML, source-like text, logs, CSV/TSV,
+RDF/Turtle, and small binary serialization formats. Unknown content and
+already-compressed or high-entropy formats (archives, images, audio/video, PDFs,
+packaged office files, and `application/octet-stream`) default to no dictionary.
+Each chunk still records the concrete `dict_id` used, and new chunks also record
+the dictionary family; old chunks with a legacy global `dict_id` remain readable.
+
+`gmeow-admin filestore train-dictionary --family <family>` samples only small
+objects classified into that family, trains a zstd dictionary via the `zstd`
+binary, installs it for that family, and refreshes the in-process cache so new
+chunks in that family compress against it immediately. `--all-families` trains
+eligible families independently. Existing chunks adopt a newer family dictionary
+only when rewritten by a future compaction/recompression path; ordinary `repack`
+preserves existing compressed bytes. Training fails closed if `zstd` is absent
+or too few representative samples exist.
 
 ### Online vs offline
 
@@ -157,7 +170,9 @@ than exclusive per-object files. It accepts `--digest`, a source object ref, or
 `--message-id`. Message-ID resolution goes through QUERY gRPC exact mail identity
 lookup; the command does not talk directly to PostgreSQL. Compound objects
 include referenced part objects by default; use `--no-recursive-parts` to
-inspect only the target object.
+inspect only the target object. Content rows include dictionary ids and
+dictionary families so operators can distinguish no dictionary, current
+family dictionaries, mixed-family references, and legacy global dictionaries.
 
 `gmeow-admin filestore path <path>` resolves an absolute or FILESTORE-relative
 path back to the data it belongs to. It classifies object files, packed metadata

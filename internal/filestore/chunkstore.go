@@ -52,12 +52,13 @@ const (
 var gearTable = buildGearTable()
 
 type chunkIndexEntry struct {
-	UpdatedAt time.Time `json:"updated_at"`
-	ChunkHash string    `json:"chunk_hash"`
-	DictID    string    `json:"dict_id,omitempty"`
-	PackID    uint64    `json:"pack_id"`
-	Offset    int64     `json:"offset"`
-	Length    int64     `json:"length"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	ChunkHash  string    `json:"chunk_hash"`
+	DictID     string    `json:"dict_id,omitempty"`
+	DictFamily string    `json:"dictionary_family,omitempty"`
+	PackID     uint64    `json:"pack_id"`
+	Offset     int64     `json:"offset"`
+	Length     int64     `json:"length"`
 }
 
 type objectRecipeEntry struct {
@@ -90,6 +91,8 @@ func (store *FilesystemStore) storeBlobContent(
 	ctx context.Context,
 	digest contracts.ObjectDigest,
 	content []byte,
+	mediaType string,
+	contentRoles []string,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -102,8 +105,9 @@ func (store *FilesystemStore) storeBlobContent(
 		ChunkHashes:  []string{},
 	}
 
+	family := dictionaryFamilyForObject(mediaType, contentRoles)
 	for _, chunk := range chunkContent(content) {
-		hash, err := store.storeChunk(ctx, chunk)
+		hash, err := store.storeChunk(ctx, chunk, family)
 		if err != nil {
 			return err
 		}
@@ -122,6 +126,8 @@ func (store *FilesystemStore) storeBlobContentBatched(
 	cb *commitBatch,
 	digest contracts.ObjectDigest,
 	content []byte,
+	mediaType string,
+	contentRoles []string,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -134,8 +140,9 @@ func (store *FilesystemStore) storeBlobContentBatched(
 		ChunkHashes:  []string{},
 	}
 
+	family := dictionaryFamilyForObject(mediaType, contentRoles)
 	for _, chunk := range chunkContent(content) {
-		hash, err := store.storeChunkBatched(ctx, cb, chunk)
+		hash, err := store.storeChunkBatched(ctx, cb, chunk, family)
 		if err != nil {
 			return err
 		}
@@ -195,6 +202,8 @@ func streamChunks(reader io.Reader, fn func(chunk []byte) error) (int64, error) 
 func (store *FilesystemStore) storeBlobReader(
 	ctx context.Context,
 	reader io.Reader,
+	mediaType string,
+	contentRoles []string,
 ) (contracts.ObjectDigest, string, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return "", "", 0, err
@@ -204,9 +213,10 @@ func (store *FilesystemStore) storeBlobReader(
 	shaHash := sha256.New()
 	teed := io.TeeReader(reader, io.MultiWriter(blakeHash, shaHash))
 
+	family := dictionaryFamilyForObject(mediaType, contentRoles)
 	chunkHashes := []string{}
 	contentBytes, err := streamChunks(teed, func(chunk []byte) error {
-		hash, storeErr := store.storeChunk(ctx, chunk)
+		hash, storeErr := store.storeChunk(ctx, chunk, family)
 		if storeErr != nil {
 			return storeErr
 		}
@@ -240,6 +250,8 @@ func (store *FilesystemStore) storeBlobReaderBatched(
 	ctx context.Context,
 	cb *commitBatch,
 	reader io.Reader,
+	mediaType string,
+	contentRoles []string,
 ) (contracts.ObjectDigest, string, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return "", "", 0, err
@@ -249,9 +261,10 @@ func (store *FilesystemStore) storeBlobReaderBatched(
 	shaHash := sha256.New()
 	teed := io.TeeReader(reader, io.MultiWriter(blakeHash, shaHash))
 
+	family := dictionaryFamilyForObject(mediaType, contentRoles)
 	chunkHashes := []string{}
 	contentBytes, err := streamChunks(teed, func(chunk []byte) error {
-		hash, storeErr := store.storeChunkBatched(ctx, cb, chunk)
+		hash, storeErr := store.storeChunkBatched(ctx, cb, chunk, family)
 		if storeErr != nil {
 			return storeErr
 		}
@@ -387,6 +400,7 @@ func (store *FilesystemStore) readBlobContent(
 func (store *FilesystemStore) storeChunk(
 	ctx context.Context,
 	chunk []byte,
+	family string,
 ) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -401,7 +415,7 @@ func (store *FilesystemStore) storeChunk(
 		return hash, nil
 	}
 
-	compressed, dictID, err := store.compressChunkContent(chunk)
+	compressed, dictID, dictFamily, err := store.compressChunkContent(chunk, family)
 	if err != nil {
 		return "", err
 	}
@@ -422,12 +436,13 @@ func (store *FilesystemStore) storeChunk(
 	}
 
 	if err := store.metaPut(chunkIndexKey(hash), chunkIndexEntry{
-		UpdatedAt: time.Now().UTC(),
-		ChunkHash: hash,
-		DictID:    dictID,
-		PackID:    packID,
-		Offset:    offset,
-		Length:    int64(len(compressed)),
+		UpdatedAt:  time.Now().UTC(),
+		ChunkHash:  hash,
+		DictID:     dictID,
+		DictFamily: dictFamily,
+		PackID:     packID,
+		Offset:     offset,
+		Length:     int64(len(compressed)),
 	}); err != nil {
 		return "", err
 	}
@@ -448,6 +463,7 @@ func (store *FilesystemStore) storeChunkBatched(
 	ctx context.Context,
 	cb *commitBatch,
 	chunk []byte,
+	family string,
 ) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -470,7 +486,7 @@ func (store *FilesystemStore) storeChunkBatched(
 		return hash, nil
 	}
 
-	compressed, dictID, err := store.compressChunkContent(chunk)
+	compressed, dictID, dictFamily, err := store.compressChunkContent(chunk, family)
 	if err != nil {
 		return "", err
 	}
@@ -493,12 +509,13 @@ func (store *FilesystemStore) storeChunkBatched(
 	}
 
 	if err := cb.set(chunkIndexKey(hash), chunkIndexEntry{
-		UpdatedAt: time.Now().UTC(),
-		ChunkHash: hash,
-		DictID:    dictID,
-		PackID:    packID,
-		Offset:    offset,
-		Length:    int64(len(compressed)),
+		UpdatedAt:  time.Now().UTC(),
+		ChunkHash:  hash,
+		DictID:     dictID,
+		DictFamily: dictFamily,
+		PackID:     packID,
+		Offset:     offset,
+		Length:     int64(len(compressed)),
 	}); err != nil {
 		return "", err
 	}

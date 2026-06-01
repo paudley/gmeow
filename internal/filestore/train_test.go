@@ -30,25 +30,31 @@ func TestTrainDictionaryInstallsAndAdopts(t *testing.T) {
 			index,
 		)
 		if _, err := store.Put(ctx, PutRequest{
-			Reader: bytes.NewReader([]byte(body)),
-			Facets: []contracts.Facet{{Kind: "email_part"}},
+			Reader:       bytes.NewReader([]byte(body)),
+			MediaType:    "text/rfc822-headers",
+			ContentRoles: []string{contracts.MailHeadersRole},
+			Facets:       []contracts.Facet{{Kind: "email_part"}},
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	report, err := store.TrainDictionary(ctx, 0)
+	report, err := store.TrainDictionary(ctx, TrainDictionaryRequest{
+		Family: DictionaryFamilyMailHeaders,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.DictionaryID == "" || report.DictionaryBytes <= 0 ||
+	if report.Family != DictionaryFamilyMailHeaders ||
+		report.DictionaryID == "" ||
+		report.DictionaryBytes <= 0 ||
 		report.Samples < minDictSamples {
 		t.Fatalf("unexpected training report: %#v", report)
 	}
 
 	// The current marker now points at the trained dictionary, and the cache
 	// reloaded so a freshly stored chunk records the new dictionary id.
-	id, dict, err := store.activeDictionary()
+	id, dict, err := store.activeDictionary(DictionaryFamilyMailHeaders)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +66,9 @@ func TestTrainDictionaryInstallsAndAdopts(t *testing.T) {
 		Reader: bytes.NewReader(
 			[]byte("From: new@example.test\r\nSubject: adopt\r\n\r\nnew body\r\n"),
 		),
-		Facets: []contracts.Facet{{Kind: "email_part"}},
+		MediaType:    "text/rfc822-headers",
+		ContentRoles: []string{contracts.MailHeadersRole},
+		Facets:       []contracts.Facet{{Kind: "email_part"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +87,9 @@ func TestTrainDictionaryInstallsAndAdopts(t *testing.T) {
 			entry.DictID,
 			report.DictionaryID,
 		)
+	}
+	if entry.DictFamily != DictionaryFamilyMailHeaders {
+		t.Fatalf("new chunk recorded family %q", entry.DictFamily)
 	}
 	breakdown, err := store.StorageBreakdown(ctx, StorageBreakdownRequest{
 		Digest: digest,
@@ -109,6 +120,7 @@ func assertDictionaryStorageRow(
 		if file.DictID != dictID ||
 			len(file.DictIDs) != 1 ||
 			file.DictIDs[0] != dictID ||
+			file.DictFamily != DictionaryFamilyMailHeaders ||
 			file.ChunkCount == 0 {
 			t.Fatalf("unexpected dictionary storage row: %#v", file)
 		}

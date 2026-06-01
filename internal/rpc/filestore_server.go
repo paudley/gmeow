@@ -729,15 +729,30 @@ func (server *FilestoreServer) TrainDictionary(
 	ctx context.Context,
 	request *pb.TrainDictionaryRequest,
 ) (*pb.TrainDictionaryResponse, error) {
-	report, err := server.store.TrainDictionary(ctx, int(request.GetSampleLimit()))
+	report, err := server.store.TrainDictionary(ctx, filestore.TrainDictionaryRequest{
+		Family:      request.GetFamily(),
+		AllFamilies: request.GetAllFamilies(),
+		SampleLimit: int(request.GetSampleLimit()),
+	})
 	if err != nil {
 		return nil, err
+	}
+	results := make([]*pb.TrainDictionaryResult, 0, len(report.Results))
+	for _, result := range report.Results {
+		results = append(results, &pb.TrainDictionaryResult{
+			DictionaryId:    result.DictionaryID,
+			DictionaryBytes: result.DictionaryBytes,
+			Samples:         int32(result.Samples),
+			Family:          result.Family,
+		})
 	}
 
 	return &pb.TrainDictionaryResponse{
 		DictionaryId:    report.DictionaryID,
 		DictionaryBytes: report.DictionaryBytes,
 		Samples:         int32(report.Samples),
+		Family:          report.Family,
+		Results:         results,
 	}, nil
 }
 

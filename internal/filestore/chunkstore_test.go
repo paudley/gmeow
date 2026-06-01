@@ -59,7 +59,7 @@ func TestStreamingStoreMatchesInMemoryDigest(t *testing.T) {
 
 	memStore := NewFilesystemStore(t.TempDir())
 	memDigest := contracts.ObjectDigest(blake3HexBytes(content))
-	if err := memStore.storeBlobContent(ctx, memDigest, content); err != nil {
+	if err := memStore.storeBlobContent(ctx, memDigest, content, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	memRecipe, _, err := memStore.readRecipe(memDigest)
@@ -71,6 +71,8 @@ func TestStreamingStoreMatchesInMemoryDigest(t *testing.T) {
 	streamDigest, _, size, err := streamStore.storeBlobReader(
 		ctx,
 		bytes.NewReader(content),
+		"",
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +133,7 @@ func TestChunkStoreRoundTrip(t *testing.T) {
 
 	content := bytes.Repeat([]byte("the quick brown fox jumps 0123456789 "), 5000)
 
-	if err := store.storeBlobContent(ctx, digest, content); err != nil {
+	if err := store.storeBlobContent(ctx, digest, content, "", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,7 +163,7 @@ func TestChunkStoreDedupsRepeatedContent(t *testing.T) {
 	block := bytes.Repeat([]byte("abcdefgh"), 4096)
 	content := bytes.Repeat(block, 8)
 
-	if err := store.storeBlobContent(ctx, digest, content); err != nil {
+	if err := store.storeBlobContent(ctx, digest, content, "", nil); err != nil {
 		t.Fatal(err)
 	}
 

@@ -75,9 +75,10 @@ scanning pack contents. See `docs/architecture/FILESTORE.md` and
   writes are safe) reclaims unreferenced chunk-index entries; `repack` rewrites
   sealed packs to free the bytes on disk. Reclamation runs while the store keeps
   serving.
-- **Content-aware compression** — `train-dictionary` trains a zstd dictionary on
-  a sample of small objects and installs it; new chunks adopt it immediately and
-  existing chunks on the next `repack`.
+- **Content-aware compression** — FILESTORE selects zstd dictionaries by
+  dictionary family. Known small-object families can bootstrap or train their
+  own dictionaries, while opaque binary and already-compressed formats default
+  to no dictionary. New chunks record both concrete `dict_id` and family.
 - **Live operability** — inspection and reclamation commands run against a
   running `filestore-serve` over gRPC (the metadata store is single-writer), so
   integrity checks and space reclamation need no downtime.

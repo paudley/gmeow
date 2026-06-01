@@ -13,7 +13,11 @@ import (
 func TestStorageBreakdownChunkCountClampsForProto(t *testing.T) {
 	response := ToPBStorageBreakdown(filestore.StorageBreakdownReport{
 		Files: []filestore.StorageBreakdownFile{
-			{ChunkCount: -1},
+			{
+				ChunkCount:   -1,
+				DictFamily:   "structured-json",
+				DictFamilies: []string{"structured-json", "logs-line-oriented"},
+			},
 			{ChunkCount: math.MaxInt32 + 1},
 		},
 	})
@@ -33,5 +37,9 @@ func TestStorageBreakdownChunkCountClampsForProto(t *testing.T) {
 			"expected large chunk count to clamp to MaxInt32, got %d",
 			files[1].GetChunkCount(),
 		)
+	}
+	if files[0].GetDictionaryFamily() != "structured-json" ||
+		len(files[0].GetDictionaryFamilies()) != 2 {
+		t.Fatalf("dictionary families did not round-trip: %#v", files[0])
 	}
 }

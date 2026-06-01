@@ -1783,22 +1783,24 @@ func (x *StorageBreakdownRequest) GetRecursiveParts() bool {
 }
 
 type StorageBreakdownFile struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	ObjectDigest   string                 `protobuf:"bytes,1,opt,name=object_digest,json=objectDigest,proto3" json:"object_digest,omitempty"`
-	Role           string                 `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
-	Path           string                 `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
-	LogicalBytes   int64                  `protobuf:"varint,4,opt,name=logical_bytes,json=logicalBytes,proto3" json:"logical_bytes,omitempty"`
-	AllocatedBytes int64                  `protobuf:"varint,5,opt,name=allocated_bytes,json=allocatedBytes,proto3" json:"allocated_bytes,omitempty"`
-	Estimated      bool                   `protobuf:"varint,6,opt,name=estimated,proto3" json:"estimated,omitempty"`
-	ReferencedBy   string                 `protobuf:"bytes,7,opt,name=referenced_by,json=referencedBy,proto3" json:"referenced_by,omitempty"`
-	CompoundRole   string                 `protobuf:"bytes,8,opt,name=compound_role,json=compoundRole,proto3" json:"compound_role,omitempty"`
-	CompoundOrder  int32                  `protobuf:"varint,9,opt,name=compound_order,json=compoundOrder,proto3" json:"compound_order,omitempty"`
-	RecursivePart  bool                   `protobuf:"varint,10,opt,name=recursive_part,json=recursivePart,proto3" json:"recursive_part,omitempty"`
-	DictId         string                 `protobuf:"bytes,11,opt,name=dict_id,json=dictId,proto3" json:"dict_id,omitempty"`
-	DictIds        []string               `protobuf:"bytes,12,rep,name=dict_ids,json=dictIds,proto3" json:"dict_ids,omitempty"`
-	ChunkCount     int32                  `protobuf:"varint,13,opt,name=chunk_count,json=chunkCount,proto3" json:"chunk_count,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	ObjectDigest       string                 `protobuf:"bytes,1,opt,name=object_digest,json=objectDigest,proto3" json:"object_digest,omitempty"`
+	Role               string                 `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
+	Path               string                 `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
+	LogicalBytes       int64                  `protobuf:"varint,4,opt,name=logical_bytes,json=logicalBytes,proto3" json:"logical_bytes,omitempty"`
+	AllocatedBytes     int64                  `protobuf:"varint,5,opt,name=allocated_bytes,json=allocatedBytes,proto3" json:"allocated_bytes,omitempty"`
+	Estimated          bool                   `protobuf:"varint,6,opt,name=estimated,proto3" json:"estimated,omitempty"`
+	ReferencedBy       string                 `protobuf:"bytes,7,opt,name=referenced_by,json=referencedBy,proto3" json:"referenced_by,omitempty"`
+	CompoundRole       string                 `protobuf:"bytes,8,opt,name=compound_role,json=compoundRole,proto3" json:"compound_role,omitempty"`
+	CompoundOrder      int32                  `protobuf:"varint,9,opt,name=compound_order,json=compoundOrder,proto3" json:"compound_order,omitempty"`
+	RecursivePart      bool                   `protobuf:"varint,10,opt,name=recursive_part,json=recursivePart,proto3" json:"recursive_part,omitempty"`
+	DictId             string                 `protobuf:"bytes,11,opt,name=dict_id,json=dictId,proto3" json:"dict_id,omitempty"`
+	DictIds            []string               `protobuf:"bytes,12,rep,name=dict_ids,json=dictIds,proto3" json:"dict_ids,omitempty"`
+	ChunkCount         int32                  `protobuf:"varint,13,opt,name=chunk_count,json=chunkCount,proto3" json:"chunk_count,omitempty"`
+	DictionaryFamily   string                 `protobuf:"bytes,14,opt,name=dictionary_family,json=dictionaryFamily,proto3" json:"dictionary_family,omitempty"`
+	DictionaryFamilies []string               `protobuf:"bytes,15,rep,name=dictionary_families,json=dictionaryFamilies,proto3" json:"dictionary_families,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *StorageBreakdownFile) Reset() {
@@ -1920,6 +1922,20 @@ func (x *StorageBreakdownFile) GetChunkCount() int32 {
 		return x.ChunkCount
 	}
 	return 0
+}
+
+func (x *StorageBreakdownFile) GetDictionaryFamily() string {
+	if x != nil {
+		return x.DictionaryFamily
+	}
+	return ""
+}
+
+func (x *StorageBreakdownFile) GetDictionaryFamilies() []string {
+	if x != nil {
+		return x.DictionaryFamilies
+	}
+	return nil
 }
 
 type StorageBreakdownResponse struct {
@@ -2809,6 +2825,8 @@ func (x *RepackResponse) GetBytesAfter() int64 {
 type TrainDictionaryRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SampleLimit   int32                  `protobuf:"varint,1,opt,name=sample_limit,json=sampleLimit,proto3" json:"sample_limit,omitempty"`
+	Family        string                 `protobuf:"bytes,2,opt,name=family,proto3" json:"family,omitempty"`
+	AllFamilies   bool                   `protobuf:"varint,3,opt,name=all_families,json=allFamilies,proto3" json:"all_families,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2850,18 +2868,102 @@ func (x *TrainDictionaryRequest) GetSampleLimit() int32 {
 	return 0
 }
 
-type TrainDictionaryResponse struct {
+func (x *TrainDictionaryRequest) GetFamily() string {
+	if x != nil {
+		return x.Family
+	}
+	return ""
+}
+
+func (x *TrainDictionaryRequest) GetAllFamilies() bool {
+	if x != nil {
+		return x.AllFamilies
+	}
+	return false
+}
+
+type TrainDictionaryResult struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	DictionaryId    string                 `protobuf:"bytes,1,opt,name=dictionary_id,json=dictionaryId,proto3" json:"dictionary_id,omitempty"`
 	DictionaryBytes int64                  `protobuf:"varint,2,opt,name=dictionary_bytes,json=dictionaryBytes,proto3" json:"dictionary_bytes,omitempty"`
 	Samples         int32                  `protobuf:"varint,3,opt,name=samples,proto3" json:"samples,omitempty"`
+	Family          string                 `protobuf:"bytes,4,opt,name=family,proto3" json:"family,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *TrainDictionaryResult) Reset() {
+	*x = TrainDictionaryResult{}
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TrainDictionaryResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TrainDictionaryResult) ProtoMessage() {}
+
+func (x *TrainDictionaryResult) ProtoReflect() protoreflect.Message {
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TrainDictionaryResult.ProtoReflect.Descriptor instead.
+func (*TrainDictionaryResult) Descriptor() ([]byte, []int) {
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *TrainDictionaryResult) GetDictionaryId() string {
+	if x != nil {
+		return x.DictionaryId
+	}
+	return ""
+}
+
+func (x *TrainDictionaryResult) GetDictionaryBytes() int64 {
+	if x != nil {
+		return x.DictionaryBytes
+	}
+	return 0
+}
+
+func (x *TrainDictionaryResult) GetSamples() int32 {
+	if x != nil {
+		return x.Samples
+	}
+	return 0
+}
+
+func (x *TrainDictionaryResult) GetFamily() string {
+	if x != nil {
+		return x.Family
+	}
+	return ""
+}
+
+type TrainDictionaryResponse struct {
+	state           protoimpl.MessageState   `protogen:"open.v1"`
+	DictionaryId    string                   `protobuf:"bytes,1,opt,name=dictionary_id,json=dictionaryId,proto3" json:"dictionary_id,omitempty"`
+	DictionaryBytes int64                    `protobuf:"varint,2,opt,name=dictionary_bytes,json=dictionaryBytes,proto3" json:"dictionary_bytes,omitempty"`
+	Samples         int32                    `protobuf:"varint,3,opt,name=samples,proto3" json:"samples,omitempty"`
+	Family          string                   `protobuf:"bytes,4,opt,name=family,proto3" json:"family,omitempty"`
+	Results         []*TrainDictionaryResult `protobuf:"bytes,5,rep,name=results,proto3" json:"results,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
 
 func (x *TrainDictionaryResponse) Reset() {
 	*x = TrainDictionaryResponse{}
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[49]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2873,7 +2975,7 @@ func (x *TrainDictionaryResponse) String() string {
 func (*TrainDictionaryResponse) ProtoMessage() {}
 
 func (x *TrainDictionaryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[49]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2886,7 +2988,7 @@ func (x *TrainDictionaryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrainDictionaryResponse.ProtoReflect.Descriptor instead.
 func (*TrainDictionaryResponse) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{49}
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *TrainDictionaryResponse) GetDictionaryId() string {
@@ -2908,6 +3010,20 @@ func (x *TrainDictionaryResponse) GetSamples() int32 {
 		return x.Samples
 	}
 	return 0
+}
+
+func (x *TrainDictionaryResponse) GetFamily() string {
+	if x != nil {
+		return x.Family
+	}
+	return ""
+}
+
+func (x *TrainDictionaryResponse) GetResults() []*TrainDictionaryResult {
+	if x != nil {
+		return x.Results
+	}
+	return nil
 }
 
 type ResolvePathResponse struct {
@@ -2935,7 +3051,7 @@ type ResolvePathResponse struct {
 
 func (x *ResolvePathResponse) Reset() {
 	*x = ResolvePathResponse{}
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[50]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2947,7 +3063,7 @@ func (x *ResolvePathResponse) String() string {
 func (*ResolvePathResponse) ProtoMessage() {}
 
 func (x *ResolvePathResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_gmeow_v1_filestore_proto_msgTypes[50]
+	mi := &file_gmeow_v1_filestore_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2960,7 +3076,7 @@ func (x *ResolvePathResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolvePathResponse.ProtoReflect.Descriptor instead.
 func (*ResolvePathResponse) Descriptor() ([]byte, []int) {
-	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{50}
+	return file_gmeow_v1_filestore_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *ResolvePathResponse) GetRecords() []*ResolvePathRecord {
@@ -3197,7 +3313,7 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\bfindings\x18\x03 \x03(\v2\x17.gmeow.v1.VerifyFindingR\bfindings\"Z\n" +
 	"\x17StorageBreakdownRequest\x12\x16\n" +
 	"\x06digest\x18\x01 \x01(\tR\x06digest\x12'\n" +
-	"\x0frecursive_parts\x18\x02 \x01(\bR\x0erecursiveParts\"\xbc\x03\n" +
+	"\x0frecursive_parts\x18\x02 \x01(\bR\x0erecursiveParts\"\x9a\x04\n" +
 	"\x14StorageBreakdownFile\x12#\n" +
 	"\robject_digest\x18\x01 \x01(\tR\fobjectDigest\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x12\n" +
@@ -3213,7 +3329,9 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\adict_id\x18\v \x01(\tR\x06dictId\x12\x19\n" +
 	"\bdict_ids\x18\f \x03(\tR\adictIds\x12\x1f\n" +
 	"\vchunk_count\x18\r \x01(\x05R\n" +
-	"chunkCount\"\x86\x03\n" +
+	"chunkCount\x12+\n" +
+	"\x11dictionary_family\x18\x0e \x01(\tR\x10dictionaryFamily\x12/\n" +
+	"\x13dictionary_families\x18\x0f \x03(\tR\x12dictionaryFamilies\"\x86\x03\n" +
 	"\x18StorageBreakdownResponse\x12\x1f\n" +
 	"\vroot_digest\x18\x01 \x01(\tR\n" +
 	"rootDigest\x124\n" +
@@ -3291,13 +3409,22 @@ const file_gmeow_v1_filestore_proto_rawDesc = "" +
 	"\fchunks_moved\x18\x04 \x01(\x05R\vchunksMoved\x12!\n" +
 	"\fbytes_before\x18\x05 \x01(\x03R\vbytesBefore\x12\x1f\n" +
 	"\vbytes_after\x18\x06 \x01(\x03R\n" +
-	"bytesAfter\";\n" +
+	"bytesAfter\"v\n" +
 	"\x16TrainDictionaryRequest\x12!\n" +
-	"\fsample_limit\x18\x01 \x01(\x05R\vsampleLimit\"\x83\x01\n" +
+	"\fsample_limit\x18\x01 \x01(\x05R\vsampleLimit\x12\x16\n" +
+	"\x06family\x18\x02 \x01(\tR\x06family\x12!\n" +
+	"\fall_families\x18\x03 \x01(\bR\vallFamilies\"\x99\x01\n" +
+	"\x15TrainDictionaryResult\x12#\n" +
+	"\rdictionary_id\x18\x01 \x01(\tR\fdictionaryId\x12)\n" +
+	"\x10dictionary_bytes\x18\x02 \x01(\x03R\x0fdictionaryBytes\x12\x18\n" +
+	"\asamples\x18\x03 \x01(\x05R\asamples\x12\x16\n" +
+	"\x06family\x18\x04 \x01(\tR\x06family\"\xd6\x01\n" +
 	"\x17TrainDictionaryResponse\x12#\n" +
 	"\rdictionary_id\x18\x01 \x01(\tR\fdictionaryId\x12)\n" +
 	"\x10dictionary_bytes\x18\x02 \x01(\x03R\x0fdictionaryBytes\x12\x18\n" +
-	"\asamples\x18\x03 \x01(\x05R\asamples\"\xbb\x05\n" +
+	"\asamples\x18\x03 \x01(\x05R\asamples\x12\x16\n" +
+	"\x06family\x18\x04 \x01(\tR\x06family\x129\n" +
+	"\aresults\x18\x05 \x03(\v2\x1f.gmeow.v1.TrainDictionaryResultR\aresults\"\xbb\x05\n" +
 	"\x13ResolvePathResponse\x125\n" +
 	"\arecords\x18\x01 \x03(\v2\x1b.gmeow.v1.ResolvePathRecordR\arecords\x12>\n" +
 	"\rsource_object\x18\x02 \x01(\v2\x19.gmeow.v1.SourceObjectRefR\fsourceObject\x12;\n" +
@@ -3358,7 +3485,7 @@ func file_gmeow_v1_filestore_proto_rawDescGZIP() []byte {
 	return file_gmeow_v1_filestore_proto_rawDescData
 }
 
-var file_gmeow_v1_filestore_proto_msgTypes = make([]protoimpl.MessageInfo, 51)
+var file_gmeow_v1_filestore_proto_msgTypes = make([]protoimpl.MessageInfo, 52)
 var file_gmeow_v1_filestore_proto_goTypes = []any{
 	(*ProjectionObjectRequest)(nil),        // 0: gmeow.v1.ProjectionObjectRequest
 	(*ProjectionObjectResponse)(nil),       // 1: gmeow.v1.ProjectionObjectResponse
@@ -3409,111 +3536,113 @@ var file_gmeow_v1_filestore_proto_goTypes = []any{
 	(*RepackRequest)(nil),                  // 46: gmeow.v1.RepackRequest
 	(*RepackResponse)(nil),                 // 47: gmeow.v1.RepackResponse
 	(*TrainDictionaryRequest)(nil),         // 48: gmeow.v1.TrainDictionaryRequest
-	(*TrainDictionaryResponse)(nil),        // 49: gmeow.v1.TrainDictionaryResponse
-	(*ResolvePathResponse)(nil),            // 50: gmeow.v1.ResolvePathResponse
-	(*ProjectionObject)(nil),               // 51: gmeow.v1.ProjectionObject
-	(*SourceObjectRef)(nil),                // 52: gmeow.v1.SourceObjectRef
-	(*SourceIngestClaim)(nil),              // 53: gmeow.v1.SourceIngestClaim
-	(*Facet)(nil),                          // 54: gmeow.v1.Facet
-	(*Provenance)(nil),                     // 55: gmeow.v1.Provenance
-	(*Relationship)(nil),                   // 56: gmeow.v1.Relationship
-	(*CompoundPart)(nil),                   // 57: gmeow.v1.CompoundPart
-	(*Manifest)(nil),                       // 58: gmeow.v1.Manifest
-	(*Structure)(nil),                      // 59: gmeow.v1.Structure
-	(*Annotation)(nil),                     // 60: gmeow.v1.Annotation
-	(*SourceCursor)(nil),                   // 61: gmeow.v1.SourceCursor
-	(*Empty)(nil),                          // 62: gmeow.v1.Empty
+	(*TrainDictionaryResult)(nil),          // 49: gmeow.v1.TrainDictionaryResult
+	(*TrainDictionaryResponse)(nil),        // 50: gmeow.v1.TrainDictionaryResponse
+	(*ResolvePathResponse)(nil),            // 51: gmeow.v1.ResolvePathResponse
+	(*ProjectionObject)(nil),               // 52: gmeow.v1.ProjectionObject
+	(*SourceObjectRef)(nil),                // 53: gmeow.v1.SourceObjectRef
+	(*SourceIngestClaim)(nil),              // 54: gmeow.v1.SourceIngestClaim
+	(*Facet)(nil),                          // 55: gmeow.v1.Facet
+	(*Provenance)(nil),                     // 56: gmeow.v1.Provenance
+	(*Relationship)(nil),                   // 57: gmeow.v1.Relationship
+	(*CompoundPart)(nil),                   // 58: gmeow.v1.CompoundPart
+	(*Manifest)(nil),                       // 59: gmeow.v1.Manifest
+	(*Structure)(nil),                      // 60: gmeow.v1.Structure
+	(*Annotation)(nil),                     // 61: gmeow.v1.Annotation
+	(*SourceCursor)(nil),                   // 62: gmeow.v1.SourceCursor
+	(*Empty)(nil),                          // 63: gmeow.v1.Empty
 }
 var file_gmeow_v1_filestore_proto_depIdxs = []int32{
-	51, // 0: gmeow.v1.ProjectionObjectResponse.object:type_name -> gmeow.v1.ProjectionObject
-	52, // 1: gmeow.v1.LookupSourceObjectRequest.ref:type_name -> gmeow.v1.SourceObjectRef
-	52, // 2: gmeow.v1.TryAcquireSourceIngestRequest.ref:type_name -> gmeow.v1.SourceObjectRef
-	53, // 3: gmeow.v1.TryAcquireSourceIngestResponse.claim:type_name -> gmeow.v1.SourceIngestClaim
-	53, // 4: gmeow.v1.ReleaseSourceIngestRequest.claim:type_name -> gmeow.v1.SourceIngestClaim
+	52, // 0: gmeow.v1.ProjectionObjectResponse.object:type_name -> gmeow.v1.ProjectionObject
+	53, // 1: gmeow.v1.LookupSourceObjectRequest.ref:type_name -> gmeow.v1.SourceObjectRef
+	53, // 2: gmeow.v1.TryAcquireSourceIngestRequest.ref:type_name -> gmeow.v1.SourceObjectRef
+	54, // 3: gmeow.v1.TryAcquireSourceIngestResponse.claim:type_name -> gmeow.v1.SourceIngestClaim
+	54, // 4: gmeow.v1.ReleaseSourceIngestRequest.claim:type_name -> gmeow.v1.SourceIngestClaim
 	11, // 5: gmeow.v1.PutObjectFrame.start:type_name -> gmeow.v1.PutObjectStart
 	12, // 6: gmeow.v1.PutObjectFrame.finish:type_name -> gmeow.v1.PutObjectFinish
-	54, // 7: gmeow.v1.PutObjectStart.facets:type_name -> gmeow.v1.Facet
-	55, // 8: gmeow.v1.PutObjectStart.provenance:type_name -> gmeow.v1.Provenance
-	56, // 9: gmeow.v1.PutObjectStart.relationships:type_name -> gmeow.v1.Relationship
-	55, // 10: gmeow.v1.AttachProvenanceRequest.provenance:type_name -> gmeow.v1.Provenance
-	54, // 11: gmeow.v1.PutCompoundRequest.facets:type_name -> gmeow.v1.Facet
-	55, // 12: gmeow.v1.PutCompoundRequest.provenance:type_name -> gmeow.v1.Provenance
-	56, // 13: gmeow.v1.PutCompoundRequest.relationships:type_name -> gmeow.v1.Relationship
-	57, // 14: gmeow.v1.PutCompoundRequest.parts:type_name -> gmeow.v1.CompoundPart
-	58, // 15: gmeow.v1.ReadManifestResponse.manifest:type_name -> gmeow.v1.Manifest
-	59, // 16: gmeow.v1.GetStructureResponse.structure:type_name -> gmeow.v1.Structure
-	60, // 17: gmeow.v1.WriteAnnotationRequest.annotation:type_name -> gmeow.v1.Annotation
-	61, // 18: gmeow.v1.WriteSourceCursorRequest.cursor:type_name -> gmeow.v1.SourceCursor
-	61, // 19: gmeow.v1.ReadSourceCursorResponse.cursor:type_name -> gmeow.v1.SourceCursor
+	55, // 7: gmeow.v1.PutObjectStart.facets:type_name -> gmeow.v1.Facet
+	56, // 8: gmeow.v1.PutObjectStart.provenance:type_name -> gmeow.v1.Provenance
+	57, // 9: gmeow.v1.PutObjectStart.relationships:type_name -> gmeow.v1.Relationship
+	56, // 10: gmeow.v1.AttachProvenanceRequest.provenance:type_name -> gmeow.v1.Provenance
+	55, // 11: gmeow.v1.PutCompoundRequest.facets:type_name -> gmeow.v1.Facet
+	56, // 12: gmeow.v1.PutCompoundRequest.provenance:type_name -> gmeow.v1.Provenance
+	57, // 13: gmeow.v1.PutCompoundRequest.relationships:type_name -> gmeow.v1.Relationship
+	58, // 14: gmeow.v1.PutCompoundRequest.parts:type_name -> gmeow.v1.CompoundPart
+	59, // 15: gmeow.v1.ReadManifestResponse.manifest:type_name -> gmeow.v1.Manifest
+	60, // 16: gmeow.v1.GetStructureResponse.structure:type_name -> gmeow.v1.Structure
+	61, // 17: gmeow.v1.WriteAnnotationRequest.annotation:type_name -> gmeow.v1.Annotation
+	62, // 18: gmeow.v1.WriteSourceCursorRequest.cursor:type_name -> gmeow.v1.SourceCursor
+	62, // 19: gmeow.v1.ReadSourceCursorResponse.cursor:type_name -> gmeow.v1.SourceCursor
 	31, // 20: gmeow.v1.VerifyResponse.findings:type_name -> gmeow.v1.VerifyFinding
 	34, // 21: gmeow.v1.StorageBreakdownResponse.files:type_name -> gmeow.v1.StorageBreakdownFile
-	52, // 22: gmeow.v1.ResolvePathRecord.source_object:type_name -> gmeow.v1.SourceObjectRef
+	53, // 22: gmeow.v1.ResolvePathRecord.source_object:type_name -> gmeow.v1.SourceObjectRef
 	37, // 23: gmeow.v1.ResolvePathRecord.recovery:type_name -> gmeow.v1.ResolvePathRecovery
 	38, // 24: gmeow.v1.ResolvePathRecord.parents:type_name -> gmeow.v1.ResolvePathParent
-	55, // 25: gmeow.v1.ResolvePathManifest.provenance:type_name -> gmeow.v1.Provenance
-	57, // 26: gmeow.v1.ResolvePathManifest.parts:type_name -> gmeow.v1.CompoundPart
-	39, // 27: gmeow.v1.ResolvePathResponse.records:type_name -> gmeow.v1.ResolvePathRecord
-	52, // 28: gmeow.v1.ResolvePathResponse.source_object:type_name -> gmeow.v1.SourceObjectRef
-	61, // 29: gmeow.v1.ResolvePathResponse.source_cursor:type_name -> gmeow.v1.SourceCursor
-	53, // 30: gmeow.v1.ResolvePathResponse.ingest_claim:type_name -> gmeow.v1.SourceIngestClaim
-	40, // 31: gmeow.v1.ResolvePathResponse.manifest:type_name -> gmeow.v1.ResolvePathManifest
-	5,  // 32: gmeow.v1.FilestoreService.LookupSourceObject:input_type -> gmeow.v1.LookupSourceObjectRequest
-	7,  // 33: gmeow.v1.FilestoreService.TryAcquireSourceIngest:input_type -> gmeow.v1.TryAcquireSourceIngestRequest
-	9,  // 34: gmeow.v1.FilestoreService.ReleaseSourceIngest:input_type -> gmeow.v1.ReleaseSourceIngestRequest
-	10, // 35: gmeow.v1.FilestoreService.PutObject:input_type -> gmeow.v1.PutObjectFrame
-	14, // 36: gmeow.v1.FilestoreService.AttachProvenance:input_type -> gmeow.v1.AttachProvenanceRequest
-	15, // 37: gmeow.v1.FilestoreService.PutCompound:input_type -> gmeow.v1.PutCompoundRequest
-	17, // 38: gmeow.v1.FilestoreService.Open:input_type -> gmeow.v1.OpenRequest
-	19, // 39: gmeow.v1.FilestoreService.ReadManifest:input_type -> gmeow.v1.ReadManifestRequest
-	21, // 40: gmeow.v1.FilestoreService.GetStructure:input_type -> gmeow.v1.GetStructureRequest
-	23, // 41: gmeow.v1.FilestoreService.HasAnalysisAnnotation:input_type -> gmeow.v1.HasAnalysisAnnotationRequest
-	25, // 42: gmeow.v1.FilestoreService.WriteAnnotation:input_type -> gmeow.v1.WriteAnnotationRequest
-	26, // 43: gmeow.v1.FilestoreService.WriteOverlays:input_type -> gmeow.v1.WriteOverlaysRequest
-	27, // 44: gmeow.v1.FilestoreService.WriteSourceCursor:input_type -> gmeow.v1.WriteSourceCursorRequest
-	28, // 45: gmeow.v1.FilestoreService.ReadSourceCursor:input_type -> gmeow.v1.ReadSourceCursorRequest
-	30, // 46: gmeow.v1.FilestoreService.Verify:input_type -> gmeow.v1.VerifyRequest
-	33, // 47: gmeow.v1.FilestoreService.StorageBreakdown:input_type -> gmeow.v1.StorageBreakdownRequest
-	36, // 48: gmeow.v1.FilestoreService.ResolvePath:input_type -> gmeow.v1.ResolvePathRequest
-	41, // 49: gmeow.v1.FilestoreService.DeleteObject:input_type -> gmeow.v1.DeleteObjectRequest
-	42, // 50: gmeow.v1.FilestoreService.DeleteImport:input_type -> gmeow.v1.DeleteImportRequest
-	44, // 51: gmeow.v1.FilestoreService.Gc:input_type -> gmeow.v1.GcRequest
-	46, // 52: gmeow.v1.FilestoreService.Repack:input_type -> gmeow.v1.RepackRequest
-	48, // 53: gmeow.v1.FilestoreService.TrainDictionary:input_type -> gmeow.v1.TrainDictionaryRequest
-	0,  // 54: gmeow.v1.FilestoreService.GetProjectionObject:input_type -> gmeow.v1.ProjectionObjectRequest
-	2,  // 55: gmeow.v1.FilestoreService.WalkProjection:input_type -> gmeow.v1.WalkProjectionRequest
-	3,  // 56: gmeow.v1.FilestoreService.WalkChangedProjection:input_type -> gmeow.v1.WalkChangedProjectionRequest
-	4,  // 57: gmeow.v1.FilestoreService.WalkSourceCursors:input_type -> gmeow.v1.WalkSourceCursorsRequest
-	6,  // 58: gmeow.v1.FilestoreService.LookupSourceObject:output_type -> gmeow.v1.LookupSourceObjectResponse
-	8,  // 59: gmeow.v1.FilestoreService.TryAcquireSourceIngest:output_type -> gmeow.v1.TryAcquireSourceIngestResponse
-	62, // 60: gmeow.v1.FilestoreService.ReleaseSourceIngest:output_type -> gmeow.v1.Empty
-	13, // 61: gmeow.v1.FilestoreService.PutObject:output_type -> gmeow.v1.PutObjectResponse
-	62, // 62: gmeow.v1.FilestoreService.AttachProvenance:output_type -> gmeow.v1.Empty
-	16, // 63: gmeow.v1.FilestoreService.PutCompound:output_type -> gmeow.v1.PutCompoundResponse
-	18, // 64: gmeow.v1.FilestoreService.Open:output_type -> gmeow.v1.ObjectChunk
-	20, // 65: gmeow.v1.FilestoreService.ReadManifest:output_type -> gmeow.v1.ReadManifestResponse
-	22, // 66: gmeow.v1.FilestoreService.GetStructure:output_type -> gmeow.v1.GetStructureResponse
-	24, // 67: gmeow.v1.FilestoreService.HasAnalysisAnnotation:output_type -> gmeow.v1.HasAnalysisAnnotationResponse
-	62, // 68: gmeow.v1.FilestoreService.WriteAnnotation:output_type -> gmeow.v1.Empty
-	62, // 69: gmeow.v1.FilestoreService.WriteOverlays:output_type -> gmeow.v1.Empty
-	62, // 70: gmeow.v1.FilestoreService.WriteSourceCursor:output_type -> gmeow.v1.Empty
-	29, // 71: gmeow.v1.FilestoreService.ReadSourceCursor:output_type -> gmeow.v1.ReadSourceCursorResponse
-	32, // 72: gmeow.v1.FilestoreService.Verify:output_type -> gmeow.v1.VerifyResponse
-	35, // 73: gmeow.v1.FilestoreService.StorageBreakdown:output_type -> gmeow.v1.StorageBreakdownResponse
-	50, // 74: gmeow.v1.FilestoreService.ResolvePath:output_type -> gmeow.v1.ResolvePathResponse
-	62, // 75: gmeow.v1.FilestoreService.DeleteObject:output_type -> gmeow.v1.Empty
-	43, // 76: gmeow.v1.FilestoreService.DeleteImport:output_type -> gmeow.v1.DeleteImportResponse
-	45, // 77: gmeow.v1.FilestoreService.Gc:output_type -> gmeow.v1.GcResponse
-	47, // 78: gmeow.v1.FilestoreService.Repack:output_type -> gmeow.v1.RepackResponse
-	49, // 79: gmeow.v1.FilestoreService.TrainDictionary:output_type -> gmeow.v1.TrainDictionaryResponse
-	1,  // 80: gmeow.v1.FilestoreService.GetProjectionObject:output_type -> gmeow.v1.ProjectionObjectResponse
-	51, // 81: gmeow.v1.FilestoreService.WalkProjection:output_type -> gmeow.v1.ProjectionObject
-	51, // 82: gmeow.v1.FilestoreService.WalkChangedProjection:output_type -> gmeow.v1.ProjectionObject
-	61, // 83: gmeow.v1.FilestoreService.WalkSourceCursors:output_type -> gmeow.v1.SourceCursor
-	58, // [58:84] is the sub-list for method output_type
-	32, // [32:58] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	56, // 25: gmeow.v1.ResolvePathManifest.provenance:type_name -> gmeow.v1.Provenance
+	58, // 26: gmeow.v1.ResolvePathManifest.parts:type_name -> gmeow.v1.CompoundPart
+	49, // 27: gmeow.v1.TrainDictionaryResponse.results:type_name -> gmeow.v1.TrainDictionaryResult
+	39, // 28: gmeow.v1.ResolvePathResponse.records:type_name -> gmeow.v1.ResolvePathRecord
+	53, // 29: gmeow.v1.ResolvePathResponse.source_object:type_name -> gmeow.v1.SourceObjectRef
+	62, // 30: gmeow.v1.ResolvePathResponse.source_cursor:type_name -> gmeow.v1.SourceCursor
+	54, // 31: gmeow.v1.ResolvePathResponse.ingest_claim:type_name -> gmeow.v1.SourceIngestClaim
+	40, // 32: gmeow.v1.ResolvePathResponse.manifest:type_name -> gmeow.v1.ResolvePathManifest
+	5,  // 33: gmeow.v1.FilestoreService.LookupSourceObject:input_type -> gmeow.v1.LookupSourceObjectRequest
+	7,  // 34: gmeow.v1.FilestoreService.TryAcquireSourceIngest:input_type -> gmeow.v1.TryAcquireSourceIngestRequest
+	9,  // 35: gmeow.v1.FilestoreService.ReleaseSourceIngest:input_type -> gmeow.v1.ReleaseSourceIngestRequest
+	10, // 36: gmeow.v1.FilestoreService.PutObject:input_type -> gmeow.v1.PutObjectFrame
+	14, // 37: gmeow.v1.FilestoreService.AttachProvenance:input_type -> gmeow.v1.AttachProvenanceRequest
+	15, // 38: gmeow.v1.FilestoreService.PutCompound:input_type -> gmeow.v1.PutCompoundRequest
+	17, // 39: gmeow.v1.FilestoreService.Open:input_type -> gmeow.v1.OpenRequest
+	19, // 40: gmeow.v1.FilestoreService.ReadManifest:input_type -> gmeow.v1.ReadManifestRequest
+	21, // 41: gmeow.v1.FilestoreService.GetStructure:input_type -> gmeow.v1.GetStructureRequest
+	23, // 42: gmeow.v1.FilestoreService.HasAnalysisAnnotation:input_type -> gmeow.v1.HasAnalysisAnnotationRequest
+	25, // 43: gmeow.v1.FilestoreService.WriteAnnotation:input_type -> gmeow.v1.WriteAnnotationRequest
+	26, // 44: gmeow.v1.FilestoreService.WriteOverlays:input_type -> gmeow.v1.WriteOverlaysRequest
+	27, // 45: gmeow.v1.FilestoreService.WriteSourceCursor:input_type -> gmeow.v1.WriteSourceCursorRequest
+	28, // 46: gmeow.v1.FilestoreService.ReadSourceCursor:input_type -> gmeow.v1.ReadSourceCursorRequest
+	30, // 47: gmeow.v1.FilestoreService.Verify:input_type -> gmeow.v1.VerifyRequest
+	33, // 48: gmeow.v1.FilestoreService.StorageBreakdown:input_type -> gmeow.v1.StorageBreakdownRequest
+	36, // 49: gmeow.v1.FilestoreService.ResolvePath:input_type -> gmeow.v1.ResolvePathRequest
+	41, // 50: gmeow.v1.FilestoreService.DeleteObject:input_type -> gmeow.v1.DeleteObjectRequest
+	42, // 51: gmeow.v1.FilestoreService.DeleteImport:input_type -> gmeow.v1.DeleteImportRequest
+	44, // 52: gmeow.v1.FilestoreService.Gc:input_type -> gmeow.v1.GcRequest
+	46, // 53: gmeow.v1.FilestoreService.Repack:input_type -> gmeow.v1.RepackRequest
+	48, // 54: gmeow.v1.FilestoreService.TrainDictionary:input_type -> gmeow.v1.TrainDictionaryRequest
+	0,  // 55: gmeow.v1.FilestoreService.GetProjectionObject:input_type -> gmeow.v1.ProjectionObjectRequest
+	2,  // 56: gmeow.v1.FilestoreService.WalkProjection:input_type -> gmeow.v1.WalkProjectionRequest
+	3,  // 57: gmeow.v1.FilestoreService.WalkChangedProjection:input_type -> gmeow.v1.WalkChangedProjectionRequest
+	4,  // 58: gmeow.v1.FilestoreService.WalkSourceCursors:input_type -> gmeow.v1.WalkSourceCursorsRequest
+	6,  // 59: gmeow.v1.FilestoreService.LookupSourceObject:output_type -> gmeow.v1.LookupSourceObjectResponse
+	8,  // 60: gmeow.v1.FilestoreService.TryAcquireSourceIngest:output_type -> gmeow.v1.TryAcquireSourceIngestResponse
+	63, // 61: gmeow.v1.FilestoreService.ReleaseSourceIngest:output_type -> gmeow.v1.Empty
+	13, // 62: gmeow.v1.FilestoreService.PutObject:output_type -> gmeow.v1.PutObjectResponse
+	63, // 63: gmeow.v1.FilestoreService.AttachProvenance:output_type -> gmeow.v1.Empty
+	16, // 64: gmeow.v1.FilestoreService.PutCompound:output_type -> gmeow.v1.PutCompoundResponse
+	18, // 65: gmeow.v1.FilestoreService.Open:output_type -> gmeow.v1.ObjectChunk
+	20, // 66: gmeow.v1.FilestoreService.ReadManifest:output_type -> gmeow.v1.ReadManifestResponse
+	22, // 67: gmeow.v1.FilestoreService.GetStructure:output_type -> gmeow.v1.GetStructureResponse
+	24, // 68: gmeow.v1.FilestoreService.HasAnalysisAnnotation:output_type -> gmeow.v1.HasAnalysisAnnotationResponse
+	63, // 69: gmeow.v1.FilestoreService.WriteAnnotation:output_type -> gmeow.v1.Empty
+	63, // 70: gmeow.v1.FilestoreService.WriteOverlays:output_type -> gmeow.v1.Empty
+	63, // 71: gmeow.v1.FilestoreService.WriteSourceCursor:output_type -> gmeow.v1.Empty
+	29, // 72: gmeow.v1.FilestoreService.ReadSourceCursor:output_type -> gmeow.v1.ReadSourceCursorResponse
+	32, // 73: gmeow.v1.FilestoreService.Verify:output_type -> gmeow.v1.VerifyResponse
+	35, // 74: gmeow.v1.FilestoreService.StorageBreakdown:output_type -> gmeow.v1.StorageBreakdownResponse
+	51, // 75: gmeow.v1.FilestoreService.ResolvePath:output_type -> gmeow.v1.ResolvePathResponse
+	63, // 76: gmeow.v1.FilestoreService.DeleteObject:output_type -> gmeow.v1.Empty
+	43, // 77: gmeow.v1.FilestoreService.DeleteImport:output_type -> gmeow.v1.DeleteImportResponse
+	45, // 78: gmeow.v1.FilestoreService.Gc:output_type -> gmeow.v1.GcResponse
+	47, // 79: gmeow.v1.FilestoreService.Repack:output_type -> gmeow.v1.RepackResponse
+	50, // 80: gmeow.v1.FilestoreService.TrainDictionary:output_type -> gmeow.v1.TrainDictionaryResponse
+	1,  // 81: gmeow.v1.FilestoreService.GetProjectionObject:output_type -> gmeow.v1.ProjectionObjectResponse
+	52, // 82: gmeow.v1.FilestoreService.WalkProjection:output_type -> gmeow.v1.ProjectionObject
+	52, // 83: gmeow.v1.FilestoreService.WalkChangedProjection:output_type -> gmeow.v1.ProjectionObject
+	62, // 84: gmeow.v1.FilestoreService.WalkSourceCursors:output_type -> gmeow.v1.SourceCursor
+	59, // [59:85] is the sub-list for method output_type
+	33, // [33:59] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_gmeow_v1_filestore_proto_init() }
@@ -3533,7 +3662,7 @@ func file_gmeow_v1_filestore_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gmeow_v1_filestore_proto_rawDesc), len(file_gmeow_v1_filestore_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   51,
+			NumMessages:   52,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

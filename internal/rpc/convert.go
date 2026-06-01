@@ -540,19 +540,24 @@ func ToPBStorageBreakdown(
 			chunkCount = math.MaxInt32
 		}
 		files = append(files, &pb.StorageBreakdownFile{
-			ObjectDigest:   string(file.ObjectDigest),
-			Role:           file.Role,
-			Path:           file.Path,
-			LogicalBytes:   file.LogicalBytes,
-			AllocatedBytes: file.AllocatedBytes,
-			Estimated:      file.Estimated,
-			DictId:         file.DictID,
-			DictIds:        append([]string{}, file.DictIDs...),
-			ChunkCount:     int32(chunkCount),
-			ReferencedBy:   string(file.ReferencedBy),
-			CompoundRole:   file.CompoundRole,
-			CompoundOrder:  int32(file.CompoundOrder),
-			RecursivePart:  file.RecursivePart,
+			ObjectDigest:     string(file.ObjectDigest),
+			Role:             file.Role,
+			Path:             file.Path,
+			LogicalBytes:     file.LogicalBytes,
+			AllocatedBytes:   file.AllocatedBytes,
+			Estimated:        file.Estimated,
+			DictId:           file.DictID,
+			DictIds:          append([]string{}, file.DictIDs...),
+			ChunkCount:       int32(chunkCount),
+			DictionaryFamily: file.DictFamily,
+			DictionaryFamilies: append(
+				[]string{},
+				file.DictFamilies...,
+			),
+			ReferencedBy:  string(file.ReferencedBy),
+			CompoundRole:  file.CompoundRole,
+			CompoundOrder: int32(file.CompoundOrder),
+			RecursivePart: file.RecursivePart,
 		})
 	}
 
@@ -583,6 +588,8 @@ func FromPBStorageBreakdown(
 			DictID:         file.GetDictId(),
 			DictIDs:        append([]string{}, file.GetDictIds()...),
 			ChunkCount:     int(file.GetChunkCount()),
+			DictFamily:     file.GetDictionaryFamily(),
+			DictFamilies:   append([]string{}, file.GetDictionaryFamilies()...),
 			ReferencedBy:   contracts.ObjectDigest(file.GetReferencedBy()),
 			CompoundRole:   file.GetCompoundRole(),
 			CompoundOrder:  int(file.GetCompoundOrder()),

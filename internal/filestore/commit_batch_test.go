@@ -28,11 +28,11 @@ func TestStoreChunkBatchedDedupsWithinObject(t *testing.T) {
 
 	chunk := bytes.Repeat([]byte("dedup-within-object "), 256)
 
-	first, err := store.storeChunkBatched(ctx, batch, chunk)
+	first, err := store.storeChunkBatched(ctx, batch, chunk, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.storeChunkBatched(ctx, batch, chunk)
+	second, err := store.storeChunkBatched(ctx, batch, chunk, "")
 	if err != nil {
 		t.Fatal(err)
 	}

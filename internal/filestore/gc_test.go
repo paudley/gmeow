@@ -110,7 +110,12 @@ func TestGcGraceWindowProtectsRecentChunks(t *testing.T) {
 	store := NewFilesystemStore(t.TempDir())
 
 	content := bytes.Repeat([]byte("recently written, must survive gc "), 5000)
-	digest, _, _, err := store.storeBlobReader(ctx, bytes.NewReader(content))
+	digest, _, _, err := store.storeBlobReader(
+		ctx,
+		bytes.NewReader(content),
+		"",
+		nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -86,7 +86,13 @@ func (store *FilesystemStore) writePackedAnnotation(
 		// own BLAKE3 digest, and reference it from the record.
 		sum := blake3.Sum256(encoded)
 		contentDigest := contracts.ObjectDigest(hex.EncodeToString(sum[:]))
-		if err := store.storeBlobContent(ctx, contentDigest, encoded); err != nil {
+		if err := store.storeBlobContent(
+			ctx,
+			contentDigest,
+			encoded,
+			"application/json",
+			nil,
+		); err != nil {
 			return err
 		}
 		entry.ExternalDigest = contentDigest

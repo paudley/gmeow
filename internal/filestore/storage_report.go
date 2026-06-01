@@ -41,6 +41,8 @@ type StorageBreakdownFile struct {
 	Estimated      bool                   `json:"estimated"`
 	DictID         string                 `json:"dict_id,omitempty"`
 	DictIDs        []string               `json:"dict_ids,omitempty"`
+	DictFamily     string                 `json:"dictionary_family,omitempty"`
+	DictFamilies   []string               `json:"dictionary_families,omitempty"`
 	ChunkCount     int                    `json:"chunk_count,omitempty"`
 	ReferencedBy   contracts.ObjectDigest `json:"referenced_by,omitempty"`
 	CompoundRole   string                 `json:"compound_role,omitempty"`
@@ -326,7 +328,9 @@ func (store *FilesystemStore) addObjectLogicalEntries(
 		return err
 	}
 	if ok {
-		chunkCount, dictID, dictIDs, err := store.recipeDictionarySummary(recipe)
+		chunkCount, dictID, dictIDs, dictFamily, dictFamilies, err := store.recipeDictionarySummary(
+			recipe,
+		)
 		if err != nil {
 			return err
 		}
@@ -336,6 +340,8 @@ func (store *FilesystemStore) addObjectLogicalEntries(
 			Path:          chunkPacksDir,
 			DictID:        dictID,
 			DictIDs:       dictIDs,
+			DictFamily:    dictFamily,
+			DictFamilies:  dictFamilies,
 			ChunkCount:    chunkCount,
 			ReferencedBy:  referencedBy,
 			CompoundRole:  compoundRole,
@@ -349,30 +355,44 @@ func (store *FilesystemStore) addObjectLogicalEntries(
 
 func (store *FilesystemStore) recipeDictionarySummary(
 	recipe objectRecipeEntry,
-) (int, string, []string, error) {
-	seen := make(map[string]bool)
+) (int, string, []string, string, []string, error) {
+	seenIDs := make(map[string]bool)
+	seenFamilies := make(map[string]bool)
 	dictIDs := make([]string, 0, len(recipe.ChunkHashes))
+	dictFamilies := make([]string, 0, len(recipe.ChunkHashes))
 	for _, chunkHash := range recipe.ChunkHashes {
 		entry, ok, err := store.lookupChunk(chunkHash)
 		if err != nil {
-			return 0, "", nil, err
+			return 0, "", nil, "", nil, err
 		}
 		if !ok {
 			continue
 		}
-		if entry.DictID == "" || seen[entry.DictID] {
-			continue
+		if entry.DictID != "" && !seenIDs[entry.DictID] {
+			seenIDs[entry.DictID] = true
+			dictIDs = append(dictIDs, entry.DictID)
 		}
-		seen[entry.DictID] = true
-		dictIDs = append(dictIDs, entry.DictID)
+		family := entry.DictFamily
+		if family == "" && entry.DictID != "" {
+			family = "legacy-global"
+		}
+		if family != "" && !seenFamilies[family] {
+			seenFamilies[family] = true
+			dictFamilies = append(dictFamilies, family)
+		}
 	}
 	sort.Strings(dictIDs)
+	sort.Strings(dictFamilies)
 	dictID := ""
 	if len(dictIDs) == 1 {
 		dictID = dictIDs[0]
 	}
+	dictFamily := ""
+	if len(dictFamilies) == 1 {
+		dictFamily = dictFamilies[0]
+	}
 
-	return len(recipe.ChunkHashes), dictID, dictIDs, nil
+	return len(recipe.ChunkHashes), dictID, dictIDs, dictFamily, dictFamilies, nil
 }
 
 // addLogicalEntry appends a logical (non-file) storage entry whose bytes come
@@ -394,6 +414,8 @@ func (store *FilesystemStore) addLogicalEntry(
 		Estimated:      true,
 		DictID:         context.DictID,
 		DictIDs:        append([]string{}, context.DictIDs...),
+		DictFamily:     context.DictFamily,
+		DictFamilies:   append([]string{}, context.DictFamilies...),
 		ChunkCount:     context.ChunkCount,
 		ReferencedBy:   context.ReferencedBy,
 		CompoundRole:   context.CompoundRole,
@@ -408,6 +430,8 @@ type storageFileContext struct {
 	Path          string
 	DictID        string
 	DictIDs       []string
+	DictFamily    string
+	DictFamilies  []string
 	ChunkCount    int
 	ReferencedBy  contracts.ObjectDigest
 	CompoundRole  string
