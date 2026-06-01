@@ -740,11 +740,7 @@ func (index *Index) StoreContactEmbedding(
 	if err != nil {
 		return fmt.Errorf("begin contact embedding upsert: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback(ctx)
-		}
-	}()
+	defer tx.Rollback(ctx)
 
 	_, err = tx.Exec(
 		ctx,
@@ -773,6 +769,19 @@ func (index *Index) StoreContactEmbedding(
 	}
 
 	if len(record.Vector) > 0 && status == "complete" {
+		embeddingID := contactEmbeddingID(record)
+		_, err = tx.Exec(
+			ctx,
+			`DELETE FROM query_contact_embeddings
+			  WHERE contact_id = $1 AND model = $2 AND embedding_id <> $3`,
+			contactID,
+			record.Model,
+			embeddingID,
+		)
+		if err != nil {
+			return fmt.Errorf("delete stale contact embeddings: %w", err)
+		}
+
 		_, err = tx.Exec(
 			ctx,
 			`INSERT INTO query_contact_embeddings(
@@ -787,7 +796,7 @@ func (index *Index) StoreContactEmbedding(
 			   embedding = excluded.embedding`,
 			contactID,
 			record.Model,
-			contactEmbeddingID(record),
+			embeddingID,
 			record.InputHash,
 			record.TextPreview,
 			metadata,
@@ -796,6 +805,17 @@ func (index *Index) StoreContactEmbedding(
 		)
 		if err != nil {
 			return fmt.Errorf("upsert contact embedding: %w", err)
+		}
+	} else {
+		_, err = tx.Exec(
+			ctx,
+			`DELETE FROM query_contact_embeddings
+			  WHERE contact_id = $1 AND model = $2`,
+			contactID,
+			record.Model,
+		)
+		if err != nil {
+			return fmt.Errorf("delete contact embeddings: %w", err)
 		}
 	}
 
@@ -818,6 +838,13 @@ func (index *Index) ContactVectorSearch(
 		return contracts.ContactVectorSearchResponse{
 			SchemaVersion: contracts.SchemaVersionPhase00,
 		}, nil
+	}
+	if request.Dimensions > 0 && request.Dimensions != len(request.Vector) {
+		return contracts.ContactVectorSearchResponse{}, fmt.Errorf(
+			"dimensions (%d) must match vector length (%d)",
+			request.Dimensions,
+			len(request.Vector),
+		)
 	}
 
 	args := []any{vectorLiteral(request.Vector), len(request.Vector)}

@@ -192,9 +192,11 @@ func TestContactIntelligenceJSONUsesContractKeys(t *testing.T) {
 		"contact_id",
 		"analyzer_name",
 		"analyzer_version",
+		"status",
+		"model",
 		"input_hash",
 		"vector",
-	}, []string{"ContactID"})
+	}, []string{"ContactID", "Status", "Model"})
 
 	assertJSONKeys(t, "contact vector search response", ContactVectorSearchResponse{
 		SchemaVersion: SchemaVersionPhase00,

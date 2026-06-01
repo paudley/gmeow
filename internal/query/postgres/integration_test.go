@@ -942,6 +942,18 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 	if len(vector.Results) == 0 || vector.Results[0].ContactID != contactID {
 		t.Fatalf("unexpected contact vector search: %#v", vector)
 	}
+	if vector.Results[0].Model != "fixture-model" {
+		t.Fatalf("contact vector search ignored model filter: %#v", vector)
+	}
+
+	_, err = index.ContactVectorSearch(ctx, contracts.ContactVectorSearchRequest{
+		Vector:     []float32{1, 0, 0},
+		Dimensions: 2,
+		Limit:      10,
+	})
+	if err == nil {
+		t.Fatal("expected contact vector search to reject mismatched dimensions")
+	}
 
 	similar, err := index.SimilarContacts(ctx, contracts.SimilarContactsRequest{
 		ContactID: contactID,
@@ -957,6 +969,74 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 	}
 	if similar.Results[0].Model != "fixture-model" {
 		t.Fatalf("similar contact ignored model filter: %#v", similar)
+	}
+
+	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
+		ContactID:       contactID,
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "complete",
+		Model:           "fixture-model",
+		InputHash:       "input-pa-updated",
+		TextPreview:     "Patrick Audley updated",
+		Vector:          []float32{0.95, 0.05, 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContactEmbeddingState(
+		t,
+		ctx,
+		index,
+		contactID,
+		"fixture-model",
+		1,
+		"input-pa-updated",
+	)
+
+	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
+		ContactID:       contactID,
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "skipped",
+		Model:           "fixture-model",
+		InputHash:       "input-pa-skipped",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContactEmbeddingState(t, ctx, index, contactID, "fixture-model", 0, "")
+}
+
+func assertContactEmbeddingState(
+	t *testing.T,
+	ctx context.Context,
+	index *Index,
+	contactID string,
+	model string,
+	wantCount int,
+	wantInputHash string,
+) {
+	t.Helper()
+	var count int
+	var inputHash string
+	err := index.pool.QueryRow(
+		ctx,
+		`SELECT count(*), COALESCE(max(input_hash), '')
+		   FROM query_contact_embeddings
+		  WHERE contact_id = $1 AND model = $2`,
+		contactID,
+		model,
+	).Scan(&count, &inputHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != wantCount || inputHash != wantInputHash {
+		t.Fatalf(
+			"unexpected contact embedding state: count=%d input_hash=%q",
+			count,
+			inputHash,
+		)
 	}
 }
 

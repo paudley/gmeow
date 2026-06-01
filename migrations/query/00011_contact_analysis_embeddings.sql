@@ -1,4 +1,14 @@
 -- +goose Up
+-- +goose StatementBegin
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+    RAISE EXCEPTION 'required PostgreSQL extension "vector" is not enabled';
+  END IF;
+END
+$$;
+-- +goose StatementEnd
+
 CREATE TABLE IF NOT EXISTS query_contact_analysis (
   contact_id TEXT NOT NULL,
   analyzer_name TEXT NOT NULL,

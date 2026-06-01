@@ -152,6 +152,7 @@ func (analyzer *EmbeddingAnalyzer) EmbedText(
 		func(callCtx context.Context) error {
 			var embedErr error
 			vector, embedErr = analyzer.embed(callCtx, truncatedText)
+
 			return embedErr
 		},
 	)

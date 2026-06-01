@@ -199,8 +199,8 @@ func analyzeContactInput(
 	input contracts.ContactAnalysisInputResult,
 ) (contracts.ContactAnalysisResult, error) {
 	inputText := strings.TrimSpace(input.InputText)
-	inputHash := contactInputHash(inputText)
 	if inputText == "" {
+		inputHash := contactInputHash(inputText)
 		record := contactEmbeddingRecord(
 			input,
 			analyzer,
@@ -221,6 +221,7 @@ func analyzeContactInput(
 	if err != nil {
 		return contracts.ContactAnalysisResult{}, err
 	}
+	inputHash := contactInputHash(text)
 	record := contactEmbeddingRecord(
 		input,
 		analyzer,
