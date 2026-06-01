@@ -18,6 +18,7 @@ const (
 	FactKindEmail        = "email"
 	FactKindIdentifier   = "identifier"
 	FactKindName         = "name"
+	FactKindNote         = "note"
 	FactKindPhone        = "phone"
 	FactKindRelationship = "relationship"
 	FactKindTitle        = "title"
@@ -314,6 +315,8 @@ func vcardContactFactKind(predicate string) (string, bool) {
 		return FactKindPhone, true
 	case "http://www.w3.org/2006/vcard/ns#hasURL":
 		return FactKindURL, true
+	case "http://www.w3.org/2006/vcard/ns#note":
+		return FactKindNote, true
 	case "http://www.w3.org/2006/vcard/ns#nickname":
 		return FactKindAlias, true
 	default:
@@ -385,6 +388,8 @@ func schemaContactFactKindEarly(predicate string) (string, bool) {
 		return FactKindEmail, true
 	case schemaOrgHTTPSPrefix + "identifier":
 		return FactKindIdentifier, true
+	case schemaOrgHTTPSPrefix + "description":
+		return FactKindNote, true
 	case schemaOrgHTTPSPrefix + "jobTitle":
 		return FactKindTitle, true
 	default:

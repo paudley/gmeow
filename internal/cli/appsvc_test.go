@@ -88,6 +88,8 @@ func TestAdminCommandIncludesContactQuerySurface(t *testing.T) {
 		"analysis-inputs",
 		"analysis-status",
 		"analyze",
+		"import",
+		"export",
 	} {
 		if !strings.Contains(output, commandName) {
 			t.Fatalf("help output missing contact %s:\n%s", commandName, output)
