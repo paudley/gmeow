@@ -77,25 +77,24 @@ func newQueryContactSearchCommand(out io.Writer, configPath *string) *cobra.Comm
 		Short: "Search contact rollups",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.ContactSearch(
-				command.Context(),
-				contracts.ContactSearchRequest{
-					Query:  args[0],
-					Limit:  limitOffset.limit,
-					Offset: limitOffset.offset,
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (
+					contracts.ContactSearchResponse,
+					error,
+				) {
+					return index.ContactSearch(ctx, contracts.ContactSearchRequest{
+						Query:  args[0],
+						Limit:  limitOffset.limit,
+						Offset: limitOffset.offset,
+					})
 				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
-	addLimitOffsetFlags(command, &limitOffset, 50)
+	addLimitOffsetFlags(command, &limitOffset)
 
 	return command
 }
@@ -106,18 +105,17 @@ func newQueryContactAggregateCommand(out io.Writer, configPath *string) *cobra.C
 		Short: "Fetch a contact aggregate",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.ContactAggregate(
-				command.Context(),
-				contracts.ContactAggregateRequest{ContactID: args[0]},
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (contracts.ContactAggregate, error) {
+					return index.ContactAggregate(
+						ctx,
+						contracts.ContactAggregateRequest{ContactID: args[0]},
+					)
+				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
 }
@@ -128,18 +126,20 @@ func newQueryContactResolveCommand(out io.Writer, configPath *string) *cobra.Com
 		Short: "Resolve an identity token to contacts",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.ResolveContactIdentity(
-				command.Context(),
-				contracts.ContactIdentityResolveRequest{Identity: args[0]},
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (
+					contracts.ContactIdentityResolveResponse,
+					error,
+				) {
+					return index.ResolveContactIdentity(
+						ctx,
+						contracts.ContactIdentityResolveRequest{Identity: args[0]},
+					)
+				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
 }
@@ -154,30 +154,32 @@ func newQueryContactIdentitiesCommand(
 		Use:   "identities",
 		Short: "List contact identity bindings",
 		RunE: func(command *cobra.Command, _ []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.ContactIdentityDetails(
-				command.Context(),
-				contracts.ContactIdentityDetailRequest{
-					Identities: request.identities,
-					ContactIDs: request.contactIDs,
-					Limit:      request.limitOffset.limit,
-					Offset:     request.limitOffset.offset,
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (
+					contracts.ContactIdentityDetailResponse,
+					error,
+				) {
+					return index.ContactIdentityDetails(
+						ctx,
+						contracts.ContactIdentityDetailRequest{
+							Identities: request.identities,
+							ContactIDs: request.contactIDs,
+							Limit:      request.limitOffset.limit,
+							Offset:     request.limitOffset.offset,
+						},
+					)
 				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
 	command.Flags().
 		StringSliceVar(&request.identities, "identity", nil, "identity token filter")
 	command.Flags().
 		StringSliceVar(&request.contactIDs, "contact-id", nil, "contact id filter")
-	addLimitOffsetFlags(command, &request.limitOffset, 50)
+	addLimitOffsetFlags(command, &request.limitOffset)
 
 	return command
 }
@@ -189,27 +191,29 @@ func newQueryContactFactsCommand(out io.Writer, configPath *string) *cobra.Comma
 		Use:   "facts",
 		Short: "List projected contact facts",
 		RunE: func(command *cobra.Command, _ []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.ContactFacts(
-				command.Context(),
-				contracts.ContactFactRequest{
-					At:         request.at,
-					From:       request.from,
-					Until:      request.until,
-					ContactIDs: request.contactIDs,
-					FactKinds:  request.factKinds,
-					Limit:      request.limitOffset.limit,
-					Offset:     request.limitOffset.offset,
-					Current:    request.current,
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (
+					contracts.ContactFactResponse,
+					error,
+				) {
+					return index.ContactFacts(
+						ctx,
+						contracts.ContactFactRequest{
+							At:         request.at,
+							From:       request.from,
+							Until:      request.until,
+							ContactIDs: request.contactIDs,
+							FactKinds:  request.factKinds,
+							Limit:      request.limitOffset.limit,
+							Offset:     request.limitOffset.offset,
+							Current:    request.current,
+						},
+					)
 				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
 	command.Flags().
@@ -221,7 +225,7 @@ func newQueryContactFactsCommand(out io.Writer, configPath *string) *cobra.Comma
 	command.Flags().StringVar(&request.until, "until", "", "temporal interval end filter")
 	command.Flags().
 		BoolVar(&request.current, "current", false, "include only current facts")
-	addLimitOffsetFlags(command, &request.limitOffset, 50)
+	addLimitOffsetFlags(command, &request.limitOffset)
 
 	return command
 }
@@ -240,28 +244,30 @@ func newQueryContactNeighborhoodCommand(
 		Short: "List a contact neighborhood",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.ContactNeighborhood(
-				command.Context(),
-				contracts.ContactNeighborhoodRequest{
-					ContactID: args[0],
-					FactKinds: factKinds,
-					Limit:     limitOffset.limit,
-					Offset:    limitOffset.offset,
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (
+					contracts.ContactNeighborhoodResponse,
+					error,
+				) {
+					return index.ContactNeighborhood(
+						ctx,
+						contracts.ContactNeighborhoodRequest{
+							ContactID: args[0],
+							FactKinds: factKinds,
+							Limit:     limitOffset.limit,
+							Offset:    limitOffset.offset,
+						},
+					)
 				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
 	command.Flags().
 		StringSliceVar(&factKinds, "fact-kind", nil, "contact fact kind filter")
-	addLimitOffsetFlags(command, &limitOffset, 50)
+	addLimitOffsetFlags(command, &limitOffset)
 
 	return command
 }
@@ -277,27 +283,29 @@ func newQueryContactMessagesCommand(out io.Writer, configPath *string) *cobra.Co
 		Short: "List messages joined through contact identity bindings",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.ContactMessages(
-				command.Context(),
-				contracts.ContactMessageRequest{
-					ContactID: args[0],
-					Role:      role,
-					Limit:     limitOffset.limit,
-					Offset:    limitOffset.offset,
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (
+					contracts.ContactMessageResponse,
+					error,
+				) {
+					return index.ContactMessages(
+						ctx,
+						contracts.ContactMessageRequest{
+							ContactID: args[0],
+							Role:      role,
+							Limit:     limitOffset.limit,
+							Offset:    limitOffset.offset,
+						},
+					)
 				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
 	command.Flags().StringVar(&role, "role", "", "mail participant role filter")
-	addLimitOffsetFlags(command, &limitOffset, 50)
+	addLimitOffsetFlags(command, &limitOffset)
 
 	return command
 }
@@ -313,22 +321,24 @@ func newQueryContactSimilarCommand(out io.Writer, configPath *string) *cobra.Com
 		Short: "Find contacts with similar embeddings",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.SimilarContacts(
-				command.Context(),
-				contracts.SimilarContactsRequest{
-					ContactID: args[0],
-					Model:     model,
-					Limit:     limit,
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (
+					contracts.SimilarContactsResponse,
+					error,
+				) {
+					return index.SimilarContacts(
+						ctx,
+						contracts.SimilarContactsRequest{
+							ContactID: args[0],
+							Model:     model,
+							Limit:     limit,
+						},
+					)
 				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
 	command.Flags().StringVar(&model, "model", "", "embedding model filter")
@@ -352,28 +362,31 @@ func newQueryContactVectorSearchCommand(
 				return err
 			}
 
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.ContactVectorSearch(
-				command.Context(),
-				contracts.ContactVectorSearchRequest{
-					Vector:     vector,
-					Model:      request.model,
-					ContactIDs: request.contactIDs,
-					Limit:      request.limit,
-					Dimensions: request.dimensions,
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (
+					contracts.ContactVectorSearchResponse,
+					error,
+				) {
+					return index.ContactVectorSearch(
+						ctx,
+						contracts.ContactVectorSearchRequest{
+							Vector:     vector,
+							Model:      request.model,
+							ContactIDs: request.contactIDs,
+							Limit:      request.limit,
+							Dimensions: request.dimensions,
+						},
+					)
 				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
 	command.Flags().
 		StringVar(&request.vector, "vector", "", "comma-separated float32 vector")
+	_ = command.MarkFlagRequired("vector")
 	command.Flags().StringVar(&request.model, "model", "", "embedding model filter")
 	command.Flags().
 		StringSliceVar(&request.contactIDs, "contact-id", nil, "contact id filter")
@@ -394,30 +407,32 @@ func newQueryContactAnalysisInputsCommand(
 		Use:   "analysis-inputs",
 		Short: "List contact analysis inputs",
 		RunE: func(command *cobra.Command, _ []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.ContactAnalysisInputs(
-				command.Context(),
-				contracts.ContactAnalysisInputRequest{
-					ContactIDs: request.contactIDs,
-					FactKinds:  request.factKinds,
-					Limit:      request.limitOffset.limit,
-					Offset:     request.limitOffset.offset,
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (
+					contracts.ContactAnalysisInputResponse,
+					error,
+				) {
+					return index.ContactAnalysisInputs(
+						ctx,
+						contracts.ContactAnalysisInputRequest{
+							ContactIDs: request.contactIDs,
+							FactKinds:  request.factKinds,
+							Limit:      request.limitOffset.limit,
+							Offset:     request.limitOffset.offset,
+						},
+					)
 				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
 	command.Flags().
 		StringSliceVar(&request.contactIDs, "contact-id", nil, "contact id filter")
 	command.Flags().
 		StringSliceVar(&request.factKinds, "fact-kind", nil, "contact fact kind filter")
-	addLimitOffsetFlags(command, &request.limitOffset, 50)
+	addLimitOffsetFlags(command, &request.limitOffset)
 
 	return command
 }
@@ -432,26 +447,28 @@ func newQueryContactAnalysisStatusCommand(
 		Use:   "analysis-status",
 		Short: "List contact analysis status rows",
 		RunE: func(command *cobra.Command, _ []string) error {
-			index, err := openQueryIndexFromPath(command.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer index.Close()
-
-			response, err := index.ContactAnalysisStatus(
-				command.Context(),
-				contracts.ContactAnalysisStatusRequest{
-					ContactIDs:      request.contactIDs,
-					InputHashes:     request.inputHashes,
-					AnalyzerName:    request.analyzerName,
-					AnalyzerVersion: request.analyzerVersion,
-					Model:           request.model,
-					Limit:           request.limitOffset.limit,
-					Offset:          request.limitOffset.offset,
+			return writeContactQueryJSON(
+				command,
+				out,
+				configPath,
+				func(ctx context.Context, index *querypg.Index) (
+					contracts.ContactAnalysisStatusResponse,
+					error,
+				) {
+					return index.ContactAnalysisStatus(
+						ctx,
+						contracts.ContactAnalysisStatusRequest{
+							ContactIDs:      request.contactIDs,
+							InputHashes:     request.inputHashes,
+							AnalyzerName:    request.analyzerName,
+							AnalyzerVersion: request.analyzerVersion,
+							Model:           request.model,
+							Limit:           request.limitOffset.limit,
+							Offset:          request.limitOffset.offset,
+						},
+					)
 				},
 			)
-
-			return writeAppJSON(out, response, err)
 		},
 	}
 	command.Flags().
@@ -463,7 +480,7 @@ func newQueryContactAnalysisStatusCommand(
 	command.Flags().
 		StringVar(&request.analyzerVersion, "analyzer-version", "", "analyzer version filter")
 	command.Flags().StringVar(&request.model, "model", "", "embedding model filter")
-	addLimitOffsetFlags(command, &request.limitOffset, 50)
+	addLimitOffsetFlags(command, &request.limitOffset)
 
 	return command
 }
@@ -526,6 +543,25 @@ func newQueryContactAnalyzeCommand(out io.Writer, configPath *string) *cobra.Com
 	return command
 }
 
+func writeContactQueryJSON[T any](
+	command *cobra.Command,
+	out io.Writer,
+	configPath *string,
+	query func(context.Context, *querypg.Index) (T, error),
+) error {
+	index, err := openQueryIndexFromPath(command.Context(), configPath)
+	if err != nil {
+		var zero T
+
+		return writeAppJSON(out, zero, err)
+	}
+	defer index.Close()
+
+	response, err := query(command.Context(), index)
+
+	return writeAppJSON(out, response, err)
+}
+
 type contactLimitOffsetFlags struct {
 	limit  int
 	offset int
@@ -570,12 +606,8 @@ type contactAnalysisStatusFlags struct {
 	inputHashes     []string
 }
 
-func addLimitOffsetFlags(
-	command *cobra.Command,
-	target *contactLimitOffsetFlags,
-	defaultLimit int,
-) {
-	command.Flags().IntVar(&target.limit, "limit", defaultLimit, "maximum rows to return")
+func addLimitOffsetFlags(command *cobra.Command, target *contactLimitOffsetFlags) {
+	command.Flags().IntVar(&target.limit, "limit", 50, "maximum rows to return")
 	command.Flags().IntVar(&target.offset, "offset", 0, "rows to skip")
 }
 
@@ -588,9 +620,10 @@ func parseFloat32CSV(raw string) ([]float32, error) {
 	parts := strings.Split(raw, ",")
 	vector := make([]float32, 0, len(parts))
 	for _, part := range parts {
-		value, err := strconv.ParseFloat(strings.TrimSpace(part), 32)
+		trimmed := strings.TrimSpace(part)
+		value, err := strconv.ParseFloat(trimmed, 32)
 		if err != nil {
-			return nil, fmt.Errorf("parse --vector value %q: %w", part, err)
+			return nil, fmt.Errorf("parse --vector value %q: %w", trimmed, err)
 		}
 		vector = append(vector, float32(value))
 	}

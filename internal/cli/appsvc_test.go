@@ -120,6 +120,21 @@ func TestParseFloat32CSVRejectsEmptyAndMalformedValues(t *testing.T) {
 	}
 }
 
+func TestContactVectorSearchRequiresVectorFlag(t *testing.T) {
+	var out bytes.Buffer
+	command := NewAdminCommand(&out, strings.NewReader(""))
+	command.SetOut(&out)
+	command.SetArgs([]string{"query", "contact", "vector-search"})
+
+	err := command.Execute()
+	if err == nil {
+		t.Fatal("expected missing vector flag to fail")
+	}
+	if !strings.Contains(err.Error(), `required flag(s) "vector" not set`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestSourceImportCommandIncludesLowNoise(t *testing.T) {
 	var out bytes.Buffer
 	command := NewAdminCommand(&out, strings.NewReader(""))
