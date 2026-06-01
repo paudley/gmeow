@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,7 +24,9 @@ const (
 	FormatNative = "native"
 	FormatVCard  = "vcard"
 
-	contactImportSourceKind = "contact_import"
+	ImportSourceKind        = "contact_import"
+	contactImportSourceKind = ImportSourceKind
+	MediaTypeTurtle         = "text/turtle"
 )
 
 const (
@@ -53,16 +56,17 @@ type ImportResult struct {
 	SourceName   string   `json:"source_name"`
 	ExternalID   string   `json:"external_id"`
 	Format       string   `json:"format"`
+	ObjectDigest string   `json:"object_digest,omitempty"`
+	Error        string   `json:"error,omitempty"`
 	Contacts     []string `json:"contacts"`
 	Created      bool     `json:"created,omitempty"`
-	ObjectDigest string   `json:"object_digest,omitempty"`
 }
 
 type NativeBundle struct {
-	Contacts      []NativeContact         `json:"contacts"`
-	Metadata      map[string]any          `json:"metadata,omitempty"`
-	SchemaVersion contracts.SchemaVersion `json:"schema_version"`
 	GeneratedAt   time.Time               `json:"generated_at,omitzero"`
+	Metadata      map[string]any          `json:"metadata,omitempty"`
+	Contacts      []NativeContact         `json:"contacts"`
+	SchemaVersion contracts.SchemaVersion `json:"schema_version"`
 }
 
 type NativeContact struct {
@@ -78,8 +82,8 @@ type NativeContact struct {
 }
 
 type vcardContact struct {
-	subject string
 	values  map[string][]string
+	subject string
 }
 
 func BuildImportObject(
@@ -90,9 +94,11 @@ func BuildImportObject(
 	observedAt time.Time,
 ) (ImportObject, ImportResult, error) {
 	format = NormalizeFormat(format)
+
 	if sourceName = strings.TrimSpace(sourceName); sourceName == "" {
 		return ImportObject{}, ImportResult{}, errors.New("source name is required")
 	}
+
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	}
@@ -106,13 +112,14 @@ func BuildImportObject(
 	if externalID == "" {
 		externalID = format + "-" + shortHash(content)
 	}
+
 	externalVersion := contentHash(content)
 	facets := importFacets(format, contacts)
 
 	object := ImportObject{
 		ObservedAt:  observedAt.UTC(),
 		Content:     rendered,
-		MediaType:   "text/turtle",
+		MediaType:   MediaTypeTurtle,
 		SourceKind:  contactImportSourceKind,
 		SourceName:  sourceName,
 		ExternalID:  externalID,
@@ -150,36 +157,51 @@ func ExportVCard(contacts []contracts.ContactAggregate) string {
 	for _, contact := range contacts {
 		builder.WriteString("BEGIN:VCARD\nVERSION:4.0\n")
 		writeVCardLine(&builder, "FN", firstNonEmpty(contact.DisplayName, contact.ContactID))
+
 		for _, fact := range exportFacts(contact.Facts) {
-			switch fact.FactKind {
-			case contactentity.FactKindName:
-				if fact.Value != contact.DisplayName {
-					writeVCardLine(&builder, "NICKNAME", fact.Value)
-				}
-			case contactentity.FactKindAlias:
-				writeVCardLine(&builder, "NICKNAME", fact.Value)
-			case contactentity.FactKindEmail:
-				if !fact.Historical {
-					writeVCardLine(&builder, "EMAIL", fact.Value)
-				}
-			case contactentity.FactKindPhone:
-				writeVCardLine(&builder, "TEL", fact.Value)
-			case contactentity.FactKindURL:
-				writeVCardLine(&builder, "URL", fact.Value)
-			case contactentity.FactKindAffiliation:
-				writeVCardLine(&builder, "ORG", fact.Value)
-			case contactentity.FactKindTitle:
-				writeVCardLine(&builder, "TITLE", fact.Value)
-			case contactentity.FactKindAddress:
-				writeVCardLine(&builder, "ADR", fact.Value)
-			case contactentity.FactKindNote:
-				writeVCardLine(&builder, "NOTE", fact.Value)
-			}
+			writeContactFactVCardLine(&builder, fact, contact.DisplayName)
 		}
+
 		builder.WriteString("END:VCARD\n")
 	}
 
 	return builder.String()
+}
+
+func writeContactFactVCardLine(
+	builder *strings.Builder,
+	fact contracts.ContactFact,
+	displayName string,
+) {
+	if fact.FactKind == contactentity.FactKindName {
+		if fact.Value != displayName {
+			writeVCardLine(builder, "NICKNAME", fact.Value)
+		}
+
+		return
+	}
+
+	if fact.FactKind == contactentity.FactKindEmail {
+		if !fact.Historical {
+			writeVCardLine(builder, "EMAIL", fact.Value)
+		}
+
+		return
+	}
+
+	if property := factVCardProperties[fact.FactKind]; property != "" {
+		writeVCardLine(builder, property, fact.Value)
+	}
+}
+
+var factVCardProperties = map[string]string{
+	contactentity.FactKindAddress:     "ADR",
+	contactentity.FactKindAffiliation: "ORG",
+	contactentity.FactKindAlias:       "NICKNAME",
+	contactentity.FactKindNote:        "NOTE",
+	contactentity.FactKindPhone:       "TEL",
+	contactentity.FactKindTitle:       "TITLE",
+	contactentity.FactKindURL:         "URL",
 }
 
 func ExportFOAF(contacts []contracts.ContactAggregate) string {
@@ -191,13 +213,16 @@ func ExportFOAF(contacts []contracts.ContactAggregate) string {
 		if subject == "" {
 			continue
 		}
+
 		builder.WriteString("\n")
 		writeTriple(&builder, subject, rdfType, iri(foafPrefix+"Person"))
+
 		for _, fact := range exportFacts(contact.Facts) {
 			predicate := predicateForFact(fact)
 			if predicate == "" {
 				continue
 			}
+
 			writeTriple(&builder, subject, predicate, objectForFact(fact))
 			writeTemporalAnnotations(&builder, subject, predicate, objectForFact(fact), fact)
 		}
@@ -267,7 +292,7 @@ func importContent(format string, content []byte) (string, []string, error) {
 
 func importFacets(format string, contacts []string) []contracts.Facet {
 	input := contactentity.MetadataInput{
-		Format:     "text/turtle",
+		Format:     MediaTypeTurtle,
 		SourceKind: contactImportSourceKind,
 	}
 	if len(contacts) == 1 {
@@ -280,7 +305,7 @@ func importFacets(format string, contacts []string) []contracts.Facet {
 			Kind: contracts.RDFSourceBundleFacetKind,
 			Metadata: contactentity.Metadata(contactentity.MetadataInput{
 				RootSubject: input.RootSubject,
-				Format:      "text/turtle",
+				Format:      MediaTypeTurtle,
 				SourceKind:  contactImportSourceKind,
 				ClaimKind:   format,
 			}),
@@ -290,23 +315,36 @@ func importFacets(format string, contacts []string) []contracts.Facet {
 
 func nativeToRDF(content []byte) (string, []string, error) {
 	var bundle NativeBundle
-	if err := json.Unmarshal(content, &bundle); err != nil {
+	err := json.Unmarshal(content, &bundle)
+	if err != nil {
 		return "", nil, fmt.Errorf("decode native contact bundle: %w", err)
 	}
+
 	if len(bundle.Contacts) == 0 {
 		return "", nil, errors.New("native contact bundle has no contacts")
 	}
 
+	if bundle.SchemaVersion != contracts.SchemaVersionPhase00 {
+		return "", nil, fmt.Errorf(
+			"unsupported native contact schema_version %d",
+			bundle.SchemaVersion,
+		)
+	}
+
 	var builder strings.Builder
 	writePrefixes(&builder)
+
 	contacts := make([]string, 0, len(bundle.Contacts))
 	for _, contact := range bundle.Contacts {
 		if strings.TrimSpace(contact.ContactID) == "" {
 			return "", nil, errors.New("native contact is missing contact_id")
 		}
+
 		contacts = append(contacts, contact.ContactID)
+
 		builder.WriteString("\n")
 		writeTriple(&builder, contact.ContactID, rdfType, iri(foafPrefix+"Person"))
+
 		if contact.DisplayName != "" {
 			writeTriple(
 				&builder,
@@ -315,6 +353,7 @@ func nativeToRDF(content []byte) (string, []string, error) {
 				literal(contact.DisplayName),
 			)
 		}
+
 		if contact.PrimaryEmail != "" {
 			writeTriple(
 				&builder,
@@ -323,11 +362,13 @@ func nativeToRDF(content []byte) (string, []string, error) {
 				iri("mailto:"+contactentity.NormalizeIdentity(contact.PrimaryEmail)),
 			)
 		}
+
 		for _, fact := range contact.Facts {
 			predicate := predicateForFact(fact)
 			if predicate == "" || strings.TrimSpace(fact.Value) == "" {
 				continue
 			}
+
 			object := objectForFact(fact)
 			writeTriple(&builder, contact.ContactID, predicate, object)
 			writeTemporalAnnotations(&builder, contact.ContactID, predicate, object, fact)
@@ -342,57 +383,59 @@ func vcardToRDF(content string) (string, []string, error) {
 	if err != nil {
 		return "", nil, err
 	}
+
 	if len(cards) == 0 {
 		return "", nil, errors.New("vCard import has no cards")
 	}
 
 	var builder strings.Builder
 	writePrefixes(&builder)
+
 	contacts := make([]string, 0, len(cards))
 	for _, card := range cards {
 		contacts = append(contacts, card.subject)
-		builder.WriteString("\n")
-		writeTriple(&builder, card.subject, rdfType, iri(foafPrefix+"Person"))
-		for _, value := range card.values["FN"] {
-			writeTriple(&builder, card.subject, foafPrefix+"name", literal(value))
-		}
-		for _, value := range card.values["NICKNAME"] {
-			writeTriple(&builder, card.subject, foafPrefix+"nick", literal(value))
-		}
-		for _, value := range card.values["EMAIL"] {
-			writeTriple(
-				&builder,
-				card.subject,
-				vcardPrefix+"hasEmail",
-				iri("mailto:"+contactentity.NormalizeIdentity(value)),
-			)
-		}
-		for _, value := range card.values["TEL"] {
-			writeTriple(&builder, card.subject, vcardPrefix+"hasTelephone", literal(value))
-		}
-		for _, value := range card.values["URL"] {
-			writeTriple(&builder, card.subject, vcardPrefix+"hasURL", iri(value))
-		}
-		for _, value := range card.values["ORG"] {
-			writeTriple(&builder, card.subject, schemaPrefix+"affiliation", literal(value))
-		}
-		for _, value := range card.values["TITLE"] {
-			writeTriple(&builder, card.subject, schemaPrefix+"jobTitle", literal(value))
-		}
-		for _, value := range card.values["ADR"] {
-			writeTriple(&builder, card.subject, schemaPrefix+"address", literal(value))
-		}
-		for _, value := range card.values["NOTE"] {
-			writeTriple(&builder, card.subject, schemaPrefix+"description", literal(value))
-		}
+		writeVCardContactRDF(&builder, card)
 	}
 
 	return builder.String(), uniqueStrings(contacts), nil
 }
 
+func writeVCardContactRDF(builder *strings.Builder, card vcardContact) {
+	builder.WriteString("\n")
+	writeTriple(builder, card.subject, rdfType, iri(foafPrefix+"Person"))
+	writeVCardValueTriples(builder, card, "FN", foafPrefix+"name", literal)
+	writeVCardValueTriples(builder, card, "NICKNAME", foafPrefix+"nick", literal)
+	writeVCardValueTriples(
+		builder,
+		card,
+		"EMAIL",
+		vcardPrefix+"hasEmail",
+		normalizedEmailIRI,
+	)
+	writeVCardValueTriples(builder, card, "TEL", vcardPrefix+"hasTelephone", literal)
+	writeVCardValueTriples(builder, card, "URL", vcardPrefix+"hasURL", iri)
+	writeVCardValueTriples(builder, card, "ORG", schemaPrefix+"affiliation", literal)
+	writeVCardValueTriples(builder, card, "TITLE", schemaPrefix+"jobTitle", literal)
+	writeVCardValueTriples(builder, card, "ADR", schemaPrefix+"address", literal)
+	writeVCardValueTriples(builder, card, "NOTE", schemaPrefix+"description", literal)
+}
+
+func writeVCardValueTriples(
+	builder *strings.Builder,
+	card vcardContact,
+	name string,
+	predicate string,
+	object func(string) string,
+) {
+	for _, value := range card.values[name] {
+		writeTriple(builder, card.subject, predicate, object(value))
+	}
+}
+
 func parseVCards(content string) ([]vcardContact, error) {
 	lines := unfoldVCardLines(content)
 	cards := []vcardContact{}
+
 	var current map[string][]string
 
 	for _, line := range lines {
@@ -400,8 +443,10 @@ func parseVCards(content string) ([]vcardContact, error) {
 		if !found {
 			continue
 		}
-		name = strings.ToUpper(strings.TrimSpace(strings.Split(name, ";")[0]))
+
+		name = vcardPropertyName(name)
 		value = unescapeVCardValue(value)
+
 		switch name {
 		case "BEGIN":
 			if strings.EqualFold(value, "VCARD") {
@@ -421,6 +466,7 @@ func parseVCards(content string) ([]vcardContact, error) {
 			}
 		}
 	}
+
 	if current != nil {
 		return nil, errors.New("unterminated vCard")
 	}
@@ -436,27 +482,55 @@ func contactSubjectForVCard(values map[string][]string) string {
 		}
 	}
 
-	key := firstValue(values["FN"])
+	key := firstNonEmpty(
+		prefixedFirstValue("UID", values["UID"]),
+		prefixedFirstValue("FN", values["FN"]),
+		prefixedFirstValue("N", values["N"]),
+	)
 	if key == "" {
-		key = firstValue(values["N"])
-	}
-	if key == "" {
-		key = "unknown"
+		key = stableVCardFingerprint(values)
 	}
 
 	return "urn:gmeow:contact:" + shortHash([]byte(key))
 }
 
+func prefixedFirstValue(prefix string, values []string) string {
+	if value := firstValue(values); value != "" {
+		return prefix + "=" + value
+	}
+
+	return ""
+}
+
+func stableVCardFingerprint(values map[string][]string) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+strings.Join(values[key], "|"))
+	}
+
+	return strings.Join(parts, ";")
+}
+
 func unfoldVCardLines(content string) []string {
 	rawLines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	lines := []string{}
+
 	for _, raw := range rawLines {
 		if strings.HasPrefix(raw, " ") || strings.HasPrefix(raw, "\t") {
 			if len(lines) > 0 {
-				lines[len(lines)-1] += strings.TrimLeft(raw, " \t")
+				lines[len(lines)-1] += raw[1:]
 			}
+
 			continue
 		}
+
 		if strings.TrimSpace(raw) != "" {
 			lines = append(lines, strings.TrimRight(raw, "\r"))
 		}
@@ -482,17 +556,29 @@ func unescapeVCardValue(value string) string {
 	return strings.TrimSpace(replacer.Replace(value))
 }
 
+func vcardPropertyName(value string) string {
+	property := strings.Split(value, ";")[0]
+	if _, after, found := strings.Cut(property, "."); found {
+		property = after
+	}
+
+	return strings.ToUpper(strings.TrimSpace(property))
+}
+
 func firstRDFContactSubjects(content string) []string {
 	subjects := []string{}
-	for _, line := range strings.Split(content, "\n") {
+
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "<") {
 			continue
 		}
+
 		subject, rest, found := strings.Cut(line, ">")
 		if !found {
 			continue
 		}
+
 		if strings.Contains(rest, "foaf:Person") ||
 			strings.Contains(rest, "schema:Person") ||
 			strings.Contains(rest, "<"+foafPrefix+"Person>") ||
@@ -510,9 +596,11 @@ func exportFacts(facts []contracts.ContactFact) []contracts.ContactFact {
 		if copied[left].ContactID != copied[right].ContactID {
 			return copied[left].ContactID < copied[right].ContactID
 		}
+
 		if copied[left].FactKind != copied[right].FactKind {
 			return copied[left].FactKind < copied[right].FactKind
 		}
+
 		if copied[left].Value != copied[right].Value {
 			return copied[left].Value < copied[right].Value
 		}
@@ -523,57 +611,75 @@ func exportFacts(facts []contracts.ContactFact) []contracts.ContactFact {
 	return copied
 }
 
+var factPredicates = map[string]string{
+	contactentity.FactKindAddress:      schemaPrefix + "address",
+	contactentity.FactKindAffiliation:  schemaPrefix + "affiliation",
+	contactentity.FactKindAlias:        schemaPrefix + "alternateName",
+	contactentity.FactKindIdentifier:   schemaPrefix + "identifier",
+	contactentity.FactKindName:         foafPrefix + "name",
+	contactentity.FactKindNote:         schemaPrefix + "description",
+	contactentity.FactKindPhone:        schemaPrefix + "telephone",
+	contactentity.FactKindRelationship: schemaPrefix + "knows",
+	contactentity.FactKindTitle:        schemaPrefix + "jobTitle",
+	contactentity.FactKindURL:          schemaPrefix + "url",
+}
+
 func predicateForFact(fact contracts.ContactFact) string {
 	if strings.TrimSpace(fact.Predicate) != "" {
 		return fact.Predicate
 	}
 
-	switch fact.FactKind {
-	case contactentity.FactKindAddress:
-		return schemaPrefix + "address"
-	case contactentity.FactKindAffiliation:
-		return schemaPrefix + "affiliation"
-	case contactentity.FactKindAlias:
-		return schemaPrefix + "alternateName"
-	case contactentity.FactKindEmail:
+	if fact.FactKind == contactentity.FactKindEmail {
 		if fact.Historical {
 			return bcidPrefix + "historicalEmail"
 		}
 
 		return schemaPrefix + "email"
-	case contactentity.FactKindIdentifier:
-		return schemaPrefix + "identifier"
-	case contactentity.FactKindName:
-		return foafPrefix + "name"
-	case contactentity.FactKindNote:
-		return schemaPrefix + "description"
-	case contactentity.FactKindPhone:
-		return schemaPrefix + "telephone"
-	case contactentity.FactKindRelationship:
-		return schemaPrefix + "knows"
-	case contactentity.FactKindTitle:
-		return schemaPrefix + "jobTitle"
-	case contactentity.FactKindURL:
-		return schemaPrefix + "url"
-	default:
-		return ""
 	}
+
+	return factPredicates[fact.FactKind]
 }
 
 func objectForFact(fact contracts.ContactFact) string {
 	value := strings.TrimSpace(fact.Value)
 	switch fact.FactKind {
 	case contactentity.FactKindEmail:
-		return iri("mailto:" + contactentity.NormalizeIdentity(value))
+		return normalizedEmailIRI(value)
 	case contactentity.FactKindURL,
 		contactentity.FactKindIdentifier,
 		contactentity.FactKindRelationship:
+		if strings.HasPrefix(value, "_:") {
+			return blankNodeOrLiteral(value)
+		}
+
 		if strings.Contains(value, ":") {
 			return iri(value)
 		}
 	}
 
 	return literal(value)
+}
+
+func normalizedEmailIRI(value string) string {
+	return iri("mailto:" + contactentity.NormalizeIdentity(value))
+}
+
+func blankNodeOrLiteral(value string) string {
+	label := strings.TrimPrefix(value, "_:")
+	if label == "" {
+		return literal(value)
+	}
+
+	for _, char := range label {
+		if char == '_' || char == '-' || char >= '0' && char <= '9' ||
+			char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' {
+			continue
+		}
+
+		return literal(value)
+	}
+
+	return "_:" + label
 }
 
 func writePrefixes(builder *strings.Builder) {
@@ -604,6 +710,7 @@ func writeTemporalAnnotations(
 	if fact.ValidFrom == "" && fact.ValidUntil == "" {
 		return
 	}
+
 	statement := "<< " + iri(subject) + " " + iri(predicate) + " " + object + " >> "
 	if fact.ValidFrom != "" {
 		builder.WriteString(statement)
@@ -612,6 +719,7 @@ func writeTemporalAnnotations(
 		builder.WriteString(typedDate(fact.ValidFrom))
 		builder.WriteString(" .\n")
 	}
+
 	if fact.ValidUntil != "" {
 		builder.WriteString(statement)
 		builder.WriteString(iri(timePrefix + "hasEnd"))
@@ -626,6 +734,7 @@ func writeVCardLine(builder *strings.Builder, name, value string) {
 	if value == "" {
 		return
 	}
+
 	builder.WriteString(name)
 	builder.WriteString(":")
 	builder.WriteString(escapeVCardValue(value))
@@ -639,7 +748,28 @@ func escapeVCardValue(value string) string {
 }
 
 func iri(value string) string {
-	return "<" + strings.TrimSpace(value) + ">"
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">") {
+		value = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "<"), ">"))
+	}
+
+	return "<" + encodeIRI(value) + ">"
+}
+
+func encodeIRI(value string) string {
+	var builder strings.Builder
+
+	for _, char := range value {
+		switch {
+		case char <= 0x20 || char == 0x7f ||
+			strings.ContainsRune("<>\"{}|\\^`", char):
+			builder.WriteString(url.QueryEscape(string(char)))
+		default:
+			builder.WriteRune(char)
+		}
+	}
+
+	return strings.ReplaceAll(builder.String(), "+", "%20")
 }
 
 func literal(value string) string {
@@ -687,11 +817,13 @@ func shortHash(content []byte) string {
 func uniqueStrings(values []string) []string {
 	seen := map[string]bool{}
 	result := []string{}
+
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value == "" || seen[value] {
 			continue
 		}
+
 		seen[value] = true
 		result = append(result, value)
 	}

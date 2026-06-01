@@ -590,7 +590,14 @@ func newQueryContactImportCommand(out io.Writer, configPath *string) *cobra.Comm
 					path,
 				)
 				if err != nil {
-					return err
+					results = append(results, contactio.ImportResult{
+						SourceKind: contactio.ImportSourceKind,
+						SourceName: sourceName,
+						ExternalID: filepath.ToSlash(path),
+						Format:     contactio.NormalizeFormat(format),
+						Error:      err.Error(),
+					})
+					continue
 				}
 				results = append(results, result)
 			}

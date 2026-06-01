@@ -37,9 +37,10 @@ func TestVCardImportProducesRDFContactBundle(t *testing.T) {
 			t.Fatalf("imported RDF missing %q:\n%s", snippet, object.Content)
 		}
 	}
-	if object.MediaType != "text/turtle" ||
+	if object.MediaType != MediaTypeTurtle ||
 		object.SourceKind != contactImportSourceKind ||
 		len(object.Facets) != 2 ||
+		len(result.Contacts) != 1 ||
 		result.Contacts[0] != "mailto:alice@example.test" {
 		t.Fatalf("unexpected import object=%#v result=%#v", object, result)
 	}
@@ -98,11 +99,139 @@ func TestNativeImportAndExportPreservesTemporalFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(exported, `"message_count": 99`) ||
-		!strings.Contains(exported, `"participant_count": 123`) ||
-		strings.Contains(exported, "message_digest") {
+	var out NativeBundle
+	if err := json.Unmarshal([]byte(exported), &out); err != nil {
+		t.Fatalf("native export is not valid JSON: %v\n%s", err, exported)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(exported), &raw); err != nil {
+		t.Fatalf("native export is not valid JSON object: %v\n%s", err, exported)
+	}
+	if len(out.Contacts) != 1 ||
+		out.Contacts[0].MessageCount != 99 ||
+		out.Contacts[0].ParticipantCount != 123 ||
+		strings.Contains(exported, "message_digest") ||
+		containsJSONKey(raw, "message_digest") {
 		t.Fatalf("native export did not preserve rollup-only shape:\n%s", exported)
 	}
+}
+
+func TestNativeImportRejectsUnsupportedSchemaVersion(t *testing.T) {
+	bundle := NativeBundle{
+		SchemaVersion: contracts.SchemaVersionPhase00 + 1,
+		Contacts: []NativeContact{{
+			ContactID: "https://example.test/#alice",
+		}},
+	}
+	encoded, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = BuildImportObject(
+		FormatNative,
+		"contacts",
+		"alice.json",
+		encoded,
+		time.Time{},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "unsupported native contact schema_version") {
+		t.Fatalf("expected unsupported schema_version error, got %v", err)
+	}
+}
+
+func TestVCardImportHandlesGroupsFoldingAndAnonymousSubjects(t *testing.T) {
+	object, result, err := BuildImportObject(
+		FormatVCard,
+		"contacts",
+		"anonymous.vcf",
+		[]byte(strings.Join([]string{
+			"BEGIN:VCARD",
+			"VERSION:4.0",
+			"UID:first",
+			"FN:Same Name",
+			"item1.EMAIL:first@example.test",
+			"NOTE:first line",
+			"  indented",
+			"END:VCARD",
+			"BEGIN:VCARD",
+			"VERSION:4.0",
+			"UID:second",
+			"FN:Same Name",
+			"TEL:+15551234567",
+			"END:VCARD",
+			"",
+		}, "\n")),
+		time.Time{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Contacts) != 2 || result.Contacts[0] == result.Contacts[1] {
+		t.Fatalf("expected two distinct contacts, got %#v", result.Contacts)
+	}
+	for _, snippet := range []string{
+		"<mailto:first@example.test>",
+		"\"first line indented\"",
+		"\"+15551234567\"",
+	} {
+		if !strings.Contains(object.Content, snippet) {
+			t.Fatalf("imported RDF missing %q:\n%s", snippet, object.Content)
+		}
+	}
+}
+
+func TestFOAFExportEscapesIRIsAndKeepsBlankNodes(t *testing.T) {
+	output := ExportFOAF([]contracts.ContactAggregate{{
+		ContactID: "<https://example.test/#alice>",
+		Facts: []contracts.ContactFact{
+			{
+				ContactID: "https://example.test/#alice",
+				FactKind:  contactentity.FactKindURL,
+				Value:     "https://example.test/a b>c",
+			},
+			{
+				ContactID: "https://example.test/#alice",
+				FactKind:  contactentity.FactKindRelationship,
+				Value:     "_:friend1",
+			},
+		},
+	}})
+
+	for _, snippet := range []string{
+		"<https://example.test/#alice>",
+		"<https://example.test/a%20b%3Ec>",
+		"_:friend1",
+	} {
+		if !strings.Contains(output, snippet) {
+			t.Fatalf("FOAF export missing %q:\n%s", snippet, output)
+		}
+	}
+	if strings.Contains(output, "<<https://example.test/#alice>>") ||
+		strings.Contains(output, "<_:friend1>") ||
+		strings.Contains(output, "<https://example.test/a b>c>") {
+		t.Fatalf("FOAF export emitted malformed IRI/blank node:\n%s", output)
+	}
+}
+
+func containsJSONKey(value any, key string) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for k, v := range typed {
+			if k == key || containsJSONKey(v, key) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if containsJSONKey(item, key) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func TestStandardExportsOmitMessageBackReferences(t *testing.T) {

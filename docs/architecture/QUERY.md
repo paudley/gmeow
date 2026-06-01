@@ -47,9 +47,11 @@ surface is `gmeow-admin query contact import --format vcard|foaf|native`; it
 does not insert rows directly into PostgreSQL.
 
 Contact export reads existing contact aggregate/fact QUERY contracts and renders
-vCard, FOAF/RDF Turtle, or Gmeow-native JSON. Standard exports are intentionally
-lossy and omit high-cardinality message back-references; native export preserves
-the projected contact facts and rollup counts available in QUERY.
+vCard, FOAF/RDF Turtle, or Gmeow-native JSON through
+`gmeow-admin query contact export --format vcard|foaf|native <contact-id...>`.
+Standard exports are intentionally lossy and omit high-cardinality message
+back-references; the native behavior is selected with `--format native` and
+preserves the projected contact facts and rollup counts available in QUERY.
 
 ## Mail Identity Projection
 
