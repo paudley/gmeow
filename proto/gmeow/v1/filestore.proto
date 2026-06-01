@@ -144,6 +144,8 @@ message StorageBreakdownFile {
   string dict_id = 11;
   repeated string dict_ids = 12;
   int32 chunk_count = 13;
+  string dictionary_family = 14;
+  repeated string dictionary_families = 15;
 }
 message StorageBreakdownResponse {
   string root_digest = 1;
@@ -225,11 +227,23 @@ message RepackResponse {
   int64 bytes_after = 6;
 }
 
-message TrainDictionaryRequest { int32 sample_limit = 1; }
+message TrainDictionaryRequest {
+  int32 sample_limit = 1;
+  string family = 2;
+  bool all_families = 3;
+}
+message TrainDictionaryResult {
+  string dictionary_id = 1;
+  int64 dictionary_bytes = 2;
+  int32 samples = 3;
+  string family = 4;
+}
 message TrainDictionaryResponse {
   string dictionary_id = 1;
   int64 dictionary_bytes = 2;
   int32 samples = 3;
+  string family = 4;
+  repeated TrainDictionaryResult results = 5;
 }
 
 message ResolvePathResponse {

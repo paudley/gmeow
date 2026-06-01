@@ -13,8 +13,16 @@ import (
 func TestStorageBreakdownChunkCountClampsForProto(t *testing.T) {
 	response := ToPBStorageBreakdown(filestore.StorageBreakdownReport{
 		Files: []filestore.StorageBreakdownFile{
-			{ChunkCount: -1},
-			{ChunkCount: math.MaxInt32 + 1},
+			{
+				ChunkCount:    -1,
+				CompoundOrder: math.MinInt32 - 1,
+				DictFamily:    "structured-json",
+				DictFamilies:  []string{"structured-json", "logs-line-oriented"},
+			},
+			{
+				ChunkCount:    math.MaxInt32 + 1,
+				CompoundOrder: math.MaxInt32 + 1,
+			},
 		},
 	})
 
@@ -33,5 +41,21 @@ func TestStorageBreakdownChunkCountClampsForProto(t *testing.T) {
 			"expected large chunk count to clamp to MaxInt32, got %d",
 			files[1].GetChunkCount(),
 		)
+	}
+	if files[0].GetCompoundOrder() != math.MinInt32 {
+		t.Fatalf(
+			"expected small compound order to clamp to MinInt32, got %d",
+			files[0].GetCompoundOrder(),
+		)
+	}
+	if files[1].GetCompoundOrder() != math.MaxInt32 {
+		t.Fatalf(
+			"expected large compound order to clamp to MaxInt32, got %d",
+			files[1].GetCompoundOrder(),
+		)
+	}
+	if files[0].GetDictionaryFamily() != "structured-json" ||
+		len(files[0].GetDictionaryFamilies()) != 2 {
+		t.Fatalf("dictionary families did not round-trip: %#v", files[0])
 	}
 }

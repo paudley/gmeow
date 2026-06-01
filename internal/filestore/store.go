@@ -115,6 +115,8 @@ func (store *FilesystemStore) Put(
 		ctx,
 		cb,
 		request.Reader,
+		request.MediaType,
+		request.ContentRoles,
 	)
 	if err != nil {
 		return "", err
@@ -775,7 +777,14 @@ func (store *FilesystemStore) commitNewObject(
 		return err
 	}
 
-	if err := store.storeBlobContentBatched(ctx, cb, digest, content); err != nil {
+	if err := store.storeBlobContentBatched(
+		ctx,
+		cb,
+		digest,
+		content,
+		manifest.MediaType,
+		manifest.ContentRoles,
+	); err != nil {
 		return fmt.Errorf("store blob content: %w", err)
 	}
 

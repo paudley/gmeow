@@ -165,6 +165,7 @@ func TestAdminFilestoreStorageReportsDigestAndSourceTargets(t *testing.T) {
 		for _, want := range []string{
 			"filestore storage:",
 			"allocated_bytes=",
+			"FAMILY",
 			"blob",
 			"manifest",
 		} {

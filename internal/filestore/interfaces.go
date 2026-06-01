@@ -84,7 +84,10 @@ type Store interface {
 	) (DeleteImportReport, error)
 	Gc(ctx context.Context) (GCReport, error)
 	Repack(ctx context.Context) (RepackReport, error)
-	TrainDictionary(ctx context.Context, sampleLimit int) (TrainDictionaryReport, error)
+	TrainDictionary(
+		ctx context.Context,
+		request TrainDictionaryRequest,
+	) (TrainDictionaryReport, error)
 }
 
 type ProjectionFinding struct {

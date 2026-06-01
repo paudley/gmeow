@@ -49,7 +49,10 @@ type filestoreReader interface {
 	DeleteObject(context.Context, contracts.ObjectDigest) error
 	Gc(context.Context) (filestore.GCReport, error)
 	Repack(context.Context) (filestore.RepackReport, error)
-	TrainDictionary(context.Context, int) (filestore.TrainDictionaryReport, error)
+	TrainDictionary(
+		context.Context,
+		filestore.TrainDictionaryRequest,
+	) (filestore.TrainDictionaryReport, error)
 	io.Closer
 }
 
@@ -578,7 +581,7 @@ func writeStorageBreakdownHuman(
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(
 		table,
-		"ROLE\tOBJECT\tLOGICAL\tALLOCATED\tCHUNKS\tDICT\tPATH",
+		"ROLE\tOBJECT\tLOGICAL\tALLOCATED\tCHUNKS\tDICT\tFAMILY\tPATH",
 	); err != nil {
 		return err
 	}
@@ -590,13 +593,14 @@ func writeStorageBreakdownHuman(
 		dictID := storageDictionaryLabel(file)
 		if _, err := fmt.Fprintf(
 			table,
-			"%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
+			"%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n",
 			role,
 			file.ObjectDigest,
 			file.LogicalBytes,
 			file.AllocatedBytes,
 			storageChunkCountLabel(file),
 			dictID,
+			storageDictionaryFamilyLabel(file),
 			file.Path,
 		); err != nil {
 			return err
@@ -620,6 +624,17 @@ func storageDictionaryLabel(file filestore.StorageBreakdownFile) string {
 	}
 	if len(file.DictIDs) > 0 {
 		return strings.Join(file.DictIDs, ",")
+	}
+
+	return "-"
+}
+
+func storageDictionaryFamilyLabel(file filestore.StorageBreakdownFile) string {
+	if file.DictFamily != "" {
+		return file.DictFamily
+	}
+	if len(file.DictFamilies) > 0 {
+		return strings.Join(file.DictFamilies, ",")
 	}
 
 	return "-"
@@ -793,6 +808,8 @@ func newFilestoreTrainDictionaryCommand(
 	var (
 		confirmInstance string
 		sampleLimit     int
+		family          string
+		allFamilies     bool
 	)
 
 	command := &cobra.Command{
@@ -815,21 +832,39 @@ func newFilestoreTrainDictionaryCommand(
 				return err
 			}
 			defer func() { _ = store.Close() }()
-			report, err := store.TrainDictionary(command.Context(), sampleLimit)
+			report, err := store.TrainDictionary(
+				command.Context(),
+				filestore.TrainDictionaryRequest{
+					Family:      family,
+					AllFamilies: allFamilies,
+					SampleLimit: sampleLimit,
+				},
+			)
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(
-				out,
-				"filestore train-dictionary: dictionary_id=%s dictionary_bytes=%d samples=%d\n",
-				report.DictionaryID, report.DictionaryBytes, report.Samples,
-			)
+			for _, result := range report.Results {
+				if _, err := fmt.Fprintf(
+					out,
+					"filestore train-dictionary: family=%s dictionary_id=%s dictionary_bytes=%d samples=%d\n",
+					result.Family,
+					result.DictionaryID,
+					result.DictionaryBytes,
+					result.Samples,
+				); err != nil {
+					return err
+				}
+			}
 
-			return err
+			return nil
 		},
 	}
 	command.Flags().
 		IntVar(&sampleLimit, "sample-limit", 0, "maximum objects to sample (0 = default)")
+	command.Flags().
+		StringVar(&family, "family", "", "dictionary family to train")
+	command.Flags().
+		BoolVar(&allFamilies, "all-families", false, "train every eligible dictionary family")
 	command.Flags().
 		StringVar(&confirmInstance, "confirm-instance", "", "required production-like instance id confirmation")
 

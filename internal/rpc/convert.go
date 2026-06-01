@@ -532,27 +532,25 @@ func ToPBStorageBreakdown(
 ) *pb.StorageBreakdownResponse {
 	files := make([]*pb.StorageBreakdownFile, 0, len(report.Files))
 	for _, file := range report.Files {
-		chunkCount := file.ChunkCount
-		if chunkCount < 0 {
-			chunkCount = 0
-		}
-		if chunkCount > math.MaxInt32 {
-			chunkCount = math.MaxInt32
-		}
 		files = append(files, &pb.StorageBreakdownFile{
-			ObjectDigest:   string(file.ObjectDigest),
-			Role:           file.Role,
-			Path:           file.Path,
-			LogicalBytes:   file.LogicalBytes,
-			AllocatedBytes: file.AllocatedBytes,
-			Estimated:      file.Estimated,
-			DictId:         file.DictID,
-			DictIds:        append([]string{}, file.DictIDs...),
-			ChunkCount:     int32(chunkCount),
-			ReferencedBy:   string(file.ReferencedBy),
-			CompoundRole:   file.CompoundRole,
-			CompoundOrder:  int32(file.CompoundOrder),
-			RecursivePart:  file.RecursivePart,
+			ObjectDigest:     string(file.ObjectDigest),
+			Role:             file.Role,
+			Path:             file.Path,
+			LogicalBytes:     file.LogicalBytes,
+			AllocatedBytes:   file.AllocatedBytes,
+			Estimated:        file.Estimated,
+			DictId:           file.DictID,
+			DictIds:          append([]string{}, file.DictIDs...),
+			ChunkCount:       clampNonNegativeInt32(file.ChunkCount),
+			DictionaryFamily: file.DictFamily,
+			DictionaryFamilies: append(
+				[]string{},
+				file.DictFamilies...,
+			),
+			ReferencedBy:  string(file.ReferencedBy),
+			CompoundRole:  file.CompoundRole,
+			CompoundOrder: clampInt32(file.CompoundOrder),
+			RecursivePart: file.RecursivePart,
 		})
 	}
 
@@ -566,6 +564,25 @@ func ToPBStorageBreakdown(
 		ReferencedObjectCount: int32(report.ReferencedObjectCount),
 		RecursiveParts:        report.RecursiveParts,
 	}
+}
+
+func clampInt32(value int) int32 {
+	if value > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	if value < math.MinInt32 {
+		return math.MinInt32
+	}
+
+	return int32(value)
+}
+
+func clampNonNegativeInt32(value int) int32 {
+	if value < 0 {
+		return 0
+	}
+
+	return clampInt32(value)
 }
 
 func FromPBStorageBreakdown(
@@ -583,6 +600,8 @@ func FromPBStorageBreakdown(
 			DictID:         file.GetDictId(),
 			DictIDs:        append([]string{}, file.GetDictIds()...),
 			ChunkCount:     int(file.GetChunkCount()),
+			DictFamily:     file.GetDictionaryFamily(),
+			DictFamilies:   append([]string{}, file.GetDictionaryFamilies()...),
 			ReferencedBy:   contracts.ObjectDigest(file.GetReferencedBy()),
 			CompoundRole:   file.GetCompoundRole(),
 			CompoundOrder:  int(file.GetCompoundOrder()),

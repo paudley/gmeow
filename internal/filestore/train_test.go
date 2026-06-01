@@ -6,6 +6,7 @@ package filestore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"testing"
@@ -30,25 +31,31 @@ func TestTrainDictionaryInstallsAndAdopts(t *testing.T) {
 			index,
 		)
 		if _, err := store.Put(ctx, PutRequest{
-			Reader: bytes.NewReader([]byte(body)),
-			Facets: []contracts.Facet{{Kind: "email_part"}},
+			Reader:       bytes.NewReader([]byte(body)),
+			MediaType:    "text/rfc822-headers",
+			ContentRoles: []string{contracts.MailHeadersRole},
+			Facets:       []contracts.Facet{{Kind: "email_part"}},
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	report, err := store.TrainDictionary(ctx, 0)
+	report, err := store.TrainDictionary(ctx, TrainDictionaryRequest{
+		Family: DictionaryFamilyMailHeaders,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.DictionaryID == "" || report.DictionaryBytes <= 0 ||
+	if report.Family != DictionaryFamilyMailHeaders ||
+		report.DictionaryID == "" ||
+		report.DictionaryBytes <= 0 ||
 		report.Samples < minDictSamples {
 		t.Fatalf("unexpected training report: %#v", report)
 	}
 
 	// The current marker now points at the trained dictionary, and the cache
 	// reloaded so a freshly stored chunk records the new dictionary id.
-	id, dict, err := store.activeDictionary()
+	id, dict, err := store.activeDictionary(DictionaryFamilyMailHeaders)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +67,9 @@ func TestTrainDictionaryInstallsAndAdopts(t *testing.T) {
 		Reader: bytes.NewReader(
 			[]byte("From: new@example.test\r\nSubject: adopt\r\n\r\nnew body\r\n"),
 		),
-		Facets: []contracts.Facet{{Kind: "email_part"}},
+		MediaType:    "text/rfc822-headers",
+		ContentRoles: []string{contracts.MailHeadersRole},
+		Facets:       []contracts.Facet{{Kind: "email_part"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -80,6 +89,9 @@ func TestTrainDictionaryInstallsAndAdopts(t *testing.T) {
 			report.DictionaryID,
 		)
 	}
+	if entry.DictFamily != DictionaryFamilyMailHeaders {
+		t.Fatalf("new chunk recorded family %q", entry.DictFamily)
+	}
 	breakdown, err := store.StorageBreakdown(ctx, StorageBreakdownRequest{
 		Digest: digest,
 	})
@@ -92,6 +104,59 @@ func TestTrainDictionaryInstallsAndAdopts(t *testing.T) {
 	got := openAll(t, ctx, store, digest)
 	if !bytes.Contains(got, []byte("new body")) {
 		t.Fatalf("dictionary-compressed object did not round-trip: %q", got)
+	}
+}
+
+func TestTrainDictionaryEmptyRequestTrainsAllFamilies(t *testing.T) {
+	if _, err := exec.LookPath("zstd"); err != nil {
+		t.Skip("zstd binary not available")
+	}
+
+	ctx := context.Background()
+	store := NewFilesystemStore(t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
+
+	for index := range 32 {
+		body := fmt.Sprintf(
+			"From: sender%[1]d@example.test\r\nTo: list@example.test\r\n"+
+				"Subject: all families %[1]d\r\n\r\nHello team, item %[1]d update.\r\n",
+			index,
+		)
+		if _, err := store.Put(ctx, PutRequest{
+			Reader:       bytes.NewReader([]byte(body)),
+			MediaType:    "text/rfc822-headers",
+			ContentRoles: []string{contracts.MailHeadersRole},
+			Facets:       []contracts.Facet{{Kind: "email_part"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report, err := store.TrainDictionary(ctx, TrainDictionaryRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) == 0 {
+		t.Fatalf("expected family training results: %#v", report)
+	}
+	if report.Results[0].Family != DictionaryFamilyMailHeaders {
+		t.Fatalf("unexpected family results: %#v", report.Results)
+	}
+}
+
+func TestTrainDictionaryTooFewSamplesUsesSentinel(t *testing.T) {
+	if _, err := exec.LookPath("zstd"); err != nil {
+		t.Skip("zstd binary not available")
+	}
+
+	store := NewFilesystemStore(t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, err := store.TrainDictionary(context.Background(), TrainDictionaryRequest{
+		Family: DictionaryFamilyMailHeaders,
+	})
+	if !errors.Is(err, ErrTooFewSamples) {
+		t.Fatalf("TrainDictionary error = %v, want ErrTooFewSamples", err)
 	}
 }
 
@@ -109,6 +174,7 @@ func assertDictionaryStorageRow(
 		if file.DictID != dictID ||
 			len(file.DictIDs) != 1 ||
 			file.DictIDs[0] != dictID ||
+			file.DictFamily != DictionaryFamilyMailHeaders ||
 			file.ChunkCount == 0 {
 			t.Fatalf("unexpected dictionary storage row: %#v", file)
 		}

@@ -594,19 +594,36 @@ func (client *FilestoreClient) Repack(
 
 func (client *FilestoreClient) TrainDictionary(
 	ctx context.Context,
-	sampleLimit int,
+	request filestore.TrainDictionaryRequest,
 ) (filestore.TrainDictionaryReport, error) {
 	response, err := client.client.TrainDictionary(ctx, &pb.TrainDictionaryRequest{
-		SampleLimit: int32(sampleLimit),
+		SampleLimit: int32(request.SampleLimit),
+		Family:      request.Family,
+		AllFamilies: request.AllFamilies,
 	})
 	if err != nil {
 		return filestore.TrainDictionaryReport{}, err
+	}
+	results := make(
+		[]filestore.TrainDictionaryFamilyReport,
+		0,
+		len(response.GetResults()),
+	)
+	for _, result := range response.GetResults() {
+		results = append(results, filestore.TrainDictionaryFamilyReport{
+			DictionaryID:    result.GetDictionaryId(),
+			DictionaryBytes: result.GetDictionaryBytes(),
+			Family:          result.GetFamily(),
+			Samples:         int(result.GetSamples()),
+		})
 	}
 
 	return filestore.TrainDictionaryReport{
 		DictionaryID:    response.GetDictionaryId(),
 		DictionaryBytes: response.GetDictionaryBytes(),
+		Family:          response.GetFamily(),
 		Samples:         int(response.GetSamples()),
+		Results:         results,
 	}, nil
 }
 
