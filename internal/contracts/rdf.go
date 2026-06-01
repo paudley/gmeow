@@ -214,3 +214,79 @@ type ContactMessageResponse struct {
 	Limit         int                    `json:"limit"`
 	Offset        int                    `json:"offset"`
 }
+
+type ContactAnalysisRequest struct {
+	ContactIDs []string `json:"contact_ids,omitempty"`
+	FactKinds  []string `json:"fact_kinds,omitempty"`
+	Limit      int      `json:"limit,omitempty"`
+	Offset     int      `json:"offset,omitempty"`
+	Forced     bool     `json:"forced,omitempty"`
+}
+
+type ContactAnalysisResult struct {
+	ContactID  string `json:"contact_id"`
+	Status     string `json:"status"`
+	InputHash  string `json:"input_hash,omitempty"`
+	Model      string `json:"model,omitempty"`
+	Dimensions int    `json:"dimensions,omitempty"`
+}
+
+type ContactAnalysisResponse struct {
+	Results       []ContactAnalysisResult `json:"results"`
+	SchemaVersion SchemaVersion           `json:"schema_version"`
+	Analyzed      int                     `json:"analyzed"`
+	Skipped       int                     `json:"skipped"`
+	Total         int                     `json:"total"`
+	Limit         int                     `json:"limit"`
+	Offset        int                     `json:"offset"`
+}
+
+type ContactVectorSearchRequest struct {
+	Vector     []float32 `json:"vector"`
+	Model      string    `json:"model,omitempty"`
+	ContactIDs []string  `json:"contact_ids,omitempty"`
+	Limit      int       `json:"limit,omitempty"`
+	Dimensions int       `json:"dimensions,omitempty"`
+}
+
+type ContactVectorSearchResult struct {
+	ContactID    string  `json:"contact_id"`
+	DisplayName  string  `json:"display_name,omitempty"`
+	PrimaryEmail string  `json:"primary_email,omitempty"`
+	Model        string  `json:"model,omitempty"`
+	EmbeddingID  string  `json:"embedding_id,omitempty"`
+	InputHash    string  `json:"input_hash,omitempty"`
+	TextPreview  string  `json:"text_preview,omitempty"`
+	Distance     float64 `json:"distance"`
+	Dimensions   int     `json:"dimensions,omitempty"`
+}
+
+type ContactEmbeddingUpsert struct {
+	GeneratedAt     time.Time      `json:"generated_at,omitzero"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	Vector          []float32      `json:"vector,omitempty"`
+	ContactID       string         `json:"contact_id"`
+	AnalyzerName    string         `json:"analyzer_name"`
+	AnalyzerVersion string         `json:"analyzer_version"`
+	Status          string         `json:"status"`
+	Model           string         `json:"model"`
+	InputHash       string         `json:"input_hash"`
+	TextPreview     string         `json:"text_preview,omitempty"`
+	InputBytes      int            `json:"input_bytes,omitempty"`
+}
+
+type ContactVectorSearchResponse struct {
+	Results       []ContactVectorSearchResult `json:"results"`
+	SchemaVersion SchemaVersion               `json:"schema_version"`
+}
+
+type SimilarContactsRequest struct {
+	ContactID string `json:"contact_id"`
+	Model     string `json:"model,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type SimilarContactsResponse struct {
+	Results       []ContactVectorSearchResult `json:"results"`
+	SchemaVersion SchemaVersion               `json:"schema_version"`
+}

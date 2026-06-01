@@ -890,6 +890,154 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 		strings.Contains(filteredInputs.Results[0].InputText, "email: paudley@blackcat.ca") {
 		t.Fatalf("fact kind filter was not applied to analysis input: %#v", filteredInputs)
 	}
+
+	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
+		ContactID:       contactID,
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "complete",
+		Model:           "fixture-model",
+		InputHash:       "input-pa",
+		TextPreview:     "Patrick Audley",
+		Vector:          []float32{1, 0, 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
+		ContactID:       contactID,
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "complete",
+		Model:           "other-model",
+		InputHash:       "aaa-other-seed",
+		TextPreview:     "Patrick Audley other model",
+		Vector:          []float32{0, 1, 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
+		ContactID:       "https://example.test/#apollo",
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "complete",
+		Model:           "fixture-model",
+		InputHash:       "input-apollo",
+		TextPreview:     "Apollo",
+		Vector:          []float32{0.8, 0.1, 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vector, err := index.ContactVectorSearch(ctx, contracts.ContactVectorSearchRequest{
+		Vector: []float32{1, 0, 0},
+		Model:  "fixture-model",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vector.Results) == 0 || vector.Results[0].ContactID != contactID {
+		t.Fatalf("unexpected contact vector search: %#v", vector)
+	}
+	if vector.Results[0].Model != "fixture-model" {
+		t.Fatalf("contact vector search ignored model filter: %#v", vector)
+	}
+
+	_, err = index.ContactVectorSearch(ctx, contracts.ContactVectorSearchRequest{
+		Vector:     []float32{1, 0, 0},
+		Dimensions: 2,
+		Limit:      10,
+	})
+	if err == nil {
+		t.Fatal("expected contact vector search to reject mismatched dimensions")
+	}
+
+	similar, err := index.SimilarContacts(ctx, contracts.SimilarContactsRequest{
+		ContactID: contactID,
+		Model:     "fixture-model",
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(similar.Results) != 1 ||
+		similar.Results[0].ContactID != "https://example.test/#apollo" {
+		t.Fatalf("unexpected similar contacts: %#v", similar)
+	}
+	if similar.Results[0].Model != "fixture-model" {
+		t.Fatalf("similar contact ignored model filter: %#v", similar)
+	}
+
+	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
+		ContactID:       contactID,
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "complete",
+		Model:           "fixture-model",
+		InputHash:       "input-pa-updated",
+		TextPreview:     "Patrick Audley updated",
+		Vector:          []float32{0.95, 0.05, 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContactEmbeddingState(
+		t,
+		ctx,
+		index,
+		contactID,
+		"fixture-model",
+		1,
+		"input-pa-updated",
+	)
+
+	err = index.StoreContactEmbedding(ctx, contracts.ContactEmbeddingUpsert{
+		ContactID:       contactID,
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "skipped",
+		Model:           "fixture-model",
+		InputHash:       "input-pa-skipped",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContactEmbeddingState(t, ctx, index, contactID, "fixture-model", 0, "")
+}
+
+func assertContactEmbeddingState(
+	t *testing.T,
+	ctx context.Context,
+	index *Index,
+	contactID string,
+	model string,
+	wantCount int,
+	wantInputHash string,
+) {
+	t.Helper()
+	var count int
+	var inputHash string
+	err := index.pool.QueryRow(
+		ctx,
+		`SELECT count(*), COALESCE(max(input_hash), '')
+		   FROM query_contact_embeddings
+		  WHERE contact_id = $1 AND model = $2`,
+		contactID,
+		model,
+	).Scan(&count, &inputHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != wantCount || inputHash != wantInputHash {
+		t.Fatalf(
+			"unexpected contact embedding state: count=%d input_hash=%q",
+			count,
+			inputHash,
+		)
+	}
 }
 
 func putMailIdentityProjectionFixture(
