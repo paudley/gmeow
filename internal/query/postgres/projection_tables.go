@@ -15,6 +15,7 @@ func truncateProjectionTablesSQL() string {
 		"query_contact_embeddings,",
 		"query_contact_analysis,",
 		"query_contact_rollups,",
+		"query_contact_aliases,",
 		"query_contact_identity_bindings,",
 		"query_contact_facts,",
 		"query_rdf_statement_annotations,",

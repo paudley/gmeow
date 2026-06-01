@@ -639,6 +639,126 @@ func TestContactImportVCardProjectsFactsAndRollup(t *testing.T) {
 	}
 }
 
+func TestContactAliasResolvesAcrossContactQueries(t *testing.T) {
+	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	migrationsDir := queryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
+
+	store := filestore.NewFilesystemStore(t.TempDir())
+	contactID := "urn:gmeow:test:contact:fixture-record"
+	profile := `@prefix bcid: <https://patrickaudley.com/lod#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix schema: <https://schema.org/> .
+
+<urn:gmeow:test:contact:fixture-record> a foaf:Person ;
+    bcid:contactAlias "fixture handle" ;
+    foaf:name "Fixture Entity" ;
+    schema:email <mailto:fixture@example.test> .
+`
+	if _, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader(profile),
+		MediaType: "text/turtle",
+		Facets: []contracts.Facet{
+			contactentity.Facet(contactentity.MetadataInput{
+				RootSubject: contactID,
+				Format:      "text/turtle",
+			}),
+			{
+				Kind: contracts.RDFSourceBundleFacetKind,
+				Metadata: contactentity.Metadata(contactentity.MetadataInput{
+					RootSubject: contactID,
+					Format:      "text/turtle",
+				}),
+			},
+		},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "fixture",
+			SourceName: "rdf-profile",
+			ExternalID: "contact-alias-profile",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	messageDigest := putMailParticipantProjectionFixture(
+		t,
+		ctx,
+		store,
+		"<fixture-alias@example.test>",
+		"Thu, 28 May 2026 10:30:00 -0600",
+		"Fixture <fixture@example.test>",
+		"Recipient <recipient@example.test>",
+	)
+
+	index := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
+	if err := index.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	aggregate, err := index.ContactAggregate(ctx, contracts.ContactAggregateRequest{
+		ContactID: "fixture-handle",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregate.ContactID != contactID ||
+		!sameStrings(aggregate.Aliases, []string{"fixture-handle"}) {
+		t.Fatalf("alias did not resolve aggregate: %#v", aggregate)
+	}
+
+	resolved, err := index.ResolveContactIdentity(
+		ctx,
+		contracts.ContactIdentityResolveRequest{
+			Identity: "fixture-handle",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameStrings(resolved.ContactIDs, []string{contactID}) {
+		t.Fatalf("alias identity resolution failed: %#v", resolved)
+	}
+
+	facts, err := index.ContactFacts(ctx, contracts.ContactFactRequest{
+		ContactIDs: []string{"fixture handle"},
+		FactKinds:  []string{contactentity.FactKindContactAlias},
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts.Total != 1 || facts.Facts[0].Value != "fixture-handle" {
+		t.Fatalf("alias contact fact lookup failed: %#v", facts)
+	}
+
+	messages, err := index.ContactMessages(ctx, contracts.ContactMessageRequest{
+		ContactID: "fixture-handle",
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages.Total != 1 ||
+		len(messages.Results) != 1 ||
+		messages.Results[0].MessageDigest != messageDigest {
+		t.Fatalf("alias contact-message lookup failed: %#v", messages)
+	}
+
+	search, err := index.ContactSearch(ctx, contracts.ContactSearchRequest{
+		Query: "fixture-handle",
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if search.Total != 1 ||
+		search.Results[0].ContactID != contactID ||
+		!sameStrings(search.Results[0].Aliases, []string{"fixture-handle"}) {
+		t.Fatalf("contact search did not expose alias: %#v", search)
+	}
+}
+
 func TestContactMessagesProjectMailParticipantObservations(t *testing.T) {
 	ctx := context.Background()
 	dsn := queryIntegrationDSN(t)

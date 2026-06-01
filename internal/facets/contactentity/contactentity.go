@@ -15,6 +15,7 @@ const (
 	FactKindAlias        = "alias"
 	FactKindAddress      = "address"
 	FactKindAccount      = "account"
+	FactKindContactAlias = "contact_alias"
 	FactKindEmail        = "email"
 	FactKindIdentifier   = "identifier"
 	FactKindName         = "name"
@@ -27,6 +28,7 @@ const (
 
 const (
 	mailtoPrefix          = "mailto:"
+	contactAliasPredicate = "https://patrickaudley.com/lod#contactAlias"
 	schemaOrgHTTPPrefix   = "http://schema.org/"
 	schemaOrgHTTPSPrefix  = "https://schema.org/"
 	schemaOrgOrganization = schemaOrgHTTPSPrefix + "Organization"
@@ -232,8 +234,36 @@ func FactValue(value, objectKind, factKind string) string {
 	if factKind == FactKindEmail {
 		return NormalizeIdentity(value)
 	}
+	if factKind == FactKindContactAlias {
+		return NormalizeAlias(value)
+	}
 
 	return strings.TrimSpace(value)
+}
+
+func NormalizeAlias(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	previousSeparator := false
+	for _, char := range value {
+		switch {
+		case char >= 'a' && char <= 'z',
+			char >= '0' && char <= '9':
+			builder.WriteRune(char)
+			previousSeparator = false
+		case char == '-' || char == '_' || char == '.' || char == ' ':
+			if builder.Len() > 0 && !previousSeparator {
+				builder.WriteByte('-')
+				previousSeparator = true
+			}
+		}
+	}
+
+	return strings.Trim(builder.String(), "-")
 }
 
 func NormalizeIdentity(value string) string {
@@ -357,6 +387,8 @@ func foafContactFactKind(predicate string) (string, bool) {
 
 func patrickAudleyContactFactKind(predicate string) (string, bool, bool) {
 	switch predicate {
+	case contactAliasPredicate:
+		return FactKindContactAlias, false, true
 	case "https://patrickaudley.com/lod#emailIdentity":
 		return FactKindEmail, false, true
 	case "https://patrickaudley.com/lod#historicalEmail":

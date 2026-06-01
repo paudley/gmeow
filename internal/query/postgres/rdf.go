@@ -857,6 +857,7 @@ func rdfStatementHash(statement rdfStatement) string {
 
 func refreshContactProjectionTx(ctx context.Context, transaction pgx.Tx) error {
 	for _, table := range []string{
+		"query_contact_aliases",
 		"query_contact_identity_bindings",
 		"query_contact_facts",
 		"query_contact_rollups",
@@ -899,6 +900,7 @@ func refreshContactProjectionForContactsTx(
 	}
 
 	for _, table := range []string{
+		"query_contact_aliases",
 		"query_contact_identity_bindings",
 		"query_contact_facts",
 		"query_contact_rollups",
@@ -1167,10 +1169,98 @@ func insertContactFact(
 	}
 
 	if fact.FactKind != contactentity.FactKindEmail {
+		if fact.FactKind == contactentity.FactKindContactAlias {
+			return insertContactAlias(ctx, transaction, fact)
+		}
+
 		return nil
 	}
 
 	return insertContactIdentityBinding(ctx, transaction, fact)
+}
+
+func insertContactAlias(
+	ctx context.Context,
+	transaction pgx.Tx,
+	fact contactentity.Fact,
+) error {
+	alias := contactentity.NormalizeAlias(fact.Value)
+	if alias == "" {
+		return nil
+	}
+
+	if err := rejectConflictingActiveContactAlias(
+		ctx,
+		transaction,
+		alias,
+		fact.ContactID,
+	); err != nil {
+		return err
+	}
+
+	_, err := transaction.Exec(
+		ctx,
+		`INSERT INTO query_contact_aliases(
+		   contact_alias, contact_id, statement_hash, source_digest,
+		   valid_from, valid_until, projected_at
+		 ) VALUES($1,$2,$3,$4,$5,$6,now())
+		 ON CONFLICT(contact_alias, contact_id, statement_hash) DO UPDATE SET
+		   source_digest = excluded.source_digest,
+		   valid_from = COALESCE(
+		     NULLIF(excluded.valid_from, ''),
+		     query_contact_aliases.valid_from
+		   ),
+		   valid_until = COALESCE(
+		     NULLIF(excluded.valid_until, ''),
+		     query_contact_aliases.valid_until
+		   ),
+		   projected_at = now()`,
+		alias,
+		fact.ContactID,
+		fact.StatementHash,
+		fact.SourceDigest,
+		fact.ValidFrom,
+		fact.ValidUntil,
+	)
+	if err != nil {
+		return fmt.Errorf("insert contact alias projection: %w", err)
+	}
+
+	return nil
+}
+
+func rejectConflictingActiveContactAlias(
+	ctx context.Context,
+	transaction pgx.Tx,
+	alias string,
+	contactID string,
+) error {
+	var existingContactID string
+	err := transaction.QueryRow(
+		ctx,
+		`SELECT contact_id
+		   FROM query_contact_aliases
+		  WHERE contact_alias = $1
+		    AND contact_id <> $2
+		    AND valid_until = ''
+		  ORDER BY contact_id
+		  LIMIT 1`,
+		alias,
+		contactID,
+	).Scan(&existingContactID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+
+		return fmt.Errorf("check contact alias conflict: %w", err)
+	}
+
+	return fmt.Errorf(
+		"active contact alias %q already belongs to contact %q",
+		alias,
+		existingContactID,
+	)
 }
 
 func insertContactIdentityBinding(
@@ -1370,7 +1460,10 @@ func (index *Index) ContactAggregate(
 	ctx context.Context,
 	request contracts.ContactAggregateRequest,
 ) (contracts.ContactAggregate, error) {
-	contactID := strings.TrimSpace(request.ContactID)
+	contactID, err := index.resolveContactRef(ctx, request.ContactID)
+	if err != nil {
+		return contracts.ContactAggregate{}, err
+	}
 
 	var (
 		aggregate contracts.ContactAggregate
@@ -1378,7 +1471,7 @@ func (index *Index) ContactAggregate(
 		lastSeen  sql.NullTime
 	)
 
-	err := index.pool.QueryRow(
+	err = index.pool.QueryRow(
 		ctx,
 		`SELECT contact_id, display_name, primary_email, fact_count,
 		first_seen_at, last_seen_at, message_count, participant_count
@@ -1449,6 +1542,12 @@ func (index *Index) ContactAggregate(
 	}
 
 	aggregate.SchemaVersion = contracts.SchemaVersionPhase00
+	aliases, err := index.aliasesForContacts(ctx, []string{aggregate.ContactID})
+	if err != nil {
+		return contracts.ContactAggregate{}, err
+	}
+	aggregate.Aliases = aliases[aggregate.ContactID]
+
 	if firstSeen.Valid {
 		aggregate.FirstSeenAt = firstSeen.Time
 	}
@@ -1504,6 +1603,7 @@ func (index *Index) ContactSearch(
 	defer rows.Close()
 
 	results := []contracts.ContactSearchResult{}
+	contactIDs := []string{}
 
 	for rows.Next() {
 		var (
@@ -1535,6 +1635,7 @@ func (index *Index) ContactSearch(
 			result.LastSeenAt = lastSeen.Time
 		}
 
+		contactIDs = append(contactIDs, result.ContactID)
 		results = append(results, result)
 	}
 
@@ -1544,6 +1645,14 @@ func (index *Index) ContactSearch(
 			"iterate contact search: %w",
 			err,
 		)
+	}
+
+	aliases, err := index.aliasesForContacts(ctx, contactIDs)
+	if err != nil {
+		return contracts.ContactSearchResponse{}, err
+	}
+	for index := range results {
+		results[index].Aliases = aliases[results[index].ContactID]
 	}
 
 	response := contracts.ContactSearchResponse{
@@ -1581,6 +1690,17 @@ func (index *Index) ResolveContactIdentity(
 	ctx context.Context,
 	request contracts.ContactIdentityResolveRequest,
 ) (contracts.ContactIdentityResolveResponse, error) {
+	contactID, err := index.resolveContactRef(ctx, request.Identity)
+	if err != nil {
+		return contracts.ContactIdentityResolveResponse{}, err
+	}
+	if contactID != "" && contactID != strings.TrimSpace(request.Identity) {
+		return contracts.ContactIdentityResolveResponse{
+			SchemaVersion: contracts.SchemaVersionPhase00,
+			ContactIDs:    []string{contactID},
+		}, nil
+	}
+
 	token := contactentity.NormalizeIdentity(request.Identity)
 	if token == "" {
 		return contracts.ContactIdentityResolveResponse{

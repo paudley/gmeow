@@ -29,6 +29,12 @@ func (index *Index) ContactFacts(
 	ctx context.Context,
 	request contracts.ContactFactRequest,
 ) (contracts.ContactFactResponse, error) {
+	contactIDs, err := index.resolveContactRefs(ctx, request.ContactIDs)
+	if err != nil {
+		return contracts.ContactFactResponse{}, err
+	}
+	request.ContactIDs = contactIDs
+
 	args := make([]any, 0, contactFactArgCapacity)
 	where := contactFactWhere(&args, request)
 	limit := normalizedLimit(request.Limit)
@@ -104,6 +110,12 @@ func (index *Index) ContactIdentityDetails(
 	ctx context.Context,
 	request contracts.ContactIdentityDetailRequest,
 ) (contracts.ContactIdentityDetailResponse, error) {
+	contactIDs, err := index.resolveContactRefs(ctx, request.ContactIDs)
+	if err != nil {
+		return contracts.ContactIdentityDetailResponse{}, err
+	}
+	request.ContactIDs = contactIDs
+
 	matchedTokens := normalizedIdentityTokens(request.Identities)
 	args, where := contactIdentityDetailWhere(matchedTokens, request.ContactIDs)
 
@@ -160,7 +172,10 @@ func (index *Index) ContactNeighborhood(
 	ctx context.Context,
 	request contracts.ContactNeighborhoodRequest,
 ) (contracts.ContactNeighborhoodResponse, error) {
-	contactID := strings.TrimSpace(request.ContactID)
+	contactID, err := index.resolveContactRef(ctx, request.ContactID)
+	if err != nil {
+		return contracts.ContactNeighborhoodResponse{}, err
+	}
 	if contactID == "" {
 		return contracts.ContactNeighborhoodResponse{
 			SchemaVersion: contracts.SchemaVersionPhase00,
@@ -224,6 +239,12 @@ func (index *Index) ContactAnalysisInputs(
 	ctx context.Context,
 	request contracts.ContactAnalysisInputRequest,
 ) (contracts.ContactAnalysisInputResponse, error) {
+	contactIDs, err := index.resolveContactRefs(ctx, request.ContactIDs)
+	if err != nil {
+		return contracts.ContactAnalysisInputResponse{}, err
+	}
+	request.ContactIDs = contactIDs
+
 	args := []any{}
 	where := []string{"true"}
 
@@ -714,7 +735,10 @@ func (index *Index) StoreContactEmbedding(
 	ctx context.Context,
 	record contracts.ContactEmbeddingUpsert,
 ) error {
-	contactID := strings.TrimSpace(record.ContactID)
+	contactID, err := index.resolveContactRef(ctx, record.ContactID)
+	if err != nil {
+		return err
+	}
 	if contactID == "" {
 		return fmt.Errorf("contact_id is required")
 	}
@@ -824,6 +848,12 @@ func (index *Index) ContactAnalysisStatus(
 	ctx context.Context,
 	request contracts.ContactAnalysisStatusRequest,
 ) (contracts.ContactAnalysisStatusResponse, error) {
+	contactIDs, err := index.resolveContactRefs(ctx, request.ContactIDs)
+	if err != nil {
+		return contracts.ContactAnalysisStatusResponse{}, err
+	}
+	request.ContactIDs = contactIDs
+
 	args, where := contactAnalysisStatusWhere(request)
 	total, err := countContactIntelligence(
 		ctx,
@@ -971,6 +1001,12 @@ func (index *Index) ContactVectorSearch(
 		)
 	}
 
+	contactIDs, err := index.resolveContactRefs(ctx, request.ContactIDs)
+	if err != nil {
+		return contracts.ContactVectorSearchResponse{}, err
+	}
+	request.ContactIDs = contactIDs
+
 	args := []any{vectorLiteral(request.Vector), len(request.Vector)}
 	where := []string{
 		"e.embedding IS NOT NULL",
@@ -1038,7 +1074,10 @@ func (index *Index) SimilarContacts(
 	ctx context.Context,
 	request contracts.SimilarContactsRequest,
 ) (contracts.SimilarContactsResponse, error) {
-	contactID := strings.TrimSpace(request.ContactID)
+	contactID, err := index.resolveContactRef(ctx, request.ContactID)
+	if err != nil {
+		return contracts.SimilarContactsResponse{}, err
+	}
 	if contactID == "" {
 		return contracts.SimilarContactsResponse{
 			SchemaVersion: contracts.SchemaVersionPhase00,

@@ -239,7 +239,10 @@ func (index *Index) ContactMessages(
 	ctx context.Context,
 	request contracts.ContactMessageRequest,
 ) (contracts.ContactMessageResponse, error) {
-	contactID := strings.TrimSpace(request.ContactID)
+	contactID, err := index.resolveContactRef(ctx, request.ContactID)
+	if err != nil {
+		return contracts.ContactMessageResponse{}, err
+	}
 	limit := normalizedLimit(request.Limit)
 	offset := max(request.Offset, 0)
 
