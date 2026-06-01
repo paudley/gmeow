@@ -857,6 +857,8 @@ func rdfStatementHash(statement rdfStatement) string {
 
 func refreshContactProjectionTx(ctx context.Context, transaction pgx.Tx) error {
 	for _, table := range []string{
+		"active_contact_aliases",
+		"query_contact_aliases",
 		"query_contact_identity_bindings",
 		"query_contact_facts",
 		"query_contact_rollups",
@@ -899,6 +901,8 @@ func refreshContactProjectionForContactsTx(
 	}
 
 	for _, table := range []string{
+		"active_contact_aliases",
+		"query_contact_aliases",
 		"query_contact_identity_bindings",
 		"query_contact_facts",
 		"query_contact_rollups",
@@ -1167,10 +1171,140 @@ func insertContactFact(
 	}
 
 	if fact.FactKind != contactentity.FactKindEmail {
+		if fact.FactKind == contactentity.FactKindContactAlias {
+			return insertContactAlias(ctx, transaction, fact)
+		}
+
 		return nil
 	}
 
 	return insertContactIdentityBinding(ctx, transaction, fact)
+}
+
+func insertContactAlias(
+	ctx context.Context,
+	transaction pgx.Tx,
+	fact contactentity.Fact,
+) error {
+	alias := contactentity.NormalizeAlias(fact.Value)
+	if alias == "" {
+		return nil
+	}
+
+	if fact.ValidUntil == "" {
+		claimed, existingContactID, err := claimActiveContactAlias(
+			ctx,
+			transaction,
+			alias,
+			fact.ContactID,
+		)
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			observability.Logger(ctx).Warn(
+				"skipping conflicting contact alias",
+				"alias",
+				alias,
+				"contact_id",
+				fact.ContactID,
+				"existing_contact_id",
+				existingContactID,
+			)
+
+			return nil
+		}
+	}
+
+	_, err := transaction.Exec(
+		ctx,
+		`INSERT INTO query_contact_aliases(
+		   contact_alias, contact_id, statement_hash, source_digest,
+		   valid_from, valid_until, projected_at
+		 ) VALUES($1,$2,$3,$4,$5,$6,now())
+		 ON CONFLICT(contact_alias, contact_id, statement_hash) DO UPDATE SET
+		   source_digest = excluded.source_digest,
+		   valid_from = COALESCE(
+		     NULLIF(excluded.valid_from, ''),
+		     query_contact_aliases.valid_from
+		   ),
+		   valid_until = COALESCE(
+		     NULLIF(excluded.valid_until, ''),
+		     query_contact_aliases.valid_until
+		   ),
+		   projected_at = now()`,
+		alias,
+		fact.ContactID,
+		fact.StatementHash,
+		fact.SourceDigest,
+		fact.ValidFrom,
+		fact.ValidUntil,
+	)
+	if err != nil {
+		return fmt.Errorf("insert contact alias projection: %w", err)
+	}
+
+	return nil
+}
+
+func claimActiveContactAlias(
+	ctx context.Context,
+	transaction pgx.Tx,
+	alias string,
+	contactID string,
+) (bool, string, error) {
+	var claimedContactID string
+	err := transaction.QueryRow(
+		ctx,
+		`INSERT INTO active_contact_aliases(
+		   contact_alias, contact_id, projected_at
+		 ) VALUES($1,$2,now())
+		 ON CONFLICT(contact_alias) DO UPDATE SET
+		   contact_id = excluded.contact_id,
+		   projected_at = now()
+		 WHERE active_contact_aliases.contact_id = excluded.contact_id
+		 RETURNING contact_id`,
+		alias,
+		contactID,
+	).Scan(&claimedContactID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			existingContactID, lookupErr := activeContactAliasOwner(
+				ctx,
+				transaction,
+				alias,
+			)
+			if lookupErr != nil {
+				return false, "", lookupErr
+			}
+
+			return false, existingContactID, nil
+		}
+
+		return false, "", fmt.Errorf("claim active contact alias: %w", err)
+	}
+
+	return true, claimedContactID, nil
+}
+
+func activeContactAliasOwner(
+	ctx context.Context,
+	transaction pgx.Tx,
+	alias string,
+) (string, error) {
+	var contactID string
+	err := transaction.QueryRow(
+		ctx,
+		`SELECT contact_id
+		   FROM active_contact_aliases
+		  WHERE contact_alias = $1`,
+		alias,
+	).Scan(&contactID)
+	if err != nil {
+		return "", fmt.Errorf("lookup active contact alias owner: %w", err)
+	}
+
+	return contactID, nil
 }
 
 func insertContactIdentityBinding(
@@ -1370,7 +1504,10 @@ func (index *Index) ContactAggregate(
 	ctx context.Context,
 	request contracts.ContactAggregateRequest,
 ) (contracts.ContactAggregate, error) {
-	contactID := strings.TrimSpace(request.ContactID)
+	contactID, err := index.resolveContactRef(ctx, request.ContactID)
+	if err != nil {
+		return contracts.ContactAggregate{}, err
+	}
 
 	var (
 		aggregate contracts.ContactAggregate
@@ -1378,7 +1515,7 @@ func (index *Index) ContactAggregate(
 		lastSeen  sql.NullTime
 	)
 
-	err := index.pool.QueryRow(
+	err = index.pool.QueryRow(
 		ctx,
 		`SELECT contact_id, display_name, primary_email, fact_count,
 		first_seen_at, last_seen_at, message_count, participant_count
@@ -1449,6 +1586,12 @@ func (index *Index) ContactAggregate(
 	}
 
 	aggregate.SchemaVersion = contracts.SchemaVersionPhase00
+	aliases, err := index.aliasesForContacts(ctx, []string{aggregate.ContactID})
+	if err != nil {
+		return contracts.ContactAggregate{}, err
+	}
+	aggregate.Aliases = aliases[aggregate.ContactID]
+
 	if firstSeen.Valid {
 		aggregate.FirstSeenAt = firstSeen.Time
 	}
@@ -1504,6 +1647,7 @@ func (index *Index) ContactSearch(
 	defer rows.Close()
 
 	results := []contracts.ContactSearchResult{}
+	contactIDs := []string{}
 
 	for rows.Next() {
 		var (
@@ -1535,6 +1679,7 @@ func (index *Index) ContactSearch(
 			result.LastSeenAt = lastSeen.Time
 		}
 
+		contactIDs = append(contactIDs, result.ContactID)
 		results = append(results, result)
 	}
 
@@ -1544,6 +1689,14 @@ func (index *Index) ContactSearch(
 			"iterate contact search: %w",
 			err,
 		)
+	}
+
+	aliases, err := index.aliasesForContacts(ctx, contactIDs)
+	if err != nil {
+		return contracts.ContactSearchResponse{}, err
+	}
+	for index := range results {
+		results[index].Aliases = aliases[results[index].ContactID]
 	}
 
 	response := contracts.ContactSearchResponse{
@@ -1581,6 +1734,17 @@ func (index *Index) ResolveContactIdentity(
 	ctx context.Context,
 	request contracts.ContactIdentityResolveRequest,
 ) (contracts.ContactIdentityResolveResponse, error) {
+	contactID, err := index.resolveContactRef(ctx, request.Identity)
+	if err != nil {
+		return contracts.ContactIdentityResolveResponse{}, err
+	}
+	if contactID != "" && contactID != strings.TrimSpace(request.Identity) {
+		return contracts.ContactIdentityResolveResponse{
+			SchemaVersion: contracts.SchemaVersionPhase00,
+			ContactIDs:    []string{contactID},
+		}, nil
+	}
+
 	token := contactentity.NormalizeIdentity(request.Identity)
 	if token == "" {
 		return contracts.ContactIdentityResolveResponse{

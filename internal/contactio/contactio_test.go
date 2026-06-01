@@ -116,6 +116,54 @@ func TestNativeImportAndExportPreservesTemporalFacts(t *testing.T) {
 	}
 }
 
+func TestNativeImportAndExportPreservesContactAliases(t *testing.T) {
+	bundle := NativeBundle{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Contacts: []NativeContact{{
+			ContactID: "urn:gmeow:test:contact:fixture",
+			Aliases:   []string{"Fixture Main"},
+		}},
+	}
+	encoded, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	object, _, err := BuildImportObject(
+		FormatNative,
+		"contacts",
+		"fixture.json",
+		encoded,
+		time.Time{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(
+		object.Content,
+		"<https://patrickaudley.com/lod#contactAlias> \"fixture-main\"",
+	) {
+		t.Fatalf("native RDF did not include contact alias:\n%s", object.Content)
+	}
+
+	exported, err := Export(FormatNative, []contracts.ContactAggregate{{
+		ContactID: "urn:gmeow:test:contact:fixture",
+		Aliases:   []string{"fixture-main"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out NativeBundle
+	if err := json.Unmarshal([]byte(exported), &out); err != nil {
+		t.Fatalf("native export is not valid JSON: %v\n%s", err, exported)
+	}
+	if len(out.Contacts) != 1 ||
+		len(out.Contacts[0].Aliases) != 1 ||
+		out.Contacts[0].Aliases[0] != "fixture-main" {
+		t.Fatalf("native export did not preserve aliases:\n%s", exported)
+	}
+}
+
 func TestNativeImportRejectsUnsupportedSchemaVersion(t *testing.T) {
 	bundle := NativeBundle{
 		SchemaVersion: contracts.SchemaVersionPhase00 + 1,

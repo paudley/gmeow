@@ -72,6 +72,7 @@ type NativeBundle struct {
 type NativeContact struct {
 	FirstSeenAt      time.Time               `json:"first_seen_at,omitzero"`
 	LastSeenAt       time.Time               `json:"last_seen_at,omitzero"`
+	Aliases          []string                `json:"aliases,omitempty"`
 	ContactID        string                  `json:"contact_id"`
 	DisplayName      string                  `json:"display_name,omitempty"`
 	PrimaryEmail     string                  `json:"primary_email,omitempty"`
@@ -242,6 +243,7 @@ func ExportNative(contacts []contracts.ContactAggregate) (string, error) {
 			ContactID:        contact.ContactID,
 			DisplayName:      contact.DisplayName,
 			PrimaryEmail:     contact.PrimaryEmail,
+			Aliases:          append([]string{}, contact.Aliases...),
 			FirstSeenAt:      contact.FirstSeenAt,
 			LastSeenAt:       contact.LastSeenAt,
 			Facts:            exportFacts(contact.Facts),
@@ -360,6 +362,19 @@ func nativeToRDF(content []byte) (string, []string, error) {
 				contact.ContactID,
 				schemaPrefix+"email",
 				iri("mailto:"+contactentity.NormalizeIdentity(contact.PrimaryEmail)),
+			)
+		}
+
+		for _, alias := range contact.Aliases {
+			normalized := contactentity.NormalizeAlias(alias)
+			if normalized == "" {
+				continue
+			}
+			writeTriple(
+				&builder,
+				contact.ContactID,
+				bcidPrefix+"contactAlias",
+				literal(normalized),
 			)
 		}
 
@@ -615,6 +630,7 @@ var factPredicates = map[string]string{
 	contactentity.FactKindAddress:      schemaPrefix + "address",
 	contactentity.FactKindAffiliation:  schemaPrefix + "affiliation",
 	contactentity.FactKindAlias:        schemaPrefix + "alternateName",
+	contactentity.FactKindContactAlias: bcidPrefix + "contactAlias",
 	contactentity.FactKindIdentifier:   schemaPrefix + "identifier",
 	contactentity.FactKindName:         foafPrefix + "name",
 	contactentity.FactKindNote:         schemaPrefix + "description",

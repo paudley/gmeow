@@ -12,6 +12,8 @@ func TestTruncateProjectionTablesClearsContactAnalysisState(t *testing.T) {
 	query := truncateProjectionTablesSQL()
 
 	for _, table := range []string{
+		"active_contact_aliases",
+		"query_contact_aliases",
 		"query_contact_analysis",
 		"query_contact_embeddings",
 	} {

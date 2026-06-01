@@ -45,6 +45,7 @@ type ContactAggregate struct {
 	LastSeenAt       time.Time     `json:"last_seen_at,omitzero"`
 	DisplayName      string        `json:"display_name,omitempty"`
 	PrimaryEmail     string        `json:"primary_email,omitempty"`
+	Aliases          []string      `json:"aliases,omitempty"`
 	Facts            []ContactFact `json:"facts"`
 	SchemaVersion    SchemaVersion `json:"schema_version"`
 	FactCount        int           `json:"fact_count"`
@@ -68,6 +69,7 @@ type ContactSearchResult struct {
 	LastSeenAt       time.Time `json:"last_seen_at,omitzero"`
 	DisplayName      string    `json:"display_name,omitempty"`
 	PrimaryEmail     string    `json:"primary_email,omitempty"`
+	Aliases          []string  `json:"aliases,omitempty"`
 	Score            float64   `json:"score"`
 	FactCount        int       `json:"fact_count"`
 	MessageCount     int       `json:"message_count"`

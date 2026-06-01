@@ -89,6 +89,14 @@ func TestFactsFromStatementsClassifiesAndNormalizesContactFacts(t *testing.T) {
 		},
 		{
 			SourceDigest:  "sha256:source",
+			StatementHash: "contact-alias",
+			Subject:       "https://example.test/#org",
+			Predicate:     "https://patrickaudley.com/lod#contactAlias",
+			Object:        "fixture handle",
+			ObjectKind:    "literal",
+		},
+		{
+			SourceDigest:  "sha256:source",
 			StatementHash: "historical",
 			Subject:       "https://example.test/#org",
 			Predicate:     "https://patrickaudley.com/lod#historicalEmail",
@@ -112,8 +120,8 @@ func TestFactsFromStatementsClassifiesAndNormalizesContactFacts(t *testing.T) {
 	}}
 
 	facts := FactsFromStatements(statements, annotations)
-	if len(facts) != 2 {
-		t.Fatalf("facts = %#v, want two classified contact facts", facts)
+	if len(facts) != 3 {
+		t.Fatalf("facts = %#v, want three classified contact facts", facts)
 	}
 
 	current := factByValue(facts, "admin@example.test")
@@ -127,6 +135,11 @@ func TestFactsFromStatementsClassifiesAndNormalizesContactFacts(t *testing.T) {
 		historical.ValidUntil != "2004-06-30" {
 		t.Fatalf("historical email fact was not annotated: %#v", historical)
 	}
+
+	alias := factByValue(facts, "fixture-handle")
+	if alias.FactKind != FactKindContactAlias {
+		t.Fatalf("contact alias fact was not normalized: %#v", alias)
+	}
 }
 
 func TestNormalizeIdentityHandlesMailtoAndDisplayNames(t *testing.T) {
@@ -138,6 +151,17 @@ func TestNormalizeIdentityHandlesMailtoAndDisplayNames(t *testing.T) {
 	got = NormalizeIdentity(`mailto.support@example.test`)
 	if got != "mailto.support@example.test" {
 		t.Fatalf("NormalizeIdentity = %q, want mailto.support@example.test", got)
+	}
+}
+
+func TestNormalizeAliasBuildsSlugHandle(t *testing.T) {
+	got := NormalizeAlias(" Fixture_Handle.One ")
+	if got != "fixture-handle-one" {
+		t.Fatalf("NormalizeAlias = %q, want fixture-handle-one", got)
+	}
+
+	if got := NormalizeAlias("..."); got != "" {
+		t.Fatalf("punctuation-only alias normalized to %q, want empty", got)
 	}
 }
 
