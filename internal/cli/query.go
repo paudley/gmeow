@@ -22,10 +22,12 @@ import (
 
 	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/config"
+	"blackcat.ca/gmeow/internal/contactio"
 	"blackcat.ca/gmeow/internal/contracts"
 	querypg "blackcat.ca/gmeow/internal/query/postgres"
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
+	"blackcat.ca/gmeow/internal/source"
 )
 
 func newQueryCommand(out io.Writer, configPath *string) *cobra.Command {
@@ -65,6 +67,8 @@ func newQueryContactCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newQueryContactAnalysisInputsCommand(out, configPath))
 	command.AddCommand(newQueryContactAnalysisStatusCommand(out, configPath))
 	command.AddCommand(newQueryContactAnalyzeCommand(out, configPath))
+	command.AddCommand(newQueryContactImportCommand(out, configPath))
+	command.AddCommand(newQueryContactExportCommand(out, configPath))
 
 	return command
 }
@@ -539,6 +543,169 @@ func newQueryContactAnalyzeCommand(out io.Writer, configPath *string) *cobra.Com
 	command.Flags().IntVar(&offset, "offset", 0, "contact offset")
 	command.Flags().
 		BoolVar(&forced, "force", false, "recompute current contact embeddings")
+
+	return command
+}
+
+func newQueryContactImportCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		format     string
+		sourceName string
+	)
+
+	command := &cobra.Command{
+		Use:   "import <path...>",
+		Short: "Import vCard, FOAF/RDF, or native contact bundles",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			if strings.TrimSpace(sourceName) == "" {
+				return errors.New("--source-name is required")
+			}
+
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			filestoreClient, err := rpc.NewFilestoreClient(
+				command.Context(),
+				rpcEndpoint(loaded.Resolved.RPC.Filestore),
+			)
+			if err != nil {
+				return err
+			}
+			defer filestoreClient.Close()
+
+			ingestService, err := source.NewService(filestoreClient)
+			if err != nil {
+				return err
+			}
+
+			results := []contactio.ImportResult{}
+			for _, path := range args {
+				result, err := importContactPath(
+					command.Context(),
+					ingestService,
+					format,
+					sourceName,
+					path,
+				)
+				if err != nil {
+					results = append(results, contactio.ImportResult{
+						SourceKind: contactio.ImportSourceKind,
+						SourceName: sourceName,
+						ExternalID: filepath.ToSlash(path),
+						Format:     contactio.NormalizeFormat(format),
+						Error:      err.Error(),
+					})
+					continue
+				}
+				results = append(results, result)
+			}
+
+			return writeAppJSON(out, results, nil)
+		},
+	}
+	command.Flags().StringVar(
+		&format,
+		"format",
+		contactio.FormatVCard,
+		"contact import format: vcard, foaf, or native",
+	)
+	command.Flags().StringVar(&sourceName, "source-name", "", "contact import source name")
+
+	return command
+}
+
+func importContactPath(
+	ctx context.Context,
+	ingestService source.IngestService,
+	format string,
+	sourceName string,
+	path string,
+) (contactio.ImportResult, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return contactio.ImportResult{}, err
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		return contactio.ImportResult{}, err
+	}
+
+	object, result, err := contactio.BuildImportObject(
+		format,
+		sourceName,
+		path,
+		content,
+		stat.ModTime(),
+	)
+	if err != nil {
+		return contactio.ImportResult{}, err
+	}
+
+	digest, created, err := ingestService.Ingest(ctx, source.IngestObject{
+		ObservedAt:   object.ObservedAt,
+		Reader:       strings.NewReader(object.Content),
+		MediaType:    object.MediaType,
+		SourceKind:   object.SourceKind,
+		SourceName:   object.SourceName,
+		ExternalID:   object.ExternalID,
+		ExternalVer:  object.ExternalVer,
+		SourceHint:   object.SourceHint,
+		ContentRoles: []string{contracts.RDFSourceBundleRole, contracts.ContactSourceRole},
+		Facets:       object.Facets,
+	})
+	if err != nil {
+		return contactio.ImportResult{}, err
+	}
+
+	result.ObjectDigest = string(digest)
+	result.Created = created
+
+	return result, nil
+}
+
+func newQueryContactExportCommand(out io.Writer, configPath *string) *cobra.Command {
+	var format string
+
+	command := &cobra.Command{
+		Use:   "export <contact-id...>",
+		Short: "Export contacts as vCard, FOAF/RDF, or native bundles",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			index, err := openQueryIndexFromPath(command.Context(), configPath)
+			if err != nil {
+				return err
+			}
+			defer index.Close()
+
+			contacts := make([]contracts.ContactAggregate, 0, len(args))
+			for _, contactID := range args {
+				aggregate, err := index.ContactAggregate(
+					command.Context(),
+					contracts.ContactAggregateRequest{ContactID: contactID},
+				)
+				if err != nil {
+					return err
+				}
+				contacts = append(contacts, aggregate)
+			}
+
+			output, err := contactio.Export(format, contacts)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprint(out, output)
+
+			return err
+		},
+	}
+	command.Flags().StringVar(
+		&format,
+		"format",
+		contactio.FormatVCard,
+		"contact export format: vcard, foaf, or native",
+	)
 
 	return command
 }

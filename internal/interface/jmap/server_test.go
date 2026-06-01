@@ -184,6 +184,80 @@ func TestJMAPUnknownMethodReturnsJMAPError(t *testing.T) {
 	}
 }
 
+func TestJMAPContactsRemainUnadvertisedAndUnsupported(t *testing.T) {
+	server := httptest.NewServer(NewHandler(nil, Options{BearerToken: "secret"}))
+	defer server.Close()
+
+	sessionRequest, err := http.NewRequest(http.MethodGet, server.URL+"/jmap/session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionRequest.Header.Set("Authorization", "Bearer secret")
+
+	sessionResponse, err := http.DefaultClient.Do(sessionRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sessionResponse.Body.Close()
+
+	var session sessionResource
+	if err := json.NewDecoder(sessionResponse.Body).Decode(&session); err != nil {
+		t.Fatal(err)
+	}
+	for capability := range session.Capabilities {
+		if strings.Contains(strings.ToLower(capability), "contact") {
+			t.Fatalf("contacts capability was advertised: %#v", session.Capabilities)
+		}
+	}
+
+	body := bytes.NewBufferString(`{
+		"using":["urn:ietf:params:jmap:contacts"],
+		"methodCalls":[
+			["Contact/get",{"accountId":"gmeow","ids":["c1"]},"c1"],
+			["Contact/query",{"accountId":"gmeow"},"c2"],
+			["Contact/set",{"accountId":"gmeow"},"c3"]
+		]
+	}`)
+	apiRequest, err := http.NewRequest(http.MethodPost, server.URL+"/jmap/api", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiRequest.Header.Set("Authorization", "Bearer secret")
+
+	apiResponse, err := http.DefaultClient.Do(apiRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer apiResponse.Body.Close()
+
+	var decoded struct {
+		MethodResponses []json.RawMessage `json:"methodResponses"`
+	}
+	if err := json.NewDecoder(apiResponse.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.MethodResponses) != 3 {
+		t.Fatalf("method response count = %d", len(decoded.MethodResponses))
+	}
+	for _, raw := range decoded.MethodResponses {
+		var tuple []json.RawMessage
+		if err := json.Unmarshal(raw, &tuple); err != nil {
+			t.Fatal(err)
+		}
+		var name string
+		var problem jmapError
+		if err := json.Unmarshal(tuple[0], &name); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(tuple[1], &problem); err != nil {
+			t.Fatal(err)
+		}
+		if name != "error" || problem.Type != "unknownMethod" {
+			t.Fatalf("unexpected contacts response name=%q problem=%#v", name, problem)
+		}
+	}
+}
+
 func TestJMAPMailboxGetAndEmailQueryUseAppServices(t *testing.T) {
 	services, err := appsvc.New(appsvc.Options{
 		Query: jmapQueryFixture{
