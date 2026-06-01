@@ -819,6 +819,138 @@ func contactEmbeddingID(record contracts.ContactEmbeddingUpsert) string {
 	return record.AnalyzerName + ":" + record.AnalyzerVersion + ":" + record.InputHash
 }
 
+func (index *Index) ContactAnalysisStatus(
+	ctx context.Context,
+	request contracts.ContactAnalysisStatusRequest,
+) (contracts.ContactAnalysisStatusResponse, error) {
+	args, where := contactAnalysisStatusWhere(request)
+	total, err := countContactIntelligence(
+		ctx,
+		index.pool,
+		"query_contact_analysis a",
+		where,
+		args,
+	)
+	if err != nil {
+		return contracts.ContactAnalysisStatusResponse{}, err
+	}
+
+	limit := normalizedLimit(request.Limit)
+	offset := max(request.Offset, 0)
+	args = append(args, limit, offset)
+	rows, err := index.pool.Query(
+		ctx,
+		`SELECT contact_id, analyzer_name, analyzer_version, status, model, input_hash, input_bytes, generated_at, data_json
+		   FROM query_contact_analysis a
+		  WHERE `+strings.Join(
+			where,
+			" AND ",
+		)+`
+		  ORDER BY generated_at DESC NULLS LAST, contact_id, analyzer_name
+		  LIMIT $`+fmt.Sprint(
+			len(args)-1,
+		)+` OFFSET $`+fmt.Sprint(
+			len(args),
+		),
+		args...,
+	)
+	if err != nil {
+		return contracts.ContactAnalysisStatusResponse{}, fmt.Errorf(
+			"query contact analysis status: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	results, err := scanContactAnalysisStatus(rows)
+	if err != nil {
+		return contracts.ContactAnalysisStatusResponse{}, err
+	}
+
+	return contracts.ContactAnalysisStatusResponse{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		Results:       results,
+		Total:         total,
+		Limit:         limit,
+		Offset:        offset,
+	}, nil
+}
+
+func contactAnalysisStatusWhere(
+	request contracts.ContactAnalysisStatusRequest,
+) ([]any, []string) {
+	args := []any{}
+	where := []string{"true"}
+
+	if contacts := uniqueNonEmptyStrings(request.ContactIDs); len(contacts) > 0 {
+		args = append(args, contacts)
+		where = append(where, fmt.Sprintf("a.contact_id = ANY($%d)", len(args)))
+	}
+	if hashes := uniqueNonEmptyStrings(request.InputHashes); len(hashes) > 0 {
+		args = append(args, hashes)
+		where = append(where, fmt.Sprintf("a.input_hash = ANY($%d)", len(args)))
+	}
+	if analyzerName := strings.TrimSpace(request.AnalyzerName); analyzerName != "" {
+		args = append(args, analyzerName)
+		where = append(where, fmt.Sprintf("a.analyzer_name = $%d", len(args)))
+	}
+	if analyzerVersion := strings.TrimSpace(
+		request.AnalyzerVersion,
+	); analyzerVersion != "" {
+		args = append(args, analyzerVersion)
+		where = append(where, fmt.Sprintf("a.analyzer_version = $%d", len(args)))
+	}
+	if model := strings.TrimSpace(request.Model); model != "" {
+		args = append(args, model)
+		where = append(where, fmt.Sprintf("a.model = $%d", len(args)))
+	}
+
+	return args, where
+}
+
+func scanContactAnalysisStatus(
+	rows pgx.Rows,
+) ([]contracts.ContactAnalysisStatusResult, error) {
+	results := []contracts.ContactAnalysisStatusResult{}
+	for rows.Next() {
+		var (
+			result      contracts.ContactAnalysisStatusResult
+			generatedAt sql.NullTime
+			metadata    []byte
+		)
+		if err := rows.Scan(
+			&result.ContactID,
+			&result.AnalyzerName,
+			&result.AnalyzerVersion,
+			&result.Status,
+			&result.Model,
+			&result.InputHash,
+			&result.InputBytes,
+			&generatedAt,
+			&metadata,
+		); err != nil {
+			return nil, fmt.Errorf("scan contact analysis status: %w", err)
+		}
+		if generatedAt.Valid {
+			result.GeneratedAt = generatedAt.Time
+		}
+		if len(metadata) > 0 {
+			if err := json.Unmarshal(metadata, &result.Metadata); err != nil {
+				return nil, fmt.Errorf("decode contact analysis status metadata: %w", err)
+			}
+		}
+		if result.Metadata == nil {
+			result.Metadata = map[string]any{}
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate contact analysis status: %w", err)
+	}
+
+	return results, nil
+}
+
 func (index *Index) ContactVectorSearch(
 	ctx context.Context,
 	request contracts.ContactVectorSearchRequest,

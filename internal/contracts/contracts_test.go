@@ -180,6 +180,20 @@ func TestContactIntelligenceJSONUsesContractKeys(t *testing.T) {
 		Limit:      10,
 	}, []string{"contact_ids", "limit"}, []string{"ContactIDs"})
 
+	assertJSONKeys(t, "contact analysis status response", ContactAnalysisStatusResponse{
+		SchemaVersion: SchemaVersionPhase00,
+		Total:         1,
+		Limit:         10,
+		Results: []ContactAnalysisStatusResult{{
+			ContactID:       "contact",
+			AnalyzerName:    "embedding.endpoint",
+			AnalyzerVersion: "phase04-email-v2",
+			Status:          "complete",
+			Model:           "model",
+			InputHash:       "hash",
+		}},
+	}, []string{"schema_version", "results", "total", "limit"}, []string{"SchemaVersion"})
+
 	assertJSONKeys(t, "contact embedding upsert", ContactEmbeddingUpsert{
 		ContactID:       "contact",
 		AnalyzerName:    "embedding.endpoint",

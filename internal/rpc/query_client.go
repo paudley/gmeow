@@ -393,6 +393,466 @@ func (client *QueryClient) RelatedObjects(
 	}, nil
 }
 
+func (client *QueryClient) ContactSearch(
+	ctx context.Context,
+	request contracts.ContactSearchRequest,
+) (contracts.ContactSearchResponse, error) {
+	response, err := client.client.ContactSearch(ctx, &pb.ContactSearchRequest{
+		Query:  request.Query,
+		Limit:  int32(request.Limit),
+		Offset: int32(request.Offset),
+	})
+	if err != nil {
+		return contracts.ContactSearchResponse{}, err
+	}
+
+	results := make([]contracts.ContactSearchResult, 0, len(response.GetResults()))
+	for _, result := range response.GetResults() {
+		firstSeenAt, err := parseTime(result.GetFirstSeenAt())
+		if err != nil {
+			return contracts.ContactSearchResponse{}, err
+		}
+		lastSeenAt, err := parseTime(result.GetLastSeenAt())
+		if err != nil {
+			return contracts.ContactSearchResponse{}, err
+		}
+		results = append(results, contracts.ContactSearchResult{
+			ContactID:        result.GetContactId(),
+			DisplayName:      result.GetDisplayName(),
+			PrimaryEmail:     result.GetPrimaryEmail(),
+			FirstSeenAt:      firstSeenAt,
+			LastSeenAt:       lastSeenAt,
+			Score:            result.GetScore(),
+			FactCount:        int(result.GetFactCount()),
+			MessageCount:     int(result.GetMessageCount()),
+			ParticipantCount: int(result.GetParticipantCount()),
+		})
+	}
+
+	return contracts.ContactSearchResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		Results:       results,
+		Total:         int(response.GetTotal()),
+		Limit:         int(response.GetLimit()),
+		Offset:        int(response.GetOffset()),
+	}, nil
+}
+
+func (client *QueryClient) ContactAggregate(
+	ctx context.Context,
+	request contracts.ContactAggregateRequest,
+) (contracts.ContactAggregate, error) {
+	response, err := client.client.ContactAggregate(ctx, &pb.ContactAggregateRequest{
+		ContactId: request.ContactID,
+	})
+	if err != nil {
+		return contracts.ContactAggregate{}, err
+	}
+	firstSeenAt, err := parseTime(response.GetFirstSeenAt())
+	if err != nil {
+		return contracts.ContactAggregate{}, err
+	}
+	lastSeenAt, err := parseTime(response.GetLastSeenAt())
+	if err != nil {
+		return contracts.ContactAggregate{}, err
+	}
+
+	return contracts.ContactAggregate{
+		SchemaVersion:    contracts.SchemaVersion(response.GetSchemaVersion()),
+		ContactID:        response.GetContactId(),
+		DisplayName:      response.GetDisplayName(),
+		PrimaryEmail:     response.GetPrimaryEmail(),
+		FirstSeenAt:      firstSeenAt,
+		LastSeenAt:       lastSeenAt,
+		FactCount:        int(response.GetFactCount()),
+		MessageCount:     int(response.GetMessageCount()),
+		ParticipantCount: int(response.GetParticipantCount()),
+		Facts:            fromPBContactFacts(response.GetFacts()),
+	}, nil
+}
+
+func (client *QueryClient) ResolveContactIdentity(
+	ctx context.Context,
+	request contracts.ContactIdentityResolveRequest,
+) (contracts.ContactIdentityResolveResponse, error) {
+	response, err := client.client.ResolveContactIdentity(
+		ctx,
+		&pb.ContactIdentityResolveRequest{Identity: request.Identity},
+	)
+	if err != nil {
+		return contracts.ContactIdentityResolveResponse{}, err
+	}
+
+	return contracts.ContactIdentityResolveResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		ContactIDs:    append([]string{}, response.GetContactIds()...),
+	}, nil
+}
+
+func (client *QueryClient) ContactFacts(
+	ctx context.Context,
+	request contracts.ContactFactRequest,
+) (contracts.ContactFactResponse, error) {
+	response, err := client.client.ContactFacts(ctx, &pb.ContactFactRequest{
+		ContactIds: append([]string{}, request.ContactIDs...),
+		FactKinds:  append([]string{}, request.FactKinds...),
+		At:         request.At,
+		From:       request.From,
+		Until:      request.Until,
+		Current:    request.Current,
+		Limit:      int32(request.Limit),
+		Offset:     int32(request.Offset),
+	})
+	if err != nil {
+		return contracts.ContactFactResponse{}, err
+	}
+
+	return contracts.ContactFactResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		Facts:         fromPBContactFacts(response.GetFacts()),
+		Total:         int(response.GetTotal()),
+		Limit:         int(response.GetLimit()),
+		Offset:        int(response.GetOffset()),
+	}, nil
+}
+
+func (client *QueryClient) ContactIdentityDetails(
+	ctx context.Context,
+	request contracts.ContactIdentityDetailRequest,
+) (contracts.ContactIdentityDetailResponse, error) {
+	response, err := client.client.ContactIdentityDetails(
+		ctx,
+		&pb.ContactIdentityDetailRequest{
+			Identities: append([]string{}, request.Identities...),
+			ContactIds: append([]string{}, request.ContactIDs...),
+			Limit:      int32(request.Limit),
+			Offset:     int32(request.Offset),
+		},
+	)
+	if err != nil {
+		return contracts.ContactIdentityDetailResponse{}, err
+	}
+
+	results := make([]contracts.ContactIdentityDetail, 0, len(response.GetResults()))
+	for _, result := range response.GetResults() {
+		results = append(results, contracts.ContactIdentityDetail{
+			SourceDigest:  contracts.ObjectDigest(result.GetSourceDigest()),
+			MatchedToken:  result.GetMatchedToken(),
+			Token:         result.GetToken(),
+			TokenHash:     result.GetTokenHash(),
+			ContactID:     result.GetContactId(),
+			StatementHash: result.GetStatementHash(),
+			ValidFrom:     result.GetValidFrom(),
+			ValidUntil:    result.GetValidUntil(),
+		})
+	}
+
+	return contracts.ContactIdentityDetailResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		Results:       results,
+		Total:         int(response.GetTotal()),
+		Limit:         int(response.GetLimit()),
+		Offset:        int(response.GetOffset()),
+	}, nil
+}
+
+func (client *QueryClient) ContactNeighborhood(
+	ctx context.Context,
+	request contracts.ContactNeighborhoodRequest,
+) (contracts.ContactNeighborhoodResponse, error) {
+	response, err := client.client.ContactNeighborhood(
+		ctx,
+		&pb.ContactNeighborhoodRequest{
+			ContactId: request.ContactID,
+			FactKinds: append(
+				[]string{},
+				request.FactKinds...,
+			),
+			Limit:  int32(request.Limit),
+			Offset: int32(request.Offset),
+		},
+	)
+	if err != nil {
+		return contracts.ContactNeighborhoodResponse{}, err
+	}
+
+	results := make(
+		[]contracts.ContactNeighborhoodResult,
+		0,
+		len(response.GetResults()),
+	)
+	for _, result := range response.GetResults() {
+		results = append(results, contracts.ContactNeighborhoodResult{
+			SourceDigest:  contracts.ObjectDigest(result.GetSourceDigest()),
+			StatementHash: result.GetStatementHash(),
+			ContactID:     result.GetContactId(),
+			FactKind:      result.GetFactKind(),
+			Value:         result.GetValue(),
+			Predicate:     result.GetPredicate(),
+			ValidFrom:     result.GetValidFrom(),
+			ValidUntil:    result.GetValidUntil(),
+		})
+	}
+
+	return contracts.ContactNeighborhoodResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		Results:       results,
+		Total:         int(response.GetTotal()),
+		Limit:         int(response.GetLimit()),
+		Offset:        int(response.GetOffset()),
+	}, nil
+}
+
+func (client *QueryClient) ContactAnalysisInputs(
+	ctx context.Context,
+	request contracts.ContactAnalysisInputRequest,
+) (contracts.ContactAnalysisInputResponse, error) {
+	response, err := client.client.ContactAnalysisInputs(
+		ctx,
+		&pb.ContactAnalysisInputRequest{
+			ContactIds: append([]string{}, request.ContactIDs...),
+			FactKinds:  append([]string{}, request.FactKinds...),
+			Limit:      int32(request.Limit),
+			Offset:     int32(request.Offset),
+		},
+	)
+	if err != nil {
+		return contracts.ContactAnalysisInputResponse{}, err
+	}
+
+	results := make([]contracts.ContactAnalysisInputResult, 0, len(response.GetResults()))
+	for _, result := range response.GetResults() {
+		firstSeenAt, err := parseTime(result.GetFirstSeenAt())
+		if err != nil {
+			return contracts.ContactAnalysisInputResponse{}, err
+		}
+		lastSeenAt, err := parseTime(result.GetLastSeenAt())
+		if err != nil {
+			return contracts.ContactAnalysisInputResponse{}, err
+		}
+		results = append(results, contracts.ContactAnalysisInputResult{
+			ContactID:        result.GetContactId(),
+			DisplayName:      result.GetDisplayName(),
+			PrimaryEmail:     result.GetPrimaryEmail(),
+			FirstSeenAt:      firstSeenAt,
+			LastSeenAt:       lastSeenAt,
+			InputText:        result.GetInputText(),
+			FactCount:        int(result.GetFactCount()),
+			MessageCount:     int(result.GetMessageCount()),
+			ParticipantCount: int(result.GetParticipantCount()),
+		})
+	}
+
+	return contracts.ContactAnalysisInputResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		Results:       results,
+		Total:         int(response.GetTotal()),
+		Limit:         int(response.GetLimit()),
+		Offset:        int(response.GetOffset()),
+	}, nil
+}
+
+func (client *QueryClient) ContactAnalysisStatus(
+	ctx context.Context,
+	request contracts.ContactAnalysisStatusRequest,
+) (contracts.ContactAnalysisStatusResponse, error) {
+	response, err := client.client.ContactAnalysisStatus(
+		ctx,
+		&pb.ContactAnalysisStatusRequest{
+			ContactIds:      append([]string{}, request.ContactIDs...),
+			InputHashes:     append([]string{}, request.InputHashes...),
+			AnalyzerName:    request.AnalyzerName,
+			AnalyzerVersion: request.AnalyzerVersion,
+			Model:           request.Model,
+			Limit:           int32(request.Limit),
+			Offset:          int32(request.Offset),
+		},
+	)
+	if err != nil {
+		return contracts.ContactAnalysisStatusResponse{}, err
+	}
+
+	results := make([]contracts.ContactAnalysisStatusResult, 0, len(response.GetResults()))
+	for _, result := range response.GetResults() {
+		metadata, err := decodeMap(result.GetMetadataJson())
+		if err != nil {
+			return contracts.ContactAnalysisStatusResponse{}, err
+		}
+		generatedAt, err := parseTime(result.GetGeneratedAt())
+		if err != nil {
+			return contracts.ContactAnalysisStatusResponse{}, err
+		}
+		results = append(results, contracts.ContactAnalysisStatusResult{
+			GeneratedAt:     generatedAt,
+			Metadata:        metadata,
+			ContactID:       result.GetContactId(),
+			AnalyzerName:    result.GetAnalyzerName(),
+			AnalyzerVersion: result.GetAnalyzerVersion(),
+			Status:          result.GetStatus(),
+			Model:           result.GetModel(),
+			InputHash:       result.GetInputHash(),
+			InputBytes:      int(result.GetInputBytes()),
+		})
+	}
+
+	return contracts.ContactAnalysisStatusResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		Results:       results,
+		Total:         int(response.GetTotal()),
+		Limit:         int(response.GetLimit()),
+		Offset:        int(response.GetOffset()),
+	}, nil
+}
+
+func (client *QueryClient) StoreContactEmbedding(
+	ctx context.Context,
+	record contracts.ContactEmbeddingUpsert,
+) error {
+	metadata, err := encodeMap(record.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = client.client.StoreContactEmbedding(ctx, &pb.ContactEmbeddingUpsert{
+		ContactId:       record.ContactID,
+		AnalyzerName:    record.AnalyzerName,
+		AnalyzerVersion: record.AnalyzerVersion,
+		Status:          record.Status,
+		Model:           record.Model,
+		InputHash:       record.InputHash,
+		InputBytes:      int32(record.InputBytes),
+		GeneratedAt:     formatTime(record.GeneratedAt),
+		TextPreview:     record.TextPreview,
+		Vector:          append([]float32{}, record.Vector...),
+		MetadataJson:    metadata,
+	})
+
+	return err
+}
+
+func (client *QueryClient) ContactVectorSearch(
+	ctx context.Context,
+	request contracts.ContactVectorSearchRequest,
+) (contracts.ContactVectorSearchResponse, error) {
+	response, err := client.client.ContactVectorSearch(
+		ctx,
+		&pb.ContactVectorSearchRequest{
+			Vector:     append([]float32{}, request.Vector...),
+			Model:      request.Model,
+			ContactIds: append([]string{}, request.ContactIDs...),
+			Dimensions: int32(request.Dimensions),
+			Limit:      int32(request.Limit),
+		},
+	)
+	if err != nil {
+		return contracts.ContactVectorSearchResponse{}, err
+	}
+
+	return contracts.ContactVectorSearchResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		Results:       fromPBContactVectorResults(response.GetResults()),
+	}, nil
+}
+
+func (client *QueryClient) SimilarContacts(
+	ctx context.Context,
+	request contracts.SimilarContactsRequest,
+) (contracts.SimilarContactsResponse, error) {
+	response, err := client.client.SimilarContacts(ctx, &pb.SimilarContactsRequest{
+		ContactId: request.ContactID,
+		Model:     request.Model,
+		Limit:     int32(request.Limit),
+	})
+	if err != nil {
+		return contracts.SimilarContactsResponse{}, err
+	}
+
+	return contracts.SimilarContactsResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		Results:       fromPBContactVectorResults(response.GetResults()),
+	}, nil
+}
+
+func (client *QueryClient) ContactMessages(
+	ctx context.Context,
+	request contracts.ContactMessageRequest,
+) (contracts.ContactMessageResponse, error) {
+	response, err := client.client.ContactMessages(ctx, &pb.ContactMessageRequest{
+		ContactId: request.ContactID,
+		Role:      request.Role,
+		Limit:     int32(request.Limit),
+		Offset:    int32(request.Offset),
+	})
+	if err != nil {
+		return contracts.ContactMessageResponse{}, err
+	}
+
+	results := make([]contracts.ContactMessageResult, 0, len(response.GetResults()))
+	for _, result := range response.GetResults() {
+		messageTime, err := parseTime(result.GetMessageTime())
+		if err != nil {
+			return contracts.ContactMessageResponse{}, err
+		}
+		results = append(results, contracts.ContactMessageResult{
+			MessageDigest: contracts.ObjectDigest(result.GetMessageDigest()),
+			MessageTime:   messageTime,
+			MessageID:     result.GetMessageId(),
+			MessageDate:   result.GetMessageDate(),
+			Role:          result.GetRole(),
+			Token:         result.GetToken(),
+			DisplayName:   result.GetDisplayName(),
+			RawValue:      result.GetRawValue(),
+		})
+	}
+
+	return contracts.ContactMessageResponse{
+		SchemaVersion: contracts.SchemaVersion(response.GetSchemaVersion()),
+		Results:       results,
+		Total:         int(response.GetTotal()),
+		Limit:         int(response.GetLimit()),
+		Offset:        int(response.GetOffset()),
+	}, nil
+}
+
+func fromPBContactFacts(facts []*pb.ContactFact) []contracts.ContactFact {
+	converted := make([]contracts.ContactFact, 0, len(facts))
+	for _, fact := range facts {
+		converted = append(converted, contracts.ContactFact{
+			SourceDigest:  contracts.ObjectDigest(fact.GetSourceDigest()),
+			StatementHash: fact.GetStatementHash(),
+			ContactID:     fact.GetContactId(),
+			FactKind:      fact.GetFactKind(),
+			Value:         fact.GetValue(),
+			Predicate:     fact.GetPredicate(),
+			ValidFrom:     fact.GetValidFrom(),
+			ValidUntil:    fact.GetValidUntil(),
+			Historical:    fact.GetHistorical(),
+		})
+	}
+
+	return converted
+}
+
+func fromPBContactVectorResults(
+	results []*pb.ContactVectorSearchResult,
+) []contracts.ContactVectorSearchResult {
+	converted := make([]contracts.ContactVectorSearchResult, 0, len(results))
+	for _, result := range results {
+		converted = append(converted, contracts.ContactVectorSearchResult{
+			ContactID:    result.GetContactId(),
+			DisplayName:  result.GetDisplayName(),
+			PrimaryEmail: result.GetPrimaryEmail(),
+			Model:        result.GetModel(),
+			EmbeddingID:  result.GetEmbeddingId(),
+			InputHash:    result.GetInputHash(),
+			TextPreview:  result.GetTextPreview(),
+			Distance:     result.GetDistance(),
+			Dimensions:   int(result.GetDimensions()),
+		})
+	}
+
+	return converted
+}
+
 func (client *QueryClient) SourceCursors(
 	ctx context.Context,
 	request contracts.SourceCursorRequest,
