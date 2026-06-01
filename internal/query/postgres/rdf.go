@@ -857,6 +857,7 @@ func rdfStatementHash(statement rdfStatement) string {
 
 func refreshContactProjectionTx(ctx context.Context, transaction pgx.Tx) error {
 	for _, table := range []string{
+		"active_contact_aliases",
 		"query_contact_aliases",
 		"query_contact_identity_bindings",
 		"query_contact_facts",
@@ -900,6 +901,7 @@ func refreshContactProjectionForContactsTx(
 	}
 
 	for _, table := range []string{
+		"active_contact_aliases",
 		"query_contact_aliases",
 		"query_contact_identity_bindings",
 		"query_contact_facts",
@@ -1189,13 +1191,29 @@ func insertContactAlias(
 		return nil
 	}
 
-	if err := rejectConflictingActiveContactAlias(
-		ctx,
-		transaction,
-		alias,
-		fact.ContactID,
-	); err != nil {
-		return err
+	if fact.ValidUntil == "" {
+		claimed, existingContactID, err := claimActiveContactAlias(
+			ctx,
+			transaction,
+			alias,
+			fact.ContactID,
+		)
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			observability.Logger(ctx).Warn(
+				"skipping conflicting contact alias",
+				"alias",
+				alias,
+				"contact_id",
+				fact.ContactID,
+				"existing_contact_id",
+				existingContactID,
+			)
+
+			return nil
+		}
 	}
 
 	_, err := transaction.Exec(
@@ -1229,38 +1247,64 @@ func insertContactAlias(
 	return nil
 }
 
-func rejectConflictingActiveContactAlias(
+func claimActiveContactAlias(
 	ctx context.Context,
 	transaction pgx.Tx,
 	alias string,
 	contactID string,
-) error {
-	var existingContactID string
+) (bool, string, error) {
+	var claimedContactID string
+	err := transaction.QueryRow(
+		ctx,
+		`INSERT INTO active_contact_aliases(
+		   contact_alias, contact_id, projected_at
+		 ) VALUES($1,$2,now())
+		 ON CONFLICT(contact_alias) DO UPDATE SET
+		   contact_id = excluded.contact_id,
+		   projected_at = now()
+		 WHERE active_contact_aliases.contact_id = excluded.contact_id
+		 RETURNING contact_id`,
+		alias,
+		contactID,
+	).Scan(&claimedContactID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			existingContactID, lookupErr := activeContactAliasOwner(
+				ctx,
+				transaction,
+				alias,
+			)
+			if lookupErr != nil {
+				return false, "", lookupErr
+			}
+
+			return false, existingContactID, nil
+		}
+
+		return false, "", fmt.Errorf("claim active contact alias: %w", err)
+	}
+
+	return true, claimedContactID, nil
+}
+
+func activeContactAliasOwner(
+	ctx context.Context,
+	transaction pgx.Tx,
+	alias string,
+) (string, error) {
+	var contactID string
 	err := transaction.QueryRow(
 		ctx,
 		`SELECT contact_id
-		   FROM query_contact_aliases
-		  WHERE contact_alias = $1
-		    AND contact_id <> $2
-		    AND valid_until = ''
-		  ORDER BY contact_id
-		  LIMIT 1`,
+		   FROM active_contact_aliases
+		  WHERE contact_alias = $1`,
 		alias,
-		contactID,
-	).Scan(&existingContactID)
+	).Scan(&contactID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-
-		return fmt.Errorf("check contact alias conflict: %w", err)
+		return "", fmt.Errorf("lookup active contact alias owner: %w", err)
 	}
 
-	return fmt.Errorf(
-		"active contact alias %q already belongs to contact %q",
-		alias,
-		existingContactID,
-	)
+	return contactID, nil
 }
 
 func insertContactIdentityBinding(
