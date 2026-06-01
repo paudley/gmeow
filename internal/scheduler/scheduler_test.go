@@ -167,11 +167,21 @@ func TestNotifyObjectsChangedProjectionOnlyDoesNotEnqueueAnalyzers(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Enqueued != 0 || status.Pending != 0 {
+	if response.Enqueued != 1 || status.Pending != 0 {
 		t.Fatalf("projection refresh must not enqueue analyzers, response=%#v status=%#v",
 			response,
 			status,
 		)
+	}
+	if _, err := schedulerService.Service.ProcessObjectChanges(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	status, err = schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Pending != 0 {
+		t.Fatalf("projection-only object change must not enqueue analyzers: %#v", status)
 	}
 }
 
@@ -198,7 +208,20 @@ func TestNotifyObjectsChangedSchedulesOnlyMissingAnalyzerWork(t *testing.T) {
 	}
 
 	if response.Enqueued != 1 {
-		t.Fatalf("expected missing work to be enqueued: %#v", response)
+		t.Fatalf("expected object change to be queued: %#v", response)
+	}
+	if _, err := schedulerService.Service.ProcessObjectChanges(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Pending != 1 {
+		t.Fatalf(
+			"expected queued object change to enqueue missing analyzer work: %#v",
+			status,
+		)
 	}
 }
 
@@ -240,8 +263,11 @@ func TestNotifySkipsFullyAnnotatedViaLRU(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if first.Enqueued != 0 {
-		t.Fatalf("expected no work for fully annotated object: %#v", first)
+	if first.Enqueued != 1 {
+		t.Fatalf("expected fully annotated object change to be queued: %#v", first)
+	}
+	if _, err := schedulerService.Service.ProcessObjectChanges(ctx, 100); err != nil {
+		t.Fatal(err)
 	}
 
 	second, err := schedulerService.Client.NotifyObjectsChanged(
@@ -257,8 +283,18 @@ func TestNotifySkipsFullyAnnotatedViaLRU(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if second.Enqueued != 0 || second.Skipped != 1 {
-		t.Fatalf("LRU should short-circuit second notify: %#v", second)
+	if second.Enqueued != 1 {
+		t.Fatalf("second notify should still queue the object change: %#v", second)
+	}
+	if _, err := schedulerService.Service.ProcessObjectChanges(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	status, err := schedulerService.Client.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Pending != 0 {
+		t.Fatalf("LRU should prevent analyzer fanout for fully annotated object: %#v", status)
 	}
 }
 

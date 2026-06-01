@@ -5,6 +5,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -708,8 +709,8 @@ func TestQueuedArchiveImportReleasesForeignRunJobs(t *testing.T) {
 		Importer: importer,
 		Source:   queue,
 	}).drainOne(ctx, ArchiveImportRequest{Publisher: queue}, "archive", &state, &report)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, errSourceImportOtherRunJob) {
+		t.Fatalf("expected foreign run sentinel, got %v", err)
 	}
 	if queue.released != 1 || queue.retried != 0 || report.Processed != 0 {
 		t.Fatalf(

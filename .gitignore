@@ -47,3 +47,4 @@ gmeow.toml
 .claude/settings.local.json
 .gemini/settings.json
 .mcp.json
+logs

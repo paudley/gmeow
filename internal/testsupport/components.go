@@ -167,9 +167,10 @@ func CleanupQueryObjects(t *testing.T, digests ...contracts.ObjectDigest) {
 }
 
 type SchedulerService struct {
-	Broker *schedmq.Broker
-	Client *rpc.SchedulerClient
-	stop   func()
+	Broker  *schedmq.Broker
+	Client  *rpc.SchedulerClient
+	Service *scheduler.Service
+	stop    func()
 }
 
 func StartSchedulerGRPC(
@@ -216,8 +217,9 @@ func StartSchedulerGRPC(
 	client := dialScheduler(t, ctx, endpoint, cancel)
 
 	return &SchedulerService{
-		Broker: broker,
-		Client: client,
+		Broker:  broker,
+		Client:  client,
+		Service: service,
 		stop: func() {
 			_ = client.Close()
 			cancel()
