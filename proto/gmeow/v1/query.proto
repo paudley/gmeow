@@ -19,6 +19,18 @@ service QueryService {
   rpc AnalysisStatus(AnalysisStatusRequest) returns (AnalysisStatusResponse);
   rpc VectorSearch(VectorSearchRequest) returns (VectorSearchResponse);
   rpc RelatedObjects(RelatedObjectsRequest) returns (RelatedObjectsResponse);
+  rpc ContactSearch(ContactSearchRequest) returns (ContactSearchResponse);
+  rpc ContactAggregate(ContactAggregateRequest) returns (ContactAggregateResponse);
+  rpc ResolveContactIdentity(ContactIdentityResolveRequest) returns (ContactIdentityResolveResponse);
+  rpc ContactFacts(ContactFactRequest) returns (ContactFactResponse);
+  rpc ContactIdentityDetails(ContactIdentityDetailRequest) returns (ContactIdentityDetailResponse);
+  rpc ContactNeighborhood(ContactNeighborhoodRequest) returns (ContactNeighborhoodResponse);
+  rpc ContactAnalysisInputs(ContactAnalysisInputRequest) returns (ContactAnalysisInputResponse);
+  rpc ContactAnalysisStatus(ContactAnalysisStatusRequest) returns (ContactAnalysisStatusResponse);
+  rpc StoreContactEmbedding(ContactEmbeddingUpsert) returns (Empty);
+  rpc ContactVectorSearch(ContactVectorSearchRequest) returns (ContactVectorSearchResponse);
+  rpc SimilarContacts(SimilarContactsRequest) returns (SimilarContactsResponse);
+  rpc ContactMessages(ContactMessageRequest) returns (ContactMessageResponse);
   rpc SourceCursors(SourceCursorRequest) returns (SourceCursorResponse);
   rpc JMAPMailboxes(JMAPMailboxRequest) returns (JMAPMailboxResponse);
   rpc JMAPEmailStates(JMAPEmailStateRequest) returns (JMAPEmailStateResponse);
@@ -213,6 +225,274 @@ message RelatedObjectsResponse {
   int32 schema_version = 1;
   string seed_digest = 2;
   repeated VectorSearchResult results = 3;
+}
+
+message ContactFact {
+  string contact_id = 1;
+  string fact_kind = 2;
+  string value = 3;
+  string predicate = 4;
+  string source_digest = 5;
+  string statement_hash = 6;
+  string valid_from = 7;
+  string valid_until = 8;
+  bool historical = 9;
+}
+
+message ContactAggregateRequest {
+  string contact_id = 1;
+}
+
+message ContactAggregateResponse {
+  int32 schema_version = 1;
+  string contact_id = 2;
+  string display_name = 3;
+  string primary_email = 4;
+  string first_seen_at = 5;
+  string last_seen_at = 6;
+  int32 fact_count = 7;
+  int32 message_count = 8;
+  int32 participant_count = 9;
+  repeated ContactFact facts = 10;
+}
+
+message ContactSearchRequest {
+  string query = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message ContactSearchResult {
+  string contact_id = 1;
+  string display_name = 2;
+  string primary_email = 3;
+  string first_seen_at = 4;
+  string last_seen_at = 5;
+  double score = 6;
+  int32 fact_count = 7;
+  int32 message_count = 8;
+  int32 participant_count = 9;
+}
+
+message ContactSearchResponse {
+  int32 schema_version = 1;
+  repeated ContactSearchResult results = 2;
+  int32 total = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+
+message ContactIdentityResolveRequest {
+  string identity = 1;
+}
+
+message ContactIdentityResolveResponse {
+  int32 schema_version = 1;
+  repeated string contact_ids = 2;
+}
+
+message ContactFactRequest {
+  repeated string contact_ids = 1;
+  repeated string fact_kinds = 2;
+  string at = 3;
+  string from = 4;
+  string until = 5;
+  bool current = 6;
+  int32 limit = 7;
+  int32 offset = 8;
+}
+
+message ContactFactResponse {
+  int32 schema_version = 1;
+  repeated ContactFact facts = 2;
+  int32 total = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+
+message ContactIdentityDetailRequest {
+  repeated string identities = 1;
+  repeated string contact_ids = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message ContactIdentityDetail {
+  string contact_id = 1;
+  string matched_token = 2;
+  string token = 3;
+  string token_hash = 4;
+  string statement_hash = 5;
+  string source_digest = 6;
+  string valid_from = 7;
+  string valid_until = 8;
+}
+
+message ContactIdentityDetailResponse {
+  int32 schema_version = 1;
+  repeated ContactIdentityDetail results = 2;
+  int32 total = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+
+message ContactNeighborhoodRequest {
+  string contact_id = 1;
+  repeated string fact_kinds = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message ContactNeighborhoodResult {
+  string contact_id = 1;
+  string fact_kind = 2;
+  string value = 3;
+  string predicate = 4;
+  string statement_hash = 5;
+  string source_digest = 6;
+  string valid_from = 7;
+  string valid_until = 8;
+}
+
+message ContactNeighborhoodResponse {
+  int32 schema_version = 1;
+  repeated ContactNeighborhoodResult results = 2;
+  int32 total = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+
+message ContactAnalysisInputRequest {
+  repeated string contact_ids = 1;
+  repeated string fact_kinds = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message ContactAnalysisInputResult {
+  string contact_id = 1;
+  string display_name = 2;
+  string primary_email = 3;
+  string first_seen_at = 4;
+  string last_seen_at = 5;
+  string input_text = 6;
+  int32 fact_count = 7;
+  int32 message_count = 8;
+  int32 participant_count = 9;
+}
+
+message ContactAnalysisInputResponse {
+  int32 schema_version = 1;
+  repeated ContactAnalysisInputResult results = 2;
+  int32 total = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+
+message ContactAnalysisStatusRequest {
+  repeated string contact_ids = 1;
+  repeated string input_hashes = 2;
+  string analyzer_name = 3;
+  string analyzer_version = 4;
+  string model = 5;
+  int32 limit = 6;
+  int32 offset = 7;
+}
+
+message ContactAnalysisStatusResult {
+  string contact_id = 1;
+  string analyzer_name = 2;
+  string analyzer_version = 3;
+  string status = 4;
+  string model = 5;
+  string input_hash = 6;
+  int32 input_bytes = 7;
+  string generated_at = 8;
+  bytes metadata_json = 9;
+}
+
+message ContactAnalysisStatusResponse {
+  int32 schema_version = 1;
+  repeated ContactAnalysisStatusResult results = 2;
+  int32 total = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+
+message ContactEmbeddingUpsert {
+  string contact_id = 1;
+  string analyzer_name = 2;
+  string analyzer_version = 3;
+  string status = 4;
+  string model = 5;
+  string input_hash = 6;
+  int32 input_bytes = 7;
+  string generated_at = 8;
+  string text_preview = 9;
+  repeated float vector = 10;
+  bytes metadata_json = 11;
+}
+
+message ContactVectorSearchRequest {
+  repeated float vector = 1;
+  string model = 2;
+  repeated string contact_ids = 3;
+  int32 dimensions = 4;
+  int32 limit = 5;
+}
+
+message ContactVectorSearchResult {
+  string contact_id = 1;
+  string display_name = 2;
+  string primary_email = 3;
+  string model = 4;
+  string embedding_id = 5;
+  string input_hash = 6;
+  string text_preview = 7;
+  double distance = 8;
+  int32 dimensions = 9;
+}
+
+message ContactVectorSearchResponse {
+  int32 schema_version = 1;
+  repeated ContactVectorSearchResult results = 2;
+}
+
+message SimilarContactsRequest {
+  string contact_id = 1;
+  string model = 2;
+  int32 limit = 3;
+}
+
+message SimilarContactsResponse {
+  int32 schema_version = 1;
+  repeated ContactVectorSearchResult results = 2;
+}
+
+message ContactMessageRequest {
+  string contact_id = 1;
+  string role = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message ContactMessageResult {
+  string message_digest = 1;
+  string message_time = 2;
+  string message_id = 3;
+  string message_date = 4;
+  string role = 5;
+  string token = 6;
+  string display_name = 7;
+  string raw_value = 8;
+}
+
+message ContactMessageResponse {
+  int32 schema_version = 1;
+  repeated ContactMessageResult results = 2;
+  int32 total = 3;
+  int32 limit = 4;
+  int32 offset = 5;
 }
 
 message SourceCursorRequest {

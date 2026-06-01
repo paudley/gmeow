@@ -105,6 +105,22 @@ type Index interface {
 		ctx context.Context,
 		request contracts.ContactAnalysisInputRequest,
 	) (contracts.ContactAnalysisInputResponse, error)
+	ContactAnalysisStatus(
+		ctx context.Context,
+		request contracts.ContactAnalysisStatusRequest,
+	) (contracts.ContactAnalysisStatusResponse, error)
+	StoreContactEmbedding(
+		ctx context.Context,
+		record contracts.ContactEmbeddingUpsert,
+	) error
+	ContactVectorSearch(
+		ctx context.Context,
+		request contracts.ContactVectorSearchRequest,
+	) (contracts.ContactVectorSearchResponse, error)
+	SimilarContacts(
+		ctx context.Context,
+		request contracts.SimilarContactsRequest,
+	) (contracts.SimilarContactsResponse, error)
 	ContactMessages(
 		ctx context.Context,
 		request contracts.ContactMessageRequest,

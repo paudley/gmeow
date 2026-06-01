@@ -175,6 +175,53 @@ func TestContactIntelligenceJSONUsesContractKeys(t *testing.T) {
 		}},
 	}, []string{"schema_version", "results", "total", "limit"}, []string{"SchemaVersion"})
 
+	assertJSONKeys(t, "contact analysis request", ContactAnalysisRequest{
+		ContactIDs: []string{"contact"},
+		Limit:      10,
+	}, []string{"contact_ids", "limit"}, []string{"ContactIDs"})
+
+	assertJSONKeys(t, "contact analysis status response", ContactAnalysisStatusResponse{
+		SchemaVersion: SchemaVersionPhase00,
+		Total:         1,
+		Limit:         10,
+		Results: []ContactAnalysisStatusResult{{
+			ContactID:       "contact",
+			AnalyzerName:    "embedding.endpoint",
+			AnalyzerVersion: "phase04-email-v2",
+			Status:          "complete",
+			Model:           "model",
+			InputHash:       "hash",
+		}},
+	}, []string{"schema_version", "results", "total", "limit"}, []string{"SchemaVersion"})
+
+	assertJSONKeys(t, "contact embedding upsert", ContactEmbeddingUpsert{
+		ContactID:       "contact",
+		AnalyzerName:    "embedding.endpoint",
+		AnalyzerVersion: "phase04-email-v2",
+		Status:          "complete",
+		Model:           "model",
+		InputHash:       "hash",
+		Vector:          []float32{1, 2},
+	}, []string{
+		"contact_id",
+		"analyzer_name",
+		"analyzer_version",
+		"status",
+		"model",
+		"input_hash",
+		"vector",
+	}, []string{"ContactID", "Status", "Model"})
+
+	assertJSONKeys(t, "contact vector search response", ContactVectorSearchResponse{
+		SchemaVersion: SchemaVersionPhase00,
+		Results: []ContactVectorSearchResult{{
+			ContactID:   "contact",
+			Model:       "model",
+			EmbeddingID: "embedding",
+			Distance:    0.25,
+		}},
+	}, []string{"schema_version", "results"}, []string{"SchemaVersion"})
+
 	var request ContactFactRequest
 	if err := json.Unmarshal([]byte(`{
 		"contact_ids": ["contact"],

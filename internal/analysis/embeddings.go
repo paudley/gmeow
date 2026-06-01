@@ -136,6 +136,33 @@ func (analyzer *EmbeddingAnalyzer) Analyze(
 	}}, nil
 }
 
+func (analyzer *EmbeddingAnalyzer) Model() string {
+	return analyzer.model
+}
+
+func (analyzer *EmbeddingAnalyzer) EmbedText(
+	ctx context.Context,
+	text string,
+) ([]float64, string, bool, error) {
+	truncatedText, truncated := truncateRunes(text, embeddingInputRuneLimit)
+	var vector []float64
+	err := analyzer.gate.withLock(
+		ctx,
+		modelRequestTimeout,
+		func(callCtx context.Context) error {
+			var embedErr error
+			vector, embedErr = analyzer.embed(callCtx, truncatedText)
+
+			return embedErr
+		},
+	)
+	if err != nil {
+		return nil, "", false, err
+	}
+
+	return vector, truncatedText, truncated, nil
+}
+
 func (analyzer *EmbeddingAnalyzer) embed(
 	ctx context.Context,
 	text string,

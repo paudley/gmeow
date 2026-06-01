@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 
+	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
 	querypg "blackcat.ca/gmeow/internal/query/postgres"
@@ -40,7 +41,76 @@ func newQueryCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newQueryMailMissingGmailCommand(out, configPath))
 	command.AddCommand(newQueryAgeCommand(out, configPath))
 	command.AddCommand(newQueryTokenCommand(out, configPath))
+	command.AddCommand(newQueryContactCommand(out, configPath))
 	command.AddCommand(newQueryServeCommand(out, configPath, "serve"))
+
+	return command
+}
+
+func newQueryContactCommand(out io.Writer, configPath *string) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "contact",
+		Short: "Manage contact intelligence projections",
+	}
+	command.AddCommand(newQueryContactAnalyzeCommand(out, configPath))
+
+	return command
+}
+
+func newQueryContactAnalyzeCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		contactIDs []string
+		factKinds  []string
+		limit      int
+		offset     int
+		forced     bool
+	)
+
+	command := &cobra.Command{
+		Use:   "analyze",
+		Short: "Generate QUERY-owned contact embeddings",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+
+			index, err := openQueryIndex(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer index.Close()
+
+			analyzer, err := analysis.NewEmbeddingAnalyzer(analysis.EmbeddingConfig{
+				Endpoint: loaded.Config.Analysis.Embeddings.Endpoint,
+				Model:    loaded.Config.Analysis.Embeddings.Model,
+			})
+			if err != nil {
+				return err
+			}
+
+			response, err := analysis.AnalyzeContacts(
+				command.Context(),
+				index,
+				analyzer,
+				contracts.ContactAnalysisRequest{
+					ContactIDs: contactIDs,
+					FactKinds:  factKinds,
+					Limit:      limit,
+					Offset:     offset,
+					Forced:     forced,
+				},
+			)
+			return writeAppJSON(out, response, err)
+		},
+	}
+	command.Flags().StringSliceVar(&contactIDs, "contact-id", nil, "contact id filter")
+	command.Flags().
+		StringSliceVar(&factKinds, "fact-kind", nil, "contact fact kind filter")
+	command.Flags().IntVar(&limit, "limit", 50, "maximum contacts to analyze")
+	command.Flags().IntVar(&offset, "offset", 0, "contact offset")
+	command.Flags().
+		BoolVar(&forced, "force", false, "recompute current contact embeddings")
 
 	return command
 }
