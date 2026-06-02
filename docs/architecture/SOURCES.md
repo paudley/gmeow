@@ -15,6 +15,49 @@ Local and push sources submit normalized content to FILESTORE-facing ingest
 contracts. Drive remains design-only on this email-focused branch, and
 unsupported Drive operations fail through capability checks.
 
+## Ingestion Integrity
+
+Every SOURCE, BACKEND, archive importer, contact importer, and future import
+workflow must import 100% of all data supplied by an input or import none of it.
+Importers must not silently drop unknown fields, vendor extensions, unsupported
+properties, parse leftovers, or raw bytes merely because the current semantic
+model does not understand them.
+
+When source data has no first-class semantic mapping yet, the importer must
+parse and preserve it through explicit, typed, documented structures. Storing
+the whole input as a single opaque blob does not satisfy the import contract.
+Dumping unsupported data into a generic "unknown fields", "extra fields", "raw
+fields", or catch-all metadata bag also does not satisfy it. QUERY projection
+may choose not to expose every preserved field immediately, but the authoritative
+FILESTORE import must retain it through deliberate typed mappings.
+
+If a source input cannot be fully parsed, represented, validated, or persisted,
+the importer must fail closed before committing partial state for that input.
+Best-effort, lossy, truncating, skip-on-error, "known fields only", or generic
+leftover-bucket import behavior violates the source contract.
+
+Contact sources use a maximal contact-domain boundary. LinkedIn, GEDCOM,
+Gmail/Google Contacts, Apple AddressBook, BBDB, vCard, and similar inputs are
+contact sources when they describe people, organizations, identities,
+relationships, contact methods, accounts, social/IM handles, roles, events,
+media, or provenance. Unrelated files in the same export may be out of domain,
+but contact-attached events and relationships are not optional.
+
+Contact imports must declare an importance level from 0 through 10. Query
+projection derives the rollup importance as the maximum asserted level for the
+contact. Later contact analyzers are FILESTORE-backed updaters: Gmail,
+GitHub, social-network, and IM analyzers emit separate provenance-bearing RDF
+claims instead of modifying the original import bundle.
+
+Contact temporal data is not a single clock. Importers must keep source
+observation time, real-world validity time, and interaction evidence separate.
+Filesystem, archive, export, and import timestamps are source observation or
+source lifecycle evidence unless the source format explicitly says otherwise.
+Curated service lifecycle tables may add hard `validUntil` bounds only to the
+specific provider endpoint they describe, such as a discontinued IM handle, and
+must not be applied to email identities, broader accounts, migrated accounts,
+profiles, relationships, or people.
+
 ## Read-Only Archive Import
 
 `gmeow-admin source import <root...>` imports historical mail archives as a

@@ -424,6 +424,7 @@ func (client *QueryClient) ContactSearch(
 			LastSeenAt:       lastSeenAt,
 			Score:            result.GetScore(),
 			FactCount:        int(result.GetFactCount()),
+			ImportanceLevel:  int(result.GetImportanceLevel()),
 			MessageCount:     int(result.GetMessageCount()),
 			ParticipantCount: int(result.GetParticipantCount()),
 		})
@@ -465,6 +466,7 @@ func (client *QueryClient) ContactAggregate(
 		FirstSeenAt:      firstSeenAt,
 		LastSeenAt:       lastSeenAt,
 		FactCount:        int(response.GetFactCount()),
+		ImportanceLevel:  int(response.GetImportanceLevel()),
 		MessageCount:     int(response.GetMessageCount()),
 		ParticipantCount: int(response.GetParticipantCount()),
 		Facts:            fromPBContactFacts(response.GetFacts()),
@@ -638,6 +640,7 @@ func (client *QueryClient) ContactAnalysisInputs(
 			LastSeenAt:       lastSeenAt,
 			InputText:        result.GetInputText(),
 			FactCount:        int(result.GetFactCount()),
+			ImportanceLevel:  int(result.GetImportanceLevel()),
 			MessageCount:     int(result.GetMessageCount()),
 			ParticipantCount: int(result.GetParticipantCount()),
 		})

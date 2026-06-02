@@ -18,6 +18,7 @@ const (
 	FactKindContactAlias = "contact_alias"
 	FactKindEmail        = "email"
 	FactKindIdentifier   = "identifier"
+	FactKindImportance   = "importance"
 	FactKindName         = "name"
 	FactKindNote         = "note"
 	FactKindPhone        = "phone"
@@ -28,7 +29,8 @@ const (
 
 const (
 	mailtoPrefix          = "mailto:"
-	contactAliasPredicate = "https://patrickaudley.com/lod#contactAlias"
+	contactAliasPredicate = "https://blackcatinformatics.ca/gmeow/contactAlias"
+	importancePredicate   = "https://blackcatinformatics.ca/gmeow/importanceLevel"
 	schemaOrgHTTPPrefix   = "http://schema.org/"
 	schemaOrgHTTPSPrefix  = "https://schema.org/"
 	schemaOrgOrganization = schemaOrgHTTPSPrefix + "Organization"
@@ -64,12 +66,14 @@ type Fact struct {
 }
 
 type MetadataInput struct {
-	RootSubject   string
-	TargetSubject string
-	Format        string
-	SourceKind    string
-	ClaimKind     string
-	IdentityHints []string
+	RootSubject    string
+	TargetSubject  string
+	Format         string
+	SourceKind     string
+	ClaimKind      string
+	ImportLevel    int
+	HasImportLevel bool
+	IdentityHints  []string
 }
 
 func Facet(input MetadataInput) contracts.Facet {
@@ -86,6 +90,9 @@ func Metadata(input MetadataInput) map[string]any {
 	putString(metadata, "format", input.Format)
 	putString(metadata, "source_kind", input.SourceKind)
 	putString(metadata, "claim_kind", input.ClaimKind)
+	if input.HasImportLevel {
+		metadata["import_level"] = input.ImportLevel
+	}
 
 	hints := normalizedIdentityHints(input.IdentityHints)
 	if len(hints) > 0 {
@@ -127,9 +134,11 @@ func IsContactEntityType(value string) bool {
 	switch canonicalSchemaIRI(value) {
 	case "http://xmlns.com/foaf/0.1/Person",
 		"http://xmlns.com/foaf/0.1/Organization",
+		"http://xmlns.com/foaf/0.1/Group",
 		schemaOrgPerson,
 		schemaOrgOrganization,
 		"http://www.w3.org/2000/10/swap/pim/gedcom#Individual",
+		"http://www.w3.org/2000/10/swap/pim/gedcom#Family",
 		"http://www.w3.org/2006/vcard/ns#Individual",
 		"http://www.w3.org/2006/vcard/ns#Organization",
 		"http://www.w3.org/ns/org#Organization":
@@ -217,7 +226,7 @@ func FactKind(predicate string) (string, bool, bool) {
 		return kind, false, true
 	}
 
-	kind, historical, found := patrickAudleyContactFactKind(predicate)
+	kind, historical, found := gmeowContactFactKind(predicate)
 	if found {
 		return kind, historical, true
 	}
@@ -309,6 +318,16 @@ func applyTemporalAnnotation(fact *Fact, annotation Annotation) {
 	case strings.HasSuffix(annotation.Predicate, "hasEnd") ||
 		strings.HasSuffix(annotation.Predicate, "validUntil"):
 		fact.ValidUntil = annotation.Object
+	case strings.HasSuffix(annotation.Predicate, "observedAt"):
+		// Ingest-time entity-resolution delta records stamp each new claim with
+		// gmeow:observedAt — the transaction time the claim was first observed for
+		// its entity. It is the claim's first_seen; absent an explicit valid-time
+		// it also seeds ValidFrom so the projection has a lower temporal bound.
+		// (A claim is written once, at first observation; re-observations NOOP, so
+		// last_seen advancing is a later refinement.)
+		if fact.ValidFrom == "" {
+			fact.ValidFrom = annotation.Object
+		}
 	}
 }
 
@@ -316,7 +335,11 @@ func relationshipContactFactKind(predicate string) (string, bool) {
 	switch predicate {
 	case "http://purl.org/vocab/relationship/childOf",
 		"http://purl.org/vocab/relationship/parentOf",
-		"http://purl.org/vocab/relationship/spouseOf":
+		"http://purl.org/vocab/relationship/spouseOf",
+		"https://blackcatinformatics.ca/gmeow/hasAgreement",
+		"https://blackcatinformatics.ca/gmeow/hasMet",
+		"https://blackcatinformatics.ca/gmeow/hasUsed",
+		"https://blackcatinformatics.ca/gmeow/hasWorkedWith":
 		return FactKindRelationship, true
 	default:
 		return "", false
@@ -385,13 +408,15 @@ func foafContactFactKind(predicate string) (string, bool) {
 	}
 }
 
-func patrickAudleyContactFactKind(predicate string) (string, bool, bool) {
+func gmeowContactFactKind(predicate string) (string, bool, bool) {
 	switch predicate {
 	case contactAliasPredicate:
 		return FactKindContactAlias, false, true
-	case "https://patrickaudley.com/lod#emailIdentity":
+	case importancePredicate:
+		return FactKindImportance, false, true
+	case "https://blackcatinformatics.ca/gmeow/emailIdentity":
 		return FactKindEmail, false, true
-	case "https://patrickaudley.com/lod#historicalEmail":
+	case "https://blackcatinformatics.ca/gmeow/historicalEmail":
 		return FactKindEmail, true, true
 	default:
 		return "", false, false

@@ -50,6 +50,59 @@ protocol; JSON appears only in intentionally dynamic metadata leaf fields.
 The package-level architecture tests enforce these boundaries so import drift
 cannot silently bypass the deployed service model.
 
+## Ingestion Integrity
+
+All ingestion and import processes are all-or-none. A source adapter, archive
+importer, contact importer, analyzer input importer, or future import path must
+preserve 100% of the data it is given or persist nothing for that input. There
+is no middle ground where only recognized fields are imported.
+
+Unknown, extension, vendor-specific, malformed-but-readable, or not-yet-modeled
+fields must be parsed and retained through explicit, typed, documented
+structures. Storing the whole input as a single opaque blob does not satisfy the
+contract. Dumping unsupported data into a generic "unknown fields", "extra
+fields", "raw fields", or catch-all metadata bag also does not satisfy it.
+Semantic projection may lag source preservation, but data preservation may not.
+If any field or byte range cannot be parsed, represented with a deliberate typed
+mapping, validated, or persisted, the importer must fail closed before
+committing partial state.
+
+Tests for ingestion/import changes must cover every supported source field and
+the fail-closed path for unsupported fields so regressions cannot silently drop
+or generically bucket source data.
+
+Contact import is contact-domain scoped and standards-first. A mixed export does
+not force the contact importer to ingest unrelated calendars, account logs, or
+bookmarks, but every person/contact-domain datum inside a supported contact
+input is in scope: identities, social accounts, IM handles, organizations,
+employment, family links, associations, events, media, credentials, projects,
+publications, places, source identifiers, and provenance. The preferred RDF
+vocabularies are Schema.org, FOAF, vCard RDF, REL, GEDCOM, ORG, PROV, DC Terms,
+TIME, GeoSPARQL, SKOS, OWL, DOAP, BIBO, BF, and SIOC. Local Gmeow ontology
+terms are secondary and must live under the Blackcat/Gmeow namespace.
+
+Contact source imports and contact analysis are separate producers. Imports
+write complete source-authored RDF bundles to FILESTORE. Analyzers such as
+Gmail-derived relationship analysis, GitHub project discovery, or social/IM
+profile scans are updaters that later write their own provenance-bearing RDF
+bundles. Updaters add claims; they do not mutate or reinterpret the source
+import object in place.
+
+Every contact import source declares an importance level from 0 through 10,
+where 0 is merely noticed and 10 is a core contact. The contact rollup
+importance is the maximum asserted level currently projected for that contact.
+Temporally scoped side properties such as `hasMet`, `hasWorkedWith`, `hasUsed`,
+and `hasAgreement` are represented as typed Gmeow ontology predicates with open
+time scope by default and explicit TIME annotations when bounds are known.
+Contact temporal projection distinguishes source observation time, real-world
+validity time, and interaction evidence. File mtimes, archive mtimes, import
+time, vCard revision fields, and export timestamps are source observation or
+source lifecycle evidence unless a format explicitly defines stronger
+semantics. Curated provider lifecycle facts can add hard validity bounds only to
+the affected service endpoint, for example an AIM or ICQ IM handle; they must
+not invalidate broader accounts, email addresses, migrated identities, social
+profiles, relationships, or people.
+
 ## FILESTORE
 
 FILESTORE is authoritative. Objects are addressed by BLAKE3 identity and stored

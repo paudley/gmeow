@@ -254,6 +254,7 @@ message ContactAggregateResponse {
   int32 message_count = 8;
   int32 participant_count = 9;
   repeated ContactFact facts = 10;
+  int32 importance_level = 11;
 }
 
 message ContactSearchRequest {
@@ -272,6 +273,7 @@ message ContactSearchResult {
   int32 fact_count = 7;
   int32 message_count = 8;
   int32 participant_count = 9;
+  int32 importance_level = 10;
 }
 
 message ContactSearchResponse {
@@ -379,6 +381,7 @@ message ContactAnalysisInputResult {
   int32 fact_count = 7;
   int32 message_count = 8;
   int32 participant_count = 9;
+  int32 importance_level = 10;
 }
 
 message ContactAnalysisInputResponse {

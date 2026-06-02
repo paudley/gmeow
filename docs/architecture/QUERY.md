@@ -43,12 +43,12 @@ not assembled from interface-level string formatting.
 
 Contact import writes FILESTORE-authoritative RDF bundle objects and lets normal
 projection derive QUERY facts, identity bindings, and rollups. The operator
-surface is `gmeow-admin query contact import --format vcard|foaf|native`; it
+surface is `gmeow-admin query contact import --format vcard|rdf|ttl|native`; it
 does not insert rows directly into PostgreSQL.
 
 Contact export reads existing contact aggregate/fact QUERY contracts and renders
-vCard, FOAF/RDF Turtle, or Gmeow-native JSON through
-`gmeow-admin query contact export --format vcard|foaf|native <contact-id...>`.
+vCard, RDF/Turtle, or Gmeow-native JSON through
+`gmeow-admin query contact export --format vcard|rdf|ttl|native <contact-id...>`.
 Standard exports are intentionally lossy and omit high-cardinality message
 back-references; the native behavior is selected with `--format native` and
 preserves the projected contact facts and rollup counts available in QUERY.

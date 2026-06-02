@@ -1223,7 +1223,11 @@ func projectObjectTx(
 		return err
 	}
 
-	affectedContacts, err := rdfSubjectsForSourceTx(ctx, tx, object.Manifest.ObjectDigest)
+	affectedContacts, err := contactFactSubjectsForSourceTx(
+		ctx,
+		tx,
+		object.Manifest.ObjectDigest,
+	)
 	if err != nil {
 		return err
 	}
@@ -1372,7 +1376,7 @@ func projectObjectTx(
 	}
 
 	if refreshContactProjection && (rdfProjectionChanged || rdfRowsInserted) {
-		newContacts, err := rdfSubjectsForSourceTx(ctx, tx, object.Manifest.ObjectDigest)
+		newContacts, err := rdfContactProjectionSubjectsTx(ctx, tx, object.Manifest)
 		if err != nil {
 			return err
 		}

@@ -91,7 +91,7 @@ func TestFactsFromStatementsClassifiesAndNormalizesContactFacts(t *testing.T) {
 			SourceDigest:  "sha256:source",
 			StatementHash: "contact-alias",
 			Subject:       "https://example.test/#org",
-			Predicate:     "https://patrickaudley.com/lod#contactAlias",
+			Predicate:     "https://blackcatinformatics.ca/gmeow/contactAlias",
 			Object:        "fixture handle",
 			ObjectKind:    "literal",
 		},
@@ -99,7 +99,7 @@ func TestFactsFromStatementsClassifiesAndNormalizesContactFacts(t *testing.T) {
 			SourceDigest:  "sha256:source",
 			StatementHash: "historical",
 			Subject:       "https://example.test/#org",
-			Predicate:     "https://patrickaudley.com/lod#historicalEmail",
+			Predicate:     "https://blackcatinformatics.ca/gmeow/historicalEmail",
 			Object:        "old@example.test",
 			ObjectKind:    "literal",
 		},
@@ -173,4 +173,37 @@ func factByValue(facts []Fact, value string) Fact {
 	}
 
 	return Fact{}
+}
+
+func TestFactsForContactsFoldsObservedAtIntoValidFrom(t *testing.T) {
+	const entity = "urn:gmeow:entity:01ENTITY"
+	statement := Statement{
+		SourceDigest:  "digest-1",
+		StatementHash: "hash-1",
+		Subject:       entity,
+		Predicate:     "http://www.w3.org/2006/vcard/ns#hasEmail",
+		Object:        "mailto:paudley@blackcat.ca",
+		ObjectKind:    "iri",
+	}
+	annotation := Annotation{
+		SourceDigest:  "digest-1",
+		StatementHash: "hash-1",
+		Predicate:     "https://blackcatinformatics.ca/gmeow/observedAt",
+		Object:        "2002-06-30T12:00:00Z",
+	}
+
+	facts := FactsForContacts(
+		[]Statement{statement},
+		[]Annotation{annotation},
+		map[string]bool{entity: true},
+	)
+	if len(facts) != 1 {
+		t.Fatalf("expected one fact, got %d", len(facts))
+	}
+	if facts[0].ContactID != entity {
+		t.Fatalf("fact contact id = %q, want the entity IRI", facts[0].ContactID)
+	}
+	if facts[0].ValidFrom != "2002-06-30T12:00:00Z" {
+		t.Fatalf("observedAt was not folded into ValidFrom: %+v", facts[0])
+	}
 }

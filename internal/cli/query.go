@@ -5,6 +5,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +26,7 @@ import (
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contactio"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/embedding"
 	querypg "blackcat.ca/gmeow/internal/query/postgres"
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
@@ -67,10 +70,51 @@ func newQueryContactCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newQueryContactAnalysisInputsCommand(out, configPath))
 	command.AddCommand(newQueryContactAnalysisStatusCommand(out, configPath))
 	command.AddCommand(newQueryContactAnalyzeCommand(out, configPath))
-	command.AddCommand(newQueryContactImportCommand(out, configPath))
-	command.AddCommand(newQueryContactExportCommand(out, configPath))
 
 	return command
+}
+
+// newContactCommand is the top-level contact group. import/export talk only to
+// FILESTORE (never QUERY), so they live here rather than under the query
+// projection namespace.
+func newContactCommand(out io.Writer, configPath *string) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "contact",
+		Short: "Import and export contacts (FILESTORE-only)",
+	}
+	command.AddCommand(newContactImportCommand(out, configPath))
+	command.AddCommand(newContactExportCommand(out, configPath))
+	command.AddCommand(newContactResetEntitiesCommand(out, configPath))
+
+	return command
+}
+
+// newContactResetEntitiesCommand clears the EMBEDDING service's resolved entity
+// space (index + ledger) while KEEPING its claim-vector cache, so a threshold
+// sweep can re-import the same corpus at new --match-threshold/--name-threshold
+// without re-embedding. (Wipe FILESTORE separately, with filestore-serve stopped.)
+func newContactResetEntitiesCommand(out io.Writer, configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "reset-entities",
+		Short: "Clear the EMBEDDING entity space (keep the claim cache) for a threshold sweep",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			client, err := rpc.NewEmbeddingClient(command.Context(), rpcEndpoint(loaded.Resolved.RPC.Embedding))
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+			if err := client.Reset(command.Context()); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(out, "embedding entity space reset (claim cache kept)")
+
+			return err
+		},
+	}
 }
 
 func newQueryContactSearchCommand(out io.Writer, configPath *string) *cobra.Command {
@@ -547,15 +591,19 @@ func newQueryContactAnalyzeCommand(out io.Writer, configPath *string) *cobra.Com
 	return command
 }
 
-func newQueryContactImportCommand(out io.Writer, configPath *string) *cobra.Command {
+func newContactImportCommand(out io.Writer, configPath *string) *cobra.Command {
 	var (
-		format     string
-		sourceName string
+		format         string
+		importLevel    int
+		sourceName     string
+		matchThreshold float64
+		nameThreshold  float64
+		embeddingRPC   bool
 	)
 
 	command := &cobra.Command{
 		Use:   "import <path...>",
-		Short: "Import vCard, FOAF/RDF, or native contact bundles",
+		Short: "Import vCard, BBDB, CSV, GEDCOM, RDF/Turtle, or native contact bundles",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
 			if strings.TrimSpace(sourceName) == "" {
@@ -580,26 +628,74 @@ func newQueryContactImportCommand(out io.Writer, configPath *string) *cobra.Comm
 				return err
 			}
 
+			// Ingest-time resolution. Either talk to a running EMBEDDING service
+			// over gRPC (--embedding-rpc; the service owns the cache+index+ledger
+			// and persists them across runs), or run an in-process EMBEDDING engine
+			// for the duration of this import session (no cross-run persistence).
+			var resolver contactio.Resolver
+			if embeddingRPC {
+				client, dialErr := rpc.NewEmbeddingClient(
+					command.Context(),
+					rpcEndpoint(loaded.Resolved.RPC.Embedding),
+				)
+				if dialErr != nil {
+					return fmt.Errorf("connect to EMBEDDING service: %w", dialErr)
+				}
+				defer client.Close()
+				resolver = client
+			} else {
+				embedConfig := loaded.Config.Analysis.Embeddings
+				embedder, embedErr := embedding.NewHTTPEmbedder(embedConfig.Endpoint, embedConfig.Model, nil)
+				if embedErr != nil {
+					return fmt.Errorf("configure embedding endpoint: %w", embedErr)
+				}
+				resolver = embedding.NewService(
+					embedding.NewResolver(embedding.NewMemoryCache(), embedder),
+					embedding.NewEntityIndex(embedding.FullDim, embedding.CoarseDim),
+					embedConfig.Model,
+				)
+			}
+
+			paths, err := expandContactImportPaths(args, format)
+			if err != nil {
+				return err
+			}
+
 			results := []contactio.ImportResult{}
-			for _, path := range args {
+			for _, item := range paths {
 				result, err := importContactPath(
 					command.Context(),
 					ingestService,
-					format,
+					resolver,
+					matchThreshold,
+					nameThreshold,
+					item.format,
+					importLevel,
 					sourceName,
-					path,
+					item.path,
 				)
-				if err != nil {
+				switch {
+				case errors.Is(err, contactio.ErrSkipNonContactDomain):
 					results = append(results, contactio.ImportResult{
-						SourceKind: contactio.ImportSourceKind,
-						SourceName: sourceName,
-						ExternalID: filepath.ToSlash(path),
-						Format:     contactio.NormalizeFormat(format),
-						Error:      err.Error(),
+						SourceKind:  contactio.ImportSourceKind,
+						SourceName:  sourceName,
+						ExternalID:  filepath.ToSlash(item.path),
+						Format:      contactio.NormalizeFormat(item.format),
+						ImportLevel: importLevel,
+						Error:       "skipped: not contact-domain",
 					})
-					continue
+				case err != nil:
+					results = append(results, contactio.ImportResult{
+						SourceKind:  contactio.ImportSourceKind,
+						SourceName:  sourceName,
+						ExternalID:  filepath.ToSlash(item.path),
+						Format:      contactio.NormalizeFormat(item.format),
+						ImportLevel: importLevel,
+						Error:       err.Error(),
+					})
+				default:
+					results = append(results, result)
 				}
-				results = append(results, result)
 			}
 
 			return writeAppJSON(out, results, nil)
@@ -609,20 +705,111 @@ func newQueryContactImportCommand(out io.Writer, configPath *string) *cobra.Comm
 		&format,
 		"format",
 		contactio.FormatVCard,
-		"contact import format: vcard, foaf, or native",
+		"contact import format: auto (detect per file), vcard, apple-addressbook, "+
+			"apple-addressbook-group, bbdb, csv, gedcom, rdf/ttl, or native",
 	)
 	command.Flags().StringVar(&sourceName, "source-name", "", "contact import source name")
+	command.Flags().IntVar(
+		&importLevel,
+		"import-level",
+		-1,
+		"contact importance level for this source, 0 noticed through 10 core",
+	)
+	_ = command.MarkFlagRequired("import-level")
+	command.Flags().Float64Var(
+		&matchThreshold,
+		"match-threshold",
+		0.72,
+		"entity-resolution cosine-similarity threshold: a record at or above this "+
+			"matches an existing entity, otherwise it mints a new one (tune per corpus)",
+	)
+	command.Flags().Float64Var(
+		&nameThreshold,
+		"name-threshold",
+		0.88,
+		"name-confirmation cosine threshold: a centroid match is rejected unless the "+
+			"names also agree this strongly (stricter than --match-threshold; "+
+			"separates same-first-name people)",
+	)
+	command.Flags().BoolVar(
+		&embeddingRPC,
+		"embedding-rpc",
+		false,
+		"resolve via the running EMBEDDING gRPC service (persisted entity space) "+
+			"instead of an in-process, non-persistent engine",
+	)
 
 	return command
+}
+
+type contactImportItem struct {
+	path   string
+	format string
+}
+
+// expandContactImportPaths resolves the import arguments into concrete
+// (file, format) work items. Directories are walked recursively. When format is
+// "auto" the format is inferred per file from its extension and files with no
+// recognized contact extension are skipped; otherwise the explicit format is
+// applied to every file.
+func expandContactImportPaths(args []string, format string) ([]contactImportItem, error) {
+	auto := strings.EqualFold(strings.TrimSpace(format), "auto")
+	items := []contactImportItem{}
+
+	add := func(path string) {
+		resolved := format
+		if auto {
+			resolved = contactio.FormatForPath(path)
+			if resolved == "" {
+				return // not a recognized contact-domain file
+			}
+		}
+		items = append(items, contactImportItem{path: path, format: resolved})
+	}
+
+	for _, arg := range args {
+		info, err := os.Stat(arg)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			add(arg)
+
+			continue
+		}
+		walkErr := filepath.WalkDir(arg, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !entry.IsDir() {
+				add(path)
+			}
+
+			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
+		}
+	}
+
+	return items, nil
 }
 
 func importContactPath(
 	ctx context.Context,
 	ingestService source.IngestService,
+	resolver contactio.Resolver,
+	matchThreshold float64,
+	nameThreshold float64,
 	format string,
+	importLevel int,
 	sourceName string,
 	path string,
 ) (contactio.ImportResult, error) {
+	if err := contactio.ValidateImportLevel(importLevel); err != nil {
+		return contactio.ImportResult{}, err
+	}
+
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return contactio.ImportResult{}, err
@@ -632,40 +819,69 @@ func importContactPath(
 		return contactio.ImportResult{}, err
 	}
 
-	object, result, err := contactio.BuildImportObject(
+	// Ingest-time entity resolution: each logical contact is resolved against the
+	// accumulating entity space, and only its NEW claims are persisted as an
+	// immutable delta record keyed by the resolved entity ULID. A record that
+	// carries no new information resolves to a NOOP and writes nothing.
+	observedAt := stat.ModTime().UTC()
+	records, result, err := contactio.ResolveImport(
+		ctx,
+		resolver,
+		matchThreshold,
+		nameThreshold,
 		format,
 		sourceName,
-		path,
 		content,
-		stat.ModTime(),
+		contactio.ImportOptions{ImportLevel: importLevel},
+		observedAt,
 	)
 	if err != nil {
 		return contactio.ImportResult{}, err
 	}
 
-	digest, created, err := ingestService.Ingest(ctx, source.IngestObject{
-		ObservedAt:   object.ObservedAt,
-		Reader:       strings.NewReader(object.Content),
-		MediaType:    object.MediaType,
-		SourceKind:   object.SourceKind,
-		SourceName:   object.SourceName,
-		ExternalID:   object.ExternalID,
-		ExternalVer:  object.ExternalVer,
-		SourceHint:   object.SourceHint,
-		ContentRoles: []string{contracts.RDFSourceBundleRole, contracts.ContactSourceRole},
-		Facets:       object.Facets,
-	})
-	if err != nil {
-		return contactio.ImportResult{}, err
+	created := 0
+	for _, record := range records {
+		if record.IsNoop {
+			continue
+		}
+		fingerprint := contactDeltaFingerprint(record.Content)
+		digest, wasCreated, ingestErr := ingestService.Ingest(ctx, source.IngestObject{
+			ObservedAt:   observedAt,
+			Reader:       strings.NewReader(record.Content),
+			MediaType:    contactio.MediaTypeTurtle,
+			SourceKind:   contactio.ImportSourceKind,
+			SourceName:   sourceName,
+			ExternalID:   contactio.EntityPrefix + record.Entity + ":" + fingerprint[:16],
+			ExternalVer:  fingerprint,
+			SourceHint:   filepath.ToSlash(path),
+			ContentRoles: []string{contracts.RDFSourceBundleRole, contracts.ContactSourceRole},
+			Facets:       record.Facets,
+		})
+		if ingestErr != nil {
+			return contactio.ImportResult{}, ingestErr
+		}
+		if wasCreated {
+			created++
+		}
+		if result.ObjectDigest == "" {
+			result.ObjectDigest = string(digest)
+		}
 	}
 
-	result.ObjectDigest = string(digest)
-	result.Created = created
-
+	result.Created = created > 0
 	return result, nil
 }
 
-func newQueryContactExportCommand(out io.Writer, configPath *string) *cobra.Command {
+// contactDeltaFingerprint is the content version key for a contact delta: equal
+// content (e.g. the same contact across repeated snapshots) yields the same key
+// and dedups via the source-object index.
+func contactDeltaFingerprint(content string) string {
+	sum := sha256.Sum256([]byte(content))
+
+	return hex.EncodeToString(sum[:])
+}
+
+func newContactExportCommand(out io.Writer, configPath *string) *cobra.Command {
 	var format string
 
 	command := &cobra.Command{

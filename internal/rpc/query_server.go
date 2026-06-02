@@ -396,6 +396,7 @@ func (server *QueryServer) ContactSearch(
 			LastSeenAt:       formatTime(result.LastSeenAt),
 			Score:            result.Score,
 			FactCount:        int32(result.FactCount),
+			ImportanceLevel:  int32(result.ImportanceLevel),
 			MessageCount:     int32(result.MessageCount),
 			ParticipantCount: int32(result.ParticipantCount),
 		})
@@ -429,6 +430,7 @@ func (server *QueryServer) ContactAggregate(
 		FirstSeenAt:      formatTime(aggregate.FirstSeenAt),
 		LastSeenAt:       formatTime(aggregate.LastSeenAt),
 		FactCount:        int32(aggregate.FactCount),
+		ImportanceLevel:  int32(aggregate.ImportanceLevel),
 		MessageCount:     int32(aggregate.MessageCount),
 		ParticipantCount: int32(aggregate.ParticipantCount),
 		Facts:            toPBContactFacts(aggregate.Facts),
@@ -590,6 +592,7 @@ func (server *QueryServer) ContactAnalysisInputs(
 			LastSeenAt:       formatTime(result.LastSeenAt),
 			InputText:        result.InputText,
 			FactCount:        int32(result.FactCount),
+			ImportanceLevel:  int32(result.ImportanceLevel),
 			MessageCount:     int32(result.MessageCount),
 			ParticipantCount: int32(result.ParticipantCount),
 		})

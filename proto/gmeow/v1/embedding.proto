@@ -1,0 +1,134 @@
+// SPDX-FileCopyrightText: 2026 Blackcat Informatics Inc.
+// SPDX-License-Identifier: AGPL-3.0-only
+
+syntax = "proto3";
+
+package gmeow.v1;
+
+option go_package = "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1;gmeowv1";
+
+import "gmeow/v1/common.proto";
+
+// EmbeddingService is the EMBEDDING tier: it owns claim-vector embedding (the
+// statement-hash cache + batched calls to the model endpoint) and the in-process
+// coder/hnsw entity index used for ingest-time resolution. IMPORT and FILESTORE
+// call it over gRPC; it is not QUERY/SCHEDULER, so the FILESTORE-only-import ban
+// still holds. The cache makes redundant work free: a fully-cached Pool/Embed
+// reports zero embedder_misses, which the importer reads as a NOOP.
+service EmbeddingService {
+  // Embed returns one full-dimension vector per input text, embedding only the
+  // statement hashes not already cached.
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+  // Pool returns the renormalized weighted mean-pool (profile centroid) of the
+  // given claim texts — the candidate vector for resolution.
+  rpc Pool(PoolRequest) returns (PoolResponse);
+  // Match runs the layered HNSW search (128-d coarse -> 768-d fine) and returns
+  // ranked candidate entities for a centroid.
+  rpc Match(MatchRequest) returns (MatchResponse);
+  // Resolve runs the full ingest-time decision (pool -> match -> diff -> NOOP or
+  // append) over a record's claims and updates the entity space. The caller
+  // persists the returned new-claim hashes as an immutable delta record.
+  rpc Resolve(ResolveRequest) returns (ResolveResponse);
+  // Reset clears the resolved entity space (index + ledger) but keeps the
+  // claim-vector cache, so a threshold sweep can re-resolve without re-embedding.
+  rpc Reset(Empty) returns (Empty);
+  // Upsert sets an entity's profile centroid and (optionally) name vectors after
+  // a delta re-pools the centroid.
+  rpc Upsert(UpsertRequest) returns (Empty);
+  // NearestName returns the best similarity between a query and any name vector
+  // owned by an entity — the identity-confirmation layer.
+  rpc NearestName(NearestNameRequest) returns (NearestNameResponse);
+  // Snapshot returns the serialized entity index for persistence as a FILESTORE
+  // artifact (centroids are materialized views, rebuildable from records).
+  rpc Snapshot(Empty) returns (SnapshotResponse);
+  // Status reports cache and index sizes.
+  rpc Status(Empty) returns (EmbeddingStatus);
+}
+
+message EmbeddingVector {
+  repeated float values = 1;
+}
+
+message EmbedRequest {
+  repeated string texts = 1;
+}
+
+message EmbedResponse {
+  repeated EmbeddingVector vectors = 1;
+  int32 embedder_misses = 2;
+}
+
+message PoolRequest {
+  repeated string texts = 1;
+  repeated double weights = 2;
+}
+
+message PoolResponse {
+  EmbeddingVector centroid = 1;
+  int32 embedder_misses = 2;
+}
+
+message MatchRequest {
+  EmbeddingVector centroid = 1;
+  int32 k = 2;
+}
+
+message MatchCandidate {
+  string entity = 1;
+  double similarity = 2;
+}
+
+message MatchResponse {
+  repeated MatchCandidate candidates = 1;
+}
+
+message ClaimInput {
+  string text = 1;
+  string hash = 2;
+  bool is_name = 3;
+}
+
+message ResolveRequest {
+  repeated ClaimInput claims = 1;
+  double threshold = 2;
+  double name_threshold = 3;
+}
+
+message ResolveResponse {
+  string entity = 1;
+  repeated string new_claim_hashes = 2;
+  double similarity = 3;
+  bool is_new = 4;
+  bool is_noop = 5;
+}
+
+message NamedVector {
+  string name_key = 1;
+  EmbeddingVector vector = 2;
+}
+
+message UpsertRequest {
+  string entity = 1;
+  EmbeddingVector centroid = 2;
+  repeated NamedVector names = 3;
+}
+
+message NearestNameRequest {
+  string entity = 1;
+  EmbeddingVector query = 2;
+}
+
+message NearestNameResponse {
+  double similarity = 1;
+  bool found = 2;
+}
+
+message SnapshotResponse {
+  bytes artifact = 1;
+}
+
+message EmbeddingStatus {
+  int32 cached_claims = 1;
+  int32 entities = 2;
+  string model = 3;
+}
