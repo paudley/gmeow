@@ -20,7 +20,11 @@ const EntityPrefix = "urn:gmeow:entity:"
 // is satisfied by the in-process *embedding.Service and by the gRPC
 // *rpc.EmbeddingClient (same shape), so import swaps transports without change.
 type Resolver interface {
-	Resolve(ctx context.Context, claims []embedding.ClaimInput, threshold, nameThreshold float64) (embedding.Resolution, error)
+	Resolve(
+		ctx context.Context,
+		claims []embedding.ClaimInput,
+		threshold, nameThreshold float64,
+	) (embedding.Resolution, error)
 }
 
 // ResolvedRecord is the ingest outcome for one parsed logical contact: either a
@@ -63,7 +67,12 @@ func ResolveImport(
 	entities := []string{}
 	for _, delta := range deltas {
 		statements := claimStatementsFromBody(delta.Content)
-		resolution, resolveErr := resolver.Resolve(ctx, claimInputs(statements), threshold, nameThreshold)
+		resolution, resolveErr := resolver.Resolve(
+			ctx,
+			claimInputs(statements),
+			threshold,
+			nameThreshold,
+		)
 		if resolveErr != nil {
 			return nil, ImportResult{}, resolveErr
 		}
@@ -81,11 +90,20 @@ func ResolveImport(
 
 		delta := deltaClaims(statements, resolution.NewClaimHashes)
 		records = append(records, ResolvedRecord{
-			Entity:  resolution.Entity,
-			Content: buildEntityDeltaRecord(resolution.Entity, delta, options.ImportLevel, observedAt),
-			Facets:  importFacets(format, []string{EntityPrefix + resolution.Entity}, options.ImportLevel),
-			IsNew:   resolution.IsNew,
-			Delta:   len(delta),
+			Entity: resolution.Entity,
+			Content: buildEntityDeltaRecord(
+				resolution.Entity,
+				delta,
+				options.ImportLevel,
+				observedAt,
+			),
+			Facets: importFacets(
+				format,
+				[]string{EntityPrefix + resolution.Entity},
+				options.ImportLevel,
+			),
+			IsNew: resolution.IsNew,
+			Delta: len(delta),
 		})
 	}
 
@@ -127,7 +145,12 @@ func deltaClaims(statements []claimStatement, newHashes []string) []claimStateme
 // annotation carrying this observation's transaction time, plus the entity's
 // importance claim. Records are append-only; the entity's full graph is the
 // ordered stack of all its records.
-func buildEntityDeltaRecord(entity string, delta []claimStatement, level int, observedAt time.Time) string {
+func buildEntityDeltaRecord(
+	entity string,
+	delta []claimStatement,
+	level int,
+	observedAt time.Time,
+) string {
 	subject := iri(EntityPrefix + entity)
 	stamp := typedDateTime(observedAt)
 
@@ -136,9 +159,13 @@ func buildEntityDeltaRecord(entity string, delta []claimStatement, level int, ob
 	for _, claim := range delta {
 		triple := subject + " " + claim.Line
 		builder.WriteString(triple + " .\n")
-		builder.WriteString("<< " + triple + " >> " + iri(gmeowPrefix+"observedAt") + " " + stamp + " .\n")
+		builder.WriteString(
+			"<< " + triple + " >> " + iri(gmeowPrefix+"observedAt") + " " + stamp + " .\n",
+		)
 	}
-	builder.WriteString(BuildRDFStarDelta([]Claim{importanceClaim(EntityPrefix+entity, level)}))
+	builder.WriteString(
+		BuildRDFStarDelta([]Claim{importanceClaim(EntityPrefix+entity, level)}),
+	)
 
 	return builder.String()
 }

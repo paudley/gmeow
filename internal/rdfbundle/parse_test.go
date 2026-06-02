@@ -46,7 +46,11 @@ func TestParsePreservesUnknownAndRDFStarAnnotations(t *testing.T) {
 		t.Fatal("historical email statement was not parsed")
 	}
 	if annotations[0].Hash != emailHash {
-		t.Fatalf("annotation hash %q did not target email hash %q", annotations[0].Hash, emailHash)
+		t.Fatalf(
+			"annotation hash %q did not target email hash %q",
+			annotations[0].Hash,
+			emailHash,
+		)
 	}
 }
 

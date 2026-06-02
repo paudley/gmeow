@@ -97,7 +97,11 @@ func TestAdminCommandIncludesContactQuerySurface(t *testing.T) {
 	}
 	for _, moved := range []string{"import", "export"} {
 		if strings.Contains(output, moved) {
-			t.Fatalf("query contact should no longer host %s (moved to top-level contact):\n%s", moved, output)
+			t.Fatalf(
+				"query contact should no longer host %s (moved to top-level contact):\n%s",
+				moved,
+				output,
+			)
 		}
 	}
 }

@@ -73,7 +73,11 @@ func (s *Service) Embed(ctx context.Context, texts []string) ([]Vector, int, err
 	return s.resolver.Vectors(ctx, texts)
 }
 
-func (s *Service) Pool(ctx context.Context, texts []string, weights []float64) (Vector, int, error) {
+func (s *Service) Pool(
+	ctx context.Context,
+	texts []string,
+	weights []float64,
+) (Vector, int, error) {
 	return s.resolver.Pool(ctx, texts, weights)
 }
 

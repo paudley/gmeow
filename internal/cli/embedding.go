@@ -47,7 +47,11 @@ func newEmbeddingServeCommand(
 			}
 
 			embedConfig := loaded.Config.Analysis.Embeddings
-			embedder, err := embedding.NewHTTPEmbedder(embedConfig.Endpoint, embedConfig.Model, nil)
+			embedder, err := embedding.NewHTTPEmbedder(
+				embedConfig.Endpoint,
+				embedConfig.Model,
+				nil,
+			)
 			if err != nil {
 				return fmt.Errorf("configure embedding endpoint: %w", err)
 			}
@@ -122,7 +126,12 @@ func saveEmbeddingState(out io.Writer, service *embedding.Service, path string) 
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write embedding state %q: %w", path, err)
 	}
-	_, _ = fmt.Fprintf(out, "embedding serve: persisted %d bytes of resolution state to %q\n", len(data), path)
+	_, _ = fmt.Fprintf(
+		out,
+		"embedding serve: persisted %d bytes of resolution state to %q\n",
+		len(data),
+		path,
+	)
 
 	return nil
 }

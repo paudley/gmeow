@@ -55,7 +55,12 @@ func TestFullChainTurtleToResolution(t *testing.T) {
     gmeow:hasEmail <mailto:paudley@blackcat.ca> ;
     gmeow:affiliation "Blackcat Informatics" .
 `
-	first, err := resolver.Resolve(ctx, claimInputs(claimStatementsFromBody(indexTTL)), threshold, threshold)
+	first, err := resolver.Resolve(
+		ctx,
+		claimInputs(claimStatementsFromBody(indexTTL)),
+		threshold,
+		threshold,
+	)
 	if err != nil {
 		t.Fatalf("resolve index.ttl: %v", err)
 	}
@@ -68,12 +73,22 @@ func TestFullChainTurtleToResolution(t *testing.T) {
 <urn:gmeow:observation:abc> <https://blackcatinformatics.ca/gmeow/hasEmail> <mailto:paudley@blackcat.ca> .
 <urn:gmeow:observation:abc> <https://blackcatinformatics.ca/gmeow/hasEmail> <mailto:pat@new.example> .
 `
-	second, err := resolver.Resolve(ctx, claimInputs(claimStatementsFromBody(vcardBody)), threshold, threshold)
+	second, err := resolver.Resolve(
+		ctx,
+		claimInputs(claimStatementsFromBody(vcardBody)),
+		threshold,
+		threshold,
+	)
 	if err != nil {
 		t.Fatalf("resolve vcard: %v", err)
 	}
 	if second.Entity != first.Entity {
-		t.Fatalf("vcard resolved to %s, want same entity %s (sim=%v)", second.Entity, first.Entity, second.Similarity)
+		t.Fatalf(
+			"vcard resolved to %s, want same entity %s (sim=%v)",
+			second.Entity,
+			first.Entity,
+			second.Similarity,
+		)
 	}
 	wantHash := embedding.StatementHash("hasEmail: mailto:pat@new.example")
 	if len(second.NewClaimHashes) != 1 || second.NewClaimHashes[0] != wantHash {

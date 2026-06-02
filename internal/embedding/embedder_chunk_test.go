@@ -18,28 +18,30 @@ import (
 // single request exceeds the batch caps.
 func TestHTTPEmbedderChunksLargeBatches(t *testing.T) {
 	var maxReqSize int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Input []string `json:"input"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if len(req.Input) > maxReqSize {
-			maxReqSize = len(req.Input)
-		}
-		var resp struct {
-			Data []struct {
-				Index     int       `json:"index"`
-				Embedding []float64 `json:"embedding"`
-			} `json:"data"`
-		}
-		for i := range req.Input {
-			resp.Data = append(resp.Data, struct {
-				Index     int       `json:"index"`
-				Embedding []float64 `json:"embedding"`
-			}{Index: i, Embedding: []float64{float64(i)}})
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Input []string `json:"input"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if len(req.Input) > maxReqSize {
+				maxReqSize = len(req.Input)
+			}
+			var resp struct {
+				Data []struct {
+					Index     int       `json:"index"`
+					Embedding []float64 `json:"embedding"`
+				} `json:"data"`
+			}
+			for i := range req.Input {
+				resp.Data = append(resp.Data, struct {
+					Index     int       `json:"index"`
+					Embedding []float64 `json:"embedding"`
+				}{Index: i, Embedding: []float64{float64(i)}})
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		}),
+	)
 	defer server.Close()
 
 	embedder, err := NewHTTPEmbedder(server.URL, "stub", nil)
@@ -60,7 +62,11 @@ func TestHTTPEmbedderChunksLargeBatches(t *testing.T) {
 		t.Fatalf("got %d vectors, want %d", len(vectors), n)
 	}
 	if maxReqSize > maxBatchTexts {
-		t.Fatalf("a request carried %d inputs, exceeding the cap %d", maxReqSize, maxBatchTexts)
+		t.Fatalf(
+			"a request carried %d inputs, exceeding the cap %d",
+			maxReqSize,
+			maxBatchTexts,
+		)
 	}
 }
 
@@ -70,30 +76,32 @@ func TestHTTPEmbedderRetriesTransientFailures(t *testing.T) {
 	defer func() { embedRetryBackoffs = saved }()
 
 	var calls int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if calls < 3 { // fail the first two attempts (transient 503)
-			http.Error(w, "overloaded", http.StatusServiceUnavailable)
-			return
-		}
-		var req struct {
-			Input []string `json:"input"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		var resp struct {
-			Data []struct {
-				Index     int       `json:"index"`
-				Embedding []float64 `json:"embedding"`
-			} `json:"data"`
-		}
-		for i := range req.Input {
-			resp.Data = append(resp.Data, struct {
-				Index     int       `json:"index"`
-				Embedding []float64 `json:"embedding"`
-			}{Index: i, Embedding: []float64{1}})
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			if calls < 3 { // fail the first two attempts (transient 503)
+				http.Error(w, "overloaded", http.StatusServiceUnavailable)
+				return
+			}
+			var req struct {
+				Input []string `json:"input"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			var resp struct {
+				Data []struct {
+					Index     int       `json:"index"`
+					Embedding []float64 `json:"embedding"`
+				} `json:"data"`
+			}
+			for i := range req.Input {
+				resp.Data = append(resp.Data, struct {
+					Index     int       `json:"index"`
+					Embedding []float64 `json:"embedding"`
+				}{Index: i, Embedding: []float64{1}})
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		}),
+	)
 	defer server.Close()
 
 	embedder, _ := NewHTTPEmbedder(server.URL, "stub", nil)
@@ -102,6 +110,10 @@ func TestHTTPEmbedderRetriesTransientFailures(t *testing.T) {
 		t.Fatalf("embed should succeed after retries: %v", err)
 	}
 	if len(vectors) != 1 || calls != 3 {
-		t.Fatalf("expected success on the 3rd call, got %d vectors after %d calls", len(vectors), calls)
+		t.Fatalf(
+			"expected success on the 3rd call, got %d vectors after %d calls",
+			len(vectors),
+			calls,
+		)
 	}
 }

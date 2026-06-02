@@ -62,13 +62,21 @@ func TestCorpusDryRun(t *testing.T) {
 		}
 		s.files++
 
-		content, readErr := os.ReadFile(path) //nolint:gosec // diagnostic over a user-provided dir
+		content, readErr := os.ReadFile(
+			path,
+		) //nolint:gosec // diagnostic over a user-provided dir
 		if readErr != nil {
 			s.failed++
 			reasons["read error"]++
 			return nil
 		}
-		_, result, importErr := BuildImportObject(format, "corpus-dryrun", path, content, time.Time{})
+		_, result, importErr := BuildImportObject(
+			format,
+			"corpus-dryrun",
+			path,
+			content,
+			time.Time{},
+		)
 		if errors.Is(importErr, ErrSkipNonContactDomain) {
 			s.skipped++
 			reasons["skipped: not contact-domain"]++
@@ -103,8 +111,17 @@ func TestCorpusDryRun(t *testing.T) {
 	t.Logf("corpus dry-run over %s", root)
 	for _, format := range sortedStatKeys(byFmt) {
 		s := byFmt[format]
-		t.Logf("  %-18s files=%-6d ok=%-6d failed=%-6d skipped=%-5d contact_refs=%-7d DISTINCT=%-7d rejected_records=%d",
-			format, s.files, s.ok, s.failed, s.skipped, s.contacts, len(distinctByFmt[format]), s.rejected)
+		t.Logf(
+			"  %-18s files=%-6d ok=%-6d failed=%-6d skipped=%-5d contact_refs=%-7d DISTINCT=%-7d rejected_records=%d",
+			format,
+			s.files,
+			s.ok,
+			s.failed,
+			s.skipped,
+			s.contacts,
+			len(distinctByFmt[format]),
+			s.rejected,
+		)
 	}
 	t.Logf("failure reasons:")
 	for _, r := range sortedCountKeys(reasons) {

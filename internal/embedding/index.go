@@ -181,7 +181,10 @@ func (idx *EntityIndex) Search(centroid Vector, k int) ([]Match, error) {
 		if !ok {
 			continue
 		}
-		matches = append(matches, Match{Entity: hit.Key, Similarity: cosineSimilarity(fineQuery, vec)})
+		matches = append(
+			matches,
+			Match{Entity: hit.Key, Similarity: cosineSimilarity(fineQuery, vec)},
+		)
 	}
 	sortMatchesDesc(matches)
 	if len(matches) > k {
@@ -195,7 +198,11 @@ func (idx *EntityIndex) Search(centroid Vector, k int) ([]Match, error) {
 // entity's OWN name vectors, and whether the entity has any. This is a direct
 // comparison (no global ANN), so it correctly disconfirms a centroid match whose
 // name diverges from the entity's. beam is ignored (kept for signature stability).
-func (idx *EntityIndex) NearestName(entity string, query Vector, _ int) (float64, bool) {
+func (idx *EntityIndex) NearestName(
+	entity string,
+	query Vector,
+	_ int,
+) (float64, bool) {
 	if len(query) != idx.dim {
 		return 0, false
 	}
@@ -255,7 +262,12 @@ func (idx *EntityIndex) Snapshot() ([]byte, error) {
 	defer idx.mu.RUnlock()
 
 	var buf bytes.Buffer
-	if err := writeArtifactHeader(&buf, idx.dim, idx.dimC, len(idx.entityNames)); err != nil {
+	if err := writeArtifactHeader(
+		&buf,
+		idx.dim,
+		idx.dimC,
+		len(idx.entityNames),
+	); err != nil {
 		return nil, err
 	}
 	for _, entity := range sortedVectorListKeys(idx.entityNames) {
@@ -273,7 +285,11 @@ func (idx *EntityIndex) Snapshot() ([]byte, error) {
 		}
 	}
 
-	if err := binary.Write(&buf, binary.LittleEndian, uint32(len(idx.centroids))); err != nil {
+	if err := binary.Write(
+		&buf,
+		binary.LittleEndian,
+		uint32(len(idx.centroids)),
+	); err != nil {
 		return nil, err
 	}
 	for _, entity := range sortedKeys(idx.centroids) {

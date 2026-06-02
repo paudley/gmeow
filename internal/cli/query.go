@@ -102,7 +102,10 @@ func newContactResetEntitiesCommand(out io.Writer, configPath *string) *cobra.Co
 			if err != nil {
 				return err
 			}
-			client, err := rpc.NewEmbeddingClient(command.Context(), rpcEndpoint(loaded.Resolved.RPC.Embedding))
+			client, err := rpc.NewEmbeddingClient(
+				command.Context(),
+				rpcEndpoint(loaded.Resolved.RPC.Embedding),
+			)
 			if err != nil {
 				return err
 			}
@@ -645,7 +648,11 @@ func newContactImportCommand(out io.Writer, configPath *string) *cobra.Command {
 				resolver = client
 			} else {
 				embedConfig := loaded.Config.Analysis.Embeddings
-				embedder, embedErr := embedding.NewHTTPEmbedder(embedConfig.Endpoint, embedConfig.Model, nil)
+				embedder, embedErr := embedding.NewHTTPEmbedder(
+					embedConfig.Endpoint,
+					embedConfig.Model,
+					nil,
+				)
 				if embedErr != nil {
 					return fmt.Errorf("configure embedding endpoint: %w", embedErr)
 				}
@@ -752,7 +759,10 @@ type contactImportItem struct {
 // "auto" the format is inferred per file from its extension and files with no
 // recognized contact extension are skipped; otherwise the explicit format is
 // applied to every file.
-func expandContactImportPaths(args []string, format string) ([]contactImportItem, error) {
+func expandContactImportPaths(
+	args []string,
+	format string,
+) ([]contactImportItem, error) {
 	auto := strings.EqualFold(strings.TrimSpace(format), "auto")
 	items := []contactImportItem{}
 
@@ -777,16 +787,19 @@ func expandContactImportPaths(args []string, format string) ([]contactImportItem
 
 			continue
 		}
-		walkErr := filepath.WalkDir(arg, func(path string, entry os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if !entry.IsDir() {
-				add(path)
-			}
+		walkErr := filepath.WalkDir(
+			arg,
+			func(path string, entry os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if !entry.IsDir() {
+					add(path)
+				}
 
-			return nil
-		})
+				return nil
+			},
+		)
 		if walkErr != nil {
 			return nil, walkErr
 		}

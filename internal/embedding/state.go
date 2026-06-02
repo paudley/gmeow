@@ -167,7 +167,11 @@ func decodeCache(data []byte) (map[string]Vector, error) {
 
 func encodeLedger(ledger *entityLedger) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := binary.Write(&buf, binary.LittleEndian, uint32(len(ledger.claims))); err != nil {
+	if err := binary.Write(
+		&buf,
+		binary.LittleEndian,
+		uint32(len(ledger.claims)),
+	); err != nil {
 		return nil, err
 	}
 	entities := make([]string, 0, len(ledger.claims))

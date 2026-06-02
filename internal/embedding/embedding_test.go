@@ -60,7 +60,12 @@ func TestResolverCacheIsNewInfoDetector(t *testing.T) {
 
 	// Re-ingest the same claims plus one new claim: only the new claim should
 	// reach the embedder — the rest are cache hits (the NOOP/delta property).
-	again := []string{"name:patrick audley", "email:paudley@blackcat.ca", "org:blackcat", "email:pat@new.example"}
+	again := []string{
+		"name:patrick audley",
+		"email:paudley@blackcat.ca",
+		"org:blackcat",
+		"email:pat@new.example",
+	}
 	_, misses, err = resolver.Vectors(ctx, again)
 	if err != nil {
 		t.Fatalf("second Vectors: %v", err)
@@ -109,7 +114,11 @@ func TestEntityIndexLayeredMatchAndPersistence(t *testing.T) {
 	if err := idx.Upsert("01OTHER", other); err != nil {
 		t.Fatalf("upsert other: %v", err)
 	}
-	if err := idx.AddName("01PAUDLEY", "01PAUDLEY:n1", deterministicVector("name:patrick audley", FullDim)); err != nil {
+	if err := idx.AddName(
+		"01PAUDLEY",
+		"01PAUDLEY:n1",
+		deterministicVector("name:patrick audley", FullDim),
+	); err != nil {
 		t.Fatalf("add name: %v", err)
 	}
 
@@ -141,7 +150,11 @@ func TestEntityIndexLayeredMatchAndPersistence(t *testing.T) {
 	if err != nil || len(matches) == 0 || matches[0].Entity != "01PAUDLEY" {
 		t.Fatalf("post-load search=%+v err=%v, want 01PAUDLEY", matches, err)
 	}
-	sim, ok := loaded.NearestName("01PAUDLEY", deterministicVector("name:patrick audley", FullDim), 8)
+	sim, ok := loaded.NearestName(
+		"01PAUDLEY",
+		deterministicVector("name:patrick audley", FullDim),
+		8,
+	)
 	if !ok || sim < 0.99 {
 		t.Fatalf("post-load NearestName sim=%v ok=%v, want ~1/true", sim, ok)
 	}

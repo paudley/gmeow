@@ -55,7 +55,10 @@ type HTTPEmbedder struct {
 	lastCall time.Time
 }
 
-func NewHTTPEmbedder(endpoint, model string, client *http.Client) (*HTTPEmbedder, error) {
+func NewHTTPEmbedder(
+	endpoint, model string,
+	client *http.Client,
+) (*HTTPEmbedder, error) {
 	if endpoint == "" {
 		return nil, errors.New("embedding endpoint is required")
 	}
@@ -126,7 +129,8 @@ func (e *HTTPEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, err
 	for _, text := range texts {
 		text = truncateToRunes(text, maxTextRunes)
 		est := len([]rune(text))/3 + 1
-		if len(batch) > 0 && (len(batch) >= maxBatchTexts || tokenEst+est > maxBatchTokenEst) {
+		if len(batch) > 0 &&
+			(len(batch) >= maxBatchTexts || tokenEst+est > maxBatchTokenEst) {
 			if err := flush(); err != nil {
 				return nil, err
 			}
@@ -154,9 +158,16 @@ func truncateToRunes(text string, limit int) string {
 // endpoint failure (network error, 5xx, or 429). Backoffs are GENEROUS: a
 // stalled/restarting model server needs time to recover, and retrying too
 // eagerly piles work onto it (which previously contributed to a crash).
-var embedRetryBackoffs = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
+var embedRetryBackoffs = []time.Duration{
+	5 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+}
 
-func (e *HTTPEmbedder) embedBatch(ctx context.Context, texts []string) ([]Vector, error) {
+func (e *HTTPEmbedder) embedBatch(
+	ctx context.Context,
+	texts []string,
+) ([]Vector, error) {
 	var lastErr error
 	for attempt := 0; attempt <= len(embedRetryBackoffs); attempt++ {
 		if attempt > 0 {
@@ -176,10 +187,17 @@ func (e *HTTPEmbedder) embedBatch(ctx context.Context, texts []string) ([]Vector
 		}
 	}
 
-	return nil, fmt.Errorf("embedding endpoint failed after %d retries: %w", len(embedRetryBackoffs), lastErr)
+	return nil, fmt.Errorf(
+		"embedding endpoint failed after %d retries: %w",
+		len(embedRetryBackoffs),
+		lastErr,
+	)
 }
 
-func (e *HTTPEmbedder) embedBatchOnce(ctx context.Context, texts []string) ([]Vector, bool, error) {
+func (e *HTTPEmbedder) embedBatchOnce(
+	ctx context.Context,
+	texts []string,
+) ([]Vector, bool, error) {
 	if err := e.pace(ctx); err != nil {
 		return nil, false, err
 	}
@@ -189,7 +207,12 @@ func (e *HTTPEmbedder) embedBatchOnce(ctx context.Context, texts []string) ([]Ve
 		return nil, false, err
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, e.endpoint, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		e.endpoint,
+		bytes.NewReader(body),
+	)
 	if err != nil {
 		return nil, false, err
 	}
@@ -205,9 +228,14 @@ func (e *HTTPEmbedder) embedBatchOnce(ctx context.Context, texts []string) ([]Ve
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		retryable := response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests
+		retryable := response.StatusCode >= 500 ||
+			response.StatusCode == http.StatusTooManyRequests
 
-		return nil, retryable, fmt.Errorf("embedding endpoint returned %s: %s", response.Status, bytes.TrimSpace(detail))
+		return nil, retryable, fmt.Errorf(
+			"embedding endpoint returned %s: %s",
+			response.Status,
+			bytes.TrimSpace(detail),
+		)
 	}
 
 	var decoded struct {
@@ -220,7 +248,11 @@ func (e *HTTPEmbedder) embedBatchOnce(ctx context.Context, texts []string) ([]Ve
 		return nil, true, fmt.Errorf("decode embedding response: %w", err)
 	}
 	if len(decoded.Data) != len(texts) {
-		return nil, false, fmt.Errorf("embedding endpoint returned %d vectors for %d inputs", len(decoded.Data), len(texts))
+		return nil, false, fmt.Errorf(
+			"embedding endpoint returned %d vectors for %d inputs",
+			len(decoded.Data),
+			len(texts),
+		)
 	}
 
 	// The OpenAI contract returns data in input order, but index is authoritative;
@@ -319,7 +351,11 @@ func (r *Resolver) Vectors(ctx context.Context, texts []string) ([]Vector, int, 
 // Pool returns the renormalized weighted mean-pool (profile centroid) of the
 // given claim texts, embedding only new claims. The second return is the number
 // of embedder calls (new claims) — ingest uses zero-misses as the NOOP signal.
-func (r *Resolver) Pool(ctx context.Context, texts []string, weights []float64) (Vector, int, error) {
+func (r *Resolver) Pool(
+	ctx context.Context,
+	texts []string,
+	weights []float64,
+) (Vector, int, error) {
 	vectors, misses, err := r.Vectors(ctx, texts)
 	if err != nil {
 		return nil, 0, err

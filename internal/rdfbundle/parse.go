@@ -113,7 +113,10 @@ func (parser *bundleParser) consume(raw string) {
 	parser.consumePredicate(line)
 }
 
-func (parser *bundleParser) consumeAnnotationContinuation(line string, indented bool) bool {
+func (parser *bundleParser) consumeAnnotationContinuation(
+	line string,
+	indented bool,
+) bool {
 	if parser.currentAnnotation == "" || !indented {
 		return false
 	}
@@ -155,7 +158,12 @@ func (parser *bundleParser) consumeObjectContinuation(line string) bool {
 		return false
 	}
 
-	next, found := parseObjectList(parser.currentSubject, parser.currentPredicate, line, parser.prefixes)
+	next, found := parseObjectList(
+		parser.currentSubject,
+		parser.currentPredicate,
+		line,
+		parser.prefixes,
+	)
 	if !found {
 		return false
 	}
@@ -202,7 +210,11 @@ func (parser *bundleParser) consumePredicate(line string) bool {
 		return false
 	}
 
-	predicate, next, found := parsePredicateObjectLine(parser.currentSubject, line, parser.prefixes)
+	predicate, next, found := parsePredicateObjectLine(
+		parser.currentSubject,
+		line,
+		parser.prefixes,
+	)
 	if !found {
 		return false
 	}
@@ -251,7 +263,11 @@ func parseSubjectLine(line string, prefixes map[string]string) (Term, string, bo
 	return subject, rest, true
 }
 
-func parsePredicateObjectLine(subject Term, line string, prefixes map[string]string) (Term, []Statement, bool) {
+func parsePredicateObjectLine(
+	subject Term,
+	line string,
+	prefixes map[string]string,
+) (Term, []Statement, bool) {
 	predicateToken, rest := splitFirstToken(line)
 
 	predicate, parsed := parsePredicateTerm(predicateToken, prefixes)
@@ -267,7 +283,11 @@ func parsePredicateObjectLine(subject Term, line string, prefixes map[string]str
 	return predicate, statements, true
 }
 
-func parseObjectList(subject Term, predicate Term, line string, prefixes map[string]string) ([]Statement, bool) {
+func parseObjectList(
+	subject, predicate Term,
+	line string,
+	prefixes map[string]string,
+) ([]Statement, bool) {
 	line = strings.TrimSpace(line)
 	line = strings.TrimSuffix(line, ";")
 	line = strings.TrimSuffix(line, ".")
@@ -288,7 +308,10 @@ func parseObjectList(subject Term, predicate Term, line string, prefixes map[str
 	return statements, len(statements) > 0
 }
 
-func parseStarAnnotation(line string, prefixes map[string]string) (AnnotationRecord, bool) {
+func parseStarAnnotation(
+	line string,
+	prefixes map[string]string,
+) (AnnotationRecord, bool) {
 	statement, rest, cutFound := parseStarStatement(line, prefixes)
 	if !cutFound {
 		return AnnotationRecord{}, false
@@ -323,7 +346,10 @@ func parseStarSubject(line string, prefixes map[string]string) (Statement, bool)
 	return statement, true
 }
 
-func parseStarStatement(line string, prefixes map[string]string) (Statement, string, bool) {
+func parseStarStatement(
+	line string,
+	prefixes map[string]string,
+) (Statement, string, bool) {
 	inner, rest, cutFound := strings.Cut(strings.TrimPrefix(line, "<<"), ">>")
 	if !cutFound {
 		return Statement{}, "", false
@@ -353,7 +379,10 @@ func parseStarStatement(line string, prefixes map[string]string) (Statement, str
 	return statement, rest, true
 }
 
-func parseAnnotationLine(statementHash string, line string, prefixes map[string]string) []AnnotationRecord {
+func parseAnnotationLine(
+	statementHash, line string,
+	prefixes map[string]string,
+) []AnnotationRecord {
 	predicateToken, rest := splitFirstToken(line)
 
 	predicate, ok := parsePredicateTerm(predicateToken, prefixes)

@@ -18,7 +18,10 @@ import (
 // reproducible without a live model endpoint.
 type stubEmbedder struct{ dim int }
 
-func (s stubEmbedder) Embed(_ context.Context, texts []string) ([]embedding.Vector, error) {
+func (s stubEmbedder) Embed(
+	_ context.Context,
+	texts []string,
+) ([]embedding.Vector, error) {
 	out := make([]embedding.Vector, len(texts))
 	for i, text := range texts {
 		v := make(embedding.Vector, s.dim)
@@ -39,7 +42,10 @@ func (s stubEmbedder) Embed(_ context.Context, texts []string) ([]embedding.Vect
 func serveTestEmbedding(t *testing.T) (Endpoint, *embedding.Service, func()) {
 	t.Helper()
 	service := embedding.NewService(
-		embedding.NewResolver(embedding.NewMemoryCache(), stubEmbedder{dim: embedding.FullDim}),
+		embedding.NewResolver(
+			embedding.NewMemoryCache(),
+			stubEmbedder{dim: embedding.FullDim},
+		),
 		embedding.NewEntityIndex(embedding.FullDim, embedding.CoarseDim),
 		"stub-model",
 	)
@@ -76,14 +82,22 @@ func TestEmbeddingClientResolveRPCRoundTrip(t *testing.T) {
 	// A fresh person mints an entity; re-resolving the same claims is a NOOP —
 	// the importer's mint/delta/NOOP signal travels over gRPC.
 	claims := []embedding.ClaimInput{
-		{Text: "name: ada lovelace", Hash: embedding.StatementHash("name: ada lovelace"), IsName: true},
-		{Text: "email: ada@analytical.example", Hash: embedding.StatementHash("email: ada@analytical.example")},
+		{
+			Text:   "name: ada lovelace",
+			Hash:   embedding.StatementHash("name: ada lovelace"),
+			IsName: true,
+		},
+		{
+			Text: "email: ada@analytical.example",
+			Hash: embedding.StatementHash("email: ada@analytical.example"),
+		},
 	}
 	resolution, err := client.Resolve(ctx, claims, 0.5, 0.5)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if !resolution.IsNew || resolution.Entity == "" || len(resolution.NewClaimHashes) != 2 {
+	if !resolution.IsNew || resolution.Entity == "" ||
+		len(resolution.NewClaimHashes) != 2 {
 		t.Fatalf("resolve: want a new entity with 2 new claims, got %+v", resolution)
 	}
 	noop, err := client.Resolve(ctx, claims, 0.5, 0.5)
@@ -133,7 +147,8 @@ func TestEmbeddingClientResolveDeltaNoopRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("match: %v", err)
 	}
-	if len(matches) == 0 || matches[0].Entity != "01PAUDLEY" || matches[0].Similarity < 0.99 {
+	if len(matches) == 0 || matches[0].Entity != "01PAUDLEY" ||
+		matches[0].Similarity < 0.99 {
 		t.Fatalf("match=%+v, want 01PAUDLEY ~1.0", matches)
 	}
 

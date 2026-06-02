@@ -31,22 +31,38 @@ func TestBuildRDFStarDeltaMatchesLegacyTriple(t *testing.T) {
 		},
 		{
 			"literal",
-			Claim{Subject: subject, Predicate: foafPrefix + "name", Object: termLiteral("Ann Example")},
+			Claim{
+				Subject:   subject,
+				Predicate: foafPrefix + "name",
+				Object:    termLiteral("Ann Example"),
+			},
 			legacyTriple(subject, foafPrefix+"name", literal("Ann Example")),
 		},
 		{
 			"typedInteger",
-			Claim{Subject: subject, Predicate: GmeowImportanceLevel, Object: termTypedInteger(7)},
+			Claim{
+				Subject:   subject,
+				Predicate: GmeowImportanceLevel,
+				Object:    termTypedInteger(7),
+			},
 			legacyTriple(subject, GmeowImportanceLevel, typedInteger(7)),
 		},
 		{
 			"typedDate",
-			Claim{Subject: subject, Predicate: timePrefix + "hasEnd", Object: termTypedDate("2012-01-02")},
+			Claim{
+				Subject:   subject,
+				Predicate: timePrefix + "hasEnd",
+				Object:    termTypedDate("2012-01-02"),
+			},
 			legacyTriple(subject, timePrefix+"hasEnd", typedDate("2012-01-02")),
 		},
 		{
 			"raw",
-			Claim{Subject: subject, Predicate: foafPrefix + "name", Object: termRaw(literal("X"))},
+			Claim{
+				Subject:   subject,
+				Predicate: foafPrefix + "name",
+				Object:    termRaw(literal("X")),
+			},
 			legacyTriple(subject, foafPrefix+"name", literal("X")),
 		},
 	}
@@ -63,10 +79,23 @@ func TestBuildRDFStarDeltaMatchesLegacyTriple(t *testing.T) {
 func TestBuildRDFStarDeltaEmitsAnnotationsAfterBaseTriple(t *testing.T) {
 	subject := "https://example.test/#a"
 	predicate := schemaPrefix + "email"
-	claim := Claim{Subject: subject, Predicate: predicate, Object: termLiteral("a@b.test")}.
-		withAnnotation(timePrefix+"hasEnd", termTypedDate("2010-01-01"))
+	claim := Claim{
+		Subject:   subject,
+		Predicate: predicate,
+		Object:    termLiteral("a@b.test"),
+	}.
+		withAnnotation(
+			timePrefix+"hasEnd",
+			termTypedDate("2010-01-01"),
+		)
 
-	statement := "<< " + iri(subject) + " " + iri(predicate) + " " + literal("a@b.test") + " >> "
+	statement := "<< " + iri(
+		subject,
+	) + " " + iri(
+		predicate,
+	) + " " + literal(
+		"a@b.test",
+	) + " >> "
 	want := legacyTriple(subject, predicate, literal("a@b.test")) +
 		statement + iri(timePrefix+"hasEnd") + " " + typedDate("2010-01-01") + " .\n"
 

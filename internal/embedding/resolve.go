@@ -82,7 +82,11 @@ func (l *entityLedger) texts(entity string) []string {
 // ledger, and — unless it is a NOOP — append the new claims to the ledger and
 // re-pool the centroid (plus any new name vectors) in the index. The caller
 // persists the returned NewClaimHashes as an immutable delta record.
-func (s *Service) Resolve(ctx context.Context, claims []ClaimInput, threshold, nameThreshold float64) (Resolution, error) {
+func (s *Service) Resolve(
+	ctx context.Context,
+	claims []ClaimInput,
+	threshold, nameThreshold float64,
+) (Resolution, error) {
 	if len(claims) == 0 {
 		return Resolution{IsNoop: true}, nil
 	}
@@ -156,7 +160,12 @@ func (s *Service) Resolve(ctx context.Context, claims []ClaimInput, threshold, n
 		return Resolution{}, err
 	}
 
-	return Resolution{Entity: entity, NewClaimHashes: newHashes, Similarity: similarity, IsNew: isNew}, nil
+	return Resolution{
+		Entity:         entity,
+		NewClaimHashes: newHashes,
+		Similarity:     similarity,
+		IsNew:          isNew,
+	}, nil
 }
 
 // nameAgrees reports whether the incoming record's name(s) are consistent with
@@ -165,7 +174,12 @@ func (s *Service) Resolve(ctx context.Context, claims []ClaimInput, threshold, n
 // the best incoming-vs-entity name similarity to meet the threshold. This is the
 // guard that keeps a person and their tightly-coupled org from merging on
 // centroid overlap alone.
-func (s *Service) nameAgrees(ctx context.Context, entity string, claims []ClaimInput, threshold float64) (bool, error) {
+func (s *Service) nameAgrees(
+	ctx context.Context,
+	entity string,
+	claims []ClaimInput,
+	threshold float64,
+) (bool, error) {
 	var nameTexts []string
 	for _, claim := range claims {
 		if claim.IsName {
@@ -202,7 +216,11 @@ func (s *Service) nameAgrees(ctx context.Context, entity string, claims []ClaimI
 
 // nameVectors embeds the name claims among the delta and returns them as entity
 // name vectors (keyed entity+hash). Renames accumulate name vectors per entity.
-func (s *Service) nameVectors(ctx context.Context, entity string, delta []ClaimInput) ([]NamedVec, error) {
+func (s *Service) nameVectors(
+	ctx context.Context,
+	entity string,
+	delta []ClaimInput,
+) ([]NamedVec, error) {
 	var texts, keys []string
 	for _, claim := range delta {
 		if !claim.IsName {

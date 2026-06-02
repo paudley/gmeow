@@ -10,9 +10,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/micromdm/plist"
+
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/facets/contactentity"
-	"github.com/micromdm/plist"
 )
 
 func TestVCardImportProducesRDFContactBundle(t *testing.T) {
@@ -65,9 +66,15 @@ func TestVCardImportPreservesInvalidEmailValuesAsSourceData(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(object.Content, "mailto:+1") {
-		t.Fatalf("invalid EMAIL value was emitted as canonical mailto RDF:\n%s", object.Content)
+		t.Fatalf(
+			"invalid EMAIL value was emitted as canonical mailto RDF:\n%s",
+			object.Content,
+		)
 	}
-	if !strings.Contains(object.Content, `<https://blackcatinformatics.ca/gmeow/vcardEmail> "+1 (604) 555-1212"`) {
+	if !strings.Contains(
+		object.Content,
+		`<https://blackcatinformatics.ca/gmeow/vcardEmail> "+1 (604) 555-1212"`,
+	) {
 		t.Fatalf("invalid EMAIL source value was not preserved:\n%s", object.Content)
 	}
 }
@@ -114,7 +121,11 @@ func TestVCardImportScopesProviderLifecycleToIMEndpoints(t *testing.T) {
 		`<< <mailto:user@aim.com> <https://blackcatinformatics.ca/gmeow/myspaceProfile>`,
 	} {
 		if strings.Contains(object.Content, snippet) {
-			t.Fatalf("provider lifecycle was applied to non-shutdown identity %q:\n%s", snippet, object.Content)
+			t.Fatalf(
+				"provider lifecycle was applied to non-shutdown identity %q:\n%s",
+				snippet,
+				object.Content,
+			)
 		}
 	}
 }
@@ -232,10 +243,17 @@ func TestVCardImportRejectsUnsupportedPropertiesAndParameters(t *testing.T) {
 				t.Fatalf("expected per-record rejection, got file error %v", err)
 			}
 			if len(result.Contacts) != 0 {
-				t.Fatalf("expected the single bad record rejected, got contacts %v", result.Contacts)
+				t.Fatalf(
+					"expected the single bad record rejected, got contacts %v",
+					result.Contacts,
+				)
 			}
 			if len(result.Rejected) != 1 {
-				t.Fatalf("expected 1 rejected record, got %d (%v)", len(result.Rejected), result.Rejected)
+				t.Fatalf(
+					"expected 1 rejected record, got %d (%v)",
+					len(result.Rejected),
+					result.Rejected,
+				)
 			}
 		})
 	}
@@ -247,17 +265,28 @@ func TestVCardImportRejectsOnlyTheBadRecord(t *testing.T) {
 	input := "BEGIN:VCARD\nVERSION:4.0\nFN:Good One\nEMAIL:good@example.test\nEND:VCARD\n" +
 		"BEGIN:VCARD\nVERSION:4.0\nFN:Bad One\nNOTAREALPROPERTY:boom\nEND:VCARD\n" +
 		"BEGIN:VCARD\nVERSION:4.0\nFN:Good Two\nEND:VCARD\n"
-	object, result, err := BuildImportObject(FormatVCard, "contacts", "mixed.vcf", []byte(input), time.Time{})
+	object, result, err := BuildImportObject(
+		FormatVCard,
+		"contacts",
+		"mixed.vcf",
+		[]byte(input),
+		time.Time{},
+	)
 	if err != nil {
 		t.Fatalf("multi-card import failed at file level: %v", err)
 	}
 	if len(result.Contacts) != 2 {
-		t.Fatalf("expected 2 imported contacts, got %d (%v)", len(result.Contacts), result.Contacts)
+		t.Fatalf(
+			"expected 2 imported contacts, got %d (%v)",
+			len(result.Contacts),
+			result.Contacts,
+		)
 	}
 	if len(result.Rejected) != 1 || result.Rejected[0].Index != 2 {
 		t.Fatalf("expected record 2 rejected, got %v", result.Rejected)
 	}
-	if !strings.Contains(object.Content, `"Good One"`) || !strings.Contains(object.Content, `"Good Two"`) {
+	if !strings.Contains(object.Content, `"Good One"`) ||
+		!strings.Contains(object.Content, `"Good Two"`) {
 		t.Fatalf("good records missing from output:\n%s", object.Content)
 	}
 	if strings.Contains(object.Content, "Bad One") {
@@ -268,7 +297,12 @@ func TestVCardImportRejectsOnlyTheBadRecord(t *testing.T) {
 func TestBuildContactDeltasEmitsOneObjectPerContact(t *testing.T) {
 	input := "BEGIN:VCARD\nVERSION:4.0\nFN:Alice One\nEMAIL:alice@example.test\nEND:VCARD\n" +
 		"BEGIN:VCARD\nVERSION:4.0\nFN:Bob Two\nEMAIL:bob@example.test\nEND:VCARD\n"
-	deltas, result, err := BuildContactDeltas(FormatVCard, "corpus", []byte(input), ImportOptions{ImportLevel: 5})
+	deltas, result, err := BuildContactDeltas(
+		FormatVCard,
+		"corpus",
+		[]byte(input),
+		ImportOptions{ImportLevel: 5},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,8 +317,15 @@ func TestBuildContactDeltasEmitsOneObjectPerContact(t *testing.T) {
 		if !strings.Contains(delta.Content, "@prefix gmeow:") {
 			t.Fatalf("delta missing prefixes:\n%s", delta.Content)
 		}
-		if !strings.Contains(delta.Content, "<"+delta.Identity+"> <"+GmeowImportanceLevel+"> \"5\"") {
-			t.Fatalf("delta %q missing its own import-level claim:\n%s", delta.Identity, delta.Content)
+		if !strings.Contains(
+			delta.Content,
+			"<"+delta.Identity+"> <"+GmeowImportanceLevel+"> \"5\"",
+		) {
+			t.Fatalf(
+				"delta %q missing its own import-level claim:\n%s",
+				delta.Identity,
+				delta.Content,
+			)
 		}
 	}
 	if deltas[0].Identity == deltas[1].Identity {
@@ -296,11 +337,21 @@ func TestBuildContactDeltasStableForDedup(t *testing.T) {
 	// The same contact observed in two different files must render identical
 	// delta content (so the source-object index dedups it across snapshots).
 	card := "BEGIN:VCARD\nVERSION:4.0\nFN:Stable Person\nEMAIL:stable@example.test\nEND:VCARD\n"
-	a, _, err := BuildContactDeltas(FormatVCard, "corpus", []byte(card), ImportOptions{ImportLevel: 3})
+	a, _, err := BuildContactDeltas(
+		FormatVCard,
+		"corpus",
+		[]byte(card),
+		ImportOptions{ImportLevel: 3},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _, err := BuildContactDeltas(FormatVCard, "corpus", []byte(card), ImportOptions{ImportLevel: 3})
+	b, _, err := BuildContactDeltas(
+		FormatVCard,
+		"corpus",
+		[]byte(card),
+		ImportOptions{ImportLevel: 3},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +366,10 @@ func TestBuildContactDeltasStableForDedup(t *testing.T) {
 func TestVCardImportClassifiesLocatorOnlyVsAgent(t *testing.T) {
 	personType := "<" + foafPrefix + "Person>"
 
-	agent := mustVCardContent(t, "BEGIN:VCARD\nVERSION:4.0\nFN:Alice Agent\nEMAIL:alice@example.test\nEND:VCARD\n")
+	agent := mustVCardContent(
+		t,
+		"BEGIN:VCARD\nVERSION:4.0\nFN:Alice Agent\nEMAIL:alice@example.test\nEND:VCARD\n",
+	)
 	if !strings.Contains(agent, personType) {
 		t.Fatalf("named card should be a foaf:Person:\n%s", agent)
 	}
@@ -333,7 +387,10 @@ func TestVCardImportClassifiesLocatorOnlyVsAgent(t *testing.T) {
 		})
 	}
 
-	org := mustVCardContent(t, "BEGIN:VCARD\nVERSION:4.0\nFN:\nN:;;;;\nORG:Acme Inc\nTEL:+1 555 0199\nEND:VCARD\n")
+	org := mustVCardContent(
+		t,
+		"BEGIN:VCARD\nVERSION:4.0\nFN:\nN:;;;;\nORG:Acme Inc\nTEL:+1 555 0199\nEND:VCARD\n",
+	)
 	if !strings.Contains(org, personType) {
 		t.Fatalf("org-bearing card should be agent-denoting:\n%s", org)
 	}
@@ -341,7 +398,13 @@ func TestVCardImportClassifiesLocatorOnlyVsAgent(t *testing.T) {
 
 func mustVCardContent(t *testing.T, input string) string {
 	t.Helper()
-	object, _, err := BuildImportObject(FormatVCard, "contacts", "classify.vcf", []byte(input), time.Time{})
+	object, _, err := BuildImportObject(
+		FormatVCard,
+		"contacts",
+		"classify.vcf",
+		[]byte(input),
+		time.Time{},
+	)
 	if err != nil {
 		t.Fatalf("import failed: %v", err)
 	}
@@ -354,7 +417,9 @@ func TestVCardImportMapsVendorExtensionProperties(t *testing.T) {
 		FormatVCard,
 		"contacts",
 		"vendor-ext.vcf",
-		[]byte("BEGIN:VCARD\nVERSION:4.0\nFN:Alice\nX-ACME-LOYALTY-ID:42\nX-SINGLESEG:on\nEND:VCARD\n"),
+		[]byte(
+			"BEGIN:VCARD\nVERSION:4.0\nFN:Alice\nX-ACME-LOYALTY-ID:42\nX-SINGLESEG:on\nEND:VCARD\n",
+		),
 		time.Time{},
 	)
 	if err != nil {
@@ -367,7 +432,8 @@ func TestVCardImportMapsVendorExtensionProperties(t *testing.T) {
 	if !strings.Contains(object.Content, gmeowPrefix+"vendorExtension/SINGLESEG") {
 		t.Fatalf("missing single-segment extension predicate:\n%s", object.Content)
 	}
-	if !strings.Contains(object.Content, `"42"`) || !strings.Contains(object.Content, `"on"`) {
+	if !strings.Contains(object.Content, `"42"`) ||
+		!strings.Contains(object.Content, `"on"`) {
 		t.Fatalf("vendor-extension values not preserved as literals:\n%s", object.Content)
 	}
 }
@@ -392,7 +458,8 @@ func TestVCardImportNormalizesInvalidUTF8(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !utf8.ValidString(object.Content) || strings.Contains(object.Content, string([]byte{0x8d})) {
+	if !utf8.ValidString(object.Content) ||
+		strings.Contains(object.Content, string([]byte{0x8d})) {
 		t.Fatalf("imported RDF contains invalid UTF-8:\n%q", object.Content)
 	}
 	if !strings.Contains(object.Content, `"bad ? byte"`) {
@@ -416,7 +483,13 @@ func TestRDFImportRootedGraphIsOneContact(t *testing.T) {
 <https://example.test/#ancestor> a gedcom:Individual ;
     schema:name "Embedded Ancestor" .
 `
-	object, result, err := BuildImportObject(FormatRDF, "rooted", "profile.ttl", []byte(graph), time.Time{})
+	object, result, err := BuildImportObject(
+		FormatRDF,
+		"rooted",
+		"profile.ttl",
+		[]byte(graph),
+		time.Time{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +516,13 @@ func TestRDFImportUnrootedCollectionYieldsManyContacts(t *testing.T) {
 <https://example.test/#b> a foaf:Person ;
     schema:name "Bob" .
 `
-	_, result, err := BuildImportObject(FormatRDF, "collection", "people.ttl", []byte(graph), time.Time{})
+	_, result, err := BuildImportObject(
+		FormatRDF,
+		"collection",
+		"people.ttl",
+		[]byte(graph),
+		time.Time{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +632,8 @@ func TestAppleAddressBookImportProducesRDFContactBundle(t *testing.T) {
 			t.Fatalf("Apple AddressBook RDF missing %q:\n%s", snippet, object.Content)
 		}
 	}
-	if len(result.Contacts) != 1 || result.Contacts[0] != "mailto:casey.contact@example.test" {
+	if len(result.Contacts) != 1 ||
+		result.Contacts[0] != "mailto:casey.contact@example.test" {
 		t.Fatalf("unexpected Apple AddressBook import result: %#v", result)
 	}
 }
@@ -568,7 +648,13 @@ func TestAppleAddressBookGroupImportProducesGroupAndMembers(t *testing.T) {
 			"PERSON-A:ABPerson": "email-id-1",
 		},
 	})
-	object, result, err := BuildImportObject(FormatAppleAddressBookGroup, "contacts", "synthetic.abcdg", content, time.Time{})
+	object, result, err := BuildImportObject(
+		FormatAppleAddressBookGroup,
+		"contacts",
+		"synthetic.abcdg",
+		content,
+		time.Time{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +680,13 @@ func TestAppleAddressBookGroupImportRejectsUnknownField(t *testing.T) {
 		"GroupName":    "Team",
 		"MysteryField": "boom",
 	})
-	if _, _, err := BuildImportObject(FormatAppleAddressBookGroup, "contacts", "bad.abcdg", content, time.Time{}); err == nil {
+	if _, _, err := BuildImportObject(
+		FormatAppleAddressBookGroup,
+		"contacts",
+		"bad.abcdg",
+		content,
+		time.Time{},
+	); err == nil {
 		t.Fatal("expected rejection of unknown Apple group field")
 	}
 }
@@ -611,7 +703,8 @@ func TestAppleAddressBookImportRejectsUnsupportedFields(t *testing.T) {
 		}),
 		time.Time{},
 	)
-	if err == nil || !strings.Contains(err.Error(), "unsupported Apple AddressBook person field") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "unsupported Apple AddressBook person field") {
 		t.Fatalf("expected unsupported Apple AddressBook field rejection, got %v", err)
 	}
 }
@@ -640,7 +733,8 @@ func TestCSVImportSupportsLinkedInConnections(t *testing.T) {
 			t.Fatalf("LinkedIn CSV RDF missing %q:\n%s", snippet, object.Content)
 		}
 	}
-	if len(result.Contacts) != 1 || result.Contacts[0] != "mailto:casey.contact@example.test" {
+	if len(result.Contacts) != 1 ||
+		result.Contacts[0] != "mailto:casey.contact@example.test" {
 		t.Fatalf("unexpected LinkedIn CSV result: %#v", result)
 	}
 }
@@ -683,7 +777,10 @@ func TestCSVImportPreservesNonEmailEmailFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(object.Content, `<https://schema.org/email> "not an email address"`) {
+	if !strings.Contains(
+		object.Content,
+		`<https://schema.org/email> "not an email address"`,
+	) {
 		t.Fatalf("non-email email field was not preserved as a literal:\n%s", object.Content)
 	}
 }
@@ -742,7 +839,11 @@ func TestImportObjectWithOptionsAddsImportanceClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.ImportLevel != 7 || object.ImportLevel != 7 {
-		t.Fatalf("importance level not carried through: object=%#v result=%#v", object, result)
+		t.Fatalf(
+			"importance level not carried through: object=%#v result=%#v",
+			object,
+			result,
+		)
 	}
 	if !strings.Contains(
 		object.Content,
@@ -808,7 +909,9 @@ func TestBBDBImportRejectsUnsupportedUserFields(t *testing.T) {
 		FormatBBDB,
 		"contacts",
 		".bbdb",
-		[]byte(`["Casey" "Contact" nil nil nil nil ("casey.contact@example.test") ((not-mapped . "value")) nil]`),
+		[]byte(
+			`["Casey" "Contact" nil nil nil nil ("casey.contact@example.test") ((not-mapped . "value")) nil]`,
+		),
 		time.Time{},
 	)
 	if err == nil || !strings.Contains(err.Error(), "unsupported BBDB contact record") {

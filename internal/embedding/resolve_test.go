@@ -16,7 +16,9 @@ func newTestService() *Service {
 		"stub",
 	)
 	var counter int
-	service.SetIDSource(func() string { counter++; return fmt.Sprintf("01ENTITY%04d", counter) })
+	service.SetIDSource(
+		func() string { counter++; return fmt.Sprintf("01ENTITY%04d", counter) },
+	)
 
 	return service
 }
@@ -130,8 +132,12 @@ func TestServiceResolveWorkedExample(t *testing.T) {
 	if second.IsNew || second.IsNoop || second.Entity != first.Entity {
 		t.Fatalf("2002 vcard: want match to %s, got %+v", first.Entity, second)
 	}
-	if len(second.NewClaimHashes) != 1 || second.NewClaimHashes[0] != StatementHash("email: pat@new.example") {
-		t.Fatalf("2002 vcard delta=%+v, want exactly the new email hash", second.NewClaimHashes)
+	if len(second.NewClaimHashes) != 1 ||
+		second.NewClaimHashes[0] != StatementHash("email: pat@new.example") {
+		t.Fatalf(
+			"2002 vcard delta=%+v, want exactly the new email hash",
+			second.NewClaimHashes,
+		)
 	}
 
 	// 3) 2004 vCard: nothing new -> NOOP.

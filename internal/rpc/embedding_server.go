@@ -45,7 +45,11 @@ func (server *EmbeddingServer) Pool(
 	ctx context.Context,
 	request *pb.PoolRequest,
 ) (*pb.PoolResponse, error) {
-	centroid, misses, err := server.service.Pool(ctx, request.GetTexts(), request.GetWeights())
+	centroid, misses, err := server.service.Pool(
+		ctx,
+		request.GetTexts(),
+		request.GetWeights(),
+	)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -60,7 +64,10 @@ func (server *EmbeddingServer) Match(
 	_ context.Context,
 	request *pb.MatchRequest,
 ) (*pb.MatchResponse, error) {
-	matches, err := server.service.Match(vectorFromProto(request.GetCentroid()), int(request.GetK()))
+	matches, err := server.service.Match(
+		vectorFromProto(request.GetCentroid()),
+		int(request.GetK()),
+	)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -88,7 +95,12 @@ func (server *EmbeddingServer) Resolve(
 			IsName: claim.GetIsName(),
 		})
 	}
-	resolution, err := server.service.Resolve(ctx, claims, request.GetThreshold(), request.GetNameThreshold())
+	resolution, err := server.service.Resolve(
+		ctx,
+		claims,
+		request.GetThreshold(),
+		request.GetNameThreshold(),
+	)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -102,7 +114,10 @@ func (server *EmbeddingServer) Resolve(
 	}, nil
 }
 
-func (server *EmbeddingServer) Reset(_ context.Context, _ *pb.Empty) (*pb.Empty, error) {
+func (server *EmbeddingServer) Reset(
+	_ context.Context,
+	_ *pb.Empty,
+) (*pb.Empty, error) {
 	server.service.ResetEntities()
 
 	return &pb.Empty{}, nil
@@ -119,7 +134,11 @@ func (server *EmbeddingServer) Upsert(
 			Vector: vectorFromProto(name.GetVector()),
 		})
 	}
-	if err := server.service.Upsert(request.GetEntity(), vectorFromProto(request.GetCentroid()), names); err != nil {
+	if err := server.service.Upsert(
+		request.GetEntity(),
+		vectorFromProto(request.GetCentroid()),
+		names,
+	); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
@@ -130,7 +149,10 @@ func (server *EmbeddingServer) NearestName(
 	_ context.Context,
 	request *pb.NearestNameRequest,
 ) (*pb.NearestNameResponse, error) {
-	sim, found := server.service.NearestName(request.GetEntity(), vectorFromProto(request.GetQuery()))
+	sim, found := server.service.NearestName(
+		request.GetEntity(),
+		vectorFromProto(request.GetQuery()),
+	)
 
 	return &pb.NearestNameResponse{Similarity: sim, Found: found}, nil
 }

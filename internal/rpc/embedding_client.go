@@ -19,7 +19,10 @@ type EmbeddingClient struct {
 	client     pb.EmbeddingServiceClient
 }
 
-func NewEmbeddingClient(ctx context.Context, endpoint Endpoint) (*EmbeddingClient, error) {
+func NewEmbeddingClient(
+	ctx context.Context,
+	endpoint Endpoint,
+) (*EmbeddingClient, error) {
 	connection, err := dial(ctx, endpoint)
 	if err != nil {
 		return nil, err
@@ -56,7 +59,10 @@ func (client *EmbeddingClient) Pool(
 	texts []string,
 	weights []float64,
 ) (embedding.Vector, int, error) {
-	response, err := client.client.Pool(ctx, &pb.PoolRequest{Texts: texts, Weights: weights})
+	response, err := client.client.Pool(
+		ctx,
+		&pb.PoolRequest{Texts: texts, Weights: weights},
+	)
 	if err != nil {
 		return nil, 0, err
 	}

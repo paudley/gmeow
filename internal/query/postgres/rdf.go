@@ -770,7 +770,10 @@ func contactSetFromSubjects(subjects []string) map[string]bool {
 	return contacts
 }
 
-func typedContactSetFromSubjects(subjects []string, typedContacts map[string]bool) map[string]bool {
+func typedContactSetFromSubjects(
+	subjects []string,
+	typedContacts map[string]bool,
+) map[string]bool {
 	contacts := map[string]bool{}
 	for _, subject := range subjects {
 		if typedContacts[subject] {

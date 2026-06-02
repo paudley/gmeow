@@ -18,7 +18,10 @@ import (
 // claims) pool to nearby centroids — no live endpoint needed in tests.
 type stubEmbedder struct{ dim int }
 
-func (s stubEmbedder) Embed(_ context.Context, texts []string) ([]embedding.Vector, error) {
+func (s stubEmbedder) Embed(
+	_ context.Context,
+	texts []string,
+) ([]embedding.Vector, error) {
 	out := make([]embedding.Vector, len(texts))
 	for i, text := range texts {
 		v := make(embedding.Vector, s.dim)
@@ -40,12 +43,17 @@ func (s stubEmbedder) Embed(_ context.Context, texts []string) ([]embedding.Vect
 // counter ULIDs) that satisfies contactio.Resolver.
 func newTestResolver() Resolver {
 	service := embedding.NewService(
-		embedding.NewResolver(embedding.NewMemoryCache(), stubEmbedder{dim: embedding.FullDim}),
+		embedding.NewResolver(
+			embedding.NewMemoryCache(),
+			stubEmbedder{dim: embedding.FullDim},
+		),
 		embedding.NewEntityIndex(embedding.FullDim, embedding.CoarseDim),
 		"stub",
 	)
 	var counter int
-	service.SetIDSource(func() string { counter++; return fmt.Sprintf("01E%04d", counter) })
+	service.SetIDSource(
+		func() string { counter++; return fmt.Sprintf("01E%04d", counter) },
+	)
 
 	return service
 }
@@ -64,7 +72,17 @@ func TestResolveImportProducesEntitySubjectedDeltaRecords(t *testing.T) {
     gmeow:affiliation "Blackcat Informatics" .
 `)
 
-	records, result, err := ResolveImport(ctx, resolver, threshold, threshold, FormatRDF, "lod", rooted, ImportOptions{ImportLevel: 10}, observedAt)
+	records, result, err := ResolveImport(
+		ctx,
+		resolver,
+		threshold,
+		threshold,
+		FormatRDF,
+		"lod",
+		rooted,
+		ImportOptions{ImportLevel: 10},
+		observedAt,
+	)
 	if err != nil {
 		t.Fatalf("resolve import (rooted): %v", err)
 	}
@@ -73,7 +91,11 @@ func TestResolveImportProducesEntitySubjectedDeltaRecords(t *testing.T) {
 	}
 	entity := records[0].Entity
 	if len(result.Contacts) != 1 || result.Contacts[0] != entity {
-		t.Fatalf("result.Contacts should be the resolved entity, got %v (entity %s)", result.Contacts, entity)
+		t.Fatalf(
+			"result.Contacts should be the resolved entity, got %v (entity %s)",
+			result.Contacts,
+			entity,
+		)
 	}
 	content := records[0].Content
 	if !strings.Contains(content, EntityPrefix+entity) {
@@ -81,15 +103,30 @@ func TestResolveImportProducesEntitySubjectedDeltaRecords(t *testing.T) {
 	}
 	// The entity's first record must carry rdf:type foaf:Person so the QUERY
 	// projection detects the entity as a contact (the entity-as-contact surface).
-	if !strings.Contains(content, "22-rdf-syntax-ns#type") || !strings.Contains(content, "foaf/0.1/Person") {
-		t.Fatalf("delta record missing the rdf:type foaf:Person triple (projection won't surface the entity):\n%s", content)
+	if !strings.Contains(content, "22-rdf-syntax-ns#type") ||
+		!strings.Contains(content, "foaf/0.1/Person") {
+		t.Fatalf(
+			"delta record missing the rdf:type foaf:Person triple (projection won't surface the entity):\n%s",
+			content,
+		)
 	}
-	if !strings.Contains(content, "observedAt") || !strings.Contains(content, "2002-06-30") {
+	if !strings.Contains(content, "observedAt") ||
+		!strings.Contains(content, "2002-06-30") {
 		t.Fatalf("delta record missing the observedAt RDF-star stamp:\n%s", content)
 	}
 
 	// Re-import the exact same graph -> NOOP, nothing to persist.
-	noop, _, err := ResolveImport(ctx, resolver, threshold, threshold, FormatRDF, "lod", rooted, ImportOptions{ImportLevel: 10}, observedAt)
+	noop, _, err := ResolveImport(
+		ctx,
+		resolver,
+		threshold,
+		threshold,
+		FormatRDF,
+		"lod",
+		rooted,
+		ImportOptions{ImportLevel: 10},
+		observedAt,
+	)
 	if err != nil {
 		t.Fatalf("resolve import (re-run): %v", err)
 	}

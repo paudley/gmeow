@@ -533,7 +533,11 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 		aggregate.PrimaryEmail != "synthetic.primary@example.test" {
 		t.Fatalf("unexpected contact aggregate: %#v", aggregate)
 	}
-	historical := contactFactValueFor(aggregate.Facts, "email", "synthetic.legacy@example.test")
+	historical := contactFactValueFor(
+		aggregate.Facts,
+		"email",
+		"synthetic.legacy@example.test",
+	)
 	if historical.ValidUntil != "2004-06-30" || !historical.Historical {
 		t.Fatalf("historical email correction not applied: %#v", aggregate.Facts)
 	}
@@ -546,7 +550,10 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sameStrings(resolved.ContactIDs, []string{"https://example.test/#synthetic-contact"}) {
+	if !sameStrings(
+		resolved.ContactIDs,
+		[]string{"https://example.test/#synthetic-contact"},
+	) {
 		t.Fatalf("unexpected contact identity resolution: %#v", resolved)
 	}
 	search, err := index.ContactSearch(ctx, contracts.ContactSearchRequest{
@@ -707,7 +714,8 @@ func TestRDFBundleProjectsLargeLiteralTerm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if aggregate.DisplayName != "Large Literal" || aggregate.PrimaryEmail != "large@example.test" {
+	if aggregate.DisplayName != "Large Literal" ||
+		aggregate.PrimaryEmail != "large@example.test" {
 		t.Fatalf("large literal projection broke contact facts: %#v", aggregate)
 	}
 }
@@ -1161,7 +1169,10 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 	if inputs.Total != 1 ||
 		len(inputs.Results) != 1 ||
 		!strings.Contains(inputs.Results[0].InputText, "Contact: Synthetic Contact") ||
-		!strings.Contains(inputs.Results[0].InputText, "email: synthetic.primary@example.test") ||
+		!strings.Contains(
+			inputs.Results[0].InputText,
+			"email: synthetic.primary@example.test",
+		) ||
 		!strings.Contains(
 			inputs.Results[0].InputText,
 			"Counts: 5 facts, 1 messages, 1 participants",
@@ -1187,7 +1198,10 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 		filteredInputs.Results[0].InputText,
 		"affiliation: Blackcat Informatics",
 	) ||
-		strings.Contains(filteredInputs.Results[0].InputText, "email: synthetic.primary@example.test") {
+		strings.Contains(
+			filteredInputs.Results[0].InputText,
+			"email: synthetic.primary@example.test",
+		) {
 		t.Fatalf("fact kind filter was not applied to analysis input: %#v", filteredInputs)
 	}
 
