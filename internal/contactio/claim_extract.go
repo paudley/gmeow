@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"blackcat.ca/gmeow/internal/embedding"
+	"blackcat.ca/gmeow/internal/ontology"
 	"blackcat.ca/gmeow/internal/rdfbundle"
 )
 
@@ -35,81 +36,70 @@ func claimStatementsFromBody(body string) []claimStatement {
 	out := make([]claimStatement, 0, len(statements))
 	seen := make(map[string]bool, len(statements))
 	for _, statement := range statements {
-		text := claimText(statement)
-		if text == "" {
+		claim, ok := extractClaim(statement)
+		if !ok {
 			continue
 		}
-		hash := embedding.StatementHash(text)
-		if seen[hash] {
+		if seen[claim.Hash] {
 			continue
 		}
-		seen[hash] = true
-		out = append(out, claimStatement{
-			Text:   text,
-			Hash:   hash,
-			Line:   claimLine(statement),
-			IsName: isNamePredicate(statement.Predicate.Value),
-		})
+		seen[claim.Hash] = true
+		out = append(out, claim)
 	}
 
 	return out
 }
 
-// claimText is the embedded/diffed semantic form of a claim: the predicate's
-// local name plus the normalized object value (lower-cased, whitespace-collapsed
-// so case/spacing variants of the same email/name share a vector and a hash).
-func claimText(statement rdfbundle.Statement) string {
-	predicate := predicateLocalName(statement.Predicate.Value)
-	object := normalizeClaimObject(predicate, statement.Object.Value)
-	if predicate == "" || object == "" {
-		return ""
-	}
-
-	return predicate + ": " + object
+// scaffoldingPredicates are the node-structure linking predicates that carry no
+// comparison value (the value lives on the node they point to). They are dropped
+// from the comparison claim set. rdf:type is deliberately NOT here: the entity's
+// type triple (foaf:Person) must persist in the delta for the projection, and it
+// is harmless in idDiff (every person shares it, contextual, low ω).
+var scaffoldingPredicates = map[string]bool{
+	schemaContactPointPred:                   true,
+	schemaAboutPred:                          true,
+	schemaAddressPred:                        true,
+	ontology.FOAF + "accountName":            true,
+	ontology.FOAF + "accountServiceHomepage": true,
 }
 
-// normalizeClaimObject canonicalizes a claim's object value by TYPE so that
-// formatting variants of the same value collapse to ONE cache key (and one
-// embed, and one diffed claim). Without this, "+1 (555) 123-4567" and
-// "5551234567" are distinct — a phone seen in three formats costs three embeds
-// and never converges. The persisted record keeps the original value; only the
-// embedded/keyed text is canonicalized.
-func normalizeClaimObject(predicate, value string) string {
-	switch strings.ToLower(predicate) {
-	case "hastelephone", "telephone", "tel", "phone":
-		return normalizePhoneValue(value)
-	case "hasurl", "url", "homepage", "weblog", "seealso":
-		return normalizeURLValue(value)
-	default:
-		return normalizeFingerprintValue(value)
-	}
-}
-
-// normalizePhoneValue reduces a phone number to its dialable digits, dropping a
-// leading North-American "1" so "+1 555…" and "555…" collapse. Non-numeric junk
-// (extensions, labels) falls back to the generic normalizer.
-func normalizePhoneValue(value string) string {
-	var digits strings.Builder
-	for _, r := range value {
-		if r >= '0' && r <= '9' {
-			digits.WriteRune(r)
-		}
-	}
-	number := digits.String()
-	if len(number) == 11 && number[0] == '1' {
-		number = number[1:]
-	}
-	if number == "" {
-		return normalizeFingerprintValue(value)
+// extractClaim turns one parsed statement into a subject-INDEPENDENT comparison
+// claim, grounded in the canonical ontology. Predicates resolve to their
+// canonical Concept + per-concept value normalization via ontology.ByIRI;
+// node-structure scaffolding is dropped; an un-migrated legacy predicate (a
+// source-namespaced importer term not yet on standards) falls back to its local
+// name + generic normalization so it still resolves until that importer lands.
+func extractClaim(statement rdfbundle.Statement) (claimStatement, bool) {
+	predicate := statement.Predicate.Value
+	if scaffoldingPredicates[predicate] {
+		return claimStatement{}, false
 	}
 
-	return number
-}
+	var concept, value string
+	isName := false
 
-// normalizeURLValue lower-cases and trims a trailing slash so "http://x.com" and
-// "http://x.com/" collapse.
-func normalizeURLValue(value string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), "/")
+	if term, ok := ontology.ByIRI(predicate); ok {
+		concept = term.Concept
+		value = term.Normalize(statement.Object.Value)
+		isName = concept == "name" || concept == "nickname"
+	} else { // legacy fallback (un-migrated importer predicate)
+		concept = predicateLocalName(predicate)
+		value = normalizeFingerprintValue(statement.Object.Value)
+		isName = isNameLocalName(concept)
+	}
+
+	if concept == "" || value == "" {
+		return claimStatement{}, false
+	}
+
+	text := concept + ": " + value
+
+	return claimStatement{
+		Text:   text,
+		Hash:   embedding.StatementHash(text),
+		Line:   claimLine(statement),
+		IsName: isName,
+	}, true
 }
 
 // claimLine is the predicate+object Turtle fragment persisted in a delta record;
@@ -145,10 +135,10 @@ func predicateLocalName(iriValue string) string {
 	return strings.TrimSpace(value)
 }
 
-// isNamePredicate reports whether a predicate denotes a person/org name, so its
-// object also seeds the entity's name-vector set (renames accumulate vectors).
-func isNamePredicate(iriValue string) bool {
-	switch strings.ToLower(predicateLocalName(iriValue)) {
+// isNameLocalName reports whether a (fallback) predicate local-name denotes a
+// person/org name, so its object also seeds the entity's name-vector set.
+func isNameLocalName(localName string) bool {
+	switch strings.ToLower(localName) {
 	case "name", "fn", "fullname", "formattedname", "nick", "nickname":
 		return true
 	default:

@@ -12,12 +12,15 @@ import (
 )
 
 func TestClaimStatementsFromRootedTurtle(t *testing.T) {
-	body := `@prefix gmeow: <https://blackcatinformatics.ca/gmeow/> .
+	// Standard-vocabulary predicates ground on the ontology registry: foaf:name →
+	// concept "name", schema:email → concept "email" (value NormEmail-canonicalized,
+	// mailto: stripped).
+	body := `@prefix schema: <https://schema.org/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
 
 <https://example.test/#paudley> a foaf:Person ;
     foaf:name "Patrick Audley" ;
-    gmeow:hasEmail <mailto:paudley@blackcat.ca> .
+    schema:email <mailto:paudley@blackcat.ca> .
 `
 	statements := claimStatementsFromBody(body)
 	if len(statements) == 0 {
@@ -32,29 +35,31 @@ func TestClaimStatementsFromRootedTurtle(t *testing.T) {
 			if !s.IsName {
 				t.Fatalf("name claim should be flagged IsName: %+v", s)
 			}
-		case "hasEmail: mailto:paudley@blackcat.ca":
+		case "email: paudley@blackcat.ca":
 			sawEmail = true
 		}
 	}
 	if !sawName || !sawEmail {
-		t.Fatalf("missing expected claims; got %+v", statements)
+		t.Fatalf("missing expected canonical claims; got %+v", statements)
 	}
 }
 
-// TestFullChainTurtleToResolution wires the shared parser through claim
-// extraction into the resolver: a rooted graph mints one entity; a vCard-style
-// body for the same person with a new email matches it and yields a 1-claim delta.
+// TestFullChainTurtleToResolution wires the shared parser through registry-
+// grounded extraction into the resolver: a rooted graph mints one entity; a
+// line-oriented body for the same person with a new email matches it and yields
+// a 1-claim delta. Cross-vocabulary by design: index.ttl uses foaf:name, the
+// vCard-style body uses schema:email — both canonicalize to the same concepts.
 func TestFullChainTurtleToResolution(t *testing.T) {
 	ctx := context.Background()
 	resolver := newTestResolver()
 	const threshold = 0.5
 
-	indexTTL := `@prefix gmeow: <https://blackcatinformatics.ca/gmeow/> .
+	indexTTL := `@prefix schema: <https://schema.org/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
 <https://example.test/#paudley> a foaf:Person ;
     foaf:name "Patrick Audley" ;
-    gmeow:hasEmail <mailto:paudley@blackcat.ca> ;
-    gmeow:affiliation "Blackcat Informatics" .
+    schema:email <mailto:paudley@blackcat.ca> ;
+    schema:description "Blackcat Informatics" .
 `
 	first, err := resolver.Resolve(
 		ctx,
@@ -69,10 +74,10 @@ func TestFullChainTurtleToResolution(t *testing.T) {
 		t.Fatalf("index.ttl should mint a new entity, got %+v", first)
 	}
 
-	// A generated line-oriented vCard body: same person, one new email.
-	vcardBody := `<urn:gmeow:observation:abc> <http://xmlns.com/foaf/0.1/name> "Patrick Audley" .
-<urn:gmeow:observation:abc> <https://blackcatinformatics.ca/gmeow/hasEmail> <mailto:paudley@blackcat.ca> .
-<urn:gmeow:observation:abc> <https://blackcatinformatics.ca/gmeow/hasEmail> <mailto:pat@new.example> .
+	// A generated line-oriented body: same person, one new email.
+	vcardBody := `<urn:gmeow:observation:abc> <https://schema.org/name> "Patrick Audley" .
+<urn:gmeow:observation:abc> <https://schema.org/email> <mailto:paudley@blackcat.ca> .
+<urn:gmeow:observation:abc> <https://schema.org/email> <mailto:pat@new.example> .
 `
 	second, err := resolver.Resolve(
 		ctx,
@@ -91,35 +96,38 @@ func TestFullChainTurtleToResolution(t *testing.T) {
 			second.Similarity,
 		)
 	}
-	wantHash := embedding.StatementHash("hasEmail: mailto:pat@new.example")
+	wantHash := embedding.StatementHash("email: pat@new.example")
 	if len(second.NewClaimHashes) != 1 || second.NewClaimHashes[0] != wantHash {
 		t.Fatalf("vcard delta=%+v, want exactly the new email", second.NewClaimHashes)
 	}
 }
 
-func TestNormalizeClaimObjectCollapsesFormattingVariants(t *testing.T) {
-	// Phone variants must collapse to one cache key.
-	a := claimText(
-		rdfStmt("https://blackcatinformatics.ca/gmeow/hasTelephone", "+1 (555) 123-4567"),
-	)
-	b := claimText(
-		rdfStmt("https://blackcatinformatics.ca/gmeow/hasTelephone", "555-123-4567"),
-	)
-	c := claimText(
-		rdfStmt("https://blackcatinformatics.ca/gmeow/hasTelephone", "5551234567"),
-	)
-	if a != b || b != c {
-		t.Fatalf("phone variants did not collapse: %q / %q / %q", a, b, c)
+func TestExtractClaimCanonicalizesFormattingVariants(t *testing.T) {
+	// Phone variants collapse via the ontology phone normalizer (schema:telephone).
+	a, _ := extractClaim(rdfStmt("https://schema.org/telephone", "+1 (555) 123-4567"))
+	b, _ := extractClaim(rdfStmt("https://schema.org/telephone", "555-123-4567"))
+	c, _ := extractClaim(rdfStmt("https://schema.org/telephone", "5551234567"))
+	if a.Text != b.Text || b.Text != c.Text {
+		t.Fatalf("phone variants did not collapse: %q / %q / %q", a.Text, b.Text, c.Text)
 	}
-	// URL trailing slash collapses.
-	u1 := claimText(
-		rdfStmt("http://www.w3.org/2006/vcard/ns#hasURL", "http://Example.com/"),
+	if a.Text != "phone: 5551234567" {
+		t.Fatalf("unexpected canonical phone text: %q", a.Text)
+	}
+
+	// Cross-vocabulary email convergence: foaf:mbox and schema:email → same claim.
+	m, _ := extractClaim(
+		rdfStmt("http://xmlns.com/foaf/0.1/mbox", "mailto:Pat@Example.com"),
 	)
-	u2 := claimText(
-		rdfStmt("http://www.w3.org/2006/vcard/ns#hasURL", "http://example.com"),
-	)
-	if u1 != u2 {
-		t.Fatalf("url variants did not collapse: %q / %q", u1, u2)
+	e, _ := extractClaim(rdfStmt("https://schema.org/email", "PAT@example.com"))
+	if m.Text != e.Text || m.Text != "email: pat@example.com" {
+		t.Fatalf("email variants did not converge: %q / %q", m.Text, e.Text)
+	}
+
+	// Structural scaffolding is dropped (not a comparison claim).
+	if _, ok := extractClaim(
+		rdfStmt("https://schema.org/contactPoint", "mailto:x@y.com"),
+	); ok {
+		t.Fatalf("schema:contactPoint scaffolding must be dropped")
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/oklog/ulid/v2"
+
+	"blackcat.ca/gmeow/internal/ontology"
 )
 
 // ClaimInput is one claim presented to resolution: its identity-bearing text
@@ -156,11 +158,12 @@ func (s *Service) Resolve(
 
 	incoming := make([]scoredClaim, len(claims))
 	for i, claim := range claims {
+		concept := attrs[i] // already the canonical concept (claim_extract grounds on ontology)
 		incoming[i] = scoredClaim{
-			Attr:  attrs[i],
+			Attr:  concept,
 			Value: values[i],
 			Hash:  claim.Hash,
-			Kind:  kindFor(attrs[i]),
+			Kind:  ontology.KindForConcept(concept),
 			Vec:   vectors[i],
 		}
 	}
@@ -194,6 +197,7 @@ func (s *Service) Resolve(
 	}
 
 	s.ledger.add(entity, newClaims)
+	delete(s.entityClaims, entity) // entity changed: drop its memoized scored claims
 
 	// Recall centroid = mean of the entity's claim VALUE vectors (cache hits). It
 	// is only an HNSW blocking key now; idDiff makes the decision, so its drift no
@@ -283,21 +287,34 @@ func (s *Service) idDiffParams(threshold, nameThreshold float64) idDiffParams {
 }
 
 // entityScoredClaims materializes an entity's folded claim set as structured
-// scoredClaims, hydrating each value vector from the claim-vector cache (keyed by
-// StatementHash(value), the value-only embed basis).
+// scoredClaims (canonical attribute, value vector hydrated from the cache). The
+// result is MEMOIZED per entity and invalidated only when the entity gains a
+// claim (see Resolve), so blocking candidates that are unchanged between Resolve
+// calls are not re-hydrated — this keeps idDiff re-ranking cheap at scale.
 func (s *Service) entityScoredClaims(entity string) []scoredClaim {
+	if cached, ok := s.entityClaims[entity]; ok {
+		return cached
+	}
+
 	set := s.ledger.claims[entity]
 	out := make([]scoredClaim, 0, len(set))
 
 	for hash, text := range set {
-		attr, value := splitClaimText(text)
-		claim := scoredClaim{Attr: attr, Value: value, Hash: hash, Kind: kindFor(attr)}
+		concept, value := splitClaimText(text)
+		claim := scoredClaim{
+			Attr:  concept,
+			Value: value,
+			Hash:  hash,
+			Kind:  ontology.KindForConcept(concept),
+		}
 		if vec, ok := s.resolver.Cache().Get(StatementHash(value)); ok {
 			claim.Vec = vec
 		}
 
 		out = append(out, claim)
 	}
+
+	s.entityClaims[entity] = out
 
 	return out
 }

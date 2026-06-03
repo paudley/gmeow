@@ -6,22 +6,20 @@ package embedding
 import (
 	"strings"
 	"time"
+
+	"blackcat.ca/gmeow/internal/ontology"
 )
 
-// AttrKind is the resolution semantics of a claim's attribute, per the formal
-// model in docs/architecture/CONTACT_IDENTITY_RESOLUTION.md §4.1. It determines
-// how a claim contributes to idDiff:
-//   - functional: single-valued-at-a-time (legal name, gender, birthdate); a
-//     co-valid, unsuperseded mismatch is a contradiction (IAC).
-//   - set: multi-valued identifiers (emails, phones, URLs, nicknames); scored by
-//     identifying-mass overlap.
-//   - contextual: free signal (notes, org, title); a soft, low-weight cosine web.
-type AttrKind uint8
+// AttrKind is the resolution semantics of a claim's attribute (functional / set
+// / contextual), per docs/architecture/CONTACT_IDENTITY_RESOLUTION.md §4.1. It is
+// the ontology's Kind — there is one authority for concept→kind
+// (ontology.KindForConcept), so the engine never classifies attributes itself.
+type AttrKind = ontology.Kind
 
 const (
-	KindContextual AttrKind = iota
-	KindFunctional
-	KindSet
+	KindContextual = ontology.Contextual
+	KindFunctional = ontology.Functional
+	KindSet        = ontology.Set
 )
 
 // Interval is a half-open validity window; a zero bound is unbounded on that
@@ -75,36 +73,4 @@ func splitClaimText(text string) (string, string) {
 	}
 
 	return strings.ToLower(strings.TrimSpace(text)), ""
-}
-
-// functionalAttrs are single-valued-at-a-time identity attributes: a
-// contemporaneous, unsuperseded disagreement on one is a real contradiction.
-var functionalAttrs = map[string]bool{
-	"name": true, "fn": true, "fullname": true, "formattedname": true,
-	"gender": true, "sex": true,
-	"bday": true, "birthday": true, "birthdate": true, "deathdate": true,
-}
-
-// setAttrs are multi-valued identifiers: a person legitimately holds several, so
-// they are scored by overlap, never as a contradiction on non-overlap alone.
-var setAttrs = map[string]bool{
-	"email": true, "hasemail": true, "mbox": true,
-	"telephone": true, "hastelephone": true, "tel": true, "phone": true,
-	"url": true, "hasurl": true, "homepage": true, "weblog": true, "seealso": true,
-	"nick": true, "nickname": true,
-	"impp": true, "hasinstantmessage": true, "account": true,
-	"sameas": true, "exactmatch": true,
-}
-
-// kindFor classifies an attribute local-name into its resolution kind. Unknown
-// attributes are contextual (low-weight soft signal) — the safe default.
-func kindFor(attr string) AttrKind {
-	switch {
-	case functionalAttrs[attr]:
-		return KindFunctional
-	case setAttrs[attr]:
-		return KindSet
-	default:
-		return KindContextual
-	}
 }
