@@ -132,6 +132,7 @@ func (s *Service) cacheEntries() map[string]Vector {
 
 func encodeCache(entries map[string]Vector) ([]byte, error) {
 	var buf bytes.Buffer
+
 	err := binary.Write(&buf, binary.LittleEndian, uint32(len(entries)))
 	if err != nil {
 		return nil, err
@@ -163,6 +164,7 @@ func decodeCache(data []byte) (map[string]Vector, error) {
 	reader := bytes.NewReader(data)
 
 	var count uint32
+
 	err := binary.Read(reader, binary.LittleEndian, &count)
 	if err != nil {
 		return nil, err
@@ -188,6 +190,7 @@ func decodeCache(data []byte) (map[string]Vector, error) {
 
 func encodeLedger(ledger *entityLedger) ([]byte, error) {
 	var buf bytes.Buffer
+
 	err := binary.Write(
 		&buf,
 		binary.LittleEndian,
@@ -211,6 +214,7 @@ func encodeLedger(ledger *entityLedger) ([]byte, error) {
 		}
 
 		claims := ledger.claims[entity]
+
 		err = binary.Write(&buf, binary.LittleEndian, uint32(len(claims)))
 		if err != nil {
 			return nil, err
@@ -244,6 +248,7 @@ func decodeLedger(data []byte) (*entityLedger, error) {
 	ledger := newEntityLedger()
 
 	var entityCount uint32
+
 	err := binary.Read(reader, binary.LittleEndian, &entityCount)
 	if err != nil {
 		return nil, err
@@ -292,12 +297,14 @@ func writeVector(w io.Writer, vector Vector) error {
 
 func readVector(r io.Reader) (Vector, error) {
 	var dim uint32
+
 	err := binary.Read(r, binary.LittleEndian, &dim)
 	if err != nil {
 		return nil, err
 	}
 
 	vector := make(Vector, dim)
+
 	err = binary.Read(r, binary.LittleEndian, vector)
 	if err != nil {
 		return nil, err

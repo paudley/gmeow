@@ -273,6 +273,7 @@ func (idx *EntityIndex) Snapshot() ([]byte, error) {
 	defer idx.mu.RUnlock()
 
 	var buf bytes.Buffer
+
 	err := writeArtifactHeader(
 		&buf,
 		idx.dim,
@@ -290,6 +291,7 @@ func (idx *EntityIndex) Snapshot() ([]byte, error) {
 		}
 
 		vectors := idx.entityNames[entity]
+
 		err = binary.Write(&buf, binary.LittleEndian, uint32(len(vectors)))
 		if err != nil {
 			return nil, err

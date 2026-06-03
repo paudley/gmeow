@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -29,7 +30,13 @@ func newEmbeddingServeCommand(
 	configPath *string,
 	use string,
 ) *cobra.Command {
-	var stateFile string
+	var (
+		stateFile    string
+		manageModel  bool
+		ollamaHost   string
+		ollamaModel  string
+		ollamaModels string
+	)
 
 	command := &cobra.Command{
 		Use:   use,
@@ -46,12 +53,40 @@ func newEmbeddingServeCommand(
 				return err
 			}
 
-			embedConfig := loaded.Config.Analysis.Embeddings
-			embedder, err := embedding.NewHTTPEmbedder(
-				embedConfig.Endpoint,
-				embedConfig.Model,
-				nil,
-			)
+			endpointURL := loaded.Config.Analysis.Embeddings.Endpoint
+			modelName := loaded.Config.Analysis.Embeddings.Model
+
+			// --manage-model: gmeow OWNS the embedding backend. Supervise our own
+			// `ollama serve` (auto-restarting on crash, which the hand-run server
+			// didn't), ensure the model is pulled, and point the embedder at it. No
+			// operator-provided endpoint required.
+			if manageModel {
+				backend, beErr := embedding.NewOllamaBackend(embedding.OllamaConfig{
+					Host:      ollamaHost,
+					Model:     ollamaModel,
+					ModelsDir: ollamaModels,
+				})
+				if beErr != nil {
+					return beErr
+				}
+				go func() { _ = backend.Run(ctx) }()
+				_, _ = fmt.Fprintf(
+					out,
+					"embedding serve: managing ollama at %s (model %s)…\n",
+					backend.Endpoint(),
+					backend.Model(),
+				)
+				if hErr := backend.WaitHealthy(ctx, 2*time.Minute); hErr != nil {
+					return hErr
+				}
+				if mErr := backend.EnsureModel(ctx); mErr != nil {
+					return mErr
+				}
+				endpointURL = backend.Endpoint()
+				modelName = backend.Model()
+			}
+
+			embedder, err := embedding.NewHTTPEmbedder(endpointURL, modelName, nil)
 			if err != nil {
 				return fmt.Errorf("configure embedding endpoint: %w", err)
 			}
@@ -59,7 +94,7 @@ func newEmbeddingServeCommand(
 			service := embedding.NewService(
 				embedding.NewResolver(embedding.NewMemoryCache(), embedder),
 				embedding.NewEntityIndex(embedding.FullDim, embedding.CoarseDim),
-				embedConfig.Model,
+				modelName,
 			)
 
 			// Restore the persisted resolution state (cache + entity index +
@@ -82,8 +117,8 @@ func newEmbeddingServeCommand(
 				"embedding serve: %s %s (endpoint %s, model %s, state %q)\n",
 				endpoint.Network,
 				endpoint.Address,
-				embedConfig.Endpoint,
-				embedConfig.Model,
+				endpointURL,
+				modelName,
 				stateFile,
 			); err != nil {
 				return err
@@ -101,6 +136,19 @@ func newEmbeddingServeCommand(
 		"path to persist the resolution state (claim cache + entity index + ledger); "+
 			"loaded at startup, snapshotted on shutdown. Empty = in-memory only",
 	)
+	command.Flags().BoolVar(
+		&manageModel,
+		"manage-model",
+		false,
+		"gmeow supervises its own ollama embedding backend (auto-restart on crash, "+
+			"auto-pull the model) instead of requiring an operator-provided endpoint",
+	)
+	command.Flags().
+		StringVar(&ollamaHost, "ollama-host", "", "OLLAMA_HOST for the managed backend (default 127.0.0.1:11434)")
+	command.Flags().
+		StringVar(&ollamaModel, "ollama-model", "", "ollama embedding model tag (default nomic-embed-text)")
+	command.Flags().
+		StringVar(&ollamaModels, "ollama-models-dir", "", "OLLAMA_MODELS dir so weights live under gmeow's control (default: ollama's own)")
 
 	return command
 }

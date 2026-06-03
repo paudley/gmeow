@@ -1,0 +1,59 @@
+# gmeow-controlled embedding backend: a pinned Ollama serving nomic-embed-text.
+#
+# This is the Docker alternative to `gmeow embedding-serve --manage-model`. It
+# gives a reproducible, auto-restarting embedding endpoint that gmeow owns,
+# instead of requiring an operator-run model server (the thing that kept
+# crashing). gmeow's EMBEDDING service points its HTTP embedder at it.
+#
+#   make embedding-up      # start + pull the model
+#   make embedding-down    # stop
+#
+# Then in gmeow.toml:
+#   [analysis.embeddings]
+#   endpoint = "http://127.0.0.1:11434/v1/embeddings"
+#   model    = "nomic-embed-text"
+#
+# GPU: Ollama auto-detects NVIDIA/AMD/Metal. For NVIDIA in Docker, install the
+# nvidia-container-toolkit and uncomment the `deploy.resources` block below.
+# Without it, Ollama runs on CPU — slower on the cold first pass, but stable, and
+# gmeow's claim-vector cache makes everything after near-instant.
+
+services:
+  embedding:
+    # PIN this to a specific tag (e.g. ollama/ollama:0.6.8) for reproducibility.
+    image: ollama/ollama:latest
+    container_name: gmeow-embedding
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - gmeow-ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # GPU (NVIDIA) — requires nvidia-container-toolkit on the host:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # One-shot: wait for the server to be healthy, then pull the embedding model.
+  model-init:
+    image: ollama/ollama:latest
+    container_name: gmeow-embedding-init
+    depends_on:
+      embedding:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "embedding:11434"
+    entrypoint: ["/bin/sh", "-c", "ollama pull ${GMEOW_EMBED_MODEL:-nomic-embed-text}"]
+    restart: "no"
+
+volumes:
+  gmeow-ollama-models:

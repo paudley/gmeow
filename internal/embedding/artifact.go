@@ -74,6 +74,7 @@ func writeLenBytes(w io.Writer, data []byte) error {
 
 func readLenBytes(r io.Reader) ([]byte, error) {
 	var n uint64
+
 	err := binary.Read(r, binary.LittleEndian, &n)
 	if err != nil {
 		return nil, err
