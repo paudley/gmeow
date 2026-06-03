@@ -22,16 +22,22 @@ run, points its embedder at it, and restarts it if it dies. Flags:
 (default `nomic-embed-text`), `--ollama-models-dir` (put weights under gmeow's
 control).
 
-## Option B — Docker Compose
+## Option B — Docker Compose (the working path on Arch/CachyOS)
 
-Reproducible, pinned, isolated. From the repo root:
+Reproducible, pinned, isolated, and — importantly — it ships a **complete**
+runtime. The Arch/CachyOS repo `ollama` package (0.30.0) is only the Go CLI; it
+carries no `llama-server` inference runner, so `--manage-model` against the
+pacman binary fails with `error starting llama-server: binary not found`. The
+Docker image (and the upstream `install.sh`) bundle the runner + GPU libs.
+
+From the repo root:
 
 ```
 make embedding-up      # start Ollama + pull the model
 make embedding-down    # stop
 ```
 
-Then point gmeow at it (already the default in `gmeow.toml`):
+Then point gmeow at it:
 
 ```toml
 [analysis.embeddings]
@@ -39,9 +45,14 @@ endpoint = "http://127.0.0.1:11434/v1/embeddings"
 model    = "nomic-embed-text"
 ```
 
-and run a plain `gmeow embedding-serve` (no `--manage-model`).
+and run `gmeow embedding-serve` (no `--manage-model`). Because gmeow controls
+this backend, drive it hard: `--embed-batch-size 128 --embed-batch-tokens 6000
+--embed-pace-ms 0`.
 
-GPU: Ollama auto-detects accelerators. For NVIDIA-in-Docker, install
-`nvidia-container-toolkit` and uncomment the `deploy.resources` block in
-`docker-compose.yml`. CPU is the portable default — stable, just slower on the
-one-time cold embed (the claim-vector cache makes re-runs near-instant).
+GPU: `docker-compose.yml` is wired for **AMD ROCm** — image `ollama/ollama:rocm`,
+`/dev/kfd` + `/dev/dri` passed in, `render`/`video` groups joined, and
+`HSA_OVERRIDE_GFX_VERSION=11.0.0` so ROCm accepts the new gfx1151 (Strix Halo /
+Radeon 8060S) by treating it as gfx1100. For NVIDIA, switch to
+`ollama/ollama:latest` + the nvidia runtime; for CPU-only, use `:latest` and drop
+the `devices`/`group_add`/`HSA` block. CPU is stable, just slower on the one-time
+cold embed (the claim-vector cache makes re-runs near-instant).

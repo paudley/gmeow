@@ -30,33 +30,74 @@ const (
 	defaultEmbedTimeout = 60 * time.Second
 	// maxTextRunes caps a single claim's embedded text.
 	maxTextRunes = 1600
-	// maxBatchTexts / maxBatchTokenEst keep each request SMALL — well under the
-	// endpoint's 8192-token physical batch — so per-request memory on the model
-	// server stays low. Smaller requests respond faster and are far less likely to
-	// stall or OOM the server under a sustained import.
-	maxBatchTexts    = 12
-	maxBatchTokenEst = 1500
-	// defaultMinInterval paces requests so we never hammer the endpoint back-to-
-	// back; the model server gets breathing room between batches.
+	// defaultBatchTexts / defaultBatchTokenEst keep each request conservatively
+	// small for an UNKNOWN endpoint (well under the 8192-token physical batch).
+	// When gmeow controls a dedicated backend, raise these (and drop the pace) for
+	// throughput — see EmbedTuning.
+	defaultBatchTexts    = 12
+	defaultBatchTokenEst = 1500
+	// defaultMinInterval paces requests so we never hammer an unknown endpoint
+	// back-to-back. With a controlled backend this can go to zero.
 	defaultMinInterval = 200 * time.Millisecond
 )
 
-// HTTPEmbedder calls the local embedding endpoint (nomic-embed-text-v1.5,
+// EmbedTuning controls request batching and pacing. Conservative defaults suit
+// an unknown/shared endpoint; with a gmeow-controlled dedicated backend, bigger
+// batches and no pacing are much faster and safe.
+type EmbedTuning struct {
+	BatchTexts    int           // max texts per request (default 12)
+	BatchTokenEst int           // max estimated tokens per request (default 1500)
+	MinInterval   time.Duration // min wait between requests (default 200ms; 0 = none)
+}
+
+func (t EmbedTuning) withDefaults() EmbedTuning {
+	if t.BatchTexts <= 0 {
+		t.BatchTexts = defaultBatchTexts
+	}
+	if t.BatchTokenEst <= 0 {
+		t.BatchTokenEst = defaultBatchTokenEst
+	}
+	if t.MinInterval < 0 {
+		t.MinInterval = 0 // explicit "no pacing"
+	}
+
+	return t
+}
+
+// HTTPEmbedder calls the local embedding endpoint (nomic-embed-text,
 // OpenAI-style {model,input}->{data:[{embedding}]}). It sends the whole batch as
 // an array input and returns vectors in input order. This is the only component
 // that touches the model endpoint; everything else works off the cache.
 type HTTPEmbedder struct {
-	lastCall    time.Time
-	client      *http.Client
-	endpoint    string
-	model       string
-	minInterval time.Duration
-	paceMu      sync.Mutex
+	lastCall      time.Time
+	client        *http.Client
+	endpoint      string
+	model         string
+	minInterval   time.Duration
+	batchTexts    int
+	batchTokenEst int
+	paceMu        sync.Mutex
 }
 
+// NewHTTPEmbedder builds an embedder with conservative default tuning (small
+// batches + 200ms pacing) suited to an unknown endpoint.
 func NewHTTPEmbedder(
 	endpoint, model string,
 	client *http.Client,
+) (*HTTPEmbedder, error) {
+	return NewHTTPEmbedderTuned(
+		endpoint,
+		model,
+		client,
+		EmbedTuning{MinInterval: defaultMinInterval},
+	)
+}
+
+// NewHTTPEmbedderTuned builds an embedder with explicit batching/pacing tuning.
+func NewHTTPEmbedderTuned(
+	endpoint, model string,
+	client *http.Client,
+	tuning EmbedTuning,
 ) (*HTTPEmbedder, error) {
 	if endpoint == "" {
 		return nil, errors.New("embedding endpoint is required")
@@ -70,11 +111,15 @@ func NewHTTPEmbedder(
 		client = &http.Client{Timeout: defaultEmbedTimeout}
 	}
 
+	tuning = tuning.withDefaults()
+
 	return &HTTPEmbedder{
-		endpoint:    endpoint,
-		model:       model,
-		client:      client,
-		minInterval: defaultMinInterval,
+		endpoint:      endpoint,
+		model:         model,
+		client:        client,
+		minInterval:   tuning.MinInterval,
+		batchTexts:    tuning.BatchTexts,
+		batchTokenEst: tuning.BatchTokenEst,
 	}, nil
 }
 
@@ -113,7 +158,7 @@ func (e *HTTPEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, err
 	}
 
 	out := make([]Vector, 0, len(texts))
-	batch := make([]string, 0, maxBatchTexts)
+	batch := make([]string, 0, e.batchTexts)
 	tokenEst := 0
 	flush := func() error {
 		if len(batch) == 0 {
@@ -137,7 +182,7 @@ func (e *HTTPEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, err
 
 		est := len([]rune(text))/3 + 1
 		if len(batch) > 0 &&
-			(len(batch) >= maxBatchTexts || tokenEst+est > maxBatchTokenEst) {
+			(len(batch) >= e.batchTexts || tokenEst+est > e.batchTokenEst) {
 			err := flush()
 			if err != nil {
 				return nil, err

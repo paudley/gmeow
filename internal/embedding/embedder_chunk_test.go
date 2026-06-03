@@ -49,7 +49,7 @@ func TestHTTPEmbedderChunksLargeBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const n = maxBatchTexts*3 + 7
+	const n = defaultBatchTexts*3 + 7
 	texts := make([]string, n)
 	for i := range texts {
 		texts[i] = fmt.Sprintf("claim number %d", i)
@@ -61,11 +61,11 @@ func TestHTTPEmbedderChunksLargeBatches(t *testing.T) {
 	if len(vectors) != n {
 		t.Fatalf("got %d vectors, want %d", len(vectors), n)
 	}
-	if maxReqSize > maxBatchTexts {
+	if maxReqSize > defaultBatchTexts {
 		t.Fatalf(
 			"a request carried %d inputs, exceeding the cap %d",
 			maxReqSize,
-			maxBatchTexts,
+			defaultBatchTexts,
 		)
 	}
 }

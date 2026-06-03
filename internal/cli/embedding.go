@@ -31,11 +31,14 @@ func newEmbeddingServeCommand(
 	use string,
 ) *cobra.Command {
 	var (
-		stateFile    string
-		manageModel  bool
-		ollamaHost   string
-		ollamaModel  string
-		ollamaModels string
+		stateFile        string
+		manageModel      bool
+		ollamaHost       string
+		ollamaModel      string
+		ollamaModels     string
+		embedBatchSize   int
+		embedBatchTokens int
+		embedPaceMs      int
 	)
 
 	command := &cobra.Command{
@@ -86,7 +89,29 @@ func newEmbeddingServeCommand(
 				modelName = backend.Model()
 			}
 
-			embedder, err := embedding.NewHTTPEmbedder(endpointURL, modelName, nil)
+			// Tuning: when gmeow controls the backend (--manage-model) it is a
+			// dedicated server, so default to big batches + no pacing for
+			// throughput; otherwise stay conservative for an unknown endpoint.
+			// Explicit flags override either default.
+			tuning := embedding.EmbedTuning{
+				BatchTexts:    12,
+				BatchTokenEst: 1500,
+				MinInterval:   200 * time.Millisecond,
+			}
+			if manageModel {
+				tuning = embedding.EmbedTuning{BatchTexts: 128, BatchTokenEst: 6000, MinInterval: 0}
+			}
+			if command.Flags().Changed("embed-batch-size") {
+				tuning.BatchTexts = embedBatchSize
+			}
+			if command.Flags().Changed("embed-batch-tokens") {
+				tuning.BatchTokenEst = embedBatchTokens
+			}
+			if command.Flags().Changed("embed-pace-ms") {
+				tuning.MinInterval = time.Duration(embedPaceMs) * time.Millisecond
+			}
+
+			embedder, err := embedding.NewHTTPEmbedderTuned(endpointURL, modelName, nil, tuning)
 			if err != nil {
 				return fmt.Errorf("configure embedding endpoint: %w", err)
 			}
@@ -149,6 +174,12 @@ func newEmbeddingServeCommand(
 		StringVar(&ollamaModel, "ollama-model", "", "ollama embedding model tag (default nomic-embed-text)")
 	command.Flags().
 		StringVar(&ollamaModels, "ollama-models-dir", "", "OLLAMA_MODELS dir so weights live under gmeow's control (default: ollama's own)")
+	command.Flags().
+		IntVar(&embedBatchSize, "embed-batch-size", 0, "max texts per embedding request (overrides the auto default)")
+	command.Flags().
+		IntVar(&embedBatchTokens, "embed-batch-tokens", 0, "max estimated tokens per embedding request (overrides the auto default)")
+	command.Flags().
+		IntVar(&embedPaceMs, "embed-pace-ms", 0, "min ms between embedding requests; 0 = none (overrides the auto default)")
 
 	return command
 }
