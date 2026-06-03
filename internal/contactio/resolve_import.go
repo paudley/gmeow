@@ -5,6 +5,7 @@ package contactio
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +16,11 @@ import (
 // EntityPrefix is the IRI namespace for resolved contact entities; the local
 // part is the entity ULID.
 const EntityPrefix = "urn:gmeow:entity:"
+
+// ObservationPrefix is the IRI namespace for the entity-independent observation
+// identity used as the FILESTORE source-dedup ExternalID; the local part is the
+// observation fingerprint (a hash of the parsed claim set).
+const ObservationPrefix = "urn:gmeow:obs:"
 
 // Resolver is the ingest-time entity-resolution surface ResolveImport needs. It
 // is satisfied by the in-process *embedding.Service and by the gRPC
@@ -31,12 +37,18 @@ type Resolver interface {
 // NOOP (no new information for its entity) or an immutable delta record
 // (entity-subjected Turtle to persist in FILESTORE).
 type ResolvedRecord struct {
-	Entity  string
-	Content string
-	Facets  []contracts.Facet
-	IsNoop  bool
-	IsNew   bool
-	Delta   int
+	Entity string
+	// ObsFingerprint is the entity-INDEPENDENT identity of the observation: a
+	// stable hash of the parsed claim set, computed before resolution. It keys
+	// FILESTORE source-dedup so that re-ingesting the same observation is a NOOP
+	// regardless of which entity it resolves to (resolution may drift); identity
+	// is a separate, latent question (see docs/architecture/CONTACT_IDENTITY_RESOLUTION.md).
+	ObsFingerprint string
+	Content        string
+	Facets         []contracts.Facet
+	IsNoop         bool
+	IsNew          bool
+	Delta          int
 }
 
 // ResolveImport parses one input into logical-contact records, resolves each
@@ -67,6 +79,7 @@ func ResolveImport(
 	entities := []string{}
 	for _, delta := range deltas {
 		statements := claimStatementsFromBody(delta.Content)
+		obsFingerprint := observationFingerprint(statements)
 		resolution, resolveErr := resolver.Resolve(
 			ctx,
 			claimInputs(statements),
@@ -83,14 +96,19 @@ func ResolveImport(
 		}
 
 		if resolution.IsNoop {
-			records = append(records, ResolvedRecord{Entity: resolution.Entity, IsNoop: true})
+			records = append(records, ResolvedRecord{
+				Entity:         resolution.Entity,
+				ObsFingerprint: obsFingerprint,
+				IsNoop:         true,
+			})
 
 			continue
 		}
 
 		delta := deltaClaims(statements, resolution.NewClaimHashes)
 		records = append(records, ResolvedRecord{
-			Entity: resolution.Entity,
+			Entity:         resolution.Entity,
+			ObsFingerprint: obsFingerprint,
 			Content: buildEntityDeltaRecord(
 				resolution.Entity,
 				delta,
@@ -121,6 +139,22 @@ func claimInputs(statements []claimStatement) []embedding.ClaimInput {
 	}
 
 	return inputs
+}
+
+// observationFingerprint is the entity-independent identity of a parsed
+// observation: a stable hash of its sorted claim hashes. Two ingests of the same
+// observation (same claim set) yield the same fingerprint regardless of import
+// time or which entity they resolve to, so FILESTORE source-dedup collapses
+// redundant re-ingests to a NOOP. The empty-claim observation hashes to a fixed
+// sentinel rather than colliding with other empties at the source layer.
+func observationFingerprint(statements []claimStatement) string {
+	hashes := make([]string, len(statements))
+	for i, s := range statements {
+		hashes[i] = s.Hash
+	}
+	sort.Strings(hashes)
+
+	return embedding.StatementHash(strings.Join(hashes, "\n"))
 }
 
 // deltaClaims selects the statements whose hashes the resolver reported as new,

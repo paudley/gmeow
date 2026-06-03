@@ -876,13 +876,18 @@ func importContactPath(
 			continue
 		}
 		fingerprint := contactDeltaFingerprint(record.Content)
+		// Source-dedup key is the ENTITY-INDEPENDENT observation fingerprint, not
+		// the resolved entity: a re-ingest of the same observation collapses to a
+		// NOOP even if resolution drifts to a different entity. Identity is a
+		// separate, latent question (docs/architecture/CONTACT_IDENTITY_RESOLUTION.md).
+		externalID := contactio.ObservationPrefix + record.ObsFingerprint
 		digest, wasCreated, ingestErr := ingestService.Ingest(ctx, source.IngestObject{
 			ObservedAt:   observedAt,
 			Reader:       strings.NewReader(record.Content),
 			MediaType:    contactio.MediaTypeTurtle,
 			SourceKind:   contactio.ImportSourceKind,
 			SourceName:   sourceName,
-			ExternalID:   contactio.EntityPrefix + record.Entity + ":" + fingerprint[:16],
+			ExternalID:   externalID,
 			ExternalVer:  fingerprint,
 			SourceHint:   filepath.ToSlash(path),
 			ContentRoles: []string{contracts.RDFSourceBundleRole, contracts.ContactSourceRole},

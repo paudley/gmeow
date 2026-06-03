@@ -5,14 +5,20 @@ package embedding
 
 import (
 	"context"
+	"math"
 	"sort"
+	"strings"
 
 	"github.com/oklog/ulid/v2"
 )
 
 // ClaimInput is one claim presented to resolution: its identity-bearing text
-// (embedded + pooled), a stable subject-independent hash (for the delta diff),
-// and whether it is a name claim (name claims seed the entity's name-vector set).
+// (embedded + grouped), a stable subject-independent hash (for the delta diff),
+// and whether it is a name claim (transitional; kind is now derived from the
+// attribute — see claim.go). Validity/source/supersedes ride as RDF* annotations
+// on the persisted record and are not yet threaded over the wire (the temporal
+// and supersedes gates degrade to no-ops until they are — see
+// docs/architecture/CONTACT_IDENTITY_RESOLUTION.md §5).
 type ClaimInput struct {
 	Text   string
 	Hash   string
@@ -31,15 +37,20 @@ type Resolution struct {
 	IsNoop         bool
 }
 
-// entityLedger is the materialized per-entity claim set (hash -> text), used to
-// diff incoming claims and re-pool the centroid. Rebuildable from the record
-// log, so it is a cache, not source truth.
+// entityLedger is the materialized per-entity claim set (hash -> text) plus a
+// corpus document-frequency index (value hash -> # of distinct entities holding
+// it) used for ω/IDF weighting. Rebuildable from the record log, so it is a
+// cache, not source truth; df is recomputed on load.
 type entityLedger struct {
 	claims map[string]map[string]string
+	df     map[string]int
 }
 
 func newEntityLedger() *entityLedger {
-	return &entityLedger{claims: make(map[string]map[string]string)}
+	return &entityLedger{
+		claims: make(map[string]map[string]string),
+		df:     make(map[string]int),
+	}
 }
 
 func (l *entityLedger) has(entity, hash string) bool {
@@ -56,13 +67,32 @@ func (l *entityLedger) add(entity string, claims []ClaimInput) {
 	}
 
 	for _, claim := range claims {
+		if _, existed := set[claim.Hash]; !existed {
+			l.df[claim.Hash]++ // a new (entity, value) pair raises document frequency
+		}
+
 		set[claim.Hash] = claim.Text
 	}
 }
 
-// texts returns the entity's full claim-text set in a stable order (sorted by
-// hash) so the re-pooled centroid is deterministic.
-func (l *entityLedger) texts(entity string) []string {
+// docFreq is the number of distinct entities asserting a value (its corpus
+// document frequency), the denominator of IDF.
+func (l *entityLedger) docFreq(hash string) int { return l.df[hash] }
+
+// rebuildDF recomputes the document-frequency index from the claim sets. Called
+// after a bulk load where df was not serialized.
+func (l *entityLedger) rebuildDF() {
+	l.df = make(map[string]int)
+	for _, set := range l.claims {
+		for hash := range set {
+			l.df[hash]++
+		}
+	}
+}
+
+// sortedClaimTexts returns the entity's claim texts in a stable order (sorted by
+// hash) so derived centroids/value lists are deterministic.
+func (l *entityLedger) sortedClaimTexts(entity string) []string {
 	set := l.claims[entity]
 
 	hashes := make([]string, 0, len(set))
@@ -81,11 +111,12 @@ func (l *entityLedger) texts(entity string) []string {
 }
 
 // Resolve runs the ingest-time match→delta→NOOP decision for one record's
-// claims: pool them into a candidate centroid, match against existing entity
-// centroids (>= threshold matches; else mint a ULID), diff against the entity's
-// ledger, and — unless it is a NOOP — append the new claims to the ledger and
-// re-pool the centroid (plus any new name vectors) in the index. The caller
-// persists the returned NewClaimHashes as an immutable delta record.
+// claims using the idDiff model (docs/architecture/CONTACT_IDENTITY_RESOLUTION.md
+// §4.1): embed the claim values, BLOCK candidate entities with the HNSW index
+// (centroid is a recall key only, no longer the decision), then score each
+// candidate with the signed, weighted idDiff and merge into the best one that
+// clears the gate without an IAC veto — else mint a new ULID. Unchanged: the
+// ledger diff → NOOP, and persisting the new claims as an immutable delta record.
 func (s *Service) Resolve(
 	ctx context.Context,
 	claims []ClaimInput,
@@ -95,53 +126,56 @@ func (s *Service) Resolve(
 		return Resolution{IsNoop: true}, nil
 	}
 
-	if nameThreshold < threshold {
-		nameThreshold = threshold // names must agree at least as strongly as centroids
-	}
-
 	s.resolveMu.Lock()
 	defer s.resolveMu.Unlock()
 
-	texts := make([]string, len(claims))
+	// Idempotency short-circuit: an IDENTICAL observation (same claim set) always
+	// resolves to the same entity as a NOOP. This makes resolution deterministic
+	// regardless of centroid drift or blocking recall, so a re-ingest never mints
+	// a duplicate (the entity-resolution counterpart of the FILESTORE source
+	// dedup; see docs/architecture/CONTACT_IDENTITY_RESOLUTION.md §5).
+	obs := observationKey(claims)
+	if entity, ok := s.seenObs[obs]; ok {
+		return Resolution{Entity: entity, IsNoop: true}, nil
+	}
+
+	// Embed the VALUE alone (not "attr: value"): idDiff compares values within an
+	// attribute, so the predicate prefix would only inflate cosine between two
+	// distinct identifiers (every "email: …" shares the prefix). The claim-vector
+	// cache is thus keyed by StatementHash(value).
+	attrs := make([]string, len(claims))
+	values := make([]string, len(claims))
 	for i, claim := range claims {
-		texts[i] = claim.Text
+		attrs[i], values[i] = splitClaimText(claim.Text)
 	}
 
-	centroid, _, err := s.resolver.Pool(ctx, texts, nil)
+	vectors, _, err := s.resolver.Vectors(ctx, values)
 	if err != nil {
 		return Resolution{}, err
 	}
 
-	entity := ""
-	similarity := 0.0
-	isNew := false
+	incoming := make([]scoredClaim, len(claims))
+	for i, claim := range claims {
+		incoming[i] = scoredClaim{
+			Attr:  attrs[i],
+			Value: values[i],
+			Hash:  claim.Hash,
+			Kind:  kindFor(attrs[i]),
+			Vec:   vectors[i],
+		}
+	}
 
-	matches, err := s.index.Search(centroid, 1)
+	entity, similarity, isNew, err := s.resolveEntity(
+		incoming,
+		vectors,
+		threshold,
+		nameThreshold,
+	)
 	if err != nil {
 		return Resolution{}, err
 	}
 
-	if len(matches) > 0 && matches[0].Similarity >= threshold {
-		// A centroid match must also AGREE ON NAME when both sides carry one:
-		// related-but-distinct entities (a person and their org) share enough
-		// context to exceed the centroid threshold, but their names diverge. The
-		// name-vector layer rejects those false merges. Absent names on either
-		// side, the centroid match stands.
-		agrees, nameErr := s.nameAgrees(ctx, matches[0].Entity, claims, nameThreshold)
-		if nameErr != nil {
-			return Resolution{}, nameErr
-		}
-
-		if agrees {
-			entity = matches[0].Entity
-			similarity = matches[0].Similarity
-		}
-	}
-
-	if entity == "" {
-		entity = s.newID()
-		isNew = true
-	}
+	s.seenObs[obs] = entity // memoize the decision for identical re-ingests
 
 	var (
 		newClaims []ClaimInput
@@ -161,17 +195,15 @@ func (s *Service) Resolve(
 
 	s.ledger.add(entity, newClaims)
 
-	newCentroid, _, err := s.resolver.Pool(ctx, s.ledger.texts(entity), nil)
+	// Recall centroid = mean of the entity's claim VALUE vectors (cache hits). It
+	// is only an HNSW blocking key now; idDiff makes the decision, so its drift no
+	// longer corrupts matching.
+	newCentroid, _, err := s.resolver.Pool(ctx, s.entityValues(entity), nil)
 	if err != nil {
 		return Resolution{}, err
 	}
 
-	names, err := s.nameVectors(ctx, entity, newClaims)
-	if err != nil {
-		return Resolution{}, err
-	}
-
-	if err := s.Upsert(entity, newCentroid, names); err != nil {
+	if err := s.Upsert(entity, newCentroid, nil); err != nil {
 		return Resolution{}, err
 	}
 
@@ -183,91 +215,118 @@ func (s *Service) Resolve(
 	}, nil
 }
 
-// nameAgrees reports whether the incoming record's name(s) are consistent with
-// the candidate entity's name-vector set. It returns true when either side has
-// no name to compare (the centroid match then stands), and otherwise requires
-// the best incoming-vs-entity name similarity to meet the threshold. This is the
-// guard that keeps a person and their tightly-coupled org from merging on
-// centroid overlap alone.
-func (s *Service) nameAgrees(
-	ctx context.Context,
-	entity string,
-	claims []ClaimInput,
-	threshold float64,
-) (bool, error) {
-	var nameTexts []string
-
-	for _, claim := range claims {
-		if claim.IsName {
-			nameTexts = append(nameTexts, claim.Text)
-		}
-	}
-
-	if len(nameTexts) == 0 {
-		return true, nil
-	}
-
-	vectors, _, err := s.Embed(ctx, nameTexts)
+// resolveEntity blocks candidate entities via the HNSW index, scores each with
+// idDiff, and returns the best entity clearing the merge gate (or a freshly
+// minted ULID). The greedy single-assignment here is the ingest path; the
+// deferred global partition (ScoreEdges) re-clusters downstream.
+func (s *Service) resolveEntity(
+	incoming []scoredClaim,
+	vectors []Vector,
+	threshold, nameThreshold float64,
+) (entity string, similarity float64, isNew bool, err error) {
+	centroid, err := MeanPool(vectors, nil)
 	if err != nil {
-		return false, err
+		return "", 0, false, err
 	}
 
-	sawEntityName := false
-	best := -2.0
-
-	for _, vector := range vectors {
-		sim, found := s.index.NearestName(entity, vector, 0)
-		if !found {
-			continue // the entity has no name vectors yet; cannot disconfirm
-		}
-
-		sawEntityName = true
-
-		if sim > best {
-			best = sim
-		}
+	candidates, err := s.index.Search(centroid, s.blockingTopN)
+	if err != nil {
+		return "", 0, false, err
 	}
 
-	if !sawEntityName {
-		return true, nil
-	}
+	params := s.idDiffParams(threshold, nameThreshold)
 
-	return best >= threshold, nil
-}
+	bestEntity := ""
+	bestScore := s.mergeGate // must clear the gate to win
+	bestConfidence := 0.0
 
-// nameVectors embeds the name claims among the delta and returns them as entity
-// name vectors (keyed entity+hash). Renames accumulate name vectors per entity.
-func (s *Service) nameVectors(
-	ctx context.Context,
-	entity string,
-	delta []ClaimInput,
-) ([]NamedVec, error) {
-	var texts, keys []string
-
-	for _, claim := range delta {
-		if !claim.IsName {
+	for _, candidate := range candidates {
+		result := idDiff(incoming, s.entityScoredClaims(candidate.Entity), params)
+		if result.Veto {
 			continue
 		}
 
-		texts = append(texts, claim.Text)
-		keys = append(keys, entity+":"+claim.Hash)
+		if result.Score >= bestScore {
+			bestEntity = candidate.Entity
+			bestScore = result.Score
+			bestConfidence = result.Confidence
+		}
 	}
 
-	if len(texts) == 0 {
-		return nil, nil
+	if bestEntity != "" {
+		return bestEntity, bestConfidence, false, nil
 	}
 
-	vectors, _, err := s.Embed(ctx, texts)
-	if err != nil {
-		return nil, err
+	return s.newID(), 0, true, nil
+}
+
+// idDiffParams builds the per-call comparison parameters. The CLI's
+// match-threshold becomes the set/identifier value-match cosine; name-threshold
+// becomes the (stricter) functional value-match cosine — so name variants still
+// match but distinct names contradict.
+func (s *Service) idDiffParams(threshold, nameThreshold float64) idDiffParams {
+	entities := s.index.Len()
+	docFreq := s.ledger.docFreq
+
+	return idDiffParams{
+		TauSet:          threshold,
+		TauFunc:         math.Max(nameThreshold, threshold),
+		TauCtx:          s.tauCtx,
+		Lambda:          s.lambda,
+		SetPenalty:      s.setPenalty,
+		VetoMass:        s.vetoMass,
+		ObservationMode: true,
+		W: func(c scoredClaim) float64 {
+			return omega(c.Kind, docFreq(c.Hash), entities)
+		},
+	}
+}
+
+// entityScoredClaims materializes an entity's folded claim set as structured
+// scoredClaims, hydrating each value vector from the claim-vector cache (keyed by
+// StatementHash(value), the value-only embed basis).
+func (s *Service) entityScoredClaims(entity string) []scoredClaim {
+	set := s.ledger.claims[entity]
+	out := make([]scoredClaim, 0, len(set))
+
+	for hash, text := range set {
+		attr, value := splitClaimText(text)
+		claim := scoredClaim{Attr: attr, Value: value, Hash: hash, Kind: kindFor(attr)}
+		if vec, ok := s.resolver.Cache().Get(StatementHash(value)); ok {
+			claim.Vec = vec
+		}
+
+		out = append(out, claim)
 	}
 
-	names := make([]NamedVec, len(vectors))
-	for i, vector := range vectors {
-		names[i] = NamedVec{Key: keys[i], Vector: vector}
+	return out
+}
+
+// entityValues returns an entity's claim VALUES (the value-only embed inputs) in
+// a stable order, for the recall centroid.
+func (s *Service) entityValues(entity string) []string {
+	texts := s.ledger.sortedClaimTexts(entity)
+	values := make([]string, len(texts))
+
+	for i, text := range texts {
+		_, values[i] = splitClaimText(text)
 	}
 
-	return names, nil
+	return values
+}
+
+// observationKey is the stable identity of an observation's claim set: a hash of
+// its sorted claim hashes. Identical claim sets share a key (and thus a memoized
+// entity), so a re-ingest is a deterministic NOOP.
+func observationKey(claims []ClaimInput) string {
+	hashes := make([]string, len(claims))
+	for i, claim := range claims {
+		hashes[i] = claim.Hash
+	}
+
+	sort.Strings(hashes)
+
+	return StatementHash(strings.Join(hashes, "\n"))
 }
 
 func defaultIDSource() func() string {

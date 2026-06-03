@@ -18,11 +18,36 @@ type Service struct {
 	ledger   *entityLedger
 	newID    func() string
 	model    string
+	// idDiff tunables (docs/architecture/CONTACT_IDENTITY_RESOLUTION.md §4.1).
+	blockingTopN int     // HNSW candidate fan-out before idDiff re-rank
+	mergeGate    float64 // min idDiff signed score (ω-mass units) to merge vs mint
+	lambda       float64 // IAC penalty weight in the signed score
+	setPenalty   float64 // scale for disjoint-set negative evidence (repair mode)
+	vetoMass     float64 // functional-contradiction ω that hard-vetoes a merge
+	tauCtx       float64 // contextual cosine value-match threshold
+	// seenObs memoizes observation-fingerprint -> resolved entity. It makes
+	// resolution deterministic and idempotent for an IDENTICAL observation
+	// (same claim set), independent of centroid drift or blocking recall — a
+	// re-ingest returns the same entity as a NOOP and never mints a duplicate.
+	seenObs map[string]string
 	// resolveMu serializes Resolve so the match->mint->diff->upsert read-modify-
 	// write of the index+ledger is atomic (import is sequential; concurrent gRPC
 	// Resolve calls thus queue rather than racing the entity space).
 	resolveMu sync.Mutex
 }
+
+// idDiff tunable defaults. mergeGate is a raw signed score in ω-mass units: ~one
+// strong functional match (a full-name agreement, base ω 1.0) or a couple of
+// identifier matches clears it; a lone weak contextual match does not. Tuned
+// empirically against the corpus.
+const (
+	defaultBlockingTopN = 24
+	defaultMergeGate    = 0.75
+	defaultLambda       = 1.5
+	defaultSetPenalty   = 0.5
+	defaultVetoMass     = 4.0
+	defaultTauCtx       = 0.6
+)
 
 // NamedVec is one name vector attached to an entity (key unique per vector).
 type NamedVec struct {
@@ -36,11 +61,18 @@ func NewService(resolver *Resolver, index *EntityIndex, model string) *Service {
 	}
 
 	return &Service{
-		resolver: resolver,
-		index:    index,
-		ledger:   newEntityLedger(),
-		newID:    defaultIDSource(),
-		model:    model,
+		resolver:     resolver,
+		index:        index,
+		ledger:       newEntityLedger(),
+		newID:        defaultIDSource(),
+		model:        model,
+		blockingTopN: defaultBlockingTopN,
+		mergeGate:    defaultMergeGate,
+		lambda:       defaultLambda,
+		setPenalty:   defaultSetPenalty,
+		vetoMass:     defaultVetoMass,
+		tauCtx:       defaultTauCtx,
+		seenObs:      make(map[string]string),
 	}
 }
 
@@ -61,6 +93,7 @@ func (s *Service) ResetEntities() {
 
 	s.index = NewEntityIndex(FullDim, CoarseDim)
 	s.ledger = newEntityLedger()
+	s.seenObs = make(map[string]string)
 }
 
 // Index exposes the underlying entity index (used in-process by ingest before
@@ -106,6 +139,59 @@ func (s *Service) Upsert(entity string, centroid Vector, names []NamedVec) error
 
 func (s *Service) NearestName(entity string, query Vector) (float64, bool) {
 	return s.index.NearestName(entity, query, 0)
+}
+
+// SignedEdge is one entity↔entity same-identity edge weight produced by idDiff
+// in entity-entity (repair) mode: positive Weight is correlation, negative is
+// anti-correlation, Veto is a hard contradiction.
+type SignedEdge struct {
+	A, B   string
+	Weight float64
+	Veto   bool
+}
+
+// ScoreEdges is the DEFERRED seam the global correlation-clustering REPAIR pass
+// consumes: it scores an entity against its blocked neighbours in entity-entity
+// mode (disjoint-set negative evidence enabled), without acting on the result.
+// Resolve stays greedy; a downstream pass calls this across neighbourhoods and
+// re-partitions by reassigning immutable records.
+func (s *Service) ScoreEdges(
+	ctx context.Context,
+	entity string,
+	topN int,
+	threshold, nameThreshold float64,
+) ([]SignedEdge, error) {
+	s.resolveMu.Lock()
+	defer s.resolveMu.Unlock()
+
+	centroid, _, err := s.resolver.Pool(ctx, s.entityValues(entity), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates, err := s.index.Search(centroid, topN+1)
+	if err != nil {
+		return nil, err
+	}
+
+	params := s.idDiffParams(threshold, nameThreshold)
+	params.ObservationMode = false // entity↔entity: non-overlap is real evidence
+
+	subject := s.entityScoredClaims(entity)
+	edges := make([]SignedEdge, 0, len(candidates))
+
+	for _, candidate := range candidates {
+		if candidate.Entity == entity {
+			continue
+		}
+
+		result := idDiff(subject, s.entityScoredClaims(candidate.Entity), params)
+		edges = append(edges, SignedEdge{
+			A: entity, B: candidate.Entity, Weight: result.Score, Veto: result.Veto,
+		})
+	}
+
+	return edges, nil
 }
 
 func (s *Service) Snapshot() ([]byte, error) {

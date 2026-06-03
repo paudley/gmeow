@@ -13,8 +13,8 @@ import (
 )
 
 // stateMagic versions the combined resolution-state artifact (claim-vector cache
-// + entity index + ledger). Bump on layout change.
-const stateMagic = "GMEOWSTATE1"
+// + entity index + ledger + observation memo). Bump on layout change.
+const stateMagic = "GMEOWSTATE2"
 
 // SnapshotState serializes the full resolution state — the claim-vector cache,
 // the HNSW entity index, and the per-entity ledger — into one artifact the
@@ -56,6 +56,15 @@ func (s *Service) SnapshotState() ([]byte, error) {
 	}
 
 	if err := writeLenBytes(&buf, ledgerBlob); err != nil {
+		return nil, err
+	}
+
+	memoBlob, err := encodeStringMap(s.seenObs)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := writeLenBytes(&buf, memoBlob); err != nil {
 		return nil, err
 	}
 
@@ -110,14 +119,80 @@ func (s *Service) LoadState(data []byte) error {
 		return err
 	}
 
+	memoBlob, err := readLenBytes(reader)
+	if err != nil {
+		return err
+	}
+
+	memo, err := decodeStringMap(memoBlob)
+	if err != nil {
+		return err
+	}
+
 	if cache, ok := s.resolver.Cache().(*MemoryCache); ok {
 		cache.load(entries)
 	}
 
 	s.index = index
 	s.ledger = ledger
+	s.seenObs = memo
 
 	return nil
+}
+
+// encodeStringMap serializes a string->string map (sorted keys) as a
+// length-prefixed block.
+func encodeStringMap(m map[string]string) ([]byte, error) {
+	var buf bytes.Buffer
+
+	if err := binary.Write(&buf, binary.LittleEndian, uint32(len(m))); err != nil {
+		return nil, err
+	}
+
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		if err := writeLenString(&buf, k); err != nil {
+			return nil, err
+		}
+
+		if err := writeLenString(&buf, m[k]); err != nil {
+			return nil, err
+		}
+	}
+
+	return buf.Bytes(), nil
+}
+
+func decodeStringMap(data []byte) (map[string]string, error) {
+	reader := bytes.NewReader(data)
+
+	var count uint32
+	if err := binary.Read(reader, binary.LittleEndian, &count); err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]string, count)
+	for range count {
+		key, err := readLenString(reader)
+		if err != nil {
+			return nil, err
+		}
+
+		value, err := readLenString(reader)
+		if err != nil {
+			return nil, err
+		}
+
+		out[key] = value
+	}
+
+	return out, nil
 }
 
 // cacheEntries returns the claim-vector cache contents if it is a MemoryCache,
@@ -282,6 +357,8 @@ func decodeLedger(data []byte) (*entityLedger, error) {
 
 		ledger.claims[entity] = set
 	}
+
+	ledger.rebuildDF() // df is not serialized; recompute from the folded claims
 
 	return ledger, nil
 }
