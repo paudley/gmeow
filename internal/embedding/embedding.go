@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"maps"
 	"math"
 	"sync"
 )
@@ -63,11 +64,13 @@ func Normalize(v Vector) Vector {
 	for _, x := range v {
 		sum += float64(x) * float64(x)
 	}
+
 	if sum == 0 {
 		return append(Vector(nil), v...)
 	}
 
 	inv := float32(1.0 / math.Sqrt(sum))
+
 	out := make(Vector, len(v))
 	for i, x := range v {
 		out[i] = x * inv
@@ -97,29 +100,37 @@ func MeanPool(vectors []Vector, weights []float64) (Vector, error) {
 	if len(vectors) == 0 {
 		return nil, errors.New("mean-pool requires at least one vector")
 	}
+
 	if weights != nil && len(weights) != len(vectors) {
 		return nil, errors.New("mean-pool weights must match vectors")
 	}
 
 	dim := len(vectors[0])
 	acc := make([]float64, dim)
+
 	var totalWeight float64
+
 	for i, v := range vectors {
 		if len(v) != dim {
 			return nil, errors.New("mean-pool requires equal-dimension vectors")
 		}
+
 		w := 1.0
 		if weights != nil {
 			w = weights[i]
 		}
+
 		if w == 0 {
 			continue
 		}
+
 		for j, x := range v {
 			acc[j] += w * float64(x)
 		}
+
 		totalWeight += w
 	}
+
 	if totalWeight == 0 {
 		return nil, errors.New("mean-pool total weight is zero")
 	}
@@ -143,8 +154,8 @@ type Cache interface {
 // MemoryCache is a concurrency-safe in-memory Cache. The EMBEDDING service holds
 // one; it may be snapshotted to a FILESTORE artifact for warm restarts.
 type MemoryCache struct {
-	mu      sync.RWMutex
 	entries map[string]Vector
+	mu      sync.RWMutex
 }
 
 func NewMemoryCache() *MemoryCache {
@@ -154,6 +165,7 @@ func NewMemoryCache() *MemoryCache {
 func (c *MemoryCache) Get(hash string) (Vector, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
 	v, ok := c.entries[hash]
 
 	return v, ok
@@ -162,6 +174,7 @@ func (c *MemoryCache) Get(hash string) (Vector, bool) {
 func (c *MemoryCache) Put(hash string, vector Vector) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	c.entries[hash] = vector
 }
 
@@ -176,10 +189,9 @@ func (c *MemoryCache) Len() int {
 func (c *MemoryCache) snapshot() map[string]Vector {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
 	out := make(map[string]Vector, len(c.entries))
-	for hash, vector := range c.entries {
-		out[hash] = vector
-	}
+	maps.Copy(out, c.entries)
 
 	return out
 }
@@ -188,8 +200,7 @@ func (c *MemoryCache) snapshot() map[string]Vector {
 func (c *MemoryCache) load(entries map[string]Vector) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	c.entries = make(map[string]Vector, len(entries))
-	for hash, vector := range entries {
-		c.entries[hash] = vector
-	}
+	maps.Copy(c.entries, entries)
 }

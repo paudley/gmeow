@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"blackcat.ca/gmeow/internal/embedding"
+	"blackcat.ca/gmeow/internal/rdfbundle"
 )
 
 func TestClaimStatementsFromRootedTurtle(t *testing.T) {
@@ -93,5 +94,38 @@ func TestFullChainTurtleToResolution(t *testing.T) {
 	wantHash := embedding.StatementHash("hasEmail: mailto:pat@new.example")
 	if len(second.NewClaimHashes) != 1 || second.NewClaimHashes[0] != wantHash {
 		t.Fatalf("vcard delta=%+v, want exactly the new email", second.NewClaimHashes)
+	}
+}
+
+func TestNormalizeClaimObjectCollapsesFormattingVariants(t *testing.T) {
+	// Phone variants must collapse to one cache key.
+	a := claimText(
+		rdfStmt("https://blackcatinformatics.ca/gmeow/hasTelephone", "+1 (555) 123-4567"),
+	)
+	b := claimText(
+		rdfStmt("https://blackcatinformatics.ca/gmeow/hasTelephone", "555-123-4567"),
+	)
+	c := claimText(
+		rdfStmt("https://blackcatinformatics.ca/gmeow/hasTelephone", "5551234567"),
+	)
+	if a != b || b != c {
+		t.Fatalf("phone variants did not collapse: %q / %q / %q", a, b, c)
+	}
+	// URL trailing slash collapses.
+	u1 := claimText(
+		rdfStmt("http://www.w3.org/2006/vcard/ns#hasURL", "http://Example.com/"),
+	)
+	u2 := claimText(
+		rdfStmt("http://www.w3.org/2006/vcard/ns#hasURL", "http://example.com"),
+	)
+	if u1 != u2 {
+		t.Fatalf("url variants did not collapse: %q / %q", u1, u2)
+	}
+}
+
+func rdfStmt(predicate, object string) rdfbundle.Statement {
+	return rdfbundle.Statement{
+		Predicate: rdfbundle.Term{Kind: "iri", Value: predicate},
+		Object:    rdfbundle.Term{Kind: "literal", Value: object},
 	}
 }

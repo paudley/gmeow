@@ -60,12 +60,56 @@ func claimStatementsFromBody(body string) []claimStatement {
 // so case/spacing variants of the same email/name share a vector and a hash).
 func claimText(statement rdfbundle.Statement) string {
 	predicate := predicateLocalName(statement.Predicate.Value)
-	object := normalizeFingerprintValue(statement.Object.Value)
+	object := normalizeClaimObject(predicate, statement.Object.Value)
 	if predicate == "" || object == "" {
 		return ""
 	}
 
 	return predicate + ": " + object
+}
+
+// normalizeClaimObject canonicalizes a claim's object value by TYPE so that
+// formatting variants of the same value collapse to ONE cache key (and one
+// embed, and one diffed claim). Without this, "+1 (555) 123-4567" and
+// "5551234567" are distinct — a phone seen in three formats costs three embeds
+// and never converges. The persisted record keeps the original value; only the
+// embedded/keyed text is canonicalized.
+func normalizeClaimObject(predicate, value string) string {
+	switch strings.ToLower(predicate) {
+	case "hastelephone", "telephone", "tel", "phone":
+		return normalizePhoneValue(value)
+	case "hasurl", "url", "homepage", "weblog", "seealso":
+		return normalizeURLValue(value)
+	default:
+		return normalizeFingerprintValue(value)
+	}
+}
+
+// normalizePhoneValue reduces a phone number to its dialable digits, dropping a
+// leading North-American "1" so "+1 555…" and "555…" collapse. Non-numeric junk
+// (extensions, labels) falls back to the generic normalizer.
+func normalizePhoneValue(value string) string {
+	var digits strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	number := digits.String()
+	if len(number) == 11 && number[0] == '1' {
+		number = number[1:]
+	}
+	if number == "" {
+		return normalizeFingerprintValue(value)
+	}
+
+	return number
+}
+
+// normalizeURLValue lower-cases and trims a trailing slash so "http://x.com" and
+// "http://x.com/" collapse.
+func normalizeURLValue(value string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), "/")
 }
 
 // claimLine is the predicate+object Turtle fragment persisted in a delta record;

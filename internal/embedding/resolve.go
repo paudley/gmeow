@@ -54,6 +54,7 @@ func (l *entityLedger) add(entity string, claims []ClaimInput) {
 		set = make(map[string]string)
 		l.claims[entity] = set
 	}
+
 	for _, claim := range claims {
 		set[claim.Hash] = claim.Text
 	}
@@ -63,11 +64,14 @@ func (l *entityLedger) add(entity string, claims []ClaimInput) {
 // hash) so the re-pooled centroid is deterministic.
 func (l *entityLedger) texts(entity string) []string {
 	set := l.claims[entity]
+
 	hashes := make([]string, 0, len(set))
 	for hash := range set {
 		hashes = append(hashes, hash)
 	}
+
 	sort.Strings(hashes)
+
 	texts := make([]string, len(hashes))
 	for i, hash := range hashes {
 		texts[i] = set[hash]
@@ -90,6 +94,7 @@ func (s *Service) Resolve(
 	if len(claims) == 0 {
 		return Resolution{IsNoop: true}, nil
 	}
+
 	if nameThreshold < threshold {
 		nameThreshold = threshold // names must agree at least as strongly as centroids
 	}
@@ -101,6 +106,7 @@ func (s *Service) Resolve(
 	for i, claim := range claims {
 		texts[i] = claim.Text
 	}
+
 	centroid, _, err := s.resolver.Pool(ctx, texts, nil)
 	if err != nil {
 		return Resolution{}, err
@@ -109,10 +115,12 @@ func (s *Service) Resolve(
 	entity := ""
 	similarity := 0.0
 	isNew := false
+
 	matches, err := s.index.Search(centroid, 1)
 	if err != nil {
 		return Resolution{}, err
 	}
+
 	if len(matches) > 0 && matches[0].Similarity >= threshold {
 		// A centroid match must also AGREE ON NAME when both sides carry one:
 		// related-but-distinct entities (a person and their org) share enough
@@ -123,18 +131,23 @@ func (s *Service) Resolve(
 		if nameErr != nil {
 			return Resolution{}, nameErr
 		}
+
 		if agrees {
 			entity = matches[0].Entity
 			similarity = matches[0].Similarity
 		}
 	}
+
 	if entity == "" {
 		entity = s.newID()
 		isNew = true
 	}
 
-	var newClaims []ClaimInput
-	var newHashes []string
+	var (
+		newClaims []ClaimInput
+		newHashes []string
+	)
+
 	for _, claim := range claims {
 		if !s.ledger.has(entity, claim.Hash) {
 			newClaims = append(newClaims, claim)
@@ -152,10 +165,12 @@ func (s *Service) Resolve(
 	if err != nil {
 		return Resolution{}, err
 	}
+
 	names, err := s.nameVectors(ctx, entity, newClaims)
 	if err != nil {
 		return Resolution{}, err
 	}
+
 	if err := s.Upsert(entity, newCentroid, names); err != nil {
 		return Resolution{}, err
 	}
@@ -181,11 +196,13 @@ func (s *Service) nameAgrees(
 	threshold float64,
 ) (bool, error) {
 	var nameTexts []string
+
 	for _, claim := range claims {
 		if claim.IsName {
 			nameTexts = append(nameTexts, claim.Text)
 		}
 	}
+
 	if len(nameTexts) == 0 {
 		return true, nil
 	}
@@ -197,16 +214,20 @@ func (s *Service) nameAgrees(
 
 	sawEntityName := false
 	best := -2.0
+
 	for _, vector := range vectors {
 		sim, found := s.index.NearestName(entity, vector, 0)
 		if !found {
 			continue // the entity has no name vectors yet; cannot disconfirm
 		}
+
 		sawEntityName = true
+
 		if sim > best {
 			best = sim
 		}
 	}
+
 	if !sawEntityName {
 		return true, nil
 	}
@@ -222,20 +243,25 @@ func (s *Service) nameVectors(
 	delta []ClaimInput,
 ) ([]NamedVec, error) {
 	var texts, keys []string
+
 	for _, claim := range delta {
 		if !claim.IsName {
 			continue
 		}
+
 		texts = append(texts, claim.Text)
 		keys = append(keys, entity+":"+claim.Hash)
 	}
+
 	if len(texts) == 0 {
 		return nil, nil
 	}
+
 	vectors, _, err := s.Embed(ctx, texts)
 	if err != nil {
 		return nil, err
 	}
+
 	names := make([]NamedVec, len(vectors))
 	for i, vector := range vectors {
 		names[i] = NamedVec{Key: keys[i], Vector: vector}

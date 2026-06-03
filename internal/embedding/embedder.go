@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,14 +46,12 @@ const (
 // an array input and returns vectors in input order. This is the only component
 // that touches the model endpoint; everything else works off the cache.
 type HTTPEmbedder struct {
+	lastCall    time.Time
 	client      *http.Client
 	endpoint    string
 	model       string
 	minInterval time.Duration
-	// paceMu serializes endpoint requests AND enforces the minimum interval
-	// between them, so the model server is never hit concurrently or back-to-back.
-	paceMu   sync.Mutex
-	lastCall time.Time
+	paceMu      sync.Mutex
 }
 
 func NewHTTPEmbedder(
@@ -62,9 +61,11 @@ func NewHTTPEmbedder(
 	if endpoint == "" {
 		return nil, errors.New("embedding endpoint is required")
 	}
+
 	if model == "" {
 		return nil, errors.New("embedding model is required")
 	}
+
 	if client == nil {
 		client = &http.Client{Timeout: defaultEmbedTimeout}
 	}
@@ -83,11 +84,13 @@ func NewHTTPEmbedder(
 func (e *HTTPEmbedder) pace(ctx context.Context) error {
 	e.paceMu.Lock()
 	defer e.paceMu.Unlock()
+
 	if e.minInterval > 0 && !e.lastCall.IsZero() {
 		wait := e.minInterval - time.Since(e.lastCall)
 		if wait > 0 {
 			timer := time.NewTimer(wait)
 			defer timer.Stop()
+
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -95,6 +98,7 @@ func (e *HTTPEmbedder) pace(ctx context.Context) error {
 			}
 		}
 	}
+
 	e.lastCall = time.Now()
 
 	return nil
@@ -115,10 +119,12 @@ func (e *HTTPEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, err
 		if len(batch) == 0 {
 			return nil
 		}
+
 		vectors, err := e.embedBatch(ctx, batch)
 		if err != nil {
 			return err
 		}
+
 		out = append(out, vectors...)
 		batch = batch[:0]
 		tokenEst = 0
@@ -128,17 +134,22 @@ func (e *HTTPEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, err
 
 	for _, text := range texts {
 		text = truncateToRunes(text, maxTextRunes)
+
 		est := len([]rune(text))/3 + 1
 		if len(batch) > 0 &&
 			(len(batch) >= maxBatchTexts || tokenEst+est > maxBatchTokenEst) {
-			if err := flush(); err != nil {
+			err := flush()
+			if err != nil {
 				return nil, err
 			}
 		}
+
 		batch = append(batch, text)
 		tokenEst += est
 	}
-	if err := flush(); err != nil {
+
+	err := flush()
+	if err != nil {
 		return nil, err
 	}
 
@@ -169,6 +180,7 @@ func (e *HTTPEmbedder) embedBatch(
 	texts []string,
 ) ([]Vector, error) {
 	var lastErr error
+
 	for attempt := 0; attempt <= len(embedRetryBackoffs); attempt++ {
 		if attempt > 0 {
 			select {
@@ -177,10 +189,12 @@ func (e *HTTPEmbedder) embedBatch(
 			case <-time.After(embedRetryBackoffs[attempt-1]):
 			}
 		}
+
 		vectors, retryable, err := e.embedBatchOnce(ctx, texts)
 		if err == nil {
 			return vectors, nil
 		}
+
 		lastErr = err
 		if !retryable || ctx.Err() != nil {
 			return nil, err
@@ -216,6 +230,7 @@ func (e *HTTPEmbedder) embedBatchOnce(
 	if err != nil {
 		return nil, false, err
 	}
+
 	request.Header.Set("Content-Type", "application/json")
 
 	response, err := e.client.Do(request)
@@ -240,13 +255,14 @@ func (e *HTTPEmbedder) embedBatchOnce(
 
 	var decoded struct {
 		Data []struct {
-			Index     int       `json:"index"`
 			Embedding []float64 `json:"embedding"`
+			Index     int       `json:"index"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
 		return nil, true, fmt.Errorf("decode embedding response: %w", err)
 	}
+
 	if len(decoded.Data) != len(texts) {
 		return nil, false, fmt.Errorf(
 			"embedding endpoint returned %d vectors for %d inputs",
@@ -258,16 +274,20 @@ func (e *HTTPEmbedder) embedBatchOnce(
 	// The OpenAI contract returns data in input order, but index is authoritative;
 	// place each vector by its index to be robust to reordering.
 	out := make([]Vector, len(texts))
+
 	for _, item := range decoded.Data {
 		idx := item.Index
 		if idx < 0 || idx >= len(texts) {
 			return nil, false, fmt.Errorf("embedding response index %d out of range", idx)
 		}
+
 		if len(item.Embedding) == 0 {
 			return nil, false, errors.New("embedding endpoint returned an empty vector")
 		}
+
 		out[idx] = VectorFromFloat64(item.Embedding)
 	}
+
 	for i, v := range out {
 		if v == nil {
 			return nil, false, fmt.Errorf("embedding response missing vector for input %d", i)
@@ -284,6 +304,11 @@ func (e *HTTPEmbedder) embedBatchOnce(
 type Resolver struct {
 	cache    Cache
 	embedder Embedder
+	// lookups counts every claim-vector lookup; misses counts those that hit the
+	// embedder. The hit rate (1 - misses/lookups) should converge toward 1.0 as
+	// the corpus's distinct claims become cached.
+	lookups atomic.Int64
+	misses  atomic.Int64
 }
 
 func NewResolver(cache Cache, embedder Embedder) *Resolver {
@@ -297,39 +322,57 @@ func NewResolver(cache Cache, embedder Embedder) *Resolver {
 // Cache exposes the resolver's claim-vector cache (for state snapshot/restore).
 func (r *Resolver) Cache() Cache { return r.cache }
 
+// Stats returns cumulative cache lookups and embedder-hitting misses.
+func (r *Resolver) Stats() (lookups, misses int64) {
+	return r.lookups.Load(), r.misses.Load()
+}
+
 // Vectors returns the full-dimension vector for each text, in order. Cache
 // misses are embedded together in one batch and written back. Returns the number
 // of texts that required the embedder (zero == a fully-cached, zero-cost call).
 func (r *Resolver) Vectors(ctx context.Context, texts []string) ([]Vector, int, error) {
+	r.lookups.Add(int64(len(texts)))
 	out := make([]Vector, len(texts))
 	hashes := make([]string, len(texts))
 
-	var missTexts []string
-	var missPositions []int
+	var (
+		missTexts     []string
+		missPositions []int
+	)
+
 	seenMiss := map[string]int{} // hash -> first miss slot, to dedup within a batch
+
 	for i, text := range texts {
 		hash := StatementHash(text)
+
 		hashes[i] = hash
 		if v, ok := r.cache.Get(hash); ok {
 			out[i] = v
+
 			continue
 		}
+
 		if _, dup := seenMiss[hash]; dup {
 			continue // same new claim twice in one record; embed once
 		}
+
 		seenMiss[hash] = len(missTexts)
 		missTexts = append(missTexts, text)
 		missPositions = append(missPositions, i)
 	}
 
+	r.misses.Add(int64(len(missTexts)))
+
 	if len(missTexts) > 0 {
 		if r.embedder == nil {
 			return nil, 0, errors.New("embedding cache miss but no embedder configured")
 		}
+
 		vectors, err := r.embedder.Embed(ctx, missTexts)
 		if err != nil {
 			return nil, 0, err
 		}
+
 		for j, v := range vectors {
 			r.cache.Put(StatementHash(missTexts[j]), v)
 			out[missPositions[j]] = v
@@ -360,6 +403,7 @@ func (r *Resolver) Pool(
 	if err != nil {
 		return nil, 0, err
 	}
+
 	pooled, err := MeanPool(vectors, weights)
 	if err != nil {
 		return nil, misses, err

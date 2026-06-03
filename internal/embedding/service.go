@@ -58,6 +58,7 @@ func (s *Service) SetIDSource(fn func() string) {
 func (s *Service) ResetEntities() {
 	s.resolveMu.Lock()
 	defer s.resolveMu.Unlock()
+
 	s.index = NewEntityIndex(FullDim, CoarseDim)
 	s.ledger = newEntityLedger()
 }
@@ -87,12 +88,15 @@ func (s *Service) Match(centroid Vector, k int) ([]Match, error) {
 
 func (s *Service) Upsert(entity string, centroid Vector, names []NamedVec) error {
 	if len(centroid) > 0 {
-		if err := s.index.Upsert(entity, centroid); err != nil {
+		err := s.index.Upsert(entity, centroid)
+		if err != nil {
 			return err
 		}
 	}
+
 	for _, name := range names {
-		if err := s.index.AddName(entity, name.Key, name.Vector); err != nil {
+		err := s.index.AddName(entity, name.Key, name.Vector)
+		if err != nil {
 			return err
 		}
 	}
@@ -108,12 +112,35 @@ func (s *Service) Snapshot() ([]byte, error) {
 	return s.index.Snapshot()
 }
 
-// Status reports cache + index sizes and the configured model.
-func (s *Service) Status() (cachedClaims, entities int, model string) {
+// ServiceStatus reports cache/index sizes plus cumulative cache-hit telemetry.
+type ServiceStatus struct {
+	Model        string
+	CachedClaims int
+	Entities     int
+	Lookups      int64
+	Misses       int64
+}
+
+// Status reports cache + index sizes, the configured model, and the cumulative
+// cache lookup/miss counters (hit rate = 1 - Misses/Lookups, should -> 1.0).
+func (s *Service) Status() ServiceStatus {
 	cached := 0
-	if s.resolver != nil && s.resolver.cache != nil {
-		cached = s.resolver.cache.Len()
+
+	var lookups, misses int64
+
+	if s.resolver != nil {
+		if s.resolver.cache != nil {
+			cached = s.resolver.cache.Len()
+		}
+
+		lookups, misses = s.resolver.Stats()
 	}
 
-	return cached, s.index.Len(), s.model
+	return ServiceStatus{
+		Model:        s.model,
+		CachedClaims: cached,
+		Entities:     s.index.Len(),
+		Lookups:      lookups,
+		Misses:       misses,
+	}
 }

@@ -31,21 +31,14 @@ import (
 const rebuildEvery = 256
 
 type EntityIndex struct {
-	mu     sync.RWMutex
-	dim    int
-	dimC   int
-	coarse *hnsw.Graph[string]
-	fine   *hnsw.Graph[string]
-	// centroids is the AUTHORITATIVE fine (full-dim, normalized) centroid per
-	// entity. The fine/coarse graphs are a rebuildable ANN view over it. coder/
-	// hnsw corrupts its neighbor structure under Delete+Add churn, so updates
-	// never Delete: they rewrite the map and the graphs are periodically rebuilt.
-	centroids map[string]Vector
-	// entityNames holds each entity's own normalized name vectors (renames add
-	// more). Name confirmation compares an incoming name DIRECTLY against these —
-	// not via a global ANN search, which fails precisely when names diverge.
+	coarse      *hnsw.Graph[string]
+	fine        *hnsw.Graph[string]
+	centroids   map[string]Vector
 	entityNames map[string][]Vector
+	dim         int
+	dimC        int
 	dirty       int
+	mu          sync.RWMutex
 }
 
 // NewEntityIndex builds an empty index for the given full/coarse dimensions
@@ -54,6 +47,7 @@ func NewEntityIndex(fullDim, coarseDim int) *EntityIndex {
 	if fullDim <= 0 {
 		fullDim = FullDim
 	}
+
 	if coarseDim <= 0 || coarseDim > fullDim {
 		coarseDim = CoarseDim
 	}
@@ -83,6 +77,7 @@ func (idx *EntityIndex) Upsert(entity string, centroid Vector) error {
 	if len(centroid) != idx.dim {
 		return fmt.Errorf("centroid dim %d != index dim %d", len(centroid), idx.dim)
 	}
+
 	fine := Normalize(centroid)
 	if !isUsableVector(fine) {
 		return fmt.Errorf("refusing to index a zero/non-finite centroid for %s", entity)
@@ -90,7 +85,9 @@ func (idx *EntityIndex) Upsert(entity string, centroid Vector) error {
 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
+
 	_, existed := idx.centroids[entity]
+
 	idx.centroids[entity] = fine
 	if !existed {
 		idx.fine.Add(hnsw.MakeNode(entity, fine))
@@ -112,10 +109,12 @@ func (idx *EntityIndex) Upsert(entity string, centroid Vector) error {
 func (idx *EntityIndex) rebuildLocked() {
 	fine := hnsw.NewGraph[string]()
 	coarse := hnsw.NewGraph[string]()
+
 	for entity, centroid := range idx.centroids {
 		fine.Add(hnsw.MakeNode(entity, centroid))
 		coarse.Add(hnsw.MakeNode(entity, Slice(centroid, idx.dimC)))
 	}
+
 	idx.fine = fine
 	idx.coarse = coarse
 	idx.dirty = 0
@@ -123,11 +122,13 @@ func (idx *EntityIndex) rebuildLocked() {
 
 func isUsableVector(v Vector) bool {
 	var sum float64
+
 	for _, x := range v {
 		f := float64(x)
 		if f != f || f > 1e308 || f < -1e308 { // NaN or ±Inf
 			return false
 		}
+
 		sum += f * f
 	}
 
@@ -141,6 +142,7 @@ func (idx *EntityIndex) AddName(entity, _ string, vector Vector) error {
 	if len(vector) != idx.dim {
 		return fmt.Errorf("name vector dim %d != index dim %d", len(vector), idx.dim)
 	}
+
 	normalized := Normalize(vector)
 	if !isUsableVector(normalized) {
 		return nil
@@ -148,6 +150,7 @@ func (idx *EntityIndex) AddName(entity, _ string, vector Vector) error {
 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
+
 	idx.entityNames[entity] = append(idx.entityNames[entity], normalized)
 
 	return nil
@@ -160,12 +163,14 @@ func (idx *EntityIndex) Search(centroid Vector, k int) ([]Match, error) {
 	if len(centroid) != idx.dim {
 		return nil, fmt.Errorf("query dim %d != index dim %d", len(centroid), idx.dim)
 	}
+
 	if k <= 0 {
 		k = 1
 	}
 
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
+
 	if idx.fine.Len() == 0 {
 		return nil, nil
 	}
@@ -181,12 +186,15 @@ func (idx *EntityIndex) Search(centroid Vector, k int) ([]Match, error) {
 		if !ok {
 			continue
 		}
+
 		matches = append(
 			matches,
 			Match{Entity: hit.Key, Similarity: cosineSimilarity(fineQuery, vec)},
 		)
 	}
+
 	sortMatchesDesc(matches)
+
 	if len(matches) > k {
 		matches = matches[:k]
 	}
@@ -209,12 +217,14 @@ func (idx *EntityIndex) NearestName(
 
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
+
 	names := idx.entityNames[entity]
 	if len(names) == 0 {
 		return 0, false
 	}
 
 	q := Normalize(query)
+
 	best := -2.0
 	for _, name := range names {
 		if sim := cosineSimilarity(q, name); sim > best {
@@ -237,6 +247,7 @@ func (idx *EntityIndex) Len() int {
 func cosineSimilarity(a, b Vector) float64 {
 	// Inputs are unit vectors here, so cosine == dot product.
 	var dot float64
+
 	n := min(len(b), len(a))
 	for i := range n {
 		dot += float64(a[i]) * float64(b[i])
@@ -262,41 +273,53 @@ func (idx *EntityIndex) Snapshot() ([]byte, error) {
 	defer idx.mu.RUnlock()
 
 	var buf bytes.Buffer
-	if err := writeArtifactHeader(
+	err := writeArtifactHeader(
 		&buf,
 		idx.dim,
 		idx.dimC,
 		len(idx.entityNames),
-	); err != nil {
+	)
+	if err != nil {
 		return nil, err
 	}
+
 	for _, entity := range sortedVectorListKeys(idx.entityNames) {
-		if err := writeLenString(&buf, entity); err != nil {
+		err := writeLenString(&buf, entity)
+		if err != nil {
 			return nil, err
 		}
+
 		vectors := idx.entityNames[entity]
-		if err := binary.Write(&buf, binary.LittleEndian, uint32(len(vectors))); err != nil {
+		err = binary.Write(&buf, binary.LittleEndian, uint32(len(vectors)))
+		if err != nil {
 			return nil, err
 		}
+
 		for _, vector := range vectors {
-			if err := writeVector(&buf, vector); err != nil {
+			err := writeVector(&buf, vector)
+			if err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	if err := binary.Write(
+	err = binary.Write(
 		&buf,
 		binary.LittleEndian,
 		uint32(len(idx.centroids)),
-	); err != nil {
+	)
+	if err != nil {
 		return nil, err
 	}
+
 	for _, entity := range sortedKeys(idx.centroids) {
-		if err := writeLenString(&buf, entity); err != nil {
+		err := writeLenString(&buf, entity)
+		if err != nil {
 			return nil, err
 		}
-		if err := writeVector(&buf, idx.centroids[entity]); err != nil {
+
+		err = writeVector(&buf, idx.centroids[entity])
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -308,28 +331,35 @@ func (idx *EntityIndex) Snapshot() ([]byte, error) {
 // fine/coarse ANN graphs from the persisted centroid map.
 func LoadEntityIndex(data []byte) (*EntityIndex, error) {
 	buf := bytes.NewReader(data)
+
 	dim, dimC, nameCount, err := readArtifactHeader(buf)
 	if err != nil {
 		return nil, err
 	}
+
 	idx := NewEntityIndex(dim, dimC)
+
 	for range nameCount {
 		entity, err := readLenString(buf)
 		if err != nil {
 			return nil, err
 		}
+
 		var vectorCount uint32
 		if err := binary.Read(buf, binary.LittleEndian, &vectorCount); err != nil {
 			return nil, err
 		}
+
 		vectors := make([]Vector, 0, vectorCount)
 		for range vectorCount {
 			vector, err := readVector(buf)
 			if err != nil {
 				return nil, err
 			}
+
 			vectors = append(vectors, vector)
 		}
+
 		idx.entityNames[entity] = vectors
 	}
 
@@ -337,17 +367,21 @@ func LoadEntityIndex(data []byte) (*EntityIndex, error) {
 	if err := binary.Read(buf, binary.LittleEndian, &centroidCount); err != nil {
 		return nil, err
 	}
+
 	for range centroidCount {
 		entity, err := readLenString(buf)
 		if err != nil {
 			return nil, err
 		}
+
 		vector, err := readVector(buf)
 		if err != nil {
 			return nil, err
 		}
+
 		idx.centroids[entity] = vector
 	}
+
 	idx.rebuildLocked()
 
 	return idx, nil
@@ -358,6 +392,7 @@ func sortedKeys(m map[string]Vector) []string {
 	for key := range m {
 		keys = append(keys, key)
 	}
+
 	sort.Strings(keys)
 
 	return keys
@@ -368,6 +403,7 @@ func sortedVectorListKeys(m map[string][]Vector) []string {
 	for key := range m {
 		keys = append(keys, key)
 	}
+
 	sort.Strings(keys)
 
 	return keys

@@ -26,9 +26,11 @@ func readArtifactHeader(r io.Reader) (dim, coarseDim, nameCount int, err error) 
 	if _, err = io.ReadFull(r, magic); err != nil {
 		return 0, 0, 0, fmt.Errorf("read artifact magic: %w", err)
 	}
+
 	if string(magic) != artifactMagic {
 		return 0, 0, 0, errors.New("unrecognized entity-index artifact magic")
 	}
+
 	d, err := readUint32s(r, 3)
 	if err != nil {
 		return 0, 0, 0, err
@@ -39,7 +41,8 @@ func readArtifactHeader(r io.Reader) (dim, coarseDim, nameCount int, err error) 
 
 func writeUint32s(w io.Writer, values ...uint32) error {
 	for _, v := range values {
-		if err := binary.Write(w, binary.LittleEndian, v); err != nil {
+		err := binary.Write(w, binary.LittleEndian, v)
+		if err != nil {
 			return err
 		}
 	}
@@ -50,7 +53,8 @@ func writeUint32s(w io.Writer, values ...uint32) error {
 func readUint32s(r io.Reader, n int) ([]uint32, error) {
 	out := make([]uint32, n)
 	for i := range out {
-		if err := binary.Read(r, binary.LittleEndian, &out[i]); err != nil {
+		err := binary.Read(r, binary.LittleEndian, &out[i])
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -62,6 +66,7 @@ func writeLenBytes(w io.Writer, data []byte) error {
 	if err := binary.Write(w, binary.LittleEndian, uint64(len(data))); err != nil {
 		return err
 	}
+
 	_, err := w.Write(data)
 
 	return err
@@ -69,9 +74,11 @@ func writeLenBytes(w io.Writer, data []byte) error {
 
 func readLenBytes(r io.Reader) ([]byte, error) {
 	var n uint64
-	if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
+	err := binary.Read(r, binary.LittleEndian, &n)
+	if err != nil {
 		return nil, err
 	}
+
 	data := make([]byte, n)
 	if _, err := io.ReadFull(r, data); err != nil {
 		return nil, err

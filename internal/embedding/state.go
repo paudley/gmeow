@@ -36,6 +36,7 @@ func (s *Service) SnapshotState() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if err := writeLenBytes(&buf, cacheBlob); err != nil {
 		return nil, err
 	}
@@ -44,6 +45,7 @@ func (s *Service) SnapshotState() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if err := writeLenBytes(&buf, indexBlob); err != nil {
 		return nil, err
 	}
@@ -52,6 +54,7 @@ func (s *Service) SnapshotState() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if err := writeLenBytes(&buf, ledgerBlob); err != nil {
 		return nil, err
 	}
@@ -67,10 +70,12 @@ func (s *Service) LoadState(data []byte) error {
 	defer s.resolveMu.Unlock()
 
 	reader := bytes.NewReader(data)
+
 	magic := make([]byte, len(stateMagic))
 	if _, err := io.ReadFull(reader, magic); err != nil {
 		return fmt.Errorf("read state magic: %w", err)
 	}
+
 	if string(magic) != stateMagic {
 		return errors.New("unrecognized resolution-state artifact magic")
 	}
@@ -79,6 +84,7 @@ func (s *Service) LoadState(data []byte) error {
 	if err != nil {
 		return err
 	}
+
 	entries, err := decodeCache(cacheBlob)
 	if err != nil {
 		return err
@@ -88,6 +94,7 @@ func (s *Service) LoadState(data []byte) error {
 	if err != nil {
 		return err
 	}
+
 	index, err := LoadEntityIndex(indexBlob)
 	if err != nil {
 		return err
@@ -97,6 +104,7 @@ func (s *Service) LoadState(data []byte) error {
 	if err != nil {
 		return err
 	}
+
 	ledger, err := decodeLedger(ledgerBlob)
 	if err != nil {
 		return err
@@ -105,6 +113,7 @@ func (s *Service) LoadState(data []byte) error {
 	if cache, ok := s.resolver.Cache().(*MemoryCache); ok {
 		cache.load(entries)
 	}
+
 	s.index = index
 	s.ledger = ledger
 
@@ -123,19 +132,26 @@ func (s *Service) cacheEntries() map[string]Vector {
 
 func encodeCache(entries map[string]Vector) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := binary.Write(&buf, binary.LittleEndian, uint32(len(entries))); err != nil {
+	err := binary.Write(&buf, binary.LittleEndian, uint32(len(entries)))
+	if err != nil {
 		return nil, err
 	}
+
 	hashes := make([]string, 0, len(entries))
 	for hash := range entries {
 		hashes = append(hashes, hash)
 	}
+
 	sort.Strings(hashes)
+
 	for _, hash := range hashes {
-		if err := writeLenString(&buf, hash); err != nil {
+		err := writeLenString(&buf, hash)
+		if err != nil {
 			return nil, err
 		}
-		if err := writeVector(&buf, entries[hash]); err != nil {
+
+		err = writeVector(&buf, entries[hash])
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -145,20 +161,25 @@ func encodeCache(entries map[string]Vector) ([]byte, error) {
 
 func decodeCache(data []byte) (map[string]Vector, error) {
 	reader := bytes.NewReader(data)
+
 	var count uint32
-	if err := binary.Read(reader, binary.LittleEndian, &count); err != nil {
+	err := binary.Read(reader, binary.LittleEndian, &count)
+	if err != nil {
 		return nil, err
 	}
+
 	entries := make(map[string]Vector, count)
 	for range count {
 		hash, err := readLenString(reader)
 		if err != nil {
 			return nil, err
 		}
+
 		vector, err := readVector(reader)
 		if err != nil {
 			return nil, err
 		}
+
 		entries[hash] = vector
 	}
 
@@ -167,36 +188,49 @@ func decodeCache(data []byte) (map[string]Vector, error) {
 
 func encodeLedger(ledger *entityLedger) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := binary.Write(
+	err := binary.Write(
 		&buf,
 		binary.LittleEndian,
 		uint32(len(ledger.claims)),
-	); err != nil {
+	)
+	if err != nil {
 		return nil, err
 	}
+
 	entities := make([]string, 0, len(ledger.claims))
 	for entity := range ledger.claims {
 		entities = append(entities, entity)
 	}
+
 	sort.Strings(entities)
+
 	for _, entity := range entities {
-		if err := writeLenString(&buf, entity); err != nil {
+		err := writeLenString(&buf, entity)
+		if err != nil {
 			return nil, err
 		}
+
 		claims := ledger.claims[entity]
-		if err := binary.Write(&buf, binary.LittleEndian, uint32(len(claims))); err != nil {
+		err = binary.Write(&buf, binary.LittleEndian, uint32(len(claims)))
+		if err != nil {
 			return nil, err
 		}
+
 		hashes := make([]string, 0, len(claims))
 		for hash := range claims {
 			hashes = append(hashes, hash)
 		}
+
 		sort.Strings(hashes)
+
 		for _, hash := range hashes {
-			if err := writeLenString(&buf, hash); err != nil {
+			err := writeLenString(&buf, hash)
+			if err != nil {
 				return nil, err
 			}
-			if err := writeLenString(&buf, claims[hash]); err != nil {
+
+			err = writeLenString(&buf, claims[hash])
+			if err != nil {
 				return nil, err
 			}
 		}
@@ -208,31 +242,39 @@ func encodeLedger(ledger *entityLedger) ([]byte, error) {
 func decodeLedger(data []byte) (*entityLedger, error) {
 	reader := bytes.NewReader(data)
 	ledger := newEntityLedger()
+
 	var entityCount uint32
-	if err := binary.Read(reader, binary.LittleEndian, &entityCount); err != nil {
+	err := binary.Read(reader, binary.LittleEndian, &entityCount)
+	if err != nil {
 		return nil, err
 	}
+
 	for range entityCount {
 		entity, err := readLenString(reader)
 		if err != nil {
 			return nil, err
 		}
+
 		var claimCount uint32
 		if err := binary.Read(reader, binary.LittleEndian, &claimCount); err != nil {
 			return nil, err
 		}
+
 		set := make(map[string]string, claimCount)
 		for range claimCount {
 			hash, err := readLenString(reader)
 			if err != nil {
 				return nil, err
 			}
+
 			text, err := readLenString(reader)
 			if err != nil {
 				return nil, err
 			}
+
 			set[hash] = text
 		}
+
 		ledger.claims[entity] = set
 	}
 
@@ -240,7 +282,8 @@ func decodeLedger(data []byte) (*entityLedger, error) {
 }
 
 func writeVector(w io.Writer, vector Vector) error {
-	if err := binary.Write(w, binary.LittleEndian, uint32(len(vector))); err != nil {
+	err := binary.Write(w, binary.LittleEndian, uint32(len(vector)))
+	if err != nil {
 		return err
 	}
 
@@ -249,11 +292,14 @@ func writeVector(w io.Writer, vector Vector) error {
 
 func readVector(r io.Reader) (Vector, error) {
 	var dim uint32
-	if err := binary.Read(r, binary.LittleEndian, &dim); err != nil {
+	err := binary.Read(r, binary.LittleEndian, &dim)
+	if err != nil {
 		return nil, err
 	}
+
 	vector := make(Vector, dim)
-	if err := binary.Read(r, binary.LittleEndian, vector); err != nil {
+	err = binary.Read(r, binary.LittleEndian, vector)
+	if err != nil {
 		return nil, err
 	}
 

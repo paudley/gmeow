@@ -83,7 +83,8 @@ func Parse(content string) ([]Statement, []AnnotationRecord, error) {
 		parser.consume(scanner.Text())
 	}
 
-	if err := scanner.Err(); err != nil {
+	err := scanner.Err()
+	if err != nil {
 		return nil, nil, fmt.Errorf("scan RDF bundle: %w", err)
 	}
 
@@ -237,6 +238,7 @@ func parsePrefix(line string, prefixes map[string]string) bool {
 	}
 
 	name := strings.TrimSuffix(fields[1], ":")
+
 	value := strings.Trim(fields[2], "<>")
 	if name != "" && value != "" {
 		prefixes[name] = value

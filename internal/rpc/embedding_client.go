@@ -100,6 +100,30 @@ func (client *EmbeddingClient) Reset(ctx context.Context) error {
 	return err
 }
 
+// EmbeddingStatus mirrors the service's cache/index counters for monitoring.
+type EmbeddingStatus struct {
+	Model         string
+	CachedClaims  int
+	Entities      int
+	TotalLookups  int64
+	EmbedderCalls int64
+}
+
+func (client *EmbeddingClient) Status(ctx context.Context) (EmbeddingStatus, error) {
+	response, err := client.client.Status(ctx, &pb.Empty{})
+	if err != nil {
+		return EmbeddingStatus{}, err
+	}
+
+	return EmbeddingStatus{
+		Model:         response.GetModel(),
+		CachedClaims:  int(response.GetCachedClaims()),
+		Entities:      int(response.GetEntities()),
+		TotalLookups:  response.GetTotalLookups(),
+		EmbedderCalls: response.GetEmbedderCalls(),
+	}, nil
+}
+
 func (client *EmbeddingClient) Resolve(
 	ctx context.Context,
 	claims []embedding.ClaimInput,

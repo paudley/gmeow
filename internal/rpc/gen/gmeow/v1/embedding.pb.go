@@ -873,10 +873,15 @@ func (x *SnapshotResponse) GetArtifact() []byte {
 }
 
 type EmbeddingStatus struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CachedClaims  int32                  `protobuf:"varint,1,opt,name=cached_claims,json=cachedClaims,proto3" json:"cached_claims,omitempty"`
-	Entities      int32                  `protobuf:"varint,2,opt,name=entities,proto3" json:"entities,omitempty"`
-	Model         string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	CachedClaims int32                  `protobuf:"varint,1,opt,name=cached_claims,json=cachedClaims,proto3" json:"cached_claims,omitempty"`
+	Entities     int32                  `protobuf:"varint,2,opt,name=entities,proto3" json:"entities,omitempty"`
+	Model        string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
+	// total_lookups is every claim-vector cache lookup since start; embedder_calls
+	// is the subset that MISSED and hit the model. The hit rate = 1 - calls/lookups
+	// and should rapidly approach 1.0 as the corpus's distinct claims get cached.
+	TotalLookups  int64 `protobuf:"varint,4,opt,name=total_lookups,json=totalLookups,proto3" json:"total_lookups,omitempty"`
+	EmbedderCalls int64 `protobuf:"varint,5,opt,name=embedder_calls,json=embedderCalls,proto3" json:"embedder_calls,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -930,6 +935,20 @@ func (x *EmbeddingStatus) GetModel() string {
 		return x.Model
 	}
 	return ""
+}
+
+func (x *EmbeddingStatus) GetTotalLookups() int64 {
+	if x != nil {
+		return x.TotalLookups
+	}
+	return 0
+}
+
+func (x *EmbeddingStatus) GetEmbedderCalls() int64 {
+	if x != nil {
+		return x.EmbedderCalls
+	}
+	return 0
 }
 
 var File_gmeow_v1_embedding_proto protoreflect.FileDescriptor
@@ -995,11 +1014,13 @@ const file_gmeow_v1_embedding_proto_rawDesc = "" +
 	"similarity\x12\x14\n" +
 	"\x05found\x18\x02 \x01(\bR\x05found\".\n" +
 	"\x10SnapshotResponse\x12\x1a\n" +
-	"\bartifact\x18\x01 \x01(\fR\bartifact\"h\n" +
+	"\bartifact\x18\x01 \x01(\fR\bartifact\"\xb4\x01\n" +
 	"\x0fEmbeddingStatus\x12#\n" +
 	"\rcached_claims\x18\x01 \x01(\x05R\fcachedClaims\x12\x1a\n" +
 	"\bentities\x18\x02 \x01(\x05R\bentities\x12\x14\n" +
-	"\x05model\x18\x03 \x01(\tR\x05model2\x97\x04\n" +
+	"\x05model\x18\x03 \x01(\tR\x05model\x12#\n" +
+	"\rtotal_lookups\x18\x04 \x01(\x03R\ftotalLookups\x12%\n" +
+	"\x0eembedder_calls\x18\x05 \x01(\x03R\rembedderCalls2\x97\x04\n" +
 	"\x10EmbeddingService\x128\n" +
 	"\x05Embed\x12\x16.gmeow.v1.EmbedRequest\x1a\x17.gmeow.v1.EmbedResponse\x125\n" +
 	"\x04Pool\x12\x15.gmeow.v1.PoolRequest\x1a\x16.gmeow.v1.PoolResponse\x128\n" +

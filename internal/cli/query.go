@@ -26,7 +26,6 @@ import (
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contactio"
 	"blackcat.ca/gmeow/internal/contracts"
-	"blackcat.ca/gmeow/internal/embedding"
 	querypg "blackcat.ca/gmeow/internal/query/postgres"
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
@@ -85,8 +84,53 @@ func newContactCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.AddCommand(newContactImportCommand(out, configPath))
 	command.AddCommand(newContactExportCommand(out, configPath))
 	command.AddCommand(newContactResetEntitiesCommand(out, configPath))
+	command.AddCommand(newContactEmbeddingStatusCommand(out, configPath))
 
 	return command
+}
+
+// newContactEmbeddingStatusCommand reports the EMBEDDING service's cache/index
+// counters and the cumulative cache hit rate (= 1 - embedder_calls/lookups),
+// which should converge toward 1.0 as the corpus's distinct claims get cached.
+func newContactEmbeddingStatusCommand(
+	out io.Writer,
+	configPath *string,
+) *cobra.Command {
+	return &cobra.Command{
+		Use:   "embedding-status",
+		Short: "Report EMBEDDING cache size, entity count, and cache hit rate",
+		RunE: func(command *cobra.Command, _ []string) error {
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			client, err := rpc.NewEmbeddingClient(
+				command.Context(),
+				rpcEndpoint(loaded.Resolved.RPC.Embedding),
+			)
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+			status, err := client.Status(command.Context())
+			if err != nil {
+				return err
+			}
+			hitRate := 0.0
+			if status.TotalLookups > 0 {
+				hitRate = 1 - float64(status.EmbedderCalls)/float64(status.TotalLookups)
+			}
+
+			return writeAppJSON(out, map[string]any{
+				"model":          status.Model,
+				"cached_claims":  status.CachedClaims,
+				"entities":       status.Entities,
+				"total_lookups":  status.TotalLookups,
+				"embedder_calls": status.EmbedderCalls,
+				"cache_hit_rate": hitRate,
+			}, nil)
+		},
+	}
 }
 
 // newContactResetEntitiesCommand clears the EMBEDDING service's resolved entity
@@ -601,7 +645,6 @@ func newContactImportCommand(out io.Writer, configPath *string) *cobra.Command {
 		sourceName     string
 		matchThreshold float64
 		nameThreshold  float64
-		embeddingRPC   bool
 	)
 
 	command := &cobra.Command{
@@ -631,37 +674,19 @@ func newContactImportCommand(out io.Writer, configPath *string) *cobra.Command {
 				return err
 			}
 
-			// Ingest-time resolution. Either talk to a running EMBEDDING service
-			// over gRPC (--embedding-rpc; the service owns the cache+index+ledger
-			// and persists them across runs), or run an in-process EMBEDDING engine
-			// for the duration of this import session (no cross-run persistence).
-			var resolver contactio.Resolver
-			if embeddingRPC {
-				client, dialErr := rpc.NewEmbeddingClient(
-					command.Context(),
-					rpcEndpoint(loaded.Resolved.RPC.Embedding),
-				)
-				if dialErr != nil {
-					return fmt.Errorf("connect to EMBEDDING service: %w", dialErr)
-				}
-				defer client.Close()
-				resolver = client
-			} else {
-				embedConfig := loaded.Config.Analysis.Embeddings
-				embedder, embedErr := embedding.NewHTTPEmbedder(
-					embedConfig.Endpoint,
-					embedConfig.Model,
-					nil,
-				)
-				if embedErr != nil {
-					return fmt.Errorf("configure embedding endpoint: %w", embedErr)
-				}
-				resolver = embedding.NewService(
-					embedding.NewResolver(embedding.NewMemoryCache(), embedder),
-					embedding.NewEntityIndex(embedding.FullDim, embedding.CoarseDim),
-					embedConfig.Model,
-				)
+			// Ingest-time resolution always runs through the EMBEDDING service over
+			// gRPC — it owns the single claim-vector cache + entity index + ledger
+			// and persists them across runs. There is deliberately no in-process
+			// pathway: one resolution authority, one converging cache.
+			client, err := rpc.NewEmbeddingClient(
+				command.Context(),
+				rpcEndpoint(loaded.Resolved.RPC.Embedding),
+			)
+			if err != nil {
+				return fmt.Errorf("connect to EMBEDDING service: %w", err)
 			}
+			defer client.Close()
+			var resolver contactio.Resolver = client
 
 			paths, err := expandContactImportPaths(args, format)
 			if err != nil {
@@ -737,13 +762,6 @@ func newContactImportCommand(out io.Writer, configPath *string) *cobra.Command {
 		"name-confirmation cosine threshold: a centroid match is rejected unless the "+
 			"names also agree this strongly (stricter than --match-threshold; "+
 			"separates same-first-name people)",
-	)
-	command.Flags().BoolVar(
-		&embeddingRPC,
-		"embedding-rpc",
-		false,
-		"resolve via the running EMBEDDING gRPC service (persisted entity space) "+
-			"instead of an in-process, non-persistent engine",
 	)
 
 	return command

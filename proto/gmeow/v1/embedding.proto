@@ -131,4 +131,9 @@ message EmbeddingStatus {
   int32 cached_claims = 1;
   int32 entities = 2;
   string model = 3;
+  // total_lookups is every claim-vector cache lookup since start; embedder_calls
+  // is the subset that MISSED and hit the model. The hit rate = 1 - calls/lookups
+  // and should rapidly approach 1.0 as the corpus's distinct claims get cached.
+  int64 total_lookups = 4;
+  int64 embedder_calls = 5;
 }

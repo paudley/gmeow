@@ -173,12 +173,14 @@ func (server *EmbeddingServer) Status(
 	_ context.Context,
 	_ *pb.Empty,
 ) (*pb.EmbeddingStatus, error) {
-	cached, entities, model := server.service.Status()
+	status := server.service.Status()
 
 	return &pb.EmbeddingStatus{
-		CachedClaims: int32(cached),
-		Entities:     int32(entities),
-		Model:        model,
+		CachedClaims:  int32(status.CachedClaims),
+		Entities:      int32(status.Entities),
+		Model:         status.Model,
+		TotalLookups:  status.Lookups,
+		EmbedderCalls: status.Misses,
 	}, nil
 }
 
