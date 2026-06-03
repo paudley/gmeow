@@ -166,6 +166,7 @@ genproto: ## Regenerate Go protobuf and gRPC stubs from proto/gmeow/v1 (needs bi
 		--go_out=. --go_opt=module=blackcat.ca/gmeow \
 		--go-grpc_out=. --go-grpc_opt=module=blackcat.ca/gmeow \
 		proto/gmeow/v1/common.proto \
+		proto/gmeow/v1/embedding.proto \
 		proto/gmeow/v1/filestore.proto \
 		proto/gmeow/v1/query.proto \
 		proto/gmeow/v1/scheduler.proto \
