@@ -41,6 +41,11 @@ not assembled from interface-level string formatting.
 
 ## Contact Import And Export
 
+Contact identity (which observations denote the same agent) is a formal entity-
+resolution problem, not attribute equality; see
+`docs/architecture/CONTACT_IDENTITY_RESOLUTION.md` for the canonical model that
+governs how projected rollups are formed.
+
 Contact import writes FILESTORE-authoritative RDF bundle objects and lets normal
 projection derive QUERY facts, identity bindings, and rollups. The operator
 surface is `gmeow-admin query contact import --format vcard|rdf|ttl|native`; it

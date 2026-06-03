@@ -1,5 +1,10 @@
 # Contact Ingestion Redesign: FILESTORE-Only, Semantic, Complete
 
+> **See also:** `docs/architecture/CONTACT_IDENTITY_RESOLUTION.md` is the canonical formal
+> treatment of *contact identity* — why dedupe cannot be field equality, and the evidence-graph /
+> correlation-clustering model that governs resolution. This document covers the operational ingest
+> pipeline; that one governs what "the same contact" means.
+
 ## Status / Framing
 
 This is **hardening and consolidation of an existing importer, not a greenfield build**. About

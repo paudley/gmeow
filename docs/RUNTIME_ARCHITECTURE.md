@@ -290,6 +290,9 @@ analyzer versions have been rescheduled.
 - `docs/architecture/` contains subsystem architecture docs for runtime
   foundation, FILESTORE, QUERY, SCHEDULER, ANALYSIS, SOURCES, INTERFACES, and
   operations.
+- `docs/architecture/CONTACT_IDENTITY_RESOLUTION.md` is the canonical formal
+  treatment of contact entity resolution (why identity is not attribute
+  equality; the evidence-graph / correlation-clustering model).
 - `docs/systemd.md` describes grouped service operation.
 - `docs/TESTING.md` describes testing boundaries and anti-mock rules.
 - `docs/FILESTORE_BACKUP_RESTORE.md` describes FILESTORE backup and restore.
