@@ -43,11 +43,33 @@ func emitCanonical(
 
 	switch mapping.Concept {
 	case "email":
-		return emitContactPoint(claims, subject, "mailto:", ontology.NormEmail(value),
-			ontology.Schema+"email", sourceProp)
+		// A junk EMAIL value (no @) is preserved as evidence — a schema:email
+		// literal, not a coerced mailto: node (the doc's typed-fallback rule).
+		if norm := ontology.NormEmail(value); strings.Contains(norm, "@") {
+			return emitContactPoint(
+				claims,
+				subject,
+				"mailto:",
+				norm,
+				ontology.Schema+"email",
+				sourceProp,
+			)
+		}
+
+		return appendCanonical(claims, subject, "email", termLiteral(value), sourceProp)
 	case "phone":
-		return emitContactPoint(claims, subject, "tel:", ontology.NormPhone(value),
-			ontology.Schema+"telephone", sourceProp)
+		if norm := ontology.NormPhone(value); isAllDigits(norm) {
+			return emitContactPoint(
+				claims,
+				subject,
+				"tel:",
+				norm,
+				ontology.Schema+"telephone",
+				sourceProp,
+			)
+		}
+
+		return appendCanonical(claims, subject, "phone", termLiteral(value), sourceProp)
 	case "account":
 		return emitAccount(claims, subject, mapping.Service, value, sourceProp)
 	case "address":
@@ -176,6 +198,15 @@ func emitAccount(claims []Claim, subject, service, value, sourceProp string) []C
 			claims,
 			Claim{Subject: node, Predicate: foafAccountServicePred, Object: termIRI(service)},
 		)
+		// Provider lifecycle: a dead service bounds the account's validity (the
+		// endpoint, not the person).
+		if end, ok := ontology.ServiceShutdown(service); ok {
+			claims = append(claims, Claim{
+				Subject:   node,
+				Predicate: ontology.Time + "hasEnd",
+				Object:    termTypedDate(end),
+			})
+		}
 	}
 	claims = append(
 		claims,
@@ -183,6 +214,19 @@ func emitAccount(claims []Claim, subject, service, value, sourceProp string) []C
 	)
 
 	return claims
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+
+	return true
 }
 
 // emitAddress emits a schema:PostalAddress node. A ";"-delimited value (vCard

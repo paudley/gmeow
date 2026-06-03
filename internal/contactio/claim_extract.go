@@ -13,12 +13,15 @@ import (
 
 // claimStatement is the record-side unit of a claim: its identity-bearing text
 // and subject-independent hash (mapped to embedding.ClaimInput for resolution),
-// the Turtle Line persisted in a delta record, and whether it is a name claim.
+// the Turtle Line persisted in a delta record, whether it is a name claim, and
+// the original Subject it was asserted under (the delta builder needs the subject
+// to preserve node sub-graphs — re-subjecting only the root agent to the entity).
 type claimStatement struct {
-	Text   string
-	Hash   string
-	Line   string
-	IsName bool
+	Subject string
+	Text    string
+	Hash    string
+	Line    string
+	IsName  bool
 }
 
 // claimStatementsFromBody turns a record's Turtle body (a raw rooted graph like
@@ -29,12 +32,21 @@ type claimStatement struct {
 // under). Duplicate claims within a record collapse to one.
 func claimStatementsFromBody(body string) []claimStatement {
 	statements, _, err := rdfbundle.Parse(body)
-	if err != nil || len(statements) == 0 {
+	if err != nil {
 		return nil
 	}
 
+	return claimStatementsFromStatements(statements)
+}
+
+// claimStatementsFromStatements extracts the deduped comparison claims from
+// already-parsed statements (the resolver input). Subject is retained but the
+// dedup is by subject-independent hash (the same value under different node
+// subjects is one comparison claim).
+func claimStatementsFromStatements(statements []rdfbundle.Statement) []claimStatement {
 	out := make([]claimStatement, 0, len(statements))
 	seen := make(map[string]bool, len(statements))
+
 	for _, statement := range statements {
 		claim, ok := extractClaim(statement)
 		if !ok {
@@ -95,10 +107,11 @@ func extractClaim(statement rdfbundle.Statement) (claimStatement, bool) {
 	text := concept + ": " + value
 
 	return claimStatement{
-		Text:   text,
-		Hash:   embedding.StatementHash(text),
-		Line:   claimLine(statement),
-		IsName: isName,
+		Subject: statement.Subject.Value,
+		Text:    text,
+		Hash:    embedding.StatementHash(text),
+		Line:    claimLine(statement),
+		IsName:  isName,
 	}, true
 }
 

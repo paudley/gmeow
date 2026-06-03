@@ -11,6 +11,7 @@ import (
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/embedding"
+	"blackcat.ca/gmeow/internal/rdfbundle"
 )
 
 // EntityPrefix is the IRI namespace for resolved contact entities; the local
@@ -78,11 +79,15 @@ func ResolveImport(
 	entitySeen := map[string]bool{}
 	entities := []string{}
 	for _, delta := range deltas {
-		statements := claimStatementsFromBody(delta.Content)
-		obsFingerprint := observationFingerprint(statements)
+		parsed, _, parseErr := rdfbundle.Parse(delta.Content)
+		if parseErr != nil {
+			return nil, ImportResult{}, parseErr
+		}
+		comparison := claimStatementsFromStatements(parsed)
+		obsFingerprint := observationFingerprint(comparison)
 		resolution, resolveErr := resolver.Resolve(
 			ctx,
-			claimInputs(statements),
+			claimInputs(comparison),
 			threshold,
 			nameThreshold,
 		)
@@ -105,13 +110,19 @@ func ResolveImport(
 			continue
 		}
 
-		delta := deltaClaims(statements, resolution.NewClaimHashes)
+		newHashes := make(map[string]bool, len(resolution.NewClaimHashes))
+		for _, hash := range resolution.NewClaimHashes {
+			newHashes[hash] = true
+		}
+
 		records = append(records, ResolvedRecord{
 			Entity:         resolution.Entity,
 			ObsFingerprint: obsFingerprint,
-			Content: buildEntityDeltaRecord(
+			Content: buildEntityDeltaGraph(
 				resolution.Entity,
-				delta,
+				delta.Identity,
+				parsed,
+				newHashes,
 				options.ImportLevel,
 				observedAt,
 			),
@@ -121,7 +132,7 @@ func ResolveImport(
 				options.ImportLevel,
 			),
 			IsNew: resolution.IsNew,
-			Delta: len(delta),
+			Delta: len(resolution.NewClaimHashes),
 		})
 	}
 
@@ -157,49 +168,135 @@ func observationFingerprint(statements []claimStatement) string {
 	return embedding.StatementHash(strings.Join(hashes, "\n"))
 }
 
-// deltaClaims selects the statements whose hashes the resolver reported as new,
-// preserving record order, so the delta record persists exactly the new claims.
-func deltaClaims(statements []claimStatement, newHashes []string) []claimStatement {
-	newSet := make(map[string]bool, len(newHashes))
-	for _, hash := range newHashes {
-		newSet[hash] = true
-	}
-	delta := make([]claimStatement, 0, len(newHashes))
-	for _, s := range statements {
-		if newSet[s.Hash] {
-			delta = append(delta, s)
-		}
-	}
-
-	return delta
+// deltaLinkPredicates are the agent→attached-node link predicates re-subjected
+// to the entity in a delta (the node sub-graph is otherwise kept verbatim).
+var deltaLinkPredicates = map[string]bool{
+	schemaContactPointPred: true,
+	foafAccountPred:        true,
+	schemaAddressPred:      true,
 }
 
-// buildEntityDeltaRecord renders an immutable delta record: each new claim
-// re-subjected to the resolved entity IRI, plus an RDF-star gmeow:observedAt
-// annotation carrying this observation's transaction time, plus the entity's
-// importance claim. Records are append-only; the entity's full graph is the
-// ordered stack of all its records.
-func buildEntityDeltaRecord(
-	entity string,
-	delta []claimStatement,
+// buildEntityDeltaGraph renders an immutable delta record that PRESERVES the
+// node sub-graph (standards-first storage). Only the root agent's own triples
+// are re-subjected to the entity ULID; attached schema:ContactPoint /
+// foaf:OnlineAccount / schema:PostalAddress nodes (keyed by canonical mailto: /
+// tel: / urn: IRIs) are kept verbatim, with their schema:about back-link
+// re-pointed to the entity. The delta is scoped to NEW information: nodes whose
+// comparison value the resolver reported new, the entity→new-node links, new
+// root-direct claims, and the entity type. Each emitted triple carries the
+// gmeow:observedAt transaction stamp; the importance claim closes the record.
+func buildEntityDeltaGraph(
+	entity, root string,
+	statements []rdfbundle.Statement,
+	newHashes map[string]bool,
 	level int,
 	observedAt time.Time,
 ) string {
-	subject := iri(EntityPrefix + entity)
+	entityIRI := EntityPrefix + entity
+
+	// Classify the new info: which attached nodes are new, which root-direct
+	// comparison claims are new.
+	newNodes := map[string]bool{}
+	rootDirect := map[string]bool{}
+
+	for _, statement := range statements {
+		claim, ok := extractClaim(statement)
+		if !ok || !newHashes[claim.Hash] {
+			continue
+		}
+		if node := nonRootNodeIRI(statement, root); node != "" {
+			newNodes[node] = true
+		} else {
+			rootDirect[claim.Hash] = true
+		}
+	}
+
 	stamp := typedDateTime(observedAt)
+	subjectIRI := iri(entityIRI)
 
 	var builder strings.Builder
+
 	writePrefixes(&builder)
-	for _, claim := range delta {
-		triple := subject + " " + claim.Line
+
+	emitted := map[string]bool{}
+	emit := func(subjectTerm, predicate, objectTerm string) {
+		triple := subjectTerm + " " + iri(predicate) + " " + objectTerm
+		if emitted[triple] {
+			return
+		}
+		emitted[triple] = true
 		builder.WriteString(triple + " .\n")
 		builder.WriteString(
 			"<< " + triple + " >> " + iri(gmeowPrefix+"observedAt") + " " + stamp + " .\n",
 		)
 	}
+
+	for _, statement := range statements {
+		subject := statement.Subject.Value
+		predicate := statement.Predicate.Value
+
+		keep := false
+		switch {
+		case subject == root && predicate == rdfTypePred:
+			keep = true
+		case subject == root && deltaLinkPredicates[predicate] && newNodes[statement.Object.Value]:
+			keep = true
+		case subject == root:
+			if claim, ok := extractClaim(statement); ok && rootDirect[claim.Hash] {
+				keep = true
+			}
+		case newNodes[subject]:
+			keep = true
+		}
+		if !keep {
+			continue
+		}
+
+		subjectText := subjectIRI
+		if subject != root {
+			subjectText = iri(subject)
+		}
+
+		emit(subjectText, predicate, deltaObject(statement.Object, root, entityIRI))
+	}
+
 	builder.WriteString(
-		BuildRDFStarDelta([]Claim{importanceClaim(EntityPrefix+entity, level)}),
+		BuildRDFStarDelta([]Claim{importanceClaim(entityIRI, level)}),
 	)
 
 	return builder.String()
+}
+
+// nonRootNodeIRI returns the attached-node IRI (subject or object) a statement
+// involves other than the root agent, or "" for a root-direct literal claim.
+func nonRootNodeIRI(statement rdfbundle.Statement, root string) string {
+	if statement.Subject.Kind == "iri" && statement.Subject.Value != root &&
+		isAttachedNodeIRI(statement.Subject.Value) {
+		return statement.Subject.Value
+	}
+	if statement.Object.Kind == "iri" && statement.Object.Value != root &&
+		isAttachedNodeIRI(statement.Object.Value) {
+		return statement.Object.Value
+	}
+
+	return ""
+}
+
+// isAttachedNodeIRI reports whether an IRI is a contact-point / account /
+// address node (a global, canonical sub-node of an agent graph).
+func isAttachedNodeIRI(value string) bool {
+	return strings.HasPrefix(value, "mailto:") ||
+		strings.HasPrefix(value, "tel:") ||
+		strings.HasPrefix(value, "urn:gmeow:account:") ||
+		strings.HasPrefix(value, "urn:gmeow:addr:")
+}
+
+// deltaObject renders a statement object for the delta, rewriting a reference to
+// the root agent into the entity IRI (e.g. a node's schema:about back-link).
+func deltaObject(term rdfbundle.Term, root, entity string) string {
+	if term.Kind == "iri" && term.Value == root {
+		return iri(entity)
+	}
+
+	return renderObjectTerm(term)
 }

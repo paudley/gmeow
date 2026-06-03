@@ -15,8 +15,12 @@ package ontology
 // point: one source of truth. `gmeow:` terms carry a GmeowReason and must be
 // registered in the published ontology (docs/ontology/gmeow-terms.md).
 
-func buildRegistry() map[string]Term {
-	terms := []Term{
+// orderedTerms is the canonical term set in DEFINITION order: the canonical
+// predicate for a concept is defined BEFORE its standard-variant aliases, so the
+// concept index (sources.go) deterministically picks the canonical IRI (e.g.
+// schema:name, not the foaf:name/vcard:fn aliases) for emission.
+func orderedTerms() []Term {
+	return []Term{
 		// --- Names (functional spine + contextual parts) ---
 		{
 			IRI:        Schema + "name",
@@ -398,6 +402,10 @@ func buildRegistry() map[string]Term {
 			GmeowReason: "no standard agreement relationship",
 		},
 	}
+}
+
+func buildRegistry() map[string]Term {
+	terms := orderedTerms()
 
 	out := make(map[string]Term, len(terms))
 	for _, t := range terms {

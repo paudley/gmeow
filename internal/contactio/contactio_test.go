@@ -31,17 +31,20 @@ func TestVCardImportProducesRDFContactBundle(t *testing.T) {
 	}
 
 	for _, snippet := range []string{
-		"<mailto:alice@example.test>",
-		"<http://www.w3.org/2006/vcard/ns#hasEmail>",
-		"\"Example Org\"",
-		"\"synthetic only\"",
+		// Canonical node structure: email is a schema:ContactPoint keyed by mailto:,
+		// name/org are standards-first (schema:name / schema:worksFor).
+		"<https://schema.org/contactPoint> <mailto:alice@example.test>",
+		"<mailto:alice@example.test> <https://schema.org/email> <mailto:alice@example.test>",
+		"<https://schema.org/name> \"Alice Example\"",
+		"<https://schema.org/worksFor> \"Example Org\"",
+		"<https://schema.org/description> \"synthetic only\"",
 	} {
 		if !strings.Contains(object.Content, snippet) {
 			t.Fatalf("imported RDF missing %q:\n%s", snippet, object.Content)
 		}
 	}
 	// Subject is now a stable OBSERVATION identity (not the email — emails are
-	// temporal/transferable); the email is preserved as a vcard:hasEmail claim.
+	// temporal/transferable); the email is a schema:ContactPoint node.
 	if object.MediaType != MediaTypeTurtle ||
 		object.SourceKind != contactImportSourceKind ||
 		len(object.Facets) != 1 ||
@@ -71,9 +74,11 @@ func TestVCardImportPreservesInvalidEmailValuesAsSourceData(t *testing.T) {
 			object.Content,
 		)
 	}
+	// A junk EMAIL (no @) is preserved as evidence — a schema:email LITERAL, not a
+	// coerced mailto: node.
 	if !strings.Contains(
 		object.Content,
-		`<https://blackcatinformatics.ca/gmeow/vcardEmail> "+1 (604) 555-1212"`,
+		`<https://schema.org/email> "+1 (604) 555-1212"`,
 	) {
 		t.Fatalf("invalid EMAIL source value was not preserved:\n%s", object.Content)
 	}
@@ -103,30 +108,32 @@ func TestVCardImportScopesProviderLifecycleToIMEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// IM/social identities are foaf:OnlineAccount nodes (one pattern). Dead
+	// services carry a time:hasEnd lifecycle bound on the account node.
 	for _, snippet := range []string{
-		`<https://blackcatinformatics.ca/gmeow/aimIdentity> "synthetic-screen-name"`,
+		`<http://xmlns.com/foaf/0.1/accountName> "synthetic-screen-name"`,
 		`<http://www.w3.org/2006/time#hasEnd> "2017-12-15"^^<http://www.w3.org/2001/XMLSchema#date>`,
-		`<https://blackcatinformatics.ca/gmeow/icqIdentity> "123456"`,
+		`<http://xmlns.com/foaf/0.1/accountName> "123456"`,
 		`<http://www.w3.org/2006/time#hasEnd> "2024-06-26"^^<http://www.w3.org/2001/XMLSchema#date>`,
-		`<https://blackcatinformatics.ca/gmeow/msnIdentity> "synthetic-msn"`,
+		`<http://xmlns.com/foaf/0.1/accountName> "synthetic-msn"`,
 		`<http://www.w3.org/2006/time#hasEnd> "2013-04-30"^^<http://www.w3.org/2001/XMLSchema#date>`,
+		`<http://xmlns.com/foaf/0.1/OnlineAccount>`,
 	} {
 		if !strings.Contains(object.Content, snippet) {
 			t.Fatalf("provider lifecycle RDF missing %q:\n%s", snippet, object.Content)
 		}
 	}
-	for _, snippet := range []string{
-		`<< <mailto:user@aim.com> <http://www.w3.org/2006/vcard/ns#hasEmail> <mailto:user@aim.com> >>`,
-		`<< <mailto:user@aim.com> <https://blackcatinformatics.ca/gmeow/jabberIdentity>`,
-		`<< <mailto:user@aim.com> <https://blackcatinformatics.ca/gmeow/myspaceProfile>`,
-	} {
-		if strings.Contains(object.Content, snippet) {
-			t.Fatalf(
-				"provider lifecycle was applied to non-shutdown identity %q:\n%s",
-				snippet,
-				object.Content,
-			)
-		}
+	// Lifecycle is scoped to the dead-service endpoints only: AIM/ICQ/MSN get a
+	// hasEnd; the live-ish Jabber/MySpace accounts do not — so exactly three.
+	if got := strings.Count(
+		object.Content,
+		"<http://www.w3.org/2006/time#hasEnd>",
+	); got != 3 {
+		t.Fatalf(
+			"want 3 lifecycle hasEnd bounds (aim/icq/msn), got %d:\n%s",
+			got,
+			object.Content,
+		)
 	}
 }
 
@@ -162,8 +169,10 @@ func TestVCardImportSupportsQuotedPrintableContinuationAndNameExtensions(t *test
 
 	for _, snippet := range []string{
 		"first\\nsecond",
-		`<https://blackcatinformatics.ca/gmeow/maidenName> "Former Synthetic"`,
-		`<https://blackcatinformatics.ca/gmeow/phoneticLastName> "synthetic-pronunciation"`,
+		// Name parts canonicalize to schema:familyName; the long-tail fastmail /
+		// legacy-fragment metadata is preserved under its source-property predicate.
+		`<https://schema.org/familyName> "Former Synthetic"`,
+		`<https://schema.org/familyName> "synthetic-pronunciation"`,
 		`<https://blackcatinformatics.ca/gmeow/fastmailGDataStash> "stash-token"`,
 		`<https://blackcatinformatics.ca/gmeow/fastmailGoogleURI> "google-uri-token"`,
 		`<https://blackcatinformatics.ca/gmeow/legacyEncodedCategoryFragment> "legacy-category-fragment"`,
@@ -1095,7 +1104,8 @@ func TestVCardImportHandlesGroupsFoldingAndAnonymousSubjects(t *testing.T) {
 	for _, snippet := range []string{
 		"<mailto:first@example.test>",
 		"\"first line indented\"",
-		"\"+15551234567\"",
+		// Phone is a canonical tel: ContactPoint node (E.164-normalized).
+		"<tel:5551234567> <https://schema.org/telephone> <tel:5551234567>",
 	} {
 		if !strings.Contains(object.Content, snippet) {
 			t.Fatalf("imported RDF missing %q:\n%s", snippet, object.Content)

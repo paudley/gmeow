@@ -42,9 +42,9 @@ func KindForConcept(concept string) Kind {
 
 var conceptIndex = func() map[string]Term {
 	out := map[string]Term{}
-	for _, t := range registry {
-		// First term wins per concept; concepts with multiple IRIs (note, nickname,
-		// same-as) share semantics so either canonical IRI is fine.
+	// orderedTerms defines the canonical predicate before its aliases, so
+	// first-in-order wins → the canonical IRI per concept (schema:name, not vcard:fn).
+	for _, t := range orderedTerms() {
 		if _, dup := out[t.Concept]; !dup {
 			out[t.Concept] = t
 		}
@@ -122,6 +122,26 @@ func VCardMapping(prop string) (Mapping, bool) {
 	default:
 		return Mapping{}, false
 	}
+}
+
+// serviceShutdown records the date a service endpoint ceased operating, keyed by
+// the account's service-homepage IRI. An account on a dead service gets a
+// time:hasEnd validity bound (the provider lifecycle), per AGENTS.md — bounded to
+// the affected endpoint, not the person.
+var serviceShutdown = map[string]string{
+	"https://www.aim.com/":     "2017-12-15",
+	"https://icq.com/":         "2024-06-26",
+	"https://www.msn.com/":     "2013-04-30",
+	"https://www.yahoo.com/":   "2018-07-17",
+	"https://talk.google.com/": "2017-06-26",
+}
+
+// ServiceShutdown returns the endpoint-shutdown date for an account service, if
+// known.
+func ServiceShutdown(service string) (string, bool) {
+	date, ok := serviceShutdown[service]
+
+	return date, ok
 }
 
 // ServiceForIMValue extracts the service homepage from an IM value like

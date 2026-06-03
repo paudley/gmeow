@@ -10,6 +10,8 @@ import (
 	"mime/quotedprintable"
 	"sort"
 	"strings"
+
+	"blackcat.ca/gmeow/internal/ontology"
 )
 
 func vcardToRDF(content string) ([]renderedContact, []RecordRejection, error) {
@@ -45,120 +47,56 @@ func vcardContactBody(card vcardContact) string {
 			},
 		)
 	}
-	claims = appendVCardValueClaims(claims, card, "FN", foafPrefix+"name", literal)
-	claims = appendVCardValueClaims(claims, card, "NICKNAME", foafPrefix+"nick", literal)
-	claims = appendVCardValueClaims(
-		claims,
-		card,
-		"EMAIL",
-		vcardPrefix+"hasEmail",
-		normalizedEmailIRI,
-	)
-	claims = appendVCardValueClaims(
-		claims,
-		card,
-		"TEL",
-		vcardPrefix+"hasTelephone",
-		literal,
-	)
-	claims = appendVCardValueClaims(claims, card, "URL", vcardPrefix+"hasURL", iri)
-	claims = appendVCardValueClaims(
-		claims,
-		card,
-		"ORG",
-		schemaPrefix+"affiliation",
-		literal,
-	)
-	claims = appendVCardValueClaims(
-		claims,
-		card,
-		"TITLE",
-		schemaPrefix+"jobTitle",
-		literal,
-	)
-	claims = appendVCardValueClaims(claims, card, "ADR", schemaPrefix+"address", literal)
-	claims = appendVCardValueClaims(
-		claims,
-		card,
-		"NOTE",
-		schemaPrefix+"description",
-		literal,
-	)
-	claims = appendVCardValueClaims(
-		claims,
-		card,
-		"UID",
-		schemaPrefix+"identifier",
-		literal,
-	)
-	claims = appendVCardValueClaims(claims, card, "N", vcardPrefix+"n", literal)
-	claims = appendVCardValueClaims(
-		claims,
-		card,
-		"VERSION",
-		gmeowPrefix+"vcardVersion",
-		literal,
-	)
-	claims = appendVCardSourceLineClaims(claims, card)
+
+	// Each vCard line either maps to a canonical concept (emitted as a
+	// standards-first node structure via the shared emitter, with gmeow:mappedFrom
+	// provenance) or is genuine source-metadata / a vendor extension preserved
+	// losslessly via its documented source-property predicate.
+	for _, line := range card.lines {
+		if line.value == "" {
+			continue
+		}
+		if mapping, ok := ontology.VCardMapping(line.name); ok {
+			claims = emitCanonical(claims, card.subject, mapping, line.value, "vcard:"+line.name)
+
+			continue
+		}
+		claims = appendVCardSourceLineClaim(claims, card.subject, line)
+	}
 
 	return BuildRDFStarDelta(claims)
 }
 
-// appendVCardValueClaims renders each value of a vCard property through the
-// legacy object func (literal/iri/normalizedEmailIRI) and appends it as a Claim.
-// The rendered string is wrapped verbatim with termRaw so output is unchanged.
-func appendVCardValueClaims(
+// appendVCardSourceLineClaim preserves a non-concept vCard line (source metadata
+// or vendor extension) under its documented source-property predicate, with
+// provider-lifecycle and parameter annotations.
+func appendVCardSourceLineClaim(
 	claims []Claim,
-	card vcardContact,
-	name string,
-	predicate string,
-	object func(string) string,
+	subject string,
+	line vcardLine,
 ) []Claim {
-	for _, value := range card.values[name] {
-		rendered := object(value)
-		if rendered == "" {
-			continue
-		}
-		claims = append(
-			claims,
-			Claim{Subject: card.subject, Predicate: predicate, Object: termRaw(rendered)},
-		)
+	predicate := vcardSourcePropertyPredicate(line.name)
+	if predicate == "" {
+		return claims
 	}
 
-	return claims
-}
+	claim := Claim{Subject: subject, Predicate: predicate, Object: termLiteral(line.value)}
+	if lifecycle, found := providerLifecycleByPredicate[predicate]; found &&
+		lifecycle.ValidUntil != "" {
+		claim = claim.withAnnotation(timePrefix+"hasEnd", termTypedDate(lifecycle.ValidUntil))
+	}
 
-func appendVCardSourceLineClaims(claims []Claim, card vcardContact) []Claim {
-	for _, line := range card.lines {
-		predicate := vcardSourcePropertyPredicate(line.name)
-		if predicate == "" || line.value == "" {
-			continue
-		}
-		claim := Claim{
-			Subject:   card.subject,
-			Predicate: predicate,
-			Object:    termLiteral(line.value),
-		}
-		if lifecycle, found := providerLifecycleByPredicate[predicate]; found &&
-			lifecycle.ValidUntil != "" {
-			claim = claim.withAnnotation(
-				timePrefix+"hasEnd",
-				termTypedDate(lifecycle.ValidUntil),
-			)
-		}
-		for param, values := range line.params {
-			paramPredicate := vcardParamPredicates[param]
-			for _, value := range values {
-				if value == "" {
-					continue
-				}
-				claim = claim.withAnnotation(paramPredicate, termLiteral(value))
+	for param, values := range line.params {
+		paramPredicate := vcardParamPredicates[param]
+		for _, value := range values {
+			if value == "" {
+				continue
 			}
+			claim = claim.withAnnotation(paramPredicate, termLiteral(value))
 		}
-		claims = append(claims, claim)
 	}
 
-	return claims
+	return append(claims, claim)
 }
 
 // parseVCards splits content into vCard records and parses each independently.
