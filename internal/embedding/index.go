@@ -30,6 +30,14 @@ import (
 // always findable; only updated centroids go briefly stale between rebuilds.
 const rebuildEvery = 256
 
+// HNSW recall provisioning (see newSearchGraph). graphEfSearch is the search-time
+// frontier size; graphM is the per-node connectivity. Both are raised well above
+// coder/hnsw's defaults (20 / 16) so recall holds at 10k+ entities.
+const (
+	graphM        = 32
+	graphEfSearch = 200
+)
+
 type EntityIndex struct {
 	coarse      *hnsw.Graph[string]
 	fine        *hnsw.Graph[string]
@@ -55,11 +63,28 @@ func NewEntityIndex(fullDim, coarseDim int) *EntityIndex {
 	return &EntityIndex{
 		dim:         fullDim,
 		dimC:        coarseDim,
-		coarse:      hnsw.NewGraph[string](),
-		fine:        hnsw.NewGraph[string](),
+		coarse:      newSearchGraph(),
+		fine:        newSearchGraph(),
 		centroids:   make(map[string]Vector),
 		entityNames: make(map[string][]Vector),
 	}
+}
+
+// newSearchGraph builds an HNSW graph provisioned for entity-resolution RECALL at
+// corpus scale. coder/hnsw's defaults (M=16, EfSearch=20) explore only ~20
+// candidates regardless of graph size — invisibly fine on a few entities, but at
+// 10k+ entities the true nearest centroid routinely falls outside that frontier,
+// so a re-ingested contact misses its own entity and mints a duplicate (breaking
+// idempotency and inflating the entity count). A denser graph (M) plus a far
+// deeper search frontier (EfSearch) keeps recall high as N grows; the extra cost
+// is cheap relative to the per-record gRPC + FILESTORE write that already
+// dominate ingest.
+func newSearchGraph() *hnsw.Graph[string] {
+	g := hnsw.NewGraph[string]()
+	g.M = graphM
+	g.EfSearch = graphEfSearch
+
+	return g
 }
 
 // Match is one candidate entity ranked by the layered search.
@@ -107,8 +132,8 @@ func (idx *EntityIndex) Upsert(entity string, centroid Vector) error {
 // rebuildLocked rebuilds the fine/coarse graphs from the authoritative centroid
 // map, picking up drifted centroids. Caller must hold idx.mu.
 func (idx *EntityIndex) rebuildLocked() {
-	fine := hnsw.NewGraph[string]()
-	coarse := hnsw.NewGraph[string]()
+	fine := newSearchGraph()
+	coarse := newSearchGraph()
 
 	for entity, centroid := range idx.centroids {
 		fine.Add(hnsw.MakeNode(entity, centroid))
@@ -175,8 +200,12 @@ func (idx *EntityIndex) Search(centroid Vector, k int) ([]Match, error) {
 		return nil, nil
 	}
 
-	// Coarse recall over a wider beam, then re-rank with the fine centroid.
-	beam := max(k*4, 16)
+	// Coarse recall over a wide beam, then re-rank with the fine centroid. The
+	// beam must be generous: the coarse 128-d Matryoshka slice is lossy, so the
+	// true fine-match can sit a few dozen ranks deep in coarse space. Too narrow
+	// a beam here is the other half of the recall failure (with EfSearch) that
+	// lets re-ingests miss their own entity at corpus scale.
+	beam := max(k*8, 64)
 	coarseHits := idx.coarse.Search(Slice(centroid, idx.dimC), beam)
 	fineQuery := Normalize(centroid)
 

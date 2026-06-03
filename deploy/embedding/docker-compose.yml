@@ -52,6 +52,9 @@ services:
       # Strix Halo is an APU: Ollama drops integrated GPUs by default. Enable it —
       # the APU's unified memory gives it the full system-RAM pool as "VRAM".
       OLLAMA_IGPU_ENABLE: "1"
+      # Process several embedding requests concurrently so a bulk pre-warm pass can
+      # saturate the iGPU instead of round-tripping one request at a time.
+      OLLAMA_NUM_PARALLEL: "4"
     healthcheck:
       test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
       interval: 10s
