@@ -39,19 +39,30 @@ type Resolution struct {
 	IsNoop         bool
 }
 
-// entityLedger is the materialized per-entity claim set (hash -> text) plus a
-// corpus document-frequency index (value hash -> # of distinct entities holding
-// it) used for ω/IDF weighting. Rebuildable from the record log, so it is a
-// cache, not source truth; df is recomputed on load.
+// identifierConcepts are the high-discrimination identifier concepts whose values
+// seed the inverted blocking index: a shared one is a strong reason to RETRIEVE a
+// candidate (idDiff/ω then decide whether to actually merge). Names/org/etc. are
+// deliberately excluded — too common, they would widen false candidates.
+var identifierConcepts = map[string]bool{
+	"email": true, "phone": true, "account": true, "url": true,
+}
+
+// entityLedger is the materialized per-entity claim set (hash -> text) plus two
+// derived indexes: df (value hash -> # of distinct entities, for ω/IDF) and ident
+// (identifier value -> entities, for value-based blocking). Both are rebuildable
+// from the claim sets — the ledger is the source of record, the indexes are views
+// recomputed on load (never serialized).
 type entityLedger struct {
 	claims map[string]map[string]string
 	df     map[string]int
+	ident  map[string][]string
 }
 
 func newEntityLedger() *entityLedger {
 	return &entityLedger{
 		claims: make(map[string]map[string]string),
 		df:     make(map[string]int),
+		ident:  make(map[string][]string),
 	}
 }
 
@@ -71,23 +82,62 @@ func (l *entityLedger) add(entity string, claims []ClaimInput) {
 	for _, claim := range claims {
 		if _, existed := set[claim.Hash]; !existed {
 			l.df[claim.Hash]++ // a new (entity, value) pair raises document frequency
+			l.indexIdentifier(entity, claim.Text)
 		}
 
 		set[claim.Hash] = claim.Text
 	}
 }
 
+// indexIdentifier adds an entity to the inverted blocking index under an
+// identifier claim's value (no-op for non-identifier concepts).
+func (l *entityLedger) indexIdentifier(entity, text string) {
+	concept, value := splitClaimText(text)
+	if value == "" || !identifierConcepts[concept] {
+		return
+	}
+
+	key := concept + "\x00" + value
+	l.ident[key] = append(l.ident[key], entity)
+}
+
+// identifierCandidates returns the entities sharing any identifier value with the
+// incoming claims — the value-based blocking candidates (deduped, sorted for
+// deterministic resolution).
+func (l *entityLedger) identifierCandidates(claims []scoredClaim) []string {
+	seen := map[string]bool{}
+	out := []string{}
+
+	for _, claim := range claims {
+		if !identifierConcepts[claim.Attr] || claim.Value == "" {
+			continue
+		}
+		for _, entity := range l.ident[claim.Attr+"\x00"+claim.Value] {
+			if !seen[entity] {
+				seen[entity] = true
+				out = append(out, entity)
+			}
+		}
+	}
+
+	sort.Strings(out)
+
+	return out
+}
+
 // docFreq is the number of distinct entities asserting a value (its corpus
 // document frequency), the denominator of IDF.
 func (l *entityLedger) docFreq(hash string) int { return l.df[hash] }
 
-// rebuildDF recomputes the document-frequency index from the claim sets. Called
-// after a bulk load where df was not serialized.
-func (l *entityLedger) rebuildDF() {
+// rebuild recomputes the derived df and identifier indexes from the claim sets.
+// Called after a bulk load (neither index is serialized).
+func (l *entityLedger) rebuild() {
 	l.df = make(map[string]int)
-	for _, set := range l.claims {
-		for hash := range set {
+	l.ident = make(map[string][]string)
+	for entity, set := range l.claims {
+		for hash, text := range set {
 			l.df[hash]++
+			l.indexIdentifier(entity, text)
 		}
 	}
 }
@@ -233,10 +283,30 @@ func (s *Service) resolveEntity(
 		return "", 0, false, err
 	}
 
+	// Blocking is the UNION of two recall channels: the centroid HNSW (gestalt
+	// similarity) and the inverted identifier index (a shared email/phone/account/
+	// url retrieves the candidate regardless of centroid drift — the cross-format
+	// recall the centroid alone misses). idDiff then decides which actually merge.
 	candidates, err := s.index.Search(centroid, s.blockingTopN)
 	if err != nil {
 		return "", 0, false, err
 	}
+
+	candidateEntities := map[string]bool{}
+	ordered := []string{}
+	addCandidate := func(entity string) {
+		if entity != "" && !candidateEntities[entity] {
+			candidateEntities[entity] = true
+			ordered = append(ordered, entity)
+		}
+	}
+	for _, candidate := range candidates {
+		addCandidate(candidate.Entity)
+	}
+	for _, entity := range s.ledger.identifierCandidates(incoming) {
+		addCandidate(entity)
+	}
+	sort.Strings(ordered) // deterministic scoring order (tie-break by ULID)
 
 	params := s.idDiffParams(threshold, nameThreshold)
 
@@ -244,14 +314,14 @@ func (s *Service) resolveEntity(
 	bestScore := s.mergeGate // must clear the gate to win
 	bestConfidence := 0.0
 
-	for _, candidate := range candidates {
-		result := idDiff(incoming, s.entityScoredClaims(candidate.Entity), params)
+	for _, entity := range ordered {
+		result := idDiff(incoming, s.entityScoredClaims(entity), params)
 		if result.Veto {
 			continue
 		}
 
 		if result.Score >= bestScore {
-			bestEntity = candidate.Entity
+			bestEntity = entity
 			bestScore = result.Score
 			bestConfidence = result.Confidence
 		}

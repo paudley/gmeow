@@ -136,6 +136,9 @@ func (s *Service) LoadState(data []byte) error {
 	s.index = index
 	s.ledger = ledger
 	s.seenObs = memo
+	s.entityClaims = make(
+		map[string][]scoredClaim,
+	) // rebuilt lazily from the loaded ledger
 
 	return nil
 }
@@ -358,7 +361,7 @@ func decodeLedger(data []byte) (*entityLedger, error) {
 		ledger.claims[entity] = set
 	}
 
-	ledger.rebuildDF() // df is not serialized; recompute from the folded claims
+	ledger.rebuild() // df + identifier index are not serialized; recompute from the claims
 
 	return ledger, nil
 }

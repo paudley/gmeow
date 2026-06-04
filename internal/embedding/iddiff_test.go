@@ -259,3 +259,59 @@ func TestResolveMemoIdempotentReingest(t *testing.T) {
 		t.Fatalf("re-ingest minted entities: %d -> %d", before, service.index.Len())
 	}
 }
+
+// TestResolveIdentifierBlockingMergesSharedEmail: a record sharing only an email
+// with an existing entity merges via the inverted identifier index even when its
+// centroid (different name/context) would miss the HNSW blocking at scale — the
+// cross-format recall channel.
+func TestResolveIdentifierBlockingMergesSharedEmail(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService()
+
+	alice, err := service.Resolve(ctx, []ClaimInput{
+		claimInput("name: alice anderson", true),
+		claimInput("email: shared@x.example", false),
+		claimInput("note: alpha context one", false),
+	}, 0.72, 0.88)
+	if err != nil {
+		t.Fatalf("resolve alice: %v", err)
+	}
+
+	// Grow the index so centroid blocking alone would not surface alice.
+	for i := range 100 {
+		_, err := service.Resolve(ctx, []ClaimInput{
+			claimInput(fmt.Sprintf("name: noise person %d", i), true),
+			claimInput(fmt.Sprintf("email: noise%d@z.example", i), false),
+		}, 0.72, 0.88)
+		if err != nil {
+			t.Fatalf("noise resolve %d: %v", i, err)
+		}
+	}
+
+	before := service.index.Len()
+	// Same email, otherwise entirely different (no name, different note + a phone)
+	// — a cross-source observation of the same person.
+	bob, err := service.Resolve(ctx, []ClaimInput{
+		claimInput("email: shared@x.example", false),
+		claimInput("note: zeta unrelated context", false),
+		claimInput("phone: 5551112222", false),
+	}, 0.72, 0.88)
+	if err != nil {
+		t.Fatalf("resolve shared-email record: %v", err)
+	}
+
+	if bob.IsNew || bob.Entity != alice.Entity {
+		t.Fatalf(
+			"shared-email record did not merge via identifier blocking: alice=%s got=%+v",
+			alice.Entity,
+			bob,
+		)
+	}
+	if service.index.Len() != before {
+		t.Fatalf(
+			"minted instead of merging on shared identifier: %d -> %d",
+			before,
+			service.index.Len(),
+		)
+	}
+}
