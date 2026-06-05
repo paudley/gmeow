@@ -26,6 +26,14 @@ type Service struct {
 	setPenalty   float64 // scale for disjoint-set negative evidence (repair mode)
 	vetoMass     float64 // functional-contradiction ω that hard-vetoes a merge
 	tauCtx       float64 // contextual cosine value-match threshold
+	// residual factorization of value embeddings (residual.go) — projects shared
+	// structure (domains/hosts/boilerplate) out before cosine so structured
+	// identifiers that share a host/domain stop false-matching. Rebuilt from the cache
+	// as it grows (geometric); a property of the value distribution, not the partition.
+	residual          *residualBasis
+	residualK         int // top components removed (0 disables residualization)
+	residualMinSample int // cache size before the first basis is built
+	residualBuiltAt   int // cache size at the last basis build
 	// seenObs memoizes observation-fingerprint -> resolved entity. It makes
 	// resolution deterministic and idempotent for an IDENTICAL observation
 	// (same claim set), independent of centroid drift or blocking recall — a
@@ -52,6 +60,12 @@ const (
 	defaultSetPenalty   = 0.5
 	defaultVetoMass     = 4.0
 	defaultTauCtx       = 0.6
+	// Residual factorization: remove the top ~20 principal directions (offline-
+	// validated sweet spot — false same-host identifiers 0.63→0.03 mean cosine, true
+	// name variants preserved at 0.90), once the cache is large enough to estimate
+	// them stably.
+	defaultResidualK         = 20
+	defaultResidualMinSample = 512
 )
 
 // NamedVec is one name vector attached to an entity (key unique per vector).
@@ -66,19 +80,21 @@ func NewService(resolver *Resolver, index *EntityIndex, model string) *Service {
 	}
 
 	return &Service{
-		resolver:     resolver,
-		index:        index,
-		ledger:       newEntityLedger(),
-		newID:        defaultIDSource(),
-		model:        model,
-		blockingTopN: defaultBlockingTopN,
-		mergeGate:    defaultMergeGate,
-		lambda:       defaultLambda,
-		setPenalty:   defaultSetPenalty,
-		vetoMass:     defaultVetoMass,
-		tauCtx:       defaultTauCtx,
-		seenObs:      make(map[string]string),
-		entityClaims: make(map[string][]scoredClaim),
+		resolver:          resolver,
+		index:             index,
+		ledger:            newEntityLedger(),
+		newID:             defaultIDSource(),
+		model:             model,
+		blockingTopN:      defaultBlockingTopN,
+		mergeGate:         defaultMergeGate,
+		lambda:            defaultLambda,
+		setPenalty:        defaultSetPenalty,
+		vetoMass:          defaultVetoMass,
+		tauCtx:            defaultTauCtx,
+		residualK:         defaultResidualK,
+		residualMinSample: defaultResidualMinSample,
+		seenObs:           make(map[string]string),
+		entityClaims:      make(map[string][]scoredClaim),
 	}
 }
 

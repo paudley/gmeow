@@ -215,6 +215,44 @@ violation. Because each `ciGraph` is *defined by* the assignment that `idDiff` i
 an **iterative, EM-like fixpoint**: assign → fold → re-score → re-assign, to convergence. Temporal
 validity and `supersedes` live on the edges, so the resulting partition is inherently bi-temporal.
 
+### 4.1.1 Residual value-match — removing shared structure before cosine
+
+The value-match cosine of §4.1 is computed in a **residual** embedding space, not the raw space.
+A structured identifier's embedding is **dominated by its shared structural component** — an email
+`@domain`, an account/URL host (`facebook.com/`), vCard boilerplate — so two *different* identifiers
+that merely share a provider embed close. Measured on the corpus: distinct same-host accounts sit at
+**0.63 mean / 0.77 max** raw cosine, *above* the 0.72 match threshold → a false-merge blob. This is a
+**representation** failure, not a metric one: no Lₚ distance on the whole-value vector separates them
+(for unit vectors cosine ≡ dot, and euclidean is monotone in cosine — only the *representation* moved),
+and **IDF cannot suppress it** (each value is unique → high `ω`). Decomposing the value by hand
+*backfires* — the host becomes an exact-match claim whose cold-start `ω` is high, growing the blob.
+
+The fix removes the shared structure before comparing: project each value embedding onto its residual
+after subtracting the top-k principal directions of the value-embedding set,
+
+```
+R = X − X·Wₖ·Wₖᵀ            (k ≈ 20)
+```
+
+— Audley (2025), *"Emergent Knowledge Graphs from Nonlinear Semantic Residuals"*
+(`audley_2025_emergent_knowledge_graphs`; github.com/paudley/nonlinear-semantic-graphs; ABTT-adjacent,
+*Mu & Viswanath, "All-but-the-Top"*). The top directions encode exactly the shared boilerplate;
+removing them separates the false pairs (**0.63 → 0.03 mean, 0.24 max** at k≈20) while **preserving
+genuine matches** (a true name variant stays **0.90**, a Bob/Robert nickname **0.65**). `idDiff`
+compares in this residual space; the HNSW **blocking/centroid keys stay raw** (recall is deliberately
+over-inclusive; the residual re-rank is the precision filter). A value that is *pure* boilerplate has a
+near-zero residual and correlates with nothing — exactly right.
+
+**This is an ingestion-time transform with no QUERY dependency.** The principal basis is estimated
+**entirely from the EMBEDDING claim-vector cache** (rebuilt geometrically as the cache grows) — ingest
+reads nothing from QUERY, consistent with the FILESTORE/EMBEDDING-only ingest invariant — and it is
+**not** the global REPAIR pass. At corpus scale it collapsed the structured-identifier over-merge from
+**862 distinct names in one entity to 31** (28×) on a 15k single-source import, ~doubling the resolved
+entity count. The residue — greedy-ingest **accretion** entities that match on *accumulated* weak
+residual-reduced signals — is a separate **ingestion-quality** concern fixed **at ingest**, never
+deferred to REPAIR (REPAIR is a distinct, offline, QUERY-independent global pass, not a crutch for
+ingestion).
+
 ### 4.2 The canonical cases, resolved correctly
 
 | case | mechanism | outcome |

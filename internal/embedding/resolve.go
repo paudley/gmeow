@@ -272,6 +272,10 @@ func (s *Service) Resolve(
 		return Resolution{}, err
 	}
 
+	// Refresh the residual basis as the value cache grows, so idDiff compares in
+	// residual space (shared-structure variance removed) rather than raw cosine.
+	s.maybeRebuildResidual()
+
 	incoming := make([]scoredClaim, len(claims))
 	for i, claim := range claims {
 		concept := attrs[i] // already the canonical concept (claim_extract grounds on ontology)
@@ -280,7 +284,7 @@ func (s *Service) Resolve(
 			Value: values[i],
 			Hash:  claim.Hash,
 			Kind:  ontology.KindForConcept(concept),
-			Vec:   vectors[i],
+			Vec:   s.residualize(vectors[i]),
 			Valid: parseValidity(claim.ValidFrom, claim.ValidUntil),
 		}
 	}
@@ -401,6 +405,40 @@ func (s *Service) resolveEntity(
 	return s.newID(), 0, true, nil
 }
 
+// maybeRebuildResidual rebuilds the value-embedding residual basis when the cache
+// has grown enough since the last build (geometric: first at residualMinSample,
+// then on each doubling). The caller holds resolveMu. A rebuild invalidates the
+// memoized per-entity scored claims, whose residual vectors depend on the basis.
+func (s *Service) maybeRebuildResidual() {
+	if s.residualK <= 0 {
+		return
+	}
+
+	n := s.resolver.Cache().Len()
+	if n < s.residualMinSample {
+		return
+	}
+	if s.residual != nil && n < 2*s.residualBuiltAt {
+		return
+	}
+
+	basis := computeResidualBasis(s.cacheEntries(), s.residualK)
+	if basis == nil {
+		return
+	}
+
+	s.residual = basis
+	s.residualBuiltAt = n
+	s.entityClaims = make(map[string][]scoredClaim) // residuals changed: drop the memo
+}
+
+// residualize projects shared-structure variance out of a value embedding before it
+// enters idDiff (residual.go). A no-op until a basis exists. Blocking/centroid keys
+// stay RAW (recall); only the idDiff comparison uses residual space (precision).
+func (s *Service) residualize(v Vector) Vector {
+	return s.residual.residual(v)
+}
+
 // idDiffParams builds the per-call comparison parameters. The CLI's
 // match-threshold becomes the set/identifier value-match cosine; name-threshold
 // becomes the (stricter) functional value-match cosine — so name variants still
@@ -447,7 +485,9 @@ func (s *Service) entityScoredClaims(entity string) []scoredClaim {
 			Valid: parseValidity(entry.ValidFrom, entry.ValidUntil),
 		}
 		if vec, ok := s.resolver.Cache().Get(StatementHash(value)); ok {
-			claim.Vec = vec
+			claim.Vec = s.residualize(
+				vec,
+			) // compare in residual space (memo dropped on basis rebuild)
 		}
 
 		out = append(out, claim)
