@@ -52,6 +52,14 @@ const (
 	// Set: multi-valued identifiers (emails, phones, urls, accounts) — scored by
 	// identifying-mass overlap.
 	Set
+	// Name: a personal-name token compared by role-free, idf-weighted SUBSUMPTION
+	// (CONTACT_IDENTITY_RESOLUTION.md §4.2). A name is decomposed into normalized
+	// tokens; shared rare tokens corroborate, a token-subset is a compatible
+	// completion (neutral), and only MUTUAL divergence on rare tokens contradicts.
+	// idf is uncapped (rarity is the whole signal — there is no "surname" slot, a
+	// token discriminates because it is rare); the divergence gate, not a cap, is
+	// the anti-blob mechanism.
+	Name
 )
 
 // Role is the contact-domain entity role of a term's object (the docs'

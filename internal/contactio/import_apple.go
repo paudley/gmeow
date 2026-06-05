@@ -158,6 +158,7 @@ func writeAppleAddressBookScalars(
 	subject string,
 	record map[string]any,
 ) error {
+	var name nameInput
 	for key, value := range record {
 		if key == "ABPropertyTypes" {
 			continue
@@ -173,10 +174,20 @@ func writeAppleAddressBookScalars(
 		if err != nil {
 			return fmt.Errorf("Apple AddressBook field %q: %w", key, err)
 		}
-		if object != "" {
-			writeTriple(builder, subject, mapping.Predicate, object)
+		if object == "" {
+			continue
 		}
+		// Name fields are reified onto one gmeow:PersonName node after the loop.
+		if field, ok := nameFieldForPredicate(mapping.Predicate); ok {
+			if raw := strings.TrimSpace(fmt.Sprintf("%v", value)); raw != "" {
+				assignNameField(&name, field, raw)
+			}
+
+			continue
+		}
+		writeTriple(builder, subject, mapping.Predicate, object)
 	}
+	writeNameNode(builder, subject, name)
 
 	return nil
 }

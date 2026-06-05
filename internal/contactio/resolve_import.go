@@ -196,6 +196,7 @@ var deltaLinkPredicates = map[string]bool{
 	schemaAddressPred:              true,
 	ontology.HasContactPointPlaces: true, // entity → gmeow:PostalAddress
 	ontology.LocatedAt:             true, // entity → gmeow:Place (coordinates)
+	ontology.HasName:               true, // entity → gmeow:PersonName (appellation)
 }
 
 // buildEntityDeltaGraph renders an immutable delta record that PRESERVES the
@@ -227,14 +228,31 @@ func buildEntityDeltaGraph(
 	validity := bearingNodeValidity(statements, annotations)
 
 	for _, statement := range statements {
-		claim, ok := extractClaim(statement)
-		if !ok || !newHashes[claim.Hash] {
+		claims, ok := extractClaims(statement)
+		if !ok {
+			continue
+		}
+		// A statement is NEW info when any of its comparison claims is new (a name
+		// statement yields several tokens; one new token keeps the whole appellation).
+		anyNew := false
+		for _, claim := range claims {
+			if newHashes[claim.Hash] {
+				anyNew = true
+
+				break
+			}
+		}
+		if !anyNew {
 			continue
 		}
 		if node := nonRootNodeIRI(statement, root); node != "" {
 			newNodes[node] = true
 		} else {
-			rootDirect[claim.Hash] = true
+			for _, claim := range claims {
+				if newHashes[claim.Hash] {
+					rootDirect[claim.Hash] = true
+				}
+			}
 		}
 	}
 
@@ -296,8 +314,14 @@ func buildEntityDeltaGraph(
 		case subject == root && deltaLinkPredicates[predicate] && newNodes[statement.Object.Value]:
 			keep = true
 		case subject == root:
-			if claim, ok := extractClaim(statement); ok && rootDirect[claim.Hash] {
-				keep = true
+			if claims, ok := extractClaims(statement); ok {
+				for _, claim := range claims {
+					if rootDirect[claim.Hash] {
+						keep = true
+
+						break
+					}
+				}
 			}
 		case newNodes[subject]:
 			keep = true
@@ -391,7 +415,8 @@ func isAttachedNodeIRI(value string) bool {
 		strings.HasPrefix(value, "tel:") ||
 		strings.HasPrefix(value, "urn:gmeow:account:") ||
 		strings.HasPrefix(value, "urn:gmeow:addr:") ||
-		strings.HasPrefix(value, "urn:gmeow:place:")
+		strings.HasPrefix(value, "urn:gmeow:place:") ||
+		strings.HasPrefix(value, "urn:gmeow:name:")
 }
 
 // deltaObject renders a statement object for the delta, rewriting a reference to

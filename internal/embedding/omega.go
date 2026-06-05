@@ -21,6 +21,14 @@ const (
 	kindScaleFunctional = 1.0
 	kindScaleSet        = 0.7
 	kindScaleContextual = 0.15
+	// Name tokens sit between contextual and set: a low floor (a single shared given
+	// name barely corroborates) but FULL idf sharpening (uncapped — a rare token like
+	// "Audley" IS discriminating; there is no privileged "surname" slot, only rarity).
+	// Calibrated so a lone rare token stays just below the merge gate while a full
+	// name (two+ shared tokens) clears it; the divergence gate, not a cap, blocks the
+	// name-fragment blob. See nameScore / CONTACT_IDENTITY_RESOLUTION.md §4.2.
+	kindBaseName  = 0.15
+	kindScaleName = 0.3
 	// contextualIDFCap bounds the IDF sharpening for CONTEXTUAL values. Per §4.1,
 	// contextual evidence is "soft, low-ω": a rare first/last name part, a small
 	// company, an unusual note is NOT a discriminating identifier the way a rare
@@ -39,6 +47,8 @@ func kindBase(kind AttrKind) float64 {
 		return kindBaseFunctional
 	case KindSet:
 		return kindBaseSet
+	case KindName:
+		return kindBaseName
 	default:
 		return kindBaseContextual
 	}
@@ -50,6 +60,8 @@ func kindScale(kind AttrKind) float64 {
 		return kindScaleFunctional
 	case KindSet:
 		return kindScaleSet
+	case KindName:
+		return kindScaleName
 	default:
 		return kindScaleContextual
 	}

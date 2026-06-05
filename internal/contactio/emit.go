@@ -72,6 +72,16 @@ func emitCanonical(
 		return appendCanonical(claims, subject, "phone", termLiteral(value), sourceProp)
 	case "account":
 		return emitAccount(claims, subject, mapping.Service, value, sourceProp)
+	case "name":
+		return emitName(claims, subject, nameInput{Full: value, Source: sourceProp})
+	case "name-structured":
+		return emitName(claims, subject, parseStructuredName(value, sourceProp))
+	case "nickname":
+		return emitName(
+			claims,
+			subject,
+			nameInput{Nicknames: []string{value}, Source: sourceProp},
+		)
 	case "address":
 		return emitAddress(claims, subject, value, sourceProp)
 	case "coordinates":
@@ -235,6 +245,248 @@ func isAllDigits(s string) bool {
 // address components are owl:equivalentProperty to schema:). A ";"-delimited vCard
 // ADR (pobox;ext;street;locality;region;postal;country) yields all SEVEN gmeow
 // components; otherwise the whole value is the street address.
+// nameInput is the assembled name of one record: a surface form and/or structured
+// parts plus nicknames, with the source property for provenance. Honorific and
+// generational affixes are facets (kept reified for interop, never identity tokens).
+type nameInput struct {
+	Full      string
+	Given     string
+	Family    string
+	Middle    string
+	Prefix    string // honorific prefix (Dr, Mr, …)
+	Suffix    string // honorific/generational suffix (Jr, PhD, …)
+	Nicknames []string
+	Source    string
+}
+
+// emitName emits a reified gmeow:PersonName appellation (the names model forbids a
+// bare name datatype property): a node keyed per record, linked via gmeow:hasName,
+// carrying gmeow:fullName (composed from parts when no surface form is given) plus
+// the flat part shortcuts (givenNamePart/surnamePart/additionalName) and foaf:nick —
+// all of which ground to name tokens for idf-subsumption comparison. Honorific
+// affixes are hung off as reified gmeow:NamePart nodes (interop, not comparison) and
+// linked to their gmeow:Honorific value when recognized. The node is keyed by the
+// record subject so a card's FN + N + NICKNAME accumulate on ONE co-equal appellation.
+func emitName(claims []Claim, subject string, n nameInput) []Claim {
+	full := strings.TrimSpace(n.Full)
+	if full == "" {
+		full = composeFullName(n)
+	}
+	if full == "" && n.Given == "" && n.Family == "" && len(n.Nicknames) == 0 {
+		return claims
+	}
+
+	node := "urn:gmeow:name:" + shortHash([]byte(strings.ToLower(subject)))
+	claims = append(
+		claims,
+		Claim{Subject: subject, Predicate: ontology.HasName, Object: termIRI(node)},
+	)
+	claims = append(
+		claims,
+		Claim{
+			Subject:   node,
+			Predicate: rdfTypePred,
+			Object:    termIRI(ontology.PersonNameClass),
+		},
+	)
+
+	literalPart := func(pred, val string) {
+		if v := strings.TrimSpace(val); v != "" {
+			claims = append(
+				claims,
+				withMappedFrom(
+					Claim{Subject: node, Predicate: pred, Object: termLiteral(v)},
+					n.Source,
+				),
+			)
+		}
+	}
+	if full != "" {
+		literalPart(ontology.FullName, full)
+	}
+	literalPart(ontology.GivenNamePart, n.Given)
+	literalPart(ontology.SurnamePart, n.Family)
+	literalPart(ontology.Schema+"additionalName", n.Middle)
+	for _, nick := range n.Nicknames {
+		literalPart(ontology.FOAF+"nick", nick)
+	}
+
+	claims = emitHonorificPart(claims, node, n.Prefix, ontology.NamePartHonorificPrefix)
+	claims = emitHonorificPart(claims, node, n.Suffix, ontology.NamePartHonorificSuffix)
+
+	return claims
+}
+
+// composeFullName builds a surface form from structured parts (prefix given middle
+// family suffix) when a record carries only the parts (Apple/CSV/vCard-N).
+func composeFullName(n nameInput) string {
+	parts := []string{n.Prefix, n.Given, n.Middle, n.Family, n.Suffix}
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+
+	return strings.Join(out, " ")
+}
+
+// emitHonorificPart hangs a reified gmeow:NamePart (type + partText) off the
+// appellation for an honorific affix — interop/projection only, never a comparison
+// token (gmeow:partText is ungrounded). A recognized title also links its
+// gmeow:Honorific value.
+func emitHonorificPart(claims []Claim, nameNode, value, partType string) []Claim {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return claims
+	}
+
+	part := nameNode + "#" + shortHash([]byte(partType+value))
+	claims = append(claims,
+		Claim{Subject: nameNode, Predicate: ontology.HasNamePart, Object: termIRI(part)},
+		Claim{Subject: part, Predicate: rdfTypePred, Object: termIRI(ontology.NamePartClass)},
+		Claim{Subject: part, Predicate: ontology.NamePartType, Object: termIRI(partType)},
+		Claim{Subject: part, Predicate: ontology.PartText, Object: termLiteral(value)},
+	)
+	if iri, _, ok := ontology.HonorificForValue(value); ok {
+		claims = append(
+			claims,
+			Claim{Subject: nameNode, Predicate: ontology.Honorific, Object: termIRI(iri)},
+		)
+	}
+
+	return claims
+}
+
+// parseStructuredName parses a vCard N value (Family;Given;Additional;Prefixes;
+// Suffixes) into a nameInput. Multi-valued components (comma-separated) keep their
+// first value for the flat shortcut; the surface form is composed by emitName.
+func parseStructuredName(value, sourceProp string) nameInput {
+	fields := strings.Split(value, ";")
+	get := func(i int) string {
+		if i < len(fields) {
+			return strings.TrimSpace(strings.ReplaceAll(fields[i], ",", " "))
+		}
+
+		return ""
+	}
+
+	return nameInput{
+		Family: get(0),
+		Given:  get(1),
+		Middle: get(2),
+		Prefix: get(3),
+		Suffix: get(4),
+		Source: sourceProp,
+	}
+}
+
+// nameFieldForPredicate classifies a grounded name predicate into the nameInput
+// field it fills, so the string-based importers (CSV, Apple) can collect their name
+// columns and reify them onto one gmeow:PersonName node instead of attaching bare
+// name properties to the contact.
+func nameFieldForPredicate(pred string) (string, bool) {
+	switch pred {
+	case ontology.Schema + "givenName", ontology.GivenNamePart:
+		return "given", true
+	case ontology.Schema + "familyName", ontology.SurnamePart:
+		return "family", true
+	case ontology.Schema + "additionalName":
+		return "middle", true
+	case ontology.FOAF + "nick", ontology.Schema + "alternateName":
+		return "nick", true
+	case ontology.Schema + "name", ontology.FullName, ontology.VCard + "fn":
+		return "full", true
+	case ontology.Schema + "honorificPrefix":
+		return "prefix", true
+	case ontology.Schema + "honorificSuffix":
+		return "suffix", true
+	}
+
+	return "", false
+}
+
+// assignNameField sets the nameInput field named by nameFieldForPredicate.
+func assignNameField(n *nameInput, field, value string) {
+	switch field {
+	case "given":
+		n.Given = value
+	case "family":
+		n.Family = value
+	case "middle":
+		n.Middle = value
+	case "nick":
+		n.Nicknames = append(n.Nicknames, value)
+	case "full":
+		n.Full = value
+	case "prefix":
+		n.Prefix = value
+	case "suffix":
+		n.Suffix = value
+	}
+}
+
+// writeNameNode is the string-emitter form of emitName for importers that render
+// Turtle directly (CSV, Apple): a reified gmeow:PersonName node keyed by the record
+// subject, carrying fullName + the flat part shortcuts that ground to name tokens.
+func writeNameNode(body *strings.Builder, subject string, n nameInput) {
+	full := strings.TrimSpace(n.Full)
+	if full == "" {
+		full = composeFullName(n)
+	}
+	if full == "" && n.Given == "" && n.Family == "" && len(n.Nicknames) == 0 {
+		return
+	}
+
+	node := "urn:gmeow:name:" + shortHash([]byte(strings.ToLower(subject)))
+	writeTriple(body, subject, ontology.HasName, iri(node))
+	writeTriple(body, node, rdfTypePred, iri(ontology.PersonNameClass))
+
+	part := func(pred, val string) {
+		if v := strings.TrimSpace(val); v != "" {
+			writeTriple(body, node, pred, literal(v))
+		}
+	}
+	if full != "" {
+		part(ontology.FullName, full)
+	}
+	part(ontology.GivenNamePart, n.Given)
+	part(ontology.SurnamePart, n.Family)
+	part(ontology.Schema+"additionalName", n.Middle)
+	for _, nick := range n.Nicknames {
+		part(ontology.FOAF+"nick", nick)
+	}
+	writeHonorificPart(body, node, n.Prefix, ontology.NamePartHonorificPrefix)
+	writeHonorificPart(body, node, n.Suffix, ontology.NamePartHonorificSuffix)
+}
+
+// writeHonorificPart is the string-emitter form of emitHonorificPart.
+func writeHonorificPart(body *strings.Builder, nameNode, value, partType string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+
+	part := nameNode + "#" + shortHash([]byte(partType+value))
+	writeTriple(body, nameNode, ontology.HasNamePart, iri(part))
+	writeTriple(body, part, rdfTypePred, iri(ontology.NamePartClass))
+	writeTriple(body, part, ontology.NamePartType, iri(partType))
+	writeTriple(body, part, ontology.PartText, literal(value))
+	if hiri, _, ok := ontology.HonorificForValue(value); ok {
+		writeTriple(body, nameNode, ontology.Honorific, iri(hiri))
+	}
+}
+
+// withMappedFrom adds the gmeow:mappedFrom provenance annotation when a source
+// property is known.
+func withMappedFrom(claim Claim, sourceProp string) Claim {
+	if sourceProp != "" {
+		return claim.withAnnotation(gmeowMappedFromPred, termLiteral(sourceProp))
+	}
+
+	return claim
+}
+
 func emitAddress(claims []Claim, subject, value, sourceProp string) []Claim {
 	node := "urn:gmeow:addr:" + shortHash([]byte(strings.ToLower(value)))
 

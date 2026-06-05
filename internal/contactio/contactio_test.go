@@ -35,7 +35,10 @@ func TestVCardImportProducesRDFContactBundle(t *testing.T) {
 		// name/org are standards-first (schema:name / schema:worksFor).
 		"<https://schema.org/contactPoint> <mailto:alice@example.test>",
 		"<mailto:alice@example.test> <https://schema.org/email> <mailto:alice@example.test>",
-		"<https://schema.org/name> \"Alice Example\"",
+		// Names are a reified gmeow:PersonName appellation, never a bare property.
+		"<https://blackcatinformatics.ca/gmeow/hasName>",
+		"<https://blackcatinformatics.ca/gmeow/PersonName>",
+		"<https://blackcatinformatics.ca/gmeow/fullName> \"Alice Example\"",
 		"<https://schema.org/worksFor> \"Example Org\"",
 		"<https://schema.org/description> \"synthetic only\"",
 	} {
@@ -214,10 +217,11 @@ func TestVCardImportSupportsQuotedPrintableContinuationAndNameExtensions(t *test
 
 	for _, snippet := range []string{
 		"first\\nsecond",
-		// Name parts canonicalize to schema:familyName; the long-tail fastmail /
-		// legacy-fragment metadata is preserved under its source-property predicate.
-		`<https://schema.org/familyName> "Former Synthetic"`,
-		`<https://schema.org/familyName> "synthetic-pronunciation"`,
+		// Name parts canonicalize to the gmeow:surnamePart shortcut (gmeow-primary);
+		// the long-tail fastmail / legacy-fragment metadata is preserved under its
+		// source-property predicate.
+		`<https://blackcatinformatics.ca/gmeow/surnamePart> "Former Synthetic"`,
+		`<https://blackcatinformatics.ca/gmeow/surnamePart> "synthetic-pronunciation"`,
 		`<https://blackcatinformatics.ca/gmeow/fastmailGDataStash> "stash-token"`,
 		`<https://blackcatinformatics.ca/gmeow/fastmailGoogleURI> "google-uri-token"`,
 		`<https://blackcatinformatics.ca/gmeow/legacyEncodedCategoryFragment> "legacy-category-fragment"`,
@@ -676,7 +680,8 @@ func TestAppleAddressBookImportProducesRDFContactBundle(t *testing.T) {
 	}
 	for _, snippet := range []string{
 		"<mailto:casey.contact@example.test>",
-		`<https://schema.org/givenName> "Casey"`,
+		`<https://blackcatinformatics.ca/gmeow/givenNamePart> "Casey"`,
+		`<https://blackcatinformatics.ca/gmeow/PersonName>`,
 		`<https://schema.org/affiliation> "Example Org"`,
 		`<https://schema.org/email> <mailto:casey.contact@example.test>`,
 		`<https://blackcatinformatics.ca/gmeow/streetAddress> "1 Example Street"`,
@@ -784,8 +789,8 @@ func TestCSVImportSupportsLinkedInConnections(t *testing.T) {
 		"<mailto:casey.contact@example.test>",
 		// Identity columns ground to canonical standard predicates (cross-dialect
 		// convergence), not source-namespaced gmeow:linkedIn* terms.
-		`<https://schema.org/givenName> "Casey"`,
-		`<https://schema.org/familyName> "Contact"`,
+		`<https://blackcatinformatics.ca/gmeow/givenNamePart> "Casey"`,
+		`<https://blackcatinformatics.ca/gmeow/surnamePart> "Contact"`,
 		`<https://schema.org/worksFor> "Example Org"`,
 		`<https://schema.org/jobTitle> "Research Lead"`,
 	} {

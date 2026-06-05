@@ -4,8 +4,6 @@
 package contactio
 
 import (
-	"strings"
-
 	"blackcat.ca/gmeow/internal/embedding"
 	"blackcat.ca/gmeow/internal/ontology"
 	"blackcat.ca/gmeow/internal/rdfbundle"
@@ -57,72 +55,23 @@ func claimStatementsFromStatements(
 	validity := bearingNodeValidity(statements, annotations)
 
 	for _, statement := range statements {
-		claim, ok := extractClaim(statement)
+		claims, ok := extractClaims(statement)
 		if !ok {
 			continue
 		}
-		if seen[claim.Hash] {
-			continue
-		}
-		if v, ok := validity[claim.Subject]; ok {
-			claim.ValidFrom, claim.ValidUntil = v.From, v.Until
-		}
-		seen[claim.Hash] = true
-		out = append(out, claim)
-	}
-
-	return synthesizeFullName(out, seen)
-}
-
-// synthesizeFullName derives a functional schema:name claim from a record's
-// given-name + family-name when it carries the parts but no full name (Apple,
-// Outlook, LinkedIn export only parts). This is load-bearing for CONSERVATIVE
-// ingest: the full name is the IDENTITY-bearing functional claim whose MISMATCH is
-// the IAC veto that SEPARATES different people. Without it, parts-only records share
-// only soft contextual evidence, and a large entity's broad contextual vocabulary
-// (given+family+org+address parts) accretes unrelated people into one entity (the
-// contextual blob — over-merge, the dangerous direction). With it, distinct full
-// names veto, so ingest over-SPLITS instead (the safe, REPAIR-able direction). The
-// residual over-split (same person, name-form variant) is consolidated by REPAIR's
-// global signed partition, not by relaxing this veto.
-func synthesizeFullName(
-	claims []claimStatement,
-	seen map[string]bool,
-) []claimStatement {
-	var given, family, subject string
-
-	for _, c := range claims {
-		switch {
-		case strings.HasPrefix(c.Text, "name: "):
-			return claims // a full name is already present
-		case given == "" && strings.HasPrefix(c.Text, "given-name: "):
-			given = strings.TrimPrefix(c.Text, "given-name: ")
-			subject = c.Subject
-		case family == "" && strings.HasPrefix(c.Text, "family-name: "):
-			family = strings.TrimPrefix(c.Text, "family-name: ")
-			if subject == "" {
-				subject = c.Subject
+		for _, claim := range claims {
+			if seen[claim.Hash] {
+				continue
 			}
+			if v, ok := validity[claim.Subject]; ok {
+				claim.ValidFrom, claim.ValidUntil = v.From, v.Until
+			}
+			seen[claim.Hash] = true
+			out = append(out, claim)
 		}
 	}
 
-	if given == "" || family == "" {
-		return claims
-	}
-
-	value := ontology.NormText(given + " " + family)
-	text := "name: " + value
-	if value == "" || seen[embedding.StatementHash(text)] {
-		return claims
-	}
-
-	return append(claims, claimStatement{
-		Subject: subject,
-		Text:    text,
-		Hash:    embedding.StatementHash(text),
-		Line:    iri(ontology.Schema+"name") + " " + literal(value),
-		IsName:  true,
-	})
+	return out
 }
 
 // scaffoldingPredicates are the node-structure linking predicates that carry no
@@ -138,14 +87,21 @@ var scaffoldingPredicates = map[string]bool{
 	ontology.FOAF + "accountServiceHomepage": true,
 }
 
-// extractClaim turns one parsed statement into a subject-INDEPENDENT comparison
-// claim, STRICTLY grounded in the canonical ontology. A predicate resolves to its
-// canonical Concept + per-concept value normalization via ontology.ByIRI;
+// extractClaims turns one parsed statement into the subject-INDEPENDENT comparison
+// claim(s) it grounds, STRICTLY via the canonical ontology. A predicate resolves to
+// its canonical Concept + per-concept value normalization via ontology.ByIRI;
 // node-structure scaffolding is dropped. A predicate NOT in the registry is NOT a
 // comparison claim — it is source provenance (kept in FILESTORE), never fed to
 // idDiff/embedding/blocking.
 //
-// This strictness is load-bearing, not cosmetic: the prior legacy fallback admitted
+// Most predicates yield exactly one claim. A NAME-bearing predicate (fullName, the
+// part shortcuts, the schema/foaf/vcard aliases) is DECOMPOSED into role-free name
+// TOKENS — one "name-token: <tok>" claim per normalized token, honorific and
+// generational tokens stripped (ontology.NameTokens) — so the engine compares names
+// by idf-subsumption (no privileged surname; see nameScore). The whole-name string
+// is never itself a comparison claim.
+//
+// Strict grounding is load-bearing, not cosmetic: the prior legacy fallback admitted
 // un-migrated source-namespaced predicates (apple/outlook/linkedin scaffolding such
 // as appleEmailEntry, applePropertyType, outlookContactsLastName) as CONTEXTUAL
 // claims. Because every record of a format shares those structural tokens, any two
@@ -154,15 +110,15 @@ var scaffoldingPredicates = map[string]bool{
 // 1 name, 1909 distinct emails, 100k claims). Grounding strictly means an unmapped
 // predicate can never become identity signal; the cost is that an un-migrated format
 // under-merges (recoverable) instead of catastrophically over-merging (not).
-func extractClaim(statement rdfbundle.Statement) (claimStatement, bool) {
+func extractClaims(statement rdfbundle.Statement) ([]claimStatement, bool) {
 	predicate := statement.Predicate.Value
 	if scaffoldingPredicates[predicate] {
-		return claimStatement{}, false
+		return nil, false
 	}
 
 	term, ok := ontology.ByIRI(predicate)
 	if !ok {
-		return claimStatement{}, false // ungrounded → provenance only, not a comparison claim
+		return nil, false // ungrounded → provenance only, not a comparison claim
 	}
 
 	concept := term.Concept
@@ -178,18 +134,45 @@ func extractClaim(statement rdfbundle.Statement) (claimStatement, bool) {
 	}
 
 	if concept == "" || value == "" {
-		return claimStatement{}, false
+		return nil, false
+	}
+
+	subject := statement.Subject.Value
+	line := claimLine(statement)
+
+	if ontology.IsNameConcept(concept) {
+		return nameTokenClaims(subject, line, value), true
 	}
 
 	text := concept + ": " + value
 
-	return claimStatement{
-		Subject: statement.Subject.Value,
+	return []claimStatement{{
+		Subject: subject,
 		Text:    text,
 		Hash:    embedding.StatementHash(text),
-		Line:    claimLine(statement),
-		IsName:  concept == "name" || concept == "nickname",
-	}, true
+		Line:    line,
+		IsName:  false,
+	}}, true
+}
+
+// nameTokenClaims decomposes a grounded name value into its role-free comparison
+// tokens (one claim each). All tokens of a statement share its source Line; the
+// delta builder keeps the statement when ANY of its tokens is new.
+func nameTokenClaims(subject, line, value string) []claimStatement {
+	tokens := ontology.NameTokens(value)
+	out := make([]claimStatement, 0, len(tokens))
+	for _, tok := range tokens {
+		text := ontology.NameTokenConcept + ": " + tok
+		out = append(out, claimStatement{
+			Subject: subject,
+			Text:    text,
+			Hash:    embedding.StatementHash(text),
+			Line:    line,
+			IsName:  true,
+		})
+	}
+
+	return out
 }
 
 // claimLine is the predicate+object Turtle fragment persisted in a delta record;

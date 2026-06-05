@@ -20,6 +20,7 @@ const (
 	KindContextual = ontology.Contextual
 	KindFunctional = ontology.Functional
 	KindSet        = ontology.Set
+	KindName       = ontology.Name
 )
 
 // Interval is a half-open validity window; a zero bound is unbounded on that

@@ -36,6 +36,7 @@ func csvToRDF(content string) ([]renderedContact, []RecordRejection, error) {
 		}
 		var body strings.Builder
 		writeTriple(&body, subject, rdfType, iri(foafPrefix+"Person"))
+		var name nameInput
 		for _, header := range row.header {
 			value := strings.TrimSpace(row.values[header])
 			if value == "" {
@@ -48,6 +49,13 @@ func csvToRDF(content string) ([]renderedContact, []RecordRejection, error) {
 			object := csvMappedObject(mapping, value)
 			if object == "" {
 				return nil, nil, fmt.Errorf("CSV field %q has invalid value", header)
+			}
+			// Name columns are collected and reified onto ONE gmeow:PersonName node
+			// after the row (the names model forbids bare name properties on a person).
+			if field, ok := nameFieldForPredicate(mapping.Predicate); ok {
+				assignNameField(&name, field, value)
+
+				continue
 			}
 			writeTriple(&body, subject, mapping.Predicate, object)
 			if mapping.ValidFromHeader != "" {
@@ -70,6 +78,7 @@ func csvToRDF(content string) ([]renderedContact, []RecordRejection, error) {
 				}
 			}
 		}
+		writeNameNode(&body, subject, name)
 		records = append(records, renderedContact{identity: subject, body: body.String()})
 	}
 

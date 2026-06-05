@@ -6,6 +6,7 @@ package embedding
 import (
 	"context"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -191,6 +192,104 @@ func TestContextualMassBoundedByIncomingNotCandidateSize(t *testing.T) {
 	}
 }
 
+// TestNameScoreSubsumption locks the role-free idf-subsumption semantics for the
+// canonical forms of one person's name (CONTACT_IDENTITY_RESOLUTION.md §4.2):
+// completion is compatible (corroborates, no penalty), divergence withholds
+// corroboration and penalises, and a shared RARE token cannot fuse two divergent
+// names (the anti-over-merge / blob guard).
+func TestNameScoreSubsumption(t *testing.T) {
+	// per-token rarity mass: common given names low, distinctive tokens high. (There
+	// is no "surname" role — only rarity.)
+	mass := map[string]float64{
+		"patrick": 0.30, "colm": 0.30, "susan": 0.80,
+		"audley": 1.20, "smith": 1.20,
+	}
+	idx := map[string]int{}
+	tok := func(v string) scoredClaim {
+		i, ok := idx[v]
+		if !ok {
+			i = len(idx) + 1
+			idx[v] = i
+		}
+
+		return scoredClaim{Attr: "name-token", Value: v, Kind: KindName, Vec: unit(i)}
+	}
+	name := func(vs ...string) []scoredClaim {
+		out := make([]scoredClaim, len(vs))
+		for i, v := range vs {
+			out[i] = tok(v)
+		}
+
+		return out
+	}
+	p := idDiffParams{
+		TauName: 0.9,
+		W:       func(c scoredClaim) float64 { return mass[c.Value] },
+	}
+
+	cases := []struct {
+		desc        string
+		a, b        []scoredClaim
+		wantIC      float64
+		wantDiverge bool // IAC > 0 (and IC withheld)
+	}{
+		{
+			"Patrick subset of Patrick Audley (completion)",
+			name("patrick"),
+			name("patrick", "audley"),
+			0.30,
+			false,
+		},
+		{
+			"Patrick Audley ~ Patrick Colm Audley (extra middle)",
+			name("patrick", "audley"),
+			name("patrick", "colm", "audley"),
+			1.50,
+			false,
+		},
+		{
+			"Mr Patrick Audley == Patrick Audley (honorific pre-stripped)",
+			name("patrick", "audley"),
+			name("patrick", "audley"),
+			1.50,
+			false,
+		},
+		{
+			"Patrick Audley vs Patrick Smith (divergent surnames)",
+			name("patrick", "audley"),
+			name("patrick", "smith"),
+			0,
+			true,
+		},
+		{
+			"Patrick Audley vs Susan Audley (shared rare surname, blob guard)",
+			name("patrick", "audley"),
+			name("susan", "audley"),
+			0,
+			true,
+		},
+		{
+			"P Audley matches Patrick Audley (initial)",
+			name("p", "audley"),
+			name("patrick", "audley"),
+			1.20,
+			false,
+		},
+	}
+	for _, c := range cases {
+		ic, iac := nameScore(c.a, c.b, p)
+		if (iac > 0) != c.wantDiverge {
+			t.Errorf("%s: diverge=%v (iac=%.2f), want %v", c.desc, iac > 0, iac, c.wantDiverge)
+		}
+		if !c.wantDiverge && math.Abs(ic-c.wantIC) > 0.01 {
+			t.Errorf("%s: ic=%.2f, want %.2f", c.desc, ic, c.wantIC)
+		}
+		if c.wantDiverge && ic != 0 {
+			t.Errorf("%s: divergent pair must withhold IC, got ic=%.2f", c.desc, ic)
+		}
+	}
+}
+
 // TestResolveValidTimeGate locks Tier 2's co-validity: a shared identifier value
 // correlates two records only while it is contemporaneously held. Disjoint valid
 // time (a transferred/inherited value) does NOT merge; overlapping valid time does.
@@ -210,7 +309,13 @@ func TestResolveValidTimeGate(t *testing.T) {
 			}
 		}
 
-		return []ClaimInput{claim("name: pat holder"), claim("email: admin@axion.example")}
+		// Post-extraction, a name arrives as role-free TOKENS (claim_extract), so the
+		// name evidence here is two name-token claims, not one whole-name claim.
+		return []ClaimInput{
+			claim("name-token: pat"),
+			claim("name-token: holder"),
+			claim("email: admin@axion.example"),
+		}
 	}
 	email := rec
 

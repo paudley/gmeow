@@ -15,8 +15,11 @@ func TestByIRIGrounding(t *testing.T) {
 		{Schema + "email", "email", Set, RoleLocator},
 		{Schema + "telephone", "phone", Set, RoleLocator},
 		{Schema + "url", "url", Set, RoleLocator},
-		{Schema + "name", "name", Functional, RoleNone},
-		{Schema + "givenName", "given-name", Contextual, RoleNone},
+		{Schema + "name", "name", Name, RoleNone},
+		{Schema + "givenName", "given-name", Name, RoleNone},
+		{FullName, "name", Name, RoleNone},
+		{GivenNamePart, "given-name", Name, RoleNone},
+		{SurnamePart, "family-name", Name, RoleNone},
 		{FOAF + "account", "account", Set, RoleAccount},
 		{Schema + "gender", "gender", Functional, RoleNone},
 	}

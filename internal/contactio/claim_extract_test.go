@@ -12,10 +12,21 @@ import (
 	"blackcat.ca/gmeow/internal/rdfbundle"
 )
 
+// extractClaim is a single-claim test shim over extractClaims (most predicates
+// yield exactly one comparison claim; name predicates yield several tokens).
+func extractClaim(s rdfbundle.Statement) (claimStatement, bool) {
+	claims, ok := extractClaims(s)
+	if !ok || len(claims) == 0 {
+		return claimStatement{}, false
+	}
+
+	return claims[0], true
+}
+
 func TestClaimStatementsFromRootedTurtle(t *testing.T) {
 	// Standard-vocabulary predicates ground on the ontology registry: foaf:name →
-	// concept "name", schema:email → concept "email" (value NormEmail-canonicalized,
-	// mailto: stripped).
+	// role-free name TOKENS (one claim per token), schema:email → concept "email"
+	// (value NormEmail-canonicalized, mailto: stripped).
 	body := `@prefix schema: <https://schema.org/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
 
@@ -28,19 +39,21 @@ func TestClaimStatementsFromRootedTurtle(t *testing.T) {
 		t.Fatal("expected claim statements from rooted Turtle")
 	}
 
-	var sawName, sawEmail bool
+	var sawPatrick, sawAudley, sawEmail bool
 	for _, s := range statements {
 		switch s.Text {
-		case "name: patrick audley":
-			sawName = true
+		case "name-token: patrick":
+			sawPatrick = true
 			if !s.IsName {
-				t.Fatalf("name claim should be flagged IsName: %+v", s)
+				t.Fatalf("name token should be flagged IsName: %+v", s)
 			}
+		case "name-token: audley":
+			sawAudley = true
 		case "email: paudley@blackcat.ca":
 			sawEmail = true
 		}
 	}
-	if !sawName || !sawEmail {
+	if !sawPatrick || !sawAudley || !sawEmail {
 		t.Fatalf("missing expected canonical claims; got %+v", statements)
 	}
 }
@@ -217,29 +230,24 @@ func TestUngroundedScaffoldingDoesNotFuseEntities(t *testing.T) {
 // TestSynthesizeFullNameFromParts: a record with given+family but no full name
 // gains a functional schema:name claim derived from the parts (the conservative-
 // ingest veto signal that separates different people; see synthesizeFullName).
-func TestSynthesizeFullNameFromParts(t *testing.T) {
+// TestNamePartsDecomposeToTokens: name-bearing predicates (parts AND a full name)
+// all decompose to role-free name TOKENS; the whole-name string is never itself a
+// comparison claim, and a token shared by the parts and the full name dedups.
+func TestNamePartsDecomposeToTokens(t *testing.T) {
 	body := `<urn:x> <https://schema.org/givenName> "Reuven" .
-<urn:x> <https://schema.org/familyName> "Cohen" .`
-	var found bool
+<urn:x> <https://schema.org/familyName> "Cohen" .
+<urn:x> <https://schema.org/name> "Reuven Q Cohen" .`
+
+	got := map[string]bool{}
 	for _, c := range claimStatementsFromBody(body) {
-		if c.Text == "name: reuven cohen" && c.IsName {
-			found = true
+		got[c.Text] = true
+		if strings.HasPrefix(c.Text, "name: ") {
+			t.Fatalf("whole-name string must not be a comparison claim: %q", c.Text)
 		}
 	}
-	if !found {
-		t.Fatalf(
-			"expected synthesized 'name: reuven cohen', got %+v",
-			claimStatementsFromBody(body),
-		)
-	}
-	// When a full name is already present, none is synthesized (no duplication).
-	withName := body + "\n<urn:x> <https://schema.org/name> \"Reuven Q Cohen\" ."
-	for _, c := range claimStatementsFromBody(withName) {
-		if c.Text == "name: reuven cohen" {
-			t.Fatalf(
-				"must not synthesize when a full name exists: %+v",
-				claimStatementsFromBody(withName),
-			)
+	for _, want := range []string{"name-token: reuven", "name-token: cohen", "name-token: q"} {
+		if !got[want] {
+			t.Fatalf("missing %q; got %v", want, got)
 		}
 	}
 }

@@ -222,13 +222,37 @@ validity and `supersedes` live on the edges, so the resulting partition is inher
 | Re-import the identical card | same `source_key` ⇒ evidence dedups; IC adds nothing | **NOOP** |
 | You + spouse, shared old number | number co-validity **disjoint** ⇒ not IC; lone low-`ω` transfer signal against otherwise-disjoint sets | **separate** |
 | `admin@axion.net` inherited by successor | shared value, **disjoint** validity ⇒ transfer, not IC | **separate** |
-| Paul → Lindsey, **no** supersedes | name + gender functional **antimatch**, high `ω`, co-valid, unbridged ⇒ IAC dominates | **separate** (correct conservative default) |
+| Paul → Lindsey, **no** supersedes | name-token **divergence** (each name has a distinctive token the other lacks) ⇒ IC withheld + IAC; gender functional antimatch ⇒ separate | **separate** (correct conservative default) |
 | Paul → Lindsey, **with** name `supersedes` | transition reclassified to evolution; merge carried by shared-context IC + retained-handle overlap | **same** |
 | Two strangers, sparse disjoint cards | no IC, no IAC, all ISD | **separate** (IC gate unmet) |
 
 The two shifts that make these all correct: **time and `supersedes` turn value-equality into a *signed*
 quantity** (a shared value can be positive, neutral, or negative), and **identity is the *global
 partition* over those signed edges**, not the pairwise score itself.
+
+#### 4.2.1 Names: role-free idf-subsumption (the `KindName` attribute)
+
+A personal name is **not** a single functional string (comparing `"Patrick"` against `"Patrick Audley"`
+as opaque values makes a *less complete* name read as a *contradiction*). It is decomposed into
+normalized, role-free **tokens** (`ontology.NameTokens`: casefolded, honorific/generational affixes
+stripped per the published `gmeow:Honorific` / generational vocabularies, initials kept). There is **no
+privileged "surname" slot** — a token discriminates purely by **rarity (idf)**: `Audley` is strong,
+`Patrick` (a common given *and* surname) weak. Two names are compared by **subsumption** (`nameScore`,
+`internal/embedding/iddiff.go`):
+
+- **Completion / subset** — one side's substantive tokens are all matched (`Patrick` ⊂ `Patrick Audley`;
+  a middle name added; an honorific stripped): the shared tokens **corroborate**, idf-weighted. No penalty.
+- **Divergence** — **both** sides carry a substantive (non-initial) unmatched token (`Patrick Audley`
+  vs `Patrick Smith`; vs `Susan Audley`): the names denote different people, so the shared tokens are
+  coincidence (a shared family name, a common given) and **withhold IC**, plus an IAC penalty by the
+  weaker distinctive side. A `supersedes` link licenses the divergence (a name change) with neither.
+
+Withholding IC on divergence (not merely penalising) is the anti-over-merge guard: a shared **rare**
+surname cannot by itself fuse two clearly-different full names. `KindName` keeps idf **uncapped** (rarity
+is the whole signal); the **divergence gate**, not a cap, replaces the contextual-`ω` cap as the
+blob defence. Names are emitted as a reified co-equal `gmeow:PersonName` appellation (never a bare
+property); the extractor decomposes its `fullName` / parts into `name-token` claims so the engine never
+compares whole-name strings.
 
 ## 5. The current implementation: state vs. target
 

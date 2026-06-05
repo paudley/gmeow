@@ -261,6 +261,87 @@ func TestLocationSubNodesFlattenOntoContact(t *testing.T) {
 	}
 }
 
+// TestPersonNameNodeFlattensOntoContactAndHonorsDisplayable: a gmeow:PersonName
+// appellation's fullName/parts flatten onto the linking contact as name facts, a
+// nickname projects as an alias, and a gmeow:displayable=false appellation (deadname)
+// is suppressed entirely.
+func TestPersonNameNodeFlattensOntoContactAndHonorsDisplayable(t *testing.T) {
+	const contact = "https://example.test/#person"
+	const chosen = "urn:gmeow:name:chosen"
+	const dead = "urn:gmeow:name:dead"
+	statements := []Statement{
+		{
+			StatementHash: "type",
+			Subject:       contact,
+			Predicate:     rdfTypePredicate,
+			Object:        schemaOrgPerson,
+		},
+		{
+			StatementHash: "l1",
+			Subject:       contact,
+			Predicate:     gmeowPrefix + "hasName",
+			Object:        chosen,
+			ObjectKind:    "iri",
+		},
+		{
+			StatementHash: "full",
+			Subject:       chosen,
+			Predicate:     gmeowPrefix + "fullName",
+			Object:        "Alex Rivera",
+			ObjectKind:    "literal",
+		},
+		{
+			StatementHash: "given",
+			Subject:       chosen,
+			Predicate:     gmeowPrefix + "givenNamePart",
+			Object:        "Alex",
+			ObjectKind:    "literal",
+		},
+		{
+			StatementHash: "nick",
+			Subject:       chosen,
+			Predicate:     "http://xmlns.com/foaf/0.1/nick",
+			Object:        "Al",
+			ObjectKind:    "literal",
+		},
+		// A suppressed deadname appellation — must not surface.
+		{
+			StatementHash: "l2",
+			Subject:       contact,
+			Predicate:     gmeowPrefix + "hasName",
+			Object:        dead,
+			ObjectKind:    "iri",
+		},
+		{
+			StatementHash: "deadfull",
+			Subject:       dead,
+			Predicate:     gmeowPrefix + "fullName",
+			Object:        "Deadname Rivera",
+			ObjectKind:    "literal",
+		},
+		{
+			StatementHash: "flag",
+			Subject:       dead,
+			Predicate:     gmeowPrefix + "displayable",
+			Object:        "false",
+			ObjectKind:    "literal",
+		},
+	}
+
+	facts := FactsFromStatements(statements, nil)
+
+	full := factByValue(facts, "Alex Rivera")
+	if full.FactKind != FactKindName || full.ContactID != contact {
+		t.Fatalf("fullName fact = %#v, want name attributed to contact", full)
+	}
+	if al := factByValue(facts, "Al"); al.FactKind != FactKindAlias {
+		t.Fatalf("nickname should project as alias, got %#v", al)
+	}
+	if dn := factByValue(facts, "Deadname Rivera"); dn.Value != "" {
+		t.Fatalf("displayable=false deadname leaked into projection: %#v", dn)
+	}
+}
+
 func factByValue(facts []Fact, value string) Fact {
 	for _, fact := range facts {
 		if fact.Value == value {

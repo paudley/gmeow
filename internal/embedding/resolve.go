@@ -413,6 +413,7 @@ func (s *Service) idDiffParams(threshold, nameThreshold float64) idDiffParams {
 		TauSet:          threshold,
 		TauFunc:         math.Max(nameThreshold, threshold),
 		TauCtx:          s.tauCtx,
+		TauName:         math.Max(nameThreshold, threshold),
 		Lambda:          s.lambda,
 		SetPenalty:      s.setPenalty,
 		VetoMass:        s.vetoMass,

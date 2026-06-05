@@ -26,6 +26,9 @@ type idDiffParams struct {
 	// VetoMass: a single functional contradiction of at least this ω hard-vetoes
 	// the merge regardless of accumulated IC.
 	VetoMass float64
+	// TauName is the per-token cosine match threshold for name tokens (high — a
+	// name token matches its near-exact spelling/typo, not a semantic neighbour).
+	TauName float64
 	// ObservationMode suppresses set-disjoint negative evidence: at ingest the A
 	// side is a PARTIAL observation (it simply may not repeat the entity's other
 	// identifiers), so non-overlap is neutral, not contradictory. The global
@@ -80,6 +83,10 @@ func idDiff(a, b []scoredClaim, p idDiffParams) idDiffResult {
 			if fveto {
 				veto = true
 			}
+		case KindName:
+			nic, niac := nameScore(av, bv, p)
+			ic += nic
+			iac += niac
 		default: // KindContextual
 			ic += contextualMass(av, bv, p)
 		}
@@ -148,6 +155,143 @@ func functionalScore(
 	}
 
 	return ic, iac, veto
+}
+
+// nameScore compares two sets of personal-name TOKENS by role-free SUBSUMPTION
+// (CONTACT_IDENTITY_RESOLUTION.md §4.2). There is no privileged "surname"; the
+// STRUCTURE of the token sets, not a role, decides:
+//
+//   - SUBSET / completion — one side's substantive tokens are all matched ("Patrick"
+//     ⊂ "Patrick Audley"; "Patrick Audley" + a middle "Colm"): the shared tokens
+//     CORROBORATE, weighted by rarity (ω). A rare shared token ("Audley") is strong;
+//     a common one ("Patrick") weak. No penalty.
+//   - DIVERGENCE — BOTH sides carry a substantive (non-initial) UNMATCHED token
+//     ("Patrick Audley" vs "Patrick Smith"; "Patrick Audley" vs "Susan Audley"):
+//     the names denote different people, so the shared tokens are coincidence
+//     (a shared family name, a common given name) and DO NOT corroborate — IC is
+//     withheld — plus a penalty scaled by the weaker side's distinctive mass.
+//
+// Withholding IC on divergence (rather than only penalising) is the conservative,
+// anti-over-merge choice: a shared rare surname must not by itself fuse two
+// clearly-different full names. A supersedes link across the sets licenses a
+// divergence (a name change) with neither effect. Initials match loosely and never
+// count as divergence (an abbreviation that simply failed to expand).
+func nameScore(av, bv []scoredClaim, p idDiffParams) (ic, iac float64) {
+	matchedB := make([]bool, len(bv))
+	matchedA := make([]bool, len(av))
+
+	var shared float64
+
+	for i, ca := range av {
+		best := -1
+
+		var bestMass float64
+
+		for j, cb := range bv {
+			if matchedB[j] || !ca.Valid.Overlaps(cb.Valid) {
+				continue
+			}
+			if !nameTokenMatch(ca, cb, p.TauName) {
+				continue
+			}
+			if m := math.Min(p.W(ca), p.W(cb)); m > bestMass {
+				bestMass = m
+				best = j
+			}
+		}
+
+		if best >= 0 {
+			matchedB[best] = true
+			matchedA[i] = true
+			shared += bestMass
+		}
+	}
+
+	divA := substantiveUnmatched(av, matchedA)
+	divB := substantiveUnmatched(bv, matchedB)
+	if divA && divB && !supersedesAcross(av, bv) {
+		// Mutual substantive divergence => different people: no corroboration, plus a
+		// penalty by the weaker distinctive side (common diverging tokens penalise
+		// little; rare ones split decisively).
+		return 0, math.Min(
+			maxUnmatchedMass(av, matchedA, p),
+			maxUnmatchedMass(bv, matchedB, p),
+		)
+	}
+
+	return shared, 0
+}
+
+// substantiveUnmatched reports whether a token set has an UNMATCHED token that is
+// not a single-letter initial — the structural test for "this side carries a
+// distinctive token the other name lacks" (the divergence half-signal).
+func substantiveUnmatched(claims []scoredClaim, matched []bool) bool {
+	for i, c := range claims {
+		if !matched[i] && len([]rune(c.Value)) > 1 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// nameTokenMatch reports whether two name tokens are the same token: exact
+// normalized equality, a high-cosine variant (typo/spelling), or an initial
+// matching a full token with the same leading rune (e.g. "p" ↔ "patrick").
+func nameTokenMatch(a, b scoredClaim, tau float64) bool {
+	if a.Value == b.Value {
+		return true
+	}
+	if initialMatch(a.Value, b.Value) {
+		return true
+	}
+
+	return cosineSimilarity(a.Vec, b.Vec) >= tau
+}
+
+// initialMatch reports whether one value is a single rune that is the leading rune
+// of the other (an abbreviated initial standing in for a full name token).
+func initialMatch(a, b string) bool {
+	ra, rb := []rune(a), []rune(b)
+	if len(ra) == 1 && len(rb) >= 1 {
+		return ra[0] == rb[0]
+	}
+	if len(rb) == 1 && len(ra) >= 1 {
+		return rb[0] == ra[0]
+	}
+
+	return false
+}
+
+// maxUnmatchedMass is the ω of the most distinctive token in a set that earned no
+// match — the side's strongest evidence of a token the other name lacks.
+func maxUnmatchedMass(claims []scoredClaim, matched []bool, p idDiffParams) float64 {
+	var max float64
+	for i, c := range claims {
+		if matched[i] {
+			continue
+		}
+		if m := p.W(c); m > max {
+			max = m
+		}
+	}
+
+	return max
+}
+
+// supersedesAcross reports whether any claim on one side supersedes one on the
+// other — a licensed name change (former → chosen), so a divergence is not a
+// contradiction.
+func supersedesAcross(av, bv []scoredClaim) bool {
+	for _, a := range av {
+		for _, b := range bv {
+			if linkedBySupersedes(a, b) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // contextualMass scores soft (contextual) overlap. Each INCOMING claim contributes

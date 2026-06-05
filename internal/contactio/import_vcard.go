@@ -31,6 +31,39 @@ func vcardToRDF(content string) ([]renderedContact, []RecordRejection, error) {
 	return records, rejections, nil
 }
 
+// isVCardNameProp reports the vCard properties assembled by emitVCardName (handled
+// once, not per line).
+func isVCardNameProp(name string) bool {
+	switch name {
+	case "FN", "N", "NICKNAME":
+		return true
+	}
+
+	return false
+}
+
+// emitVCardName assembles FN (surface form) + N (Family;Given;Additional;Prefixes;
+// Suffixes) + NICKNAME into one reified gmeow:PersonName appellation.
+func emitVCardName(claims []Claim, card vcardContact) []Claim {
+	var n nameInput
+	if nval := firstNonEmpty(card.values["N"]...); nval != "" {
+		n = parseStructuredName(nval, "vcard:N")
+	}
+	if fn := firstNonEmpty(card.values["FN"]...); fn != "" {
+		n.Full = fn
+		n.Source = "vcard:FN"
+	}
+	for _, nick := range card.values["NICKNAME"] {
+		for _, part := range strings.Split(nick, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				n.Nicknames = append(n.Nicknames, p)
+			}
+		}
+	}
+
+	return emitName(claims, card.subject, n)
+}
+
 func vcardContactBody(card vcardContact) string {
 	// Entity classification: only an agent-denoting card (has a name, org, or
 	// explicit KIND) is asserted to be a foaf:Person. A locator-only card
@@ -48,12 +81,16 @@ func vcardContactBody(card vcardContact) string {
 		)
 	}
 
-	// Each vCard line either maps to a canonical concept (emitted as a
+	// FN + N + NICKNAME assemble into ONE co-equal gmeow:PersonName appellation
+	// (emitting them per line would duplicate the node link/type and the fullName).
+	claims = emitVCardName(claims, card)
+
+	// Each remaining vCard line either maps to a canonical concept (emitted as a
 	// standards-first node structure via the shared emitter, with gmeow:mappedFrom
 	// provenance) or is genuine source-metadata / a vendor extension preserved
 	// losslessly via its documented source-property predicate.
 	for _, line := range card.lines {
-		if line.value == "" {
+		if line.value == "" || isVCardNameProp(line.name) {
 			continue
 		}
 		if mapping, ok := ontology.VCardMapping(line.name); ok {

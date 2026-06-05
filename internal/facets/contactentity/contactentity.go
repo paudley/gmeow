@@ -39,11 +39,12 @@ const (
 	schemaOrgPerson       = schemaOrgHTTPSPrefix + "Person"
 
 	gmeowPrefix = "https://blackcatinformatics.ca/gmeow/"
-	// Location sub-nodes carry their values as literals (unlike emails, whose
-	// value is the object IRI), so the projection flattens these node IRIs onto
-	// the contact that links them via gmeow:hasContactPoint / gmeow:locatedAt.
+	// Sub-nodes carry their values as literals (unlike emails, whose value is the
+	// object IRI), so the projection flattens these node IRIs onto the contact that
+	// links them via gmeow:hasContactPoint / gmeow:locatedAt / gmeow:hasName.
 	gmeowAddrNodePrefix  = "urn:gmeow:addr:"
 	gmeowPlaceNodePrefix = "urn:gmeow:place:"
+	gmeowNameNodePrefix  = "urn:gmeow:name:"
 )
 
 type Statement struct {
@@ -171,11 +172,12 @@ func FactsForContacts(
 	facts := []Fact{}
 	annotationIndex := annotationsByStatement(annotations)
 	nodeOwner := locationNodeOwners(statements, contacts)
+	suppressed := suppressedNameNodes(statements)
 
 	for _, statement := range statements {
-		// A location sub-node's literal facts (address components, coordinates) are
-		// attributed to the contact that links it; a fact on the contact itself
-		// keeps its own subject. Everything else off-contact is ignored.
+		// A sub-node's literal facts (address components, coordinates, name parts) are
+		// attributed to the contact that links it; a fact on the contact itself keeps
+		// its own subject. Everything else off-contact is ignored.
 		contactID := statement.Subject
 		if !contacts[contactID] {
 			owner, linked := nodeOwner[statement.Subject]
@@ -183,6 +185,12 @@ func FactsForContacts(
 				continue
 			}
 			contactID = owner
+		}
+
+		// Deadname suppression (gmeow:fnSelectDisplayName): a gmeow:PersonName flagged
+		// gmeow:displayable false is the ONLY name filter — its facts never surface.
+		if suppressed[statement.Subject] {
+			continue
 		}
 
 		factKind, historical, ok := FactKind(statement.Predicate)
@@ -236,12 +244,28 @@ func locationNodeOwners(
 			continue
 		}
 		if strings.HasPrefix(statement.Object, gmeowAddrNodePrefix) ||
-			strings.HasPrefix(statement.Object, gmeowPlaceNodePrefix) {
+			strings.HasPrefix(statement.Object, gmeowPlaceNodePrefix) ||
+			strings.HasPrefix(statement.Object, gmeowNameNodePrefix) {
 			owners[statement.Object] = statement.Subject
 		}
 	}
 
 	return owners
+}
+
+// suppressedNameNodes is the set of gmeow:PersonName nodes flagged
+// gmeow:displayable false (deadnames / superseded names). Their facts are withheld
+// from the projection — the only sanctioned name filter (fnSelectDisplayName).
+func suppressedNameNodes(statements []Statement) map[string]bool {
+	out := map[string]bool{}
+	for _, statement := range statements {
+		if statement.Predicate == gmeowPrefix+"displayable" &&
+			strings.EqualFold(strings.TrimSpace(statement.Object), "false") {
+			out[statement.Subject] = true
+		}
+	}
+
+	return out
 }
 
 func FactKind(predicate string) (string, bool, bool) {
@@ -459,6 +483,10 @@ func gmeowContactFactKind(predicate string) (string, bool, bool) {
 		return FactKindEmail, false, true
 	case "https://blackcatinformatics.ca/gmeow/historicalEmail":
 		return FactKindEmail, true, true
+	case gmeowPrefix + "fullName",
+		gmeowPrefix + "givenNamePart",
+		gmeowPrefix + "surnamePart":
+		return FactKindName, false, true
 	case gmeowPrefix + "streetAddress",
 		gmeowPrefix + "extendedAddress",
 		gmeowPrefix + "postOfficeBox",

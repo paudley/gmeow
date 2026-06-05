@@ -33,6 +33,12 @@ func ConceptTerm(concept string) (Term, bool) {
 // Contextual for unknown concepts (the safe default). This is the single
 // concept→kind authority the resolution engine reads.
 func KindForConcept(concept string) Kind {
+	// name-token is a SYNTHETIC concept (no predicate): the extractor mints it from
+	// the name-bearing predicates, so it is not in conceptIndex but must score as a
+	// name token under idf-subsumption.
+	if concept == NameTokenConcept {
+		return Name
+	}
 	if t, ok := conceptIndex[concept]; ok {
 		return t.Kind
 	}
@@ -77,6 +83,8 @@ func VCardMapping(prop string) (Mapping, bool) {
 	switch prop {
 	case "FN":
 		return Mapping{Concept: "name"}, true
+	case "N":
+		return Mapping{Concept: "name-structured"}, true
 	case "NICKNAME":
 		return Mapping{Concept: "nickname"}, true
 	case "X-MAIDENNAME", "X-PHONETIC-LAST-NAME":

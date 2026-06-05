@@ -105,9 +105,11 @@ func TestServiceResolveWorkedExample(t *testing.T) {
 	service := newTestService()
 	const threshold = 0.5
 
-	// 1) index.ttl: a rich rooted graph -> exactly one new entity.
+	// 1) index.ttl: a rich rooted graph -> exactly one new entity. Names arrive as
+	// role-free TOKENS post-extraction, so "Patrick Audley" is two name-token claims.
 	indexTTL := []ClaimInput{
-		claimInput("name: patrick audley", true),
+		claimInput("name-token: patrick", true),
+		claimInput("name-token: audley", true),
 		claimInput("email: paudley@blackcat.ca", false),
 		claimInput("org: blackcat informatics", false),
 	}
@@ -115,13 +117,14 @@ func TestServiceResolveWorkedExample(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve index.ttl: %v", err)
 	}
-	if !first.IsNew || first.IsNoop || len(first.NewClaimHashes) != 3 {
-		t.Fatalf("index.ttl: want a new entity with 3 new claims, got %+v", first)
+	if !first.IsNew || first.IsNoop || len(first.NewClaimHashes) != 4 {
+		t.Fatalf("index.ttl: want a new entity with 4 new claims, got %+v", first)
 	}
 
 	// 2) 2002 vCard: same person, one NEW email -> matches, delta is just the email.
 	vcard2002 := []ClaimInput{
-		claimInput("name: patrick audley", true),
+		claimInput("name-token: patrick", true),
+		claimInput("name-token: audley", true),
 		claimInput("email: paudley@blackcat.ca", false),
 		claimInput("email: pat@new.example", false),
 	}
@@ -142,7 +145,8 @@ func TestServiceResolveWorkedExample(t *testing.T) {
 
 	// 3) 2004 vCard: nothing new -> NOOP.
 	vcard2004 := []ClaimInput{
-		claimInput("name: patrick audley", true),
+		claimInput("name-token: patrick", true),
+		claimInput("name-token: audley", true),
 		claimInput("email: paudley@blackcat.ca", false),
 	}
 	third, err := service.Resolve(ctx, vcard2004, threshold, threshold)
