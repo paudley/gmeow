@@ -125,6 +125,9 @@ func TestResolveImportProducesEntitySubjectedDeltaRecords(t *testing.T) {
 		"sourceModifiedAt", "2002-06-30", // carrier time on the Source
 		"ImportActivity", "ingestedAt", "2026-06-05", // transaction time
 		"recordedNoLaterThan", // per-claim derived bound (no source assertion)
+		// Carrier storage is a structured gmeow:StorageLocation, not a bare string.
+		"StorageLocation", "storedIn", "storagePath", "/imports/paudley.ttl",
+		"storageMediumLocalFilesystem",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("delta record missing four-clock term %q:\n%s", want, content)

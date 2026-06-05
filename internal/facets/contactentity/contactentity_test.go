@@ -165,6 +165,102 @@ func TestNormalizeAliasBuildsSlugHandle(t *testing.T) {
 	}
 }
 
+// TestLocationSubNodesFlattenOntoContact: address-component and coordinate
+// literals live on the gmeow:addr / gmeow:place sub-nodes (linked from the contact
+// via gmeow:hasContactPoint / gmeow:locatedAt), and timezone on the contact itself.
+// The projection must attribute the sub-node literals back to the owning contact,
+// while a sub-node no contact links must NOT leak.
+func TestLocationSubNodesFlattenOntoContact(t *testing.T) {
+	const contact = "https://example.test/#person"
+	const addr = "urn:gmeow:addr:abc"
+	const place = "urn:gmeow:place:xyz"
+	statements := []Statement{
+		{
+			StatementHash: "type",
+			Subject:       contact,
+			Predicate:     rdfTypePredicate,
+			Object:        schemaOrgPerson,
+		},
+		{
+			StatementHash: "link-addr",
+			Subject:       contact,
+			Predicate:     gmeowPrefix + "hasContactPoint",
+			Object:        addr,
+			ObjectKind:    "iri",
+		},
+		{
+			StatementHash: "link-place",
+			Subject:       contact,
+			Predicate:     gmeowPrefix + "locatedAt",
+			Object:        place,
+			ObjectKind:    "iri",
+		},
+		{
+			StatementHash: "street",
+			Subject:       addr,
+			Predicate:     gmeowPrefix + "streetAddress",
+			Object:        "1 Example Street",
+			ObjectKind:    "literal",
+		},
+		{
+			StatementHash: "city",
+			Subject:       addr,
+			Predicate:     gmeowPrefix + "addressLocality",
+			Object:        "Example City",
+			ObjectKind:    "literal",
+		},
+		{
+			StatementHash: "lat",
+			Subject:       place,
+			Predicate:     gmeowPrefix + "latitude",
+			Object:        "37.7",
+			ObjectKind:    "literal",
+		},
+		{
+			StatementHash: "tz",
+			Subject:       contact,
+			Predicate:     gmeowPrefix + "timezone",
+			Object:        "America/Toronto",
+			ObjectKind:    "literal",
+		},
+		// Orphan sub-node no contact links — must not surface.
+		{
+			StatementHash: "orphan",
+			Subject:       "urn:gmeow:addr:orphan",
+			Predicate:     gmeowPrefix + "streetAddress",
+			Object:        "99 Nowhere",
+			ObjectKind:    "literal",
+		},
+	}
+
+	facts := FactsFromStatements(statements, nil)
+
+	for _, want := range []struct {
+		value string
+		kind  string
+	}{
+		{"1 Example Street", FactKindAddress},
+		{"Example City", FactKindAddress},
+		{"37.7", FactKindCoordinates},
+		{"America/Toronto", FactKindTimezone},
+	} {
+		fact := factByValue(facts, want.value)
+		if fact.FactKind != want.kind || fact.ContactID != contact {
+			t.Fatalf(
+				"fact %q = %#v, want kind %s attributed to %s",
+				want.value,
+				fact,
+				want.kind,
+				contact,
+			)
+		}
+	}
+
+	if leaked := factByValue(facts, "99 Nowhere"); leaked.Value != "" {
+		t.Fatalf("orphan sub-node leaked into projection: %#v", leaked)
+	}
+}
+
 func factByValue(facts []Fact, value string) Fact {
 	for _, fact := range facts {
 		if fact.Value == value {

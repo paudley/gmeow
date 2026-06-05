@@ -55,6 +55,51 @@ func TestVCardImportProducesRDFContactBundle(t *testing.T) {
 	}
 }
 
+// TestVCardLocationEmitsGmeowModel: vCard ADR/GEO/TZ become the GMEOW-primary
+// location model — a gmeow:PostalAddress with all seven components, a gmeow:Place
+// carrying latitude/longitude, and gmeow:timezone — not schema:PostalAddress or a
+// dropped vcardGeoParameter source predicate.
+func TestVCardLocationEmitsGmeowModel(t *testing.T) {
+	vcf := "BEGIN:VCARD\nVERSION:4.0\nFN:Pat Audley\n" +
+		"ADR:POBox 9;Suite 5;112 Westbourne Rd;Spruce Grove;AB;T7X 0A1;CA\n" +
+		"GEO:geo:53.544972,-113.924398\nTZ:America/Edmonton\nEND:VCARD\n"
+	object, _, err := BuildImportObject(
+		FormatVCard,
+		"contacts",
+		"pat.vcf",
+		[]byte(vcf),
+		time.Time{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := "https://blackcatinformatics.ca/gmeow/"
+	for _, want := range []string{
+		"<" + g + "PostalAddress>",
+		"<" + g + `postOfficeBox> "POBox 9"`,
+		"<" + g + `extendedAddress> "Suite 5"`,
+		"<" + g + `streetAddress> "112 Westbourne Rd"`,
+		"<" + g + `addressLocality> "Spruce Grove"`,
+		"<" + g + `addressRegion> "AB"`,
+		"<" + g + `postalCode> "T7X 0A1"`,
+		"<" + g + `countryCode> "CA"`,
+		"<" + g + "Place>",
+		"<" + g + `latitude> "53.544972"`,
+		"<" + g + `longitude> "-113.924398"`,
+		"<" + g + `timezone> "America/Edmonton"`,
+	} {
+		if !strings.Contains(object.Content, want) {
+			t.Fatalf("location RDF missing %q:\n%s", want, object.Content)
+		}
+	}
+	for _, bad := range []string{"schema.org/PostalAddress", "vcardGeoParameter", "vcardTimeZone"} {
+		if strings.Contains(object.Content, bad) {
+			t.Fatalf("location RDF still emits legacy %q:\n%s", bad, object.Content)
+		}
+	}
+}
+
 func TestVCardImportPreservesInvalidEmailValuesAsSourceData(t *testing.T) {
 	object, _, err := BuildImportObject(
 		FormatVCard,
@@ -634,7 +679,9 @@ func TestAppleAddressBookImportProducesRDFContactBundle(t *testing.T) {
 		`<https://schema.org/givenName> "Casey"`,
 		`<https://schema.org/affiliation> "Example Org"`,
 		`<https://schema.org/email> <mailto:casey.contact@example.test>`,
-		`<https://schema.org/streetAddress> "1 Example Street"`,
+		`<https://blackcatinformatics.ca/gmeow/streetAddress> "1 Example Street"`,
+		`<https://blackcatinformatics.ca/gmeow/addressLocality> "Example City"`,
+		`<https://blackcatinformatics.ca/gmeow/countryCode> "Example Country"`,
 		`<https://blackcatinformatics.ca/gmeow/applePropertyTypeName> "Email"`,
 	} {
 		if !strings.Contains(object.Content, snippet) {

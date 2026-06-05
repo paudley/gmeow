@@ -14,6 +14,8 @@ const (
 	FactKindAffiliation  = "affiliation"
 	FactKindAlias        = "alias"
 	FactKindAddress      = "address"
+	FactKindCoordinates  = "coordinates"
+	FactKindTimezone     = "timezone"
 	FactKindAccount      = "account"
 	FactKindContactAlias = "contact_alias"
 	FactKindEmail        = "email"
@@ -35,6 +37,13 @@ const (
 	schemaOrgHTTPSPrefix  = "https://schema.org/"
 	schemaOrgOrganization = schemaOrgHTTPSPrefix + "Organization"
 	schemaOrgPerson       = schemaOrgHTTPSPrefix + "Person"
+
+	gmeowPrefix = "https://blackcatinformatics.ca/gmeow/"
+	// Location sub-nodes carry their values as literals (unlike emails, whose
+	// value is the object IRI), so the projection flattens these node IRIs onto
+	// the contact that links them via gmeow:hasContactPoint / gmeow:locatedAt.
+	gmeowAddrNodePrefix  = "urn:gmeow:addr:"
+	gmeowPlaceNodePrefix = "urn:gmeow:place:"
 )
 
 type Statement struct {
@@ -161,10 +170,19 @@ func FactsForContacts(
 ) []Fact {
 	facts := []Fact{}
 	annotationIndex := annotationsByStatement(annotations)
+	nodeOwner := locationNodeOwners(statements, contacts)
 
 	for _, statement := range statements {
-		if !contacts[statement.Subject] {
-			continue
+		// A location sub-node's literal facts (address components, coordinates) are
+		// attributed to the contact that links it; a fact on the contact itself
+		// keeps its own subject. Everything else off-contact is ignored.
+		contactID := statement.Subject
+		if !contacts[contactID] {
+			owner, linked := nodeOwner[statement.Subject]
+			if !linked {
+				continue
+			}
+			contactID = owner
 		}
 
 		factKind, historical, ok := FactKind(statement.Predicate)
@@ -180,7 +198,7 @@ func FactsForContacts(
 		fact := Fact{
 			SourceDigest:  statement.SourceDigest,
 			StatementHash: statement.StatementHash,
-			ContactID:     statement.Subject,
+			ContactID:     contactID,
 			FactKind:      factKind,
 			Value:         value,
 			Predicate:     statement.Predicate,
@@ -198,6 +216,32 @@ func FactsForContacts(
 	}
 
 	return facts
+}
+
+// locationNodeOwners maps each address/place sub-node IRI to the contact that
+// links it (via gmeow:hasContactPoint / gmeow:locatedAt — detected structurally by
+// the sub-node IRI prefix, robust to the link predicate name). Sub-nodes that no
+// contact links are absent, so their literals never leak into the projection.
+func locationNodeOwners(
+	statements []Statement,
+	contacts map[string]bool,
+) map[string]string {
+	owners := map[string]string{}
+
+	for _, statement := range statements {
+		if !contacts[statement.Subject] {
+			continue
+		}
+		if statement.ObjectKind != "iri" {
+			continue
+		}
+		if strings.HasPrefix(statement.Object, gmeowAddrNodePrefix) ||
+			strings.HasPrefix(statement.Object, gmeowPlaceNodePrefix) {
+			owners[statement.Object] = statement.Subject
+		}
+	}
+
+	return owners
 }
 
 func FactKind(predicate string) (string, bool, bool) {
@@ -415,6 +459,19 @@ func gmeowContactFactKind(predicate string) (string, bool, bool) {
 		return FactKindEmail, false, true
 	case "https://blackcatinformatics.ca/gmeow/historicalEmail":
 		return FactKindEmail, true, true
+	case gmeowPrefix + "streetAddress",
+		gmeowPrefix + "extendedAddress",
+		gmeowPrefix + "postOfficeBox",
+		gmeowPrefix + "addressLocality",
+		gmeowPrefix + "addressRegion",
+		gmeowPrefix + "postalCode",
+		gmeowPrefix + "countryCode":
+		return FactKindAddress, false, true
+	case gmeowPrefix + "latitude",
+		gmeowPrefix + "longitude":
+		return FactKindCoordinates, false, true
+	case gmeowPrefix + "timezone":
+		return FactKindTimezone, false, true
 	default:
 		return "", false, false
 	}

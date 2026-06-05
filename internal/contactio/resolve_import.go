@@ -191,9 +191,11 @@ func observationFingerprint(statements []claimStatement) string {
 // deltaLinkPredicates are the agent→attached-node link predicates re-subjected
 // to the entity in a delta (the node sub-graph is otherwise kept verbatim).
 var deltaLinkPredicates = map[string]bool{
-	schemaContactPointPred: true,
-	foafAccountPred:        true,
-	schemaAddressPred:      true,
+	schemaContactPointPred:         true,
+	foafAccountPred:                true,
+	schemaAddressPred:              true,
+	ontology.HasContactPointPlaces: true, // entity → gmeow:PostalAddress
+	ontology.LocatedAt:             true, // entity → gmeow:Place (coordinates)
 }
 
 // buildEntityDeltaGraph renders an immutable delta record that PRESERVES the
@@ -348,7 +350,15 @@ func emitProvenanceNodes(
 		write(source, ontology.ContentDigest, literal(prov.ContentDigest))
 	}
 	if prov.Location != "" {
-		write(source, ontology.SourceLocation, literal(prov.Location))
+		// Carrier storage is a structured gmeow:StorageLocation, not a bare string:
+		// medium (local filesystem) + path + service, linked via gmeow:storedIn. This
+		// is the surface seam for a later physicalPlace gazetteer step.
+		storage := iri("urn:gmeow:storage:" + shortHash([]byte(prov.Location)))
+		write(source, ontology.StoredIn, storage)
+		write(storage, rdfTypePred, iri(ontology.StorageLocationClass))
+		write(storage, ontology.StorageMedium, iri(ontology.StorageMediumLocalFilesyst))
+		write(storage, ontology.StoragePath, literal(prov.Location))
+		write(storage, ontology.StorageService, literal("local"))
 	}
 
 	write(activity, rdfTypePred, iri(ontology.ImportActivityClass))
@@ -380,7 +390,8 @@ func isAttachedNodeIRI(value string) bool {
 	return strings.HasPrefix(value, "mailto:") ||
 		strings.HasPrefix(value, "tel:") ||
 		strings.HasPrefix(value, "urn:gmeow:account:") ||
-		strings.HasPrefix(value, "urn:gmeow:addr:")
+		strings.HasPrefix(value, "urn:gmeow:addr:") ||
+		strings.HasPrefix(value, "urn:gmeow:place:")
 }
 
 // deltaObject renders a statement object for the delta, rewriting a reference to

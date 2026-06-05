@@ -222,7 +222,18 @@ func orderedTerms() []Term {
 			Normalize:  NormURL,
 		},
 
-		// --- Postal address parts (contextual; the PostalAddress node groups them) ---
+		// --- Postal address parts (GMEOW-primary; the gmeow: form is canonical, the
+		// schema: form is the aligned alias. Contextual; the PostalAddress node groups
+		// them). GMEOW is now the primary ontology. ---
+		{
+			IRI:         StreetAddress,
+			Concept:     "street-address",
+			Kind:        Contextual,
+			Role:        RoleLocator,
+			ObjectKind:  ObjLiteral,
+			Normalize:   NormText,
+			GmeowReason: "gmeow-primary; owl:equivalentProperty schema:streetAddress",
+		},
 		{
 			IRI:        Schema + "streetAddress",
 			Concept:    "street-address",
@@ -230,6 +241,33 @@ func orderedTerms() []Term {
 			Role:       RoleLocator,
 			ObjectKind: ObjLiteral,
 			Normalize:  NormText,
+		},
+		{
+			IRI:         ExtendedAddress,
+			Concept:     "extended-address",
+			Kind:        Contextual,
+			Role:        RoleLocator,
+			ObjectKind:  ObjLiteral,
+			Normalize:   NormText,
+			GmeowReason: "gmeow-primary; vCard ADR extended-address (no exact schema term)",
+		},
+		{
+			IRI:         PostOfficeBox,
+			Concept:     "po-box",
+			Kind:        Contextual,
+			Role:        RoleLocator,
+			ObjectKind:  ObjLiteral,
+			Normalize:   NormText,
+			GmeowReason: "gmeow-primary; vCard ADR post-office-box",
+		},
+		{
+			IRI:         AddressLocality,
+			Concept:     "locality",
+			Kind:        Contextual,
+			Role:        RoleLocator,
+			ObjectKind:  ObjLiteral,
+			Normalize:   NormText,
+			GmeowReason: "gmeow-primary; owl:equivalentProperty schema:addressLocality",
 		},
 		{
 			IRI:        Schema + "addressLocality",
@@ -240,12 +278,30 @@ func orderedTerms() []Term {
 			Normalize:  NormText,
 		},
 		{
+			IRI:         AddressRegion,
+			Concept:     "region",
+			Kind:        Contextual,
+			Role:        RoleLocator,
+			ObjectKind:  ObjLiteral,
+			Normalize:   NormText,
+			GmeowReason: "gmeow-primary; owl:equivalentProperty schema:addressRegion",
+		},
+		{
 			IRI:        Schema + "addressRegion",
 			Concept:    "region",
 			Kind:       Contextual,
 			Role:       RoleLocator,
 			ObjectKind: ObjLiteral,
 			Normalize:  NormText,
+		},
+		{
+			IRI:         PostalCode,
+			Concept:     "postal-code",
+			Kind:        Set,
+			Role:        RoleLocator,
+			ObjectKind:  ObjLiteral,
+			Normalize:   NormText,
+			GmeowReason: "gmeow-primary; owl:equivalentProperty schema:postalCode",
 		},
 		{
 			IRI:        Schema + "postalCode",
@@ -256,12 +312,50 @@ func orderedTerms() []Term {
 			Normalize:  NormText,
 		},
 		{
+			IRI:         CountryCode,
+			Concept:     "country",
+			Kind:        Contextual,
+			Role:        RoleLocator,
+			ObjectKind:  ObjLiteral,
+			Normalize:   NormText,
+			GmeowReason: "gmeow-primary; ISO 3166-1 alpha-2 (vs schema:addressCountry name)",
+		},
+		{
 			IRI:        Schema + "addressCountry",
 			Concept:    "country",
 			Kind:       Contextual,
 			Role:       RoleLocator,
 			ObjectKind: ObjLiteral,
 			Normalize:  NormText,
+		},
+
+		// --- Geo coordinates + timezone (gmeow location module) ---
+		{
+			IRI:         Latitude,
+			Concept:     "latitude",
+			Kind:        Contextual,
+			Role:        RoleLocator,
+			ObjectKind:  ObjLiteral,
+			Normalize:   NormText,
+			GmeowReason: "gmeow-primary; geo point latitude (skos:closeMatch wgs84:lat)",
+		},
+		{
+			IRI:         Longitude,
+			Concept:     "longitude",
+			Kind:        Contextual,
+			Role:        RoleLocator,
+			ObjectKind:  ObjLiteral,
+			Normalize:   NormText,
+			GmeowReason: "gmeow-primary; geo point longitude",
+		},
+		{
+			IRI:         Timezone,
+			Concept:     "timezone",
+			Kind:        Contextual,
+			Role:        RoleLocator,
+			ObjectKind:  ObjLiteral,
+			Normalize:   NormText,
+			GmeowReason: "gmeow-primary; IANA timezone (vCard TZ)",
 		},
 
 		// --- Organization / employment ---

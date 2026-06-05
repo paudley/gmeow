@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/micromdm/plist"
+
+	"blackcat.ca/gmeow/internal/ontology"
 )
 
 func appleAddressBookPersonToRDF(
@@ -621,12 +623,12 @@ var appleAddressBookMultiValueFields = map[string]appleMultiValueField{
 	"Address": {
 		LinkPredicate: gmeowPrefix + "appleAddressEntry",
 		ComponentPredicate: map[string]string{
-			"City":        schemaPrefix + "addressLocality",
-			"Country":     schemaPrefix + "addressCountry",
-			"CountryCode": gmeowPrefix + "appleAddressCountryCode",
-			"State":       schemaPrefix + "addressRegion",
-			"Street":      schemaPrefix + "streetAddress",
-			"ZIP":         schemaPrefix + "postalCode",
+			"City":        ontology.AddressLocality,
+			"Country":     ontology.CountryCode,
+			"CountryCode": ontology.CountryCode,
+			"State":       ontology.AddressRegion,
+			"Street":      ontology.StreetAddress,
+			"ZIP":         ontology.PostalCode,
 		},
 	},
 }

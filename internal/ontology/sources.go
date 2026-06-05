@@ -93,6 +93,10 @@ func VCardMapping(prop string) (Mapping, bool) {
 		return Mapping{Concept: "job-title"}, true
 	case "ADR", "ADDRESS":
 		return Mapping{Concept: "address"}, true
+	case "GEO":
+		return Mapping{Concept: "coordinates"}, true
+	case "TZ", "TZID":
+		return Mapping{Concept: "timezone"}, true
 	case "BDAY", "BIRTHDAY":
 		return Mapping{Concept: "birth-date"}, true
 	case "X-GENDER":

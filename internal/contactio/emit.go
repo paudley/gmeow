@@ -74,6 +74,8 @@ func emitCanonical(
 		return emitAccount(claims, subject, mapping.Service, value, sourceProp)
 	case "address":
 		return emitAddress(claims, subject, value, sourceProp)
+	case "coordinates":
+		return emitCoordinates(claims, subject, value, sourceProp)
 	case "url", "image":
 		return appendCanonical(
 			claims,
@@ -229,19 +231,28 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// emitAddress emits a schema:PostalAddress node. A ";"-delimited value (vCard
-// ADR: pobox;ext;street;locality;region;postal;country) is split into parts;
-// otherwise the whole value is the street address.
+// emitAddress emits a gmeow:PostalAddress surface node (GMEOW-primary; the gmeow:
+// address components are owl:equivalentProperty to schema:). A ";"-delimited vCard
+// ADR (pobox;ext;street;locality;region;postal;country) yields all SEVEN gmeow
+// components; otherwise the whole value is the street address.
 func emitAddress(claims []Claim, subject, value, sourceProp string) []Claim {
 	node := "urn:gmeow:addr:" + shortHash([]byte(strings.ToLower(value)))
 
 	claims = append(
 		claims,
-		Claim{Subject: subject, Predicate: schemaAddressPred, Object: termIRI(node)},
+		Claim{
+			Subject:   subject,
+			Predicate: ontology.HasContactPointPlaces,
+			Object:    termIRI(node),
+		},
 	)
 	claims = append(
 		claims,
-		Claim{Subject: node, Predicate: rdfTypePred, Object: termIRI(schemaPostalAddrType)},
+		Claim{
+			Subject:   node,
+			Predicate: rdfTypePred,
+			Object:    termIRI(ontology.PostalAddressClass),
+		},
 	)
 
 	addPart := func(pred, part string) {
@@ -255,13 +266,15 @@ func emitAddress(claims []Claim, subject, value, sourceProp string) []Claim {
 	}
 
 	if parts := strings.Split(value, ";"); len(parts) >= 7 {
-		addPart(ontology.Schema+"streetAddress", parts[2])
-		addPart(ontology.Schema+"addressLocality", parts[3])
-		addPart(ontology.Schema+"addressRegion", parts[4])
-		addPart(ontology.Schema+"postalCode", parts[5])
-		addPart(ontology.Schema+"addressCountry", parts[6])
+		addPart(ontology.PostOfficeBox, parts[0])
+		addPart(ontology.ExtendedAddress, parts[1])
+		addPart(ontology.StreetAddress, parts[2])
+		addPart(ontology.AddressLocality, parts[3])
+		addPart(ontology.AddressRegion, parts[4])
+		addPart(ontology.PostalCode, parts[5])
+		addPart(ontology.CountryCode, parts[6])
 	} else {
-		addPart(ontology.Schema+"streetAddress", value)
+		addPart(ontology.StreetAddress, value)
 	}
 
 	if sourceProp != "" {
@@ -276,4 +289,104 @@ func emitAddress(claims []Claim, subject, value, sourceProp string) []Claim {
 	}
 
 	return claims
+}
+
+// emitCoordinates emits a gmeow:Place (premises granularity) carrying its
+// gmeow:latitude/longitude, linked from the agent via gmeow:locatedAt — the
+// surface→resolved seam (a later gazetteer step gives the Place a QID and the
+// containedInPlace hierarchy). Accepts a vCard GEO value "geo:lat,long"
+// (RFC 6350) or legacy "lat;long". (Coordinates are flattened onto the Place
+// rather than a nested gmeow:GeoCoordinates node so the place is preserved as a
+// comparison-bearing delta node; the nested form is a later refinement.)
+func emitCoordinates(claims []Claim, subject, value, sourceProp string) []Claim {
+	lat, long, ok := parseGeo(value)
+	if !ok {
+		return claims
+	}
+
+	place := "urn:gmeow:place:" + shortHash([]byte(lat+","+long))
+
+	claims = append(
+		claims,
+		Claim{Subject: subject, Predicate: ontology.LocatedAt, Object: termIRI(place)},
+	)
+	claims = append(
+		claims,
+		Claim{Subject: place, Predicate: rdfTypePred, Object: termIRI(ontology.PlaceClass)},
+	)
+	claims = append(
+		claims,
+		Claim{
+			Subject:   place,
+			Predicate: ontology.PlaceType,
+			Object:    termIRI(ontology.PlaceTypePremises),
+		},
+	)
+	claims = append(
+		claims,
+		Claim{Subject: place, Predicate: ontology.Latitude, Object: termLiteral(lat)},
+	)
+	claims = append(
+		claims,
+		Claim{Subject: place, Predicate: ontology.Longitude, Object: termLiteral(long)},
+	)
+
+	if sourceProp != "" {
+		claims = append(
+			claims,
+			Claim{
+				Subject:   place,
+				Predicate: gmeowMappedFromPred,
+				Object:    termLiteral(sourceProp),
+			},
+		)
+	}
+
+	return claims
+}
+
+// parseGeo extracts decimal latitude/longitude from a vCard GEO value:
+// "geo:53.54,-113.92" (RFC 6350 URI) or the legacy "53.54;-113.92".
+func parseGeo(value string) (lat, long string, ok bool) {
+	v := strings.TrimSpace(value)
+	v = strings.TrimPrefix(strings.TrimPrefix(v, "geo:"), "GEO:")
+
+	sep := ","
+	if !strings.Contains(v, ",") && strings.Contains(v, ";") {
+		sep = ";"
+	}
+
+	parts := strings.SplitN(v, sep, 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+
+	lat = strings.TrimSpace(parts[0])
+	long = strings.TrimSpace(parts[1])
+	if !isDecimal(lat) || !isDecimal(long) {
+		return "", "", false
+	}
+
+	return lat, long, true
+}
+
+// isDecimal reports whether s is a signed decimal number (a coordinate degree).
+func isDecimal(s string) bool {
+	if s == "" {
+		return false
+	}
+	seenDigit, seenDot := false, false
+	for i, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			seenDigit = true
+		case (r == '-' || r == '+') && i == 0:
+		case r == '.' && !seenDot:
+			seenDot = true
+		default:
+			return false
+		}
+	}
+
+	return seenDigit
 }

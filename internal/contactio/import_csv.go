@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"blackcat.ca/gmeow/internal/ontology"
 )
 
 func csvToRDF(content string) ([]renderedContact, []RecordRejection, error) {
@@ -247,8 +249,43 @@ func canonicalCSVField(field string) (csvFieldMapping, bool) {
 		return csvFieldMapping{Predicate: schemaPrefix + "gender"}, true
 	case "url", "web page", "personal web page", "personal website", "business website":
 		return csvFieldMapping{Predicate: schemaPrefix + "url", ObjectKind: "iri"}, true
+	}
+
+	// Address components (Business/Home/Other and Google "Address N - …" variants)
+	// route to the canonical gmeow address predicates so CSV addresses participate
+	// in resolution instead of leaking to dropped source-property predicates.
+	if pred := csvAddressComponent(strings.ToLower(strings.TrimSpace(field))); pred != "" {
+		return csvFieldMapping{Predicate: pred}, true
+	}
+
+	return csvFieldMapping{}, false
+}
+
+// csvAddressComponent maps an address column name to its canonical gmeow address
+// predicate (or "" if not an address field). Ordered so "po box" / "street 2/3"
+// win over the broader "street" / "country" matches.
+func csvAddressComponent(name string) string {
+	switch {
+	case strings.Contains(name, "po box"), strings.Contains(name, "post office box"):
+		return ontology.PostOfficeBox
+	case strings.Contains(name, "street 2"), strings.Contains(name, "street 3"),
+		strings.Contains(name, "extended address"):
+		return ontology.ExtendedAddress
+	case strings.HasSuffix(name, " street"), strings.HasSuffix(name, "- street"),
+		strings.HasSuffix(name, " address"): // "business address" / "home address" (whole)
+		return ontology.StreetAddress
+	case strings.HasSuffix(name, " city"), strings.HasSuffix(name, "- city"):
+		return ontology.AddressLocality
+	case strings.HasSuffix(name, " state"), strings.HasSuffix(name, "- region"),
+		strings.HasSuffix(name, " province"):
+		return ontology.AddressRegion
+	case strings.Contains(name, "postal code"), strings.HasSuffix(name, " zip"),
+		strings.HasSuffix(name, "- postal code"):
+		return ontology.PostalCode
+	case strings.HasSuffix(name, " country"), strings.HasSuffix(name, "- country"):
+		return ontology.CountryCode
 	default:
-		return csvFieldMapping{}, false
+		return ""
 	}
 }
 
