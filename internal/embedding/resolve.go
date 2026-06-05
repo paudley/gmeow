@@ -8,6 +8,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 
@@ -17,14 +18,36 @@ import (
 // ClaimInput is one claim presented to resolution: its identity-bearing text
 // (embedded + grouped), a stable subject-independent hash (for the delta diff),
 // and whether it is a name claim (transitional; kind is now derived from the
-// attribute — see claim.go). Validity/source/supersedes ride as RDF* annotations
-// on the persisted record and are not yet threaded over the wire (the temporal
-// and supersedes gates degrade to no-ops until they are — see
-// docs/architecture/CONTACT_IDENTITY_RESOLUTION.md §5).
+// attribute — see claim.go). ValidFrom/ValidUntil are the VALID-time (tenure)
+// bounds — RFC3339, empty = unbounded — the ONLY clock that feeds the co-validity
+// gate (assertion/carrier/transaction time never reach here; see
+// docs/architecture/CONTACT_IDENTITY_RESOLUTION.md §4.1 and the four-clock model
+// in ~/Active/gmeow-ontology/docs/import-provenance.md). Source/supersedes still
+// ride as RDF* annotations on the persisted record.
 type ClaimInput struct {
-	Text   string
-	Hash   string
-	IsName bool
+	Text       string
+	Hash       string
+	IsName     bool
+	ValidFrom  string
+	ValidUntil string
+}
+
+// parseValidity builds a validity Interval from RFC3339 ValidFrom/ValidUntil
+// strings; an empty or unparseable bound is left unbounded on that side (the
+// graceful default — a claim the source did not temporally ground stays null).
+func parseValidity(from, until string) Interval {
+	parse := func(s string) time.Time {
+		if s == "" {
+			return time.Time{}
+		}
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			return t
+		}
+
+		return time.Time{}
+	}
+
+	return Interval{First: parse(from), Last: parse(until)}
 }
 
 // Resolution is the outcome of resolving one record's claims against the entity
@@ -53,14 +76,24 @@ var identifierConcepts = map[string]bool{
 // from the claim sets — the ledger is the source of record, the indexes are views
 // recomputed on load (never serialized).
 type entityLedger struct {
-	claims map[string]map[string]string
+	claims map[string]map[string]claimEntry
 	df     map[string]int
 	ident  map[string][]string
 }
 
+// claimEntry is an entity's folded view of one claim: its text plus the VALID-time
+// (tenure) bounds (RFC3339, empty = unbounded — the four-clock valid clock). The
+// candidate side of the co-validity gate reads these, so they must survive folds
+// and the state snapshot.
+type claimEntry struct {
+	Text       string
+	ValidFrom  string
+	ValidUntil string
+}
+
 func newEntityLedger() *entityLedger {
 	return &entityLedger{
-		claims: make(map[string]map[string]string),
+		claims: make(map[string]map[string]claimEntry),
 		df:     make(map[string]int),
 		ident:  make(map[string][]string),
 	}
@@ -75,18 +108,51 @@ func (l *entityLedger) has(entity, hash string) bool {
 func (l *entityLedger) add(entity string, claims []ClaimInput) {
 	set := l.claims[entity]
 	if set == nil {
-		set = make(map[string]string)
+		set = make(map[string]claimEntry)
 		l.claims[entity] = set
 	}
 
 	for _, claim := range claims {
-		if _, existed := set[claim.Hash]; !existed {
+		existing, existed := set[claim.Hash]
+		if !existed {
 			l.df[claim.Hash]++ // a new (entity, value) pair raises document frequency
 			l.indexIdentifier(entity, claim.Text)
-		}
+			set[claim.Hash] = claimEntry{
+				Text: claim.Text, ValidFrom: claim.ValidFrom, ValidUntil: claim.ValidUntil,
+			}
 
-		set[claim.Hash] = claim.Text
+			continue
+		}
+		// Same value re-observed: widen the held interval to the union span (the
+		// entity held the value across all observed validity windows).
+		existing.ValidFrom = earlierBound(existing.ValidFrom, claim.ValidFrom)
+		existing.ValidUntil = laterBound(existing.ValidUntil, claim.ValidUntil)
+		set[claim.Hash] = existing
 	}
+}
+
+// earlierBound / laterBound widen a validity span across re-observations. An empty
+// bound is unbounded (extends to infinity), so it absorbs any value.
+func earlierBound(a, b string) string {
+	if a == "" || b == "" {
+		return ""
+	}
+	if b < a { // RFC3339 sorts lexicographically by time
+		return b
+	}
+
+	return a
+}
+
+func laterBound(a, b string) string {
+	if a == "" || b == "" {
+		return ""
+	}
+	if b > a {
+		return b
+	}
+
+	return a
 }
 
 // indexIdentifier adds an entity to the inverted blocking index under an
@@ -135,9 +201,9 @@ func (l *entityLedger) rebuild() {
 	l.df = make(map[string]int)
 	l.ident = make(map[string][]string)
 	for entity, set := range l.claims {
-		for hash, text := range set {
+		for hash, entry := range set {
 			l.df[hash]++
-			l.indexIdentifier(entity, text)
+			l.indexIdentifier(entity, entry.Text)
 		}
 	}
 }
@@ -156,7 +222,7 @@ func (l *entityLedger) sortedClaimTexts(entity string) []string {
 
 	texts := make([]string, len(hashes))
 	for i, hash := range hashes {
-		texts[i] = set[hash]
+		texts[i] = set[hash].Text
 	}
 
 	return texts
@@ -215,6 +281,7 @@ func (s *Service) Resolve(
 			Hash:  claim.Hash,
 			Kind:  ontology.KindForConcept(concept),
 			Vec:   vectors[i],
+			Valid: parseValidity(claim.ValidFrom, claim.ValidUntil),
 		}
 	}
 
@@ -369,13 +436,14 @@ func (s *Service) entityScoredClaims(entity string) []scoredClaim {
 	set := s.ledger.claims[entity]
 	out := make([]scoredClaim, 0, len(set))
 
-	for hash, text := range set {
-		concept, value := splitClaimText(text)
+	for hash, entry := range set {
+		concept, value := splitClaimText(entry.Text)
 		claim := scoredClaim{
 			Attr:  concept,
 			Value: value,
 			Hash:  hash,
 			Kind:  ontology.KindForConcept(concept),
+			Valid: parseValidity(entry.ValidFrom, entry.ValidUntil),
 		}
 		if vec, ok := s.resolver.Cache().Get(StatementHash(value)); ok {
 			claim.Vec = vec
@@ -406,14 +474,17 @@ func (s *Service) entityValues(entity string) []string {
 // its sorted claim hashes. Identical claim sets share a key (and thus a memoized
 // entity), so a re-ingest is a deterministic NOOP.
 func observationKey(claims []ClaimInput) string {
-	hashes := make([]string, len(claims))
+	// Include valid-time bounds: the same value asserted with different validity is
+	// a DIFFERENT observation (a transfer, not a re-ingest), so it must not collapse
+	// to the same memo entry and short-circuit the co-validity gate.
+	keys := make([]string, len(claims))
 	for i, claim := range claims {
-		hashes[i] = claim.Hash
+		keys[i] = claim.Hash + "\x00" + claim.ValidFrom + "\x00" + claim.ValidUntil
 	}
 
-	sort.Strings(hashes)
+	sort.Strings(keys)
 
-	return StatementHash(strings.Join(hashes, "\n"))
+	return StatementHash(strings.Join(keys, "\n"))
 }
 
 func defaultIDSource() func() string {

@@ -855,6 +855,15 @@ func importContactPath(
 	// immutable delta record keyed by the resolved entity ULID. A record that
 	// carries no new information resolves to a NOOP and writes nothing.
 	observedAt := stat.ModTime().UTC()
+	// Four-clock provenance (import-provenance.md): mtime is CARRIER time (on the
+	// Source), now() is TRANSACTION time (on the ImportActivity) — neither is a
+	// claim's validity.
+	prov := contactio.SourceProvenance{
+		Location:      filepath.ToSlash(path),
+		ModifiedAt:    observedAt,
+		ContentDigest: contactio.ContentDigest(content),
+		IngestedAt:    time.Now().UTC(),
+	}
 	records, result, err := contactio.ResolveImport(
 		ctx,
 		resolver,
@@ -864,7 +873,7 @@ func importContactPath(
 		sourceName,
 		content,
 		contactio.ImportOptions{ImportLevel: importLevel},
-		observedAt,
+		prov,
 	)
 	if err != nil {
 		return contactio.ImportResult{}, err

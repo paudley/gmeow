@@ -310,6 +310,13 @@ func annotationsByStatement(annotations []Annotation) map[statementKey][]Annotat
 	return index
 }
 
+// applyTemporalAnnotation populates a fact's VALID-time axis from the four-clock
+// claim annotations, and ONLY the valid clock (import-provenance.md). gmeow:validFrom
+// /validUntil (and the raw OWL-Time time:hasBeginning/hasEnd a grounded source may
+// carry) are real tenure; everything else — assertion / carrier / transaction time,
+// and the derived recordedNoLaterThan upper bound — is NOT validity and must never
+// seed ValidFrom. (The previous observedAt→ValidFrom fold fabricated a valid-from
+// from ingestion time for envelope formats; that bug is removed here.)
 func applyTemporalAnnotation(fact *Fact, annotation Annotation) {
 	switch {
 	case strings.HasSuffix(annotation.Predicate, "hasBeginning") ||
@@ -318,16 +325,6 @@ func applyTemporalAnnotation(fact *Fact, annotation Annotation) {
 	case strings.HasSuffix(annotation.Predicate, "hasEnd") ||
 		strings.HasSuffix(annotation.Predicate, "validUntil"):
 		fact.ValidUntil = annotation.Object
-	case strings.HasSuffix(annotation.Predicate, "observedAt"):
-		// Ingest-time entity-resolution delta records stamp each new claim with
-		// gmeow:observedAt — the transaction time the claim was first observed for
-		// its entity. It is the claim's first_seen; absent an explicit valid-time
-		// it also seeds ValidFrom so the projection has a lower temporal bound.
-		// (A claim is written once, at first observation; re-observations NOOP, so
-		// last_seen advancing is a later refinement.)
-		if fact.ValidFrom == "" {
-			fact.ValidFrom = annotation.Object
-		}
 	}
 }
 

@@ -5,6 +5,7 @@ package embedding
 
 import (
 	"context"
+	"sort"
 	"sync"
 )
 
@@ -30,6 +31,10 @@ type Service struct {
 	// (same claim set), independent of centroid drift or blocking recall — a
 	// re-ingest returns the same entity as a NOOP and never mints a duplicate.
 	seenObs map[string]string
+	// entityClaims memoizes an entity's materialized scoredClaims, invalidated
+	// when the entity gains a claim. It keeps idDiff candidate re-ranking cheap by
+	// not re-hydrating unchanged candidates from the cache on every Resolve.
+	entityClaims map[string][]scoredClaim
 	// resolveMu serializes Resolve so the match->mint->diff->upsert read-modify-
 	// write of the index+ledger is atomic (import is sequential; concurrent gRPC
 	// Resolve calls thus queue rather than racing the entity space).
@@ -73,6 +78,7 @@ func NewService(resolver *Resolver, index *EntityIndex, model string) *Service {
 		vetoMass:     defaultVetoMass,
 		tauCtx:       defaultTauCtx,
 		seenObs:      make(map[string]string),
+		entityClaims: make(map[string][]scoredClaim),
 	}
 }
 
@@ -94,6 +100,7 @@ func (s *Service) ResetEntities() {
 	s.index = NewEntityIndex(FullDim, CoarseDim)
 	s.ledger = newEntityLedger()
 	s.seenObs = make(map[string]string)
+	s.entityClaims = make(map[string][]scoredClaim)
 }
 
 // Index exposes the underlying entity index (used in-process by ingest before
@@ -169,25 +176,46 @@ func (s *Service) ScoreEdges(
 		return nil, err
 	}
 
+	subject := s.entityScoredClaims(entity)
+
+	// Block on BOTH recall channels, exactly as ingest does: the centroid HNSW
+	// (gestalt similarity) AND the inverted identifier index (entities sharing an
+	// email/phone/account/url). The identifier channel is essential here — the
+	// over-split this pass consolidates is the SAME person under different name
+	// forms, whose divergent centroids hide them from HNSW; they are only found
+	// via the shared identifier (the cross-format recall the centroid alone misses).
 	candidates, err := s.index.Search(centroid, topN+1)
 	if err != nil {
 		return nil, err
 	}
 
+	neighbours := map[string]bool{}
+	add := func(e string) {
+		if e != "" && e != entity {
+			neighbours[e] = true
+		}
+	}
+	for _, candidate := range candidates {
+		add(candidate.Entity)
+	}
+	for _, e := range s.ledger.identifierCandidates(subject) {
+		add(e)
+	}
+
+	ordered := make([]string, 0, len(neighbours))
+	for e := range neighbours {
+		ordered = append(ordered, e)
+	}
+	sort.Strings(ordered)
+
 	params := s.idDiffParams(threshold, nameThreshold)
 	params.ObservationMode = false // entity↔entity: non-overlap is real evidence
 
-	subject := s.entityScoredClaims(entity)
-	edges := make([]SignedEdge, 0, len(candidates))
-
-	for _, candidate := range candidates {
-		if candidate.Entity == entity {
-			continue
-		}
-
-		result := idDiff(subject, s.entityScoredClaims(candidate.Entity), params)
+	edges := make([]SignedEdge, 0, len(ordered))
+	for _, candidate := range ordered {
+		result := idDiff(subject, s.entityScoredClaims(candidate), params)
 		edges = append(edges, SignedEdge{
-			A: entity, B: candidate.Entity, Weight: result.Score, Veto: result.Veto,
+			A: entity, B: candidate, Weight: result.Score, Veto: result.Veto,
 		})
 	}
 

@@ -90,9 +90,11 @@ func (server *EmbeddingServer) Resolve(
 	claims := make([]embedding.ClaimInput, 0, len(request.GetClaims()))
 	for _, claim := range request.GetClaims() {
 		claims = append(claims, embedding.ClaimInput{
-			Text:   claim.GetText(),
-			Hash:   claim.GetHash(),
-			IsName: claim.GetIsName(),
+			Text:       claim.GetText(),
+			Hash:       claim.GetHash(),
+			IsName:     claim.GetIsName(),
+			ValidFrom:  claim.GetValidFrom(),
+			ValidUntil: claim.GetValidUntil(),
 		})
 	}
 	resolution, err := server.service.Resolve(

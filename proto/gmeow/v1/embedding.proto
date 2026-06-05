@@ -86,6 +86,10 @@ message ClaimInput {
   string text = 1;
   string hash = 2;
   bool is_name = 3;
+  // Valid-time (tenure) bounds, RFC3339; empty = unbounded. The ONLY clock the
+  // co-validity gate reads (four-clock model: import-provenance.md).
+  string valid_from = 4;
+  string valid_until = 5;
 }
 
 message ResolveRequest {

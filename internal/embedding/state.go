@@ -14,7 +14,7 @@ import (
 
 // stateMagic versions the combined resolution-state artifact (claim-vector cache
 // + entity index + ledger + observation memo). Bump on layout change.
-const stateMagic = "GMEOWSTATE2"
+const stateMagic = "GMEOWSTATE3"
 
 // SnapshotState serializes the full resolution state — the claim-vector cache,
 // the HNSW entity index, and the per-entity ledger — into one artifact the
@@ -306,13 +306,17 @@ func encodeLedger(ledger *entityLedger) ([]byte, error) {
 		sort.Strings(hashes)
 
 		for _, hash := range hashes {
-			err := writeLenString(&buf, hash)
-			if err != nil {
+			entry := claims[hash]
+			if err := writeLenString(&buf, hash); err != nil {
 				return nil, err
 			}
-
-			err = writeLenString(&buf, claims[hash])
-			if err != nil {
+			if err := writeLenString(&buf, entry.Text); err != nil {
+				return nil, err
+			}
+			if err := writeLenString(&buf, entry.ValidFrom); err != nil {
+				return nil, err
+			}
+			if err := writeLenString(&buf, entry.ValidUntil); err != nil {
 				return nil, err
 			}
 		}
@@ -343,7 +347,7 @@ func decodeLedger(data []byte) (*entityLedger, error) {
 			return nil, err
 		}
 
-		set := make(map[string]string, claimCount)
+		set := make(map[string]claimEntry, claimCount)
 		for range claimCount {
 			hash, err := readLenString(reader)
 			if err != nil {
@@ -355,7 +359,17 @@ func decodeLedger(data []byte) (*entityLedger, error) {
 				return nil, err
 			}
 
-			set[hash] = text
+			validFrom, err := readLenString(reader)
+			if err != nil {
+				return nil, err
+			}
+
+			validUntil, err := readLenString(reader)
+			if err != nil {
+				return nil, err
+			}
+
+			set[hash] = claimEntry{Text: text, ValidFrom: validFrom, ValidUntil: validUntil}
 		}
 
 		ledger.claims[entity] = set

@@ -184,6 +184,93 @@ func newEmbeddingServeCommand(
 	return command
 }
 
+// newEmbeddingRepairCommand runs the global REPAIR re-partition (correlation
+// clustering over the signed idDiff edge graph) OFFLINE over a persisted resolution
+// state: load the state, consolidate the conservative ingest's over-split by merging
+// entities along strong positive signed edges (never across a cannot-link), and
+// snapshot the re-partitioned state back. The embedding service must be stopped
+// (it owns the state file); the warm claim-vector cache in the snapshot serves the
+// centroid re-pool, so the model endpoint is not required for an all-cached state.
+func newEmbeddingRepairCommand(
+	out io.Writer,
+	configPath *string,
+	use string,
+) *cobra.Command {
+	var (
+		stateFile      string
+		matchThreshold float64
+		nameThreshold  float64
+		mergeThreshold float64
+		topN           int
+	)
+
+	command := &cobra.Command{
+		Use:   use,
+		Short: "Run the global REPAIR re-partition over a persisted resolution state",
+		RunE: func(command *cobra.Command, _ []string) error {
+			if stateFile == "" {
+				return fmt.Errorf("--state-file is required")
+			}
+
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+
+			embedder, err := embedding.NewHTTPEmbedder(
+				loaded.Config.Analysis.Embeddings.Endpoint,
+				loaded.Config.Analysis.Embeddings.Model,
+				nil,
+			)
+			if err != nil {
+				return fmt.Errorf("configure embedding endpoint: %w", err)
+			}
+
+			service := embedding.NewService(
+				embedding.NewResolver(embedding.NewMemoryCache(), embedder),
+				embedding.NewEntityIndex(embedding.FullDim, embedding.CoarseDim),
+				loaded.Config.Analysis.Embeddings.Model,
+			)
+			if loadErr := loadEmbeddingState(service, stateFile); loadErr != nil {
+				return loadErr
+			}
+
+			result, err := service.Repair(command.Context(), embedding.RepairParams{
+				Threshold:      matchThreshold,
+				NameThreshold:  nameThreshold,
+				MergeThreshold: mergeThreshold,
+				TopN:           topN,
+			})
+			if err != nil {
+				return fmt.Errorf("repair: %w", err)
+			}
+
+			if _, err := fmt.Fprintf(
+				out,
+				"repair: %d entities → %d (%d records reassigned into %d clusters)\n",
+				result.EntitiesBefore, result.EntitiesAfter, result.Merges, result.Clusters,
+			); err != nil {
+				return err
+			}
+
+			return saveEmbeddingState(out, service, stateFile)
+		},
+	}
+
+	command.Flags().
+		StringVar(&stateFile, "state-file", "", "resolution state to re-partition in place (required)")
+	command.Flags().
+		Float64Var(&matchThreshold, "match-threshold", 0.72, "idDiff set/identifier value-match cosine")
+	command.Flags().
+		Float64Var(&nameThreshold, "name-threshold", 0.88, "idDiff functional (name) value-match cosine")
+	command.Flags().
+		Float64Var(&mergeThreshold, "merge-threshold", 0, "min positive signed edge weight to merge (0 = the ingest merge gate)")
+	command.Flags().
+		IntVar(&topN, "top-n", 0, "blocking neighbours scored per entity (0 = the ingest default)")
+
+	return command
+}
+
 func loadEmbeddingState(service *embedding.Service, path string) error {
 	data, err := os.ReadFile(path) //nolint:gosec // operator-provided state path
 	if err != nil {

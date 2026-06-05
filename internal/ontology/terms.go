@@ -274,6 +274,18 @@ func orderedTerms() []Term {
 			Normalize:  NormText,
 		},
 		{
+			// schema:affiliation — the organization a person is affiliated with;
+			// Apple (Organization) and BBDB (company) emit it. Alias of works-for so
+			// employer matches contribute to resolution (defined AFTER worksFor so the
+			// canonical IRI for the concept stays schema:worksFor).
+			IRI:        Schema + "affiliation",
+			Concept:    "works-for",
+			Kind:       Set,
+			Role:       RoleOrgRole,
+			ObjectKind: ObjLiteral,
+			Normalize:  NormText,
+		},
+		{
 			IRI:        Schema + "jobTitle",
 			Concept:    "job-title",
 			Kind:       Contextual,

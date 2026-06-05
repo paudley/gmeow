@@ -21,6 +21,16 @@ const (
 	kindScaleFunctional = 1.0
 	kindScaleSet        = 0.7
 	kindScaleContextual = 0.15
+	// contextualIDFCap bounds the IDF sharpening for CONTEXTUAL values. Per §4.1,
+	// contextual evidence is "soft, low-ω": a rare first/last name part, a small
+	// company, an unusual note is NOT a discriminating identifier the way a rare
+	// email is — it is shared by everyone who has that name/employer. Without this
+	// cap, idf inflates a rare name part to ω≈0.9 and a single part-match clears
+	// the 0.75 merge gate, accreting people who merely share a first name into one
+	// entity (the name-fragment blob). Capped, max contextual ω ≈ 0.2 — corroborates
+	// but never identifies. Functional (full name) and Set (identifiers) keep full
+	// IDF: an unusual full name and a rare email ARE discriminating.
+	contextualIDFCap = 1.0
 )
 
 func kindBase(kind AttrKind) float64 {
@@ -62,5 +72,10 @@ func idf(docFreq, entities int) float64 {
 // count toward (or against) same-identity. Source-trust and a temporal-validity
 // factor are folded in as 1.0 until the importer populates them.
 func omega(kind AttrKind, docFreq, entities int) float64 {
-	return kindBase(kind) + idf(docFreq, entities)*kindScale(kind)
+	d := idf(docFreq, entities)
+	if kind == KindContextual && d > contextualIDFCap {
+		d = contextualIDFCap // contextual evidence stays soft/low-ω (§4.1)
+	}
+
+	return kindBase(kind) + d*kindScale(kind)
 }

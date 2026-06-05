@@ -132,9 +132,11 @@ func (client *EmbeddingClient) Resolve(
 	pbClaims := make([]*pb.ClaimInput, 0, len(claims))
 	for _, claim := range claims {
 		pbClaims = append(pbClaims, &pb.ClaimInput{
-			Text:   claim.Text,
-			Hash:   claim.Hash,
-			IsName: claim.IsName,
+			Text:       claim.Text,
+			Hash:       claim.Hash,
+			IsName:     claim.IsName,
+			ValidFrom:  claim.ValidFrom,
+			ValidUntil: claim.ValidUntil,
 		})
 	}
 	response, err := client.client.Resolve(ctx, &pb.ResolveRequest{

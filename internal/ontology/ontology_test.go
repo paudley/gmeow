@@ -65,12 +65,58 @@ func TestValueNormalizers(t *testing.T) {
 		{NormPhone, "+1 (403) 555-0123", "4035550123"},
 		{NormPhone, "tel:403.555.0123", "4035550123"},
 		{NormPhone, "5550123", "5550123"},
+		// Degenerate "phones" carry no identity and must be rejected (→ "") so they
+		// never seed the identifier index (corpus: "phone 0" pooled 82 entities).
+		{NormPhone, "0", ""},
+		{NormPhone, "2", ""},
+		{NormPhone, "n/a", ""},
+		{NormPhone, "555-12", ""}, // 5 digits, below the subscriber-number minimum
+		// Backslash-corrupted URLs collapse onto the clean form (corpus: one site
+		// fractured into http%5c://, http&#92;//, and the clean URL).
 		{NormURL, "HTTP://Example.com/", "http://example.com"},
+		{NormURL, "http%5c://www.cambrianhouse.com", "http://www.cambrianhouse.com"},
+		{NormURL, "http://www.cambrianhouse.com", "http://www.cambrianhouse.com"},
 		{NormText, "  Patrick   AUDLEY ", "patrick audley"},
 	}
 	for _, c := range cases {
 		if got := c.fn(c.in); got != c.want {
 			t.Fatalf("normalize(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestIMAccountFromPseudoEmail(t *testing.T) {
+	cases := []struct {
+		in       string
+		want     string
+		wantIsIM bool
+	}{
+		{
+			"bill.trembley%5c40gmail.com@msn.i.blackcat.ca",
+			"msn:bill.trembley@gmail.com",
+			true,
+		},
+		{
+			"-668103306&#92;40chat.facebook.com@fb.i.blackcat.ca",
+			"fb:-668103306@chat.facebook.com",
+			true,
+		},
+		{"102998083@icq.i.blackcat.ca", "icq:102998083", true},
+		// Ordinary emails are not IM accounts.
+		{"paudley@blackcat.ca", "", false},
+		{"someone@example.com", "", false},
+	}
+	for _, c := range cases {
+		got, ok := IMAccountFromPseudoEmail(c.in)
+		if ok != c.wantIsIM || (ok && got != c.want) {
+			t.Fatalf(
+				"IMAccountFromPseudoEmail(%q) = (%q,%v), want (%q,%v)",
+				c.in,
+				got,
+				ok,
+				c.want,
+				c.wantIsIM,
+			)
 		}
 	}
 }

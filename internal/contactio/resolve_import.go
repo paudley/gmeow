@@ -11,6 +11,7 @@ import (
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/embedding"
+	"blackcat.ca/gmeow/internal/ontology"
 	"blackcat.ca/gmeow/internal/rdfbundle"
 )
 
@@ -55,8 +56,20 @@ type ResolvedRecord struct {
 // ResolveImport parses one input into logical-contact records, resolves each
 // against the entity space via the Resolver, and returns the immutable delta
 // records to persist (NOOPs carry no Content). ImportResult.Contacts is rewritten
-// to the distinct resolved ENTITY ids. observedAt stamps each new claim's
-// transaction time (the projection folds these into (first_seen,last_seen)).
+// to the distinct resolved ENTITY ids. The SourceProvenance places the carrier and
+// transaction clocks (four-clock model); per-claim VALID time, when the source
+// grounds it, is the only clock that reaches resolution.
+// SourceProvenance is the import-time carrier/transaction provenance of one source
+// artifact, placed on gmeow:Source / gmeow:ImportActivity nodes per the four-clock
+// model (~/Active/gmeow-ontology/docs/import-provenance.md). None of these clocks
+// is a claim's validity — only source-asserted VALID time gates resolution.
+type SourceProvenance struct {
+	Location      string    // file path / URL — gmeow:sourceLocation (audit)
+	ModifiedAt    time.Time // file mtime — gmeow:sourceModifiedAt (CARRIER time)
+	ContentDigest string    // content hash — gmeow:contentDigest (source identity)
+	IngestedAt    time.Time // this import run — gmeow:ingestedAt (TRANSACTION time)
+}
+
 func ResolveImport(
 	ctx context.Context,
 	resolver Resolver,
@@ -65,25 +78,25 @@ func ResolveImport(
 	sourceName string,
 	content []byte,
 	options ImportOptions,
-	observedAt time.Time,
+	prov SourceProvenance,
 ) ([]ResolvedRecord, ImportResult, error) {
 	deltas, result, err := BuildContactDeltas(format, sourceName, content, options)
 	if err != nil {
 		return nil, ImportResult{}, err
 	}
-	if observedAt.IsZero() {
-		observedAt = time.Now().UTC()
+	if prov.IngestedAt.IsZero() {
+		prov.IngestedAt = time.Now().UTC()
 	}
 
 	records := make([]ResolvedRecord, 0, len(deltas))
 	entitySeen := map[string]bool{}
 	entities := []string{}
 	for _, delta := range deltas {
-		parsed, _, parseErr := rdfbundle.Parse(delta.Content)
+		parsed, annotations, parseErr := rdfbundle.Parse(delta.Content)
 		if parseErr != nil {
 			return nil, ImportResult{}, parseErr
 		}
-		comparison := claimStatementsFromStatements(parsed)
+		comparison := claimStatementsFromStatements(parsed, annotations)
 		obsFingerprint := observationFingerprint(comparison)
 		resolution, resolveErr := resolver.Resolve(
 			ctx,
@@ -122,9 +135,10 @@ func ResolveImport(
 				resolution.Entity,
 				delta.Identity,
 				parsed,
+				annotations,
 				newHashes,
 				options.ImportLevel,
-				observedAt,
+				prov,
 			),
 			Facets: importFacets(
 				format,
@@ -146,7 +160,13 @@ func ResolveImport(
 func claimInputs(statements []claimStatement) []embedding.ClaimInput {
 	inputs := make([]embedding.ClaimInput, len(statements))
 	for i, s := range statements {
-		inputs[i] = embedding.ClaimInput{Text: s.Text, Hash: s.Hash, IsName: s.IsName}
+		inputs[i] = embedding.ClaimInput{
+			Text:       s.Text,
+			Hash:       s.Hash,
+			IsName:     s.IsName,
+			ValidFrom:  s.ValidFrom,
+			ValidUntil: s.ValidUntil,
+		}
 	}
 
 	return inputs
@@ -183,21 +203,26 @@ var deltaLinkPredicates = map[string]bool{
 // tel: / urn: IRIs) are kept verbatim, with their schema:about back-link
 // re-pointed to the entity. The delta is scoped to NEW information: nodes whose
 // comparison value the resolver reported new, the entity→new-node links, new
-// root-direct claims, and the entity type. Each emitted triple carries the
-// gmeow:observedAt transaction stamp; the importance claim closes the record.
+// root-direct claims, and the entity type. The four clocks are placed per the
+// import-provenance model: carrier + identity on a gmeow:Source, transaction time
+// on a gmeow:ImportActivity, a derived recordedNoLaterThan and any source-grounded
+// VALID time per claim; the importance claim closes the record.
 func buildEntityDeltaGraph(
 	entity, root string,
 	statements []rdfbundle.Statement,
+	annotations []rdfbundle.AnnotationRecord,
 	newHashes map[string]bool,
 	level int,
-	observedAt time.Time,
+	prov SourceProvenance,
 ) string {
 	entityIRI := EntityPrefix + entity
 
 	// Classify the new info: which attached nodes are new, which root-direct
-	// comparison claims are new.
+	// comparison claims are new. Per-claim VALID time is inherited from the bearing
+	// node (the only clock that gates resolution).
 	newNodes := map[string]bool{}
 	rootDirect := map[string]bool{}
+	validity := bearingNodeValidity(statements, annotations)
 
 	for _, statement := range statements {
 		claim, ok := extractClaim(statement)
@@ -211,24 +236,51 @@ func buildEntityDeltaGraph(
 		}
 	}
 
-	stamp := typedDateTime(observedAt)
 	subjectIRI := iri(entityIRI)
 
 	var builder strings.Builder
 
 	writePrefixes(&builder)
 
+	// The four clocks (import-provenance.md): the carrier on a gmeow:Source, the
+	// transaction time on a gmeow:ImportActivity, the entity linked to both. mtime
+	// is NEVER a claim's validity — it only yields a derived recordedNoLaterThan.
+	carrierStamp := typedDateTime(prov.ModifiedAt)
+	emitProvenanceNodes(&builder, entityIRI, prov)
+
 	emitted := map[string]bool{}
-	emit := func(subjectTerm, predicate, objectTerm string) {
+	// emit writes one kept claim triple plus its per-claim clocks: a derived
+	// terminus-ante-quem from the carrier (low confidence) and, when the source
+	// grounded it, the VALID-time bounds. No transaction time on a claim.
+	emit := func(subjectTerm, predicate, objectTerm, bearing string) {
 		triple := subjectTerm + " " + iri(predicate) + " " + objectTerm
 		if emitted[triple] {
 			return
 		}
 		emitted[triple] = true
 		builder.WriteString(triple + " .\n")
-		builder.WriteString(
-			"<< " + triple + " >> " + iri(gmeowPrefix+"observedAt") + " " + stamp + " .\n",
-		)
+
+		quoted := "<< " + triple + " >> "
+		if !prov.ModifiedAt.IsZero() {
+			builder.WriteString(
+				quoted + iri(ontology.RecordedNoLaterThan) + " " + carrierStamp + " .\n",
+			)
+			builder.WriteString(
+				quoted + iri(ontology.Confidence) + " " + typedDecimal("0.3") + " .\n",
+			)
+		}
+		if v, ok := validity[bearing]; ok {
+			if v.From != "" {
+				builder.WriteString(
+					quoted + iri(ontology.ValidFrom) + " " + typedDateTimeStr(v.From) + " .\n",
+				)
+			}
+			if v.Until != "" {
+				builder.WriteString(
+					quoted + iri(ontology.ValidUntil) + " " + typedDateTimeStr(v.Until) + " .\n",
+				)
+			}
+		}
 	}
 
 	for _, statement := range statements {
@@ -257,7 +309,7 @@ func buildEntityDeltaGraph(
 			subjectText = iri(subject)
 		}
 
-		emit(subjectText, predicate, deltaObject(statement.Object, root, entityIRI))
+		emit(subjectText, predicate, deltaObject(statement.Object, root, entityIRI), subject)
 	}
 
 	builder.WriteString(
@@ -265,6 +317,46 @@ func buildEntityDeltaGraph(
 	)
 
 	return builder.String()
+}
+
+// emitProvenanceNodes writes the gmeow:Source (carrier time + identity) and
+// gmeow:ImportActivity (transaction time) nodes and links the entity to both. The
+// Source is keyed by content digest (its reliable identity); the ImportActivity by
+// ingestion time. These are provenance structure, not per-claim clocks.
+func emitProvenanceNodes(
+	builder *strings.Builder,
+	entityIRI string,
+	prov SourceProvenance,
+) {
+	sourceID := prov.ContentDigest
+	if sourceID == "" {
+		sourceID = shortHash([]byte(prov.Location))
+	}
+	source := iri("urn:gmeow:source:" + sourceID)
+	activity := iri(
+		"urn:gmeow:import:" + shortHash([]byte(prov.IngestedAt.UTC().Format(time.RFC3339))),
+	)
+	entity := iri(entityIRI)
+
+	write := func(s, p, o string) { builder.WriteString(s + " " + iri(p) + " " + o + " .\n") }
+
+	write(source, rdfTypePred, iri(ontology.SourceClass))
+	if !prov.ModifiedAt.IsZero() {
+		write(source, ontology.SourceModifiedAt, typedDateTime(prov.ModifiedAt))
+	}
+	if prov.ContentDigest != "" {
+		write(source, ontology.ContentDigest, literal(prov.ContentDigest))
+	}
+	if prov.Location != "" {
+		write(source, ontology.SourceLocation, literal(prov.Location))
+	}
+
+	write(activity, rdfTypePred, iri(ontology.ImportActivityClass))
+	write(activity, ontology.IngestedAt, typedDateTime(prov.IngestedAt))
+
+	write(entity, ontology.HasSource, source)
+	write(entity, ontology.WasDerivedFrom, source)
+	write(entity, ontology.WasGeneratedBy, activity)
 }
 
 // nonRootNodeIRI returns the attached-node IRI (subject or object) a statement

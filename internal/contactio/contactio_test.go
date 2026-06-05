@@ -735,8 +735,12 @@ func TestCSVImportSupportsLinkedInConnections(t *testing.T) {
 	}
 	for _, snippet := range []string{
 		"<mailto:casey.contact@example.test>",
-		`<https://blackcatinformatics.ca/gmeow/linkedInCurrentCompany> "Example Org"`,
-		`<https://blackcatinformatics.ca/gmeow/linkedInCurrentPosition> "Research Lead"`,
+		// Identity columns ground to canonical standard predicates (cross-dialect
+		// convergence), not source-namespaced gmeow:linkedIn* terms.
+		`<https://schema.org/givenName> "Casey"`,
+		`<https://schema.org/familyName> "Contact"`,
+		`<https://schema.org/worksFor> "Example Org"`,
+		`<https://schema.org/jobTitle> "Research Lead"`,
 	} {
 		if !strings.Contains(object.Content, snippet) {
 			t.Fatalf("LinkedIn CSV RDF missing %q:\n%s", snippet, object.Content)

@@ -175,7 +175,11 @@ func factByValue(facts []Fact, value string) Fact {
 	return Fact{}
 }
 
-func TestFactsForContactsFoldsObservedAtIntoValidFrom(t *testing.T) {
+// TestFactsValidFromIsValidTimeOnly: the projection's ValidFrom comes ONLY from
+// real VALID time (gmeow:validFrom), never from transaction/carrier/derived clocks.
+// An envelope-format claim carrying only a recordedNoLaterThan (or the old
+// observedAt) gets NO ValidFrom — the four-clock bug fix.
+func TestFactsValidFromIsValidTimeOnly(t *testing.T) {
 	const entity = "urn:gmeow:entity:01ENTITY"
 	statement := Statement{
 		SourceDigest:  "digest-1",
@@ -185,25 +189,34 @@ func TestFactsForContactsFoldsObservedAtIntoValidFrom(t *testing.T) {
 		Object:        "mailto:paudley@blackcat.ca",
 		ObjectKind:    "iri",
 	}
-	annotation := Annotation{
-		SourceDigest:  "digest-1",
-		StatementHash: "hash-1",
-		Predicate:     "https://blackcatinformatics.ca/gmeow/observedAt",
-		Object:        "2002-06-30T12:00:00Z",
+	annotate := func(pred, obj string) Annotation {
+		return Annotation{
+			SourceDigest:  "digest-1",
+			StatementHash: "hash-1",
+			Predicate:     pred,
+			Object:        obj,
+		}
 	}
 
-	facts := FactsForContacts(
-		[]Statement{statement},
-		[]Annotation{annotation},
-		map[string]bool{entity: true},
-	)
-	if len(facts) != 1 {
-		t.Fatalf("expected one fact, got %d", len(facts))
+	// Envelope claim: only a derived recordedNoLaterThan (the carrier-derived bound)
+	// → ValidFrom MUST stay empty (no fabrication).
+	envelope := FactsForContacts([]Statement{statement}, []Annotation{
+		annotate(
+			"https://blackcatinformatics.ca/gmeow/recordedNoLaterThan",
+			"2009-03-14T00:00:00Z",
+		),
+	}, map[string]bool{entity: true})
+	if len(envelope) != 1 || envelope[0].ValidFrom != "" {
+		t.Fatalf("envelope-format claim must have empty ValidFrom: %+v", envelope)
 	}
-	if facts[0].ContactID != entity {
-		t.Fatalf("fact contact id = %q, want the entity IRI", facts[0].ContactID)
-	}
-	if facts[0].ValidFrom != "2002-06-30T12:00:00Z" {
-		t.Fatalf("observedAt was not folded into ValidFrom: %+v", facts[0])
+
+	// Grounded claim: real gmeow:validFrom/validUntil → populated valid axis.
+	grounded := FactsForContacts([]Statement{statement}, []Annotation{
+		annotate("https://blackcatinformatics.ca/gmeow/validFrom", "1996-05-01T00:00:00Z"),
+		annotate("https://blackcatinformatics.ca/gmeow/validUntil", "1997-08-01T00:00:00Z"),
+	}, map[string]bool{entity: true})
+	if len(grounded) != 1 || grounded[0].ValidFrom != "1996-05-01T00:00:00Z" ||
+		grounded[0].ValidUntil != "1997-08-01T00:00:00Z" {
+		t.Fatalf("grounded valid time not surfaced: %+v", grounded)
 	}
 }

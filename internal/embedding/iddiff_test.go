@@ -154,6 +154,121 @@ func TestIdDiffCanonicalCases(t *testing.T) {
 	}
 }
 
+// TestContextualMassBoundedByIncomingNotCandidateSize locks the 1:1 fix: one
+// incoming name-part claim earns at most one match's mass even when the candidate
+// holds many claims that all match it. Without the bound, contextual IC grew with
+// candidate size and a bag of common name parts accreted unrelated people into a
+// blob (corpus: one entity, 1 name, 1294 emails before strict grounding; a residual
+// name-fragment blob after, until this bound).
+func TestContextualMassBoundedByIncomingNotCandidateSize(t *testing.T) {
+	p := idDiffParams{
+		TauSet: 0.9, TauFunc: 0.9, TauCtx: 0.6, Lambda: 1.5,
+		SetPenalty: 0.5, VetoMass: 4.0, ObservationMode: true, W: corpusWeight,
+	}
+
+	// A large candidate whose 50 name-part claims all fuzzy-match the incoming one.
+	big := make([]scoredClaim, 0, 50)
+	for i := range 50 {
+		big = append(big, scoredClaim{
+			Attr:  "given-name",
+			Value: fmt.Sprintf("doug%d", i),
+			Kind:  KindContextual,
+			Vec:   unit(1),
+		})
+	}
+	incoming := []scoredClaim{
+		{Attr: "given-name", Value: "doug", Kind: KindContextual, Vec: unit(1)},
+	}
+
+	got := idDiff(incoming, big, p)
+	oneMatch := omega(KindContextual, 1, 5000)
+	if got.IC > oneMatch*1.0001 {
+		t.Fatalf(
+			"contextual IC %.4f exceeds single best match %.4f — candidate-size multiplication not bounded",
+			got.IC,
+			oneMatch,
+		)
+	}
+}
+
+// TestResolveValidTimeGate locks Tier 2's co-validity: a shared identifier value
+// correlates two records only while it is contemporaneously held. Disjoint valid
+// time (a transferred/inherited value) does NOT merge; overlapping valid time does.
+func TestResolveValidTimeGate(t *testing.T) {
+	ctx := context.Background()
+	const threshold = 0.5
+
+	// Both records carry the same name + email (enough IC to merge when co-valid);
+	// validity rides every claim, so disjoint windows gate ALL the IC out.
+	rec := func(from, until string) []ClaimInput {
+		claim := func(text string) ClaimInput {
+			return ClaimInput{
+				Text:       text,
+				Hash:       StatementHash(text),
+				ValidFrom:  from,
+				ValidUntil: until,
+			}
+		}
+
+		return []ClaimInput{claim("name: pat holder"), claim("email: admin@axion.example")}
+	}
+	email := rec
+
+	t.Run("disjoint validity does not merge (transfer)", func(t *testing.T) {
+		s := newTestService()
+		a, err := s.Resolve(
+			ctx,
+			email("1996-01-01T00:00:00Z", "1998-01-01T00:00:00Z"),
+			threshold,
+			threshold,
+		)
+		if err != nil {
+			t.Fatalf("resolve a: %v", err)
+		}
+		b, err := s.Resolve(
+			ctx,
+			email("2010-01-01T00:00:00Z", "2012-01-01T00:00:00Z"),
+			threshold,
+			threshold,
+		)
+		if err != nil {
+			t.Fatalf("resolve b: %v", err)
+		}
+		if !b.IsNew || b.Entity == a.Entity {
+			t.Fatalf(
+				"disjoint-validity shared identifier merged transferred holders: a=%+v b=%+v",
+				a,
+				b,
+			)
+		}
+	})
+
+	t.Run("overlapping validity merges", func(t *testing.T) {
+		s := newTestService()
+		a, err := s.Resolve(
+			ctx,
+			email("1996-01-01T00:00:00Z", "1998-01-01T00:00:00Z"),
+			threshold,
+			threshold,
+		)
+		if err != nil {
+			t.Fatalf("resolve a: %v", err)
+		}
+		b, err := s.Resolve(
+			ctx,
+			email("1997-01-01T00:00:00Z", "1999-01-01T00:00:00Z"),
+			threshold,
+			threshold,
+		)
+		if err != nil {
+			t.Fatalf("resolve b: %v", err)
+		}
+		if b.Entity != a.Entity {
+			t.Fatalf("overlapping-validity shared identifier did not merge: a=%+v b=%+v", a, b)
+		}
+	})
+}
+
 func TestIntervalOverlaps(t *testing.T) {
 	cases := []struct {
 		a, b Interval

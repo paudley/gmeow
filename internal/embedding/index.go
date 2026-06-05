@@ -145,6 +145,40 @@ func (idx *EntityIndex) rebuildLocked() {
 	idx.dirty = 0
 }
 
+// ApplyMerges applies a REPAIR re-partition to the index in one pass: each member
+// entity's name vectors fold into its canonical entity and the member is removed;
+// then the canonicals' recomputed centroids are written; finally the ANN graphs are
+// rebuilt once from the authoritative centroid map. Centroids are materialized
+// views, so this is a safe view rewrite (the immutable record log is untouched).
+func (idx *EntityIndex) ApplyMerges(
+	merges map[string][]string,
+	newCentroids map[string]Vector,
+) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	for canonical, members := range merges {
+		for _, m := range members {
+			if m == canonical {
+				continue
+			}
+			if names := idx.entityNames[m]; len(names) > 0 {
+				idx.entityNames[canonical] = append(idx.entityNames[canonical], names...)
+			}
+			delete(idx.entityNames, m)
+			delete(idx.centroids, m)
+		}
+	}
+
+	for entity, centroid := range newCentroids {
+		if fine := Normalize(centroid); isUsableVector(fine) {
+			idx.centroids[entity] = fine
+		}
+	}
+
+	idx.rebuildLocked()
+}
+
 func isUsableVector(v Vector) bool {
 	var sum float64
 

@@ -5,6 +5,7 @@ package contactio
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"blackcat.ca/gmeow/internal/embedding"
@@ -128,6 +129,185 @@ func TestExtractClaimCanonicalizesFormattingVariants(t *testing.T) {
 		rdfStmt("https://schema.org/contactPoint", "mailto:x@y.com"),
 	); ok {
 		t.Fatalf("schema:contactPoint scaffolding must be dropped")
+	}
+}
+
+// TestExtractClaimDropsUngroundedPredicate locks strict grounding: a predicate not
+// in the ontology registry (an un-migrated importer's source-namespaced term) is
+// NOT a comparison claim. Admitting these as contextual claims is what fused the
+// blob (see extractClaim doc).
+func TestExtractClaimDropsUngroundedPredicate(t *testing.T) {
+	for _, pred := range []string{
+		"https://gmeow.blackcat.ca/ns#applePropertyType",
+		"https://gmeow.blackcat.ca/ns#appleEmailEntry",
+		"https://gmeow.blackcat.ca/ns#outlookContactsLastName",
+		"https://gmeow.blackcat.ca/ns#linkedInTime",
+	} {
+		if claim, ok := extractClaim(rdfStmt(pred, "Email")); ok {
+			t.Fatalf(
+				"ungrounded predicate %q must be dropped, got comparison claim %q",
+				pred,
+				claim.Text,
+			)
+		}
+	}
+	// A grounded predicate alongside them still resolves.
+	if claim, ok := extractClaim(
+		rdfStmt("https://schema.org/email", "real@person.example"),
+	); !ok ||
+		claim.Text != "email: real@person.example" {
+		t.Fatalf("grounded predicate must still resolve, got ok=%v claim=%q", ok, claim.Text)
+	}
+}
+
+// TestUngroundedScaffoldingDoesNotFuseEntities is the blob regression in miniature:
+// two records that are clearly DIFFERENT people (distinct grounded emails+names) but
+// share a large block of identical ungrounded scaffolding tokens must resolve to
+// SEPARATE entities. Before strict grounding, the shared scaffolding accreted enough
+// contextual IC mass to merge them — at corpus scale that fused ~2000 people into one
+// entity (1 name, 1909 emails, 100k claims).
+func TestUngroundedScaffoldingDoesNotFuseEntities(t *testing.T) {
+	ctx := context.Background()
+	resolver := newTestResolver()
+	const threshold = 0.5
+
+	// A wide block of identical vendor scaffolding shared by every record of a format.
+	scaffold := func(subject string) string {
+		s := ""
+		for _, pred := range []string{
+			"applePropertyType", "appleEmailEntry", "applePhoneEntry", "appleAddressEntry",
+			"applePersonFlags", "appleCreationTime", "outlookContactsCategories", "linkedInTime",
+		} {
+			s += "<" + subject + "> <https://gmeow.blackcat.ca/ns#" + pred + "> \"shared-token\" .\n"
+		}
+
+		return s
+	}
+
+	alice := `<urn:obs:a> <https://schema.org/name> "Alice Anderson" .
+<urn:obs:a> <https://schema.org/email> <mailto:alice@anderson.example> .
+` + scaffold("urn:obs:a")
+	bob := `<urn:obs:b> <https://schema.org/name> "Bob Brown" .
+<urn:obs:b> <https://schema.org/email> <mailto:bob@brown.example> .
+` + scaffold("urn:obs:b")
+
+	ra, err := resolver.Resolve(
+		ctx,
+		claimInputs(claimStatementsFromBody(alice)),
+		threshold,
+		threshold,
+	)
+	if err != nil {
+		t.Fatalf("resolve alice: %v", err)
+	}
+	rb, err := resolver.Resolve(
+		ctx,
+		claimInputs(claimStatementsFromBody(bob)),
+		threshold,
+		threshold,
+	)
+	if err != nil {
+		t.Fatalf("resolve bob: %v", err)
+	}
+	if !ra.IsNew || !rb.IsNew || ra.Entity == rb.Entity {
+		t.Fatalf("shared scaffolding fused distinct people: alice=%+v bob=%+v", ra, rb)
+	}
+}
+
+// TestSynthesizeFullNameFromParts: a record with given+family but no full name
+// gains a functional schema:name claim derived from the parts (the conservative-
+// ingest veto signal that separates different people; see synthesizeFullName).
+func TestSynthesizeFullNameFromParts(t *testing.T) {
+	body := `<urn:x> <https://schema.org/givenName> "Reuven" .
+<urn:x> <https://schema.org/familyName> "Cohen" .`
+	var found bool
+	for _, c := range claimStatementsFromBody(body) {
+		if c.Text == "name: reuven cohen" && c.IsName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf(
+			"expected synthesized 'name: reuven cohen', got %+v",
+			claimStatementsFromBody(body),
+		)
+	}
+	// When a full name is already present, none is synthesized (no duplication).
+	withName := body + "\n<urn:x> <https://schema.org/name> \"Reuven Q Cohen\" ."
+	for _, c := range claimStatementsFromBody(withName) {
+		if c.Text == "name: reuven cohen" {
+			t.Fatalf(
+				"must not synthesize when a full name exists: %+v",
+				claimStatementsFromBody(withName),
+			)
+		}
+	}
+}
+
+// TestSynthesizedFullNameSeparatesDifferentPeople: two different people sharing only
+// a first name (Apple-style parts, no full name) must NOT fuse — the synthesized full
+// name makes their differing names a functional contradiction (IAC veto). This is the
+// contextual-blob guard at ingest; the safe over-split direction.
+func TestSynthesizedFullNameSeparatesDifferentPeople(t *testing.T) {
+	ctx := context.Background()
+	resolver := newTestResolver()
+	const threshold = 0.5
+
+	a := `<urn:obs:a> <https://schema.org/givenName> "Reuven" .
+<urn:obs:a> <https://schema.org/familyName> "Cohen" .
+<urn:obs:a> <https://schema.org/email> <mailto:reuven.cohen@a.example> .`
+	b := `<urn:obs:b> <https://schema.org/givenName> "Reuven" .
+<urn:obs:b> <https://schema.org/familyName> "Goldberg" .
+<urn:obs:b> <https://schema.org/email> <mailto:reuven.goldberg@b.example> .`
+
+	ra, err := resolver.Resolve(
+		ctx,
+		claimInputs(claimStatementsFromBody(a)),
+		threshold,
+		threshold,
+	)
+	if err != nil {
+		t.Fatalf("resolve a: %v", err)
+	}
+	rb, err := resolver.Resolve(
+		ctx,
+		claimInputs(claimStatementsFromBody(b)),
+		threshold,
+		threshold,
+	)
+	if err != nil {
+		t.Fatalf("resolve b: %v", err)
+	}
+	if !ra.IsNew || !rb.IsNew || ra.Entity == rb.Entity {
+		t.Fatalf("shared first name fused distinct people: a=%+v b=%+v", ra, rb)
+	}
+}
+
+// TestParseValidTimeFromTenureNode: a claim on a node carrying a reified OWL-Time
+// interval (the index.ttl org:Membership pattern) inherits that VALID-time interval;
+// an envelope-format claim (no temporal structure) stays unbounded.
+func TestParseValidTimeFromTenureNode(t *testing.T) {
+	body := `@prefix schema: <https://schema.org/> .
+<urn:membership:1> schema:worksFor "Axion Internet" ;
+    schema:startDate "1996-05-01" ;
+    schema:endDate "1997-08-01" .
+<urn:card:bob> schema:email <mailto:bob@bob.example> .`
+
+	var worksFor, email *claimStatement
+	for i, c := range claimStatementsFromBody(body) {
+		switch {
+		case strings.HasPrefix(c.Text, "works-for: "):
+			worksFor = &claimStatementsFromBody(body)[i]
+		case strings.HasPrefix(c.Text, "email: "):
+			email = &claimStatementsFromBody(body)[i]
+		}
+	}
+	if worksFor == nil || worksFor.ValidFrom != "1996-05-01T00:00:00Z" ||
+		worksFor.ValidUntil != "1997-08-01T00:00:00Z" {
+		t.Fatalf("tenure-node validity not parsed onto works-for claim: %+v", worksFor)
+	}
+	if email == nil || email.ValidFrom != "" || email.ValidUntil != "" {
+		t.Fatalf("envelope-format email claim must stay unbounded: %+v", email)
 	}
 }
 

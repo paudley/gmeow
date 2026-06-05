@@ -96,15 +96,24 @@ func idDiff(a, b []scoredClaim, p idDiffParams) idDiffResult {
 	}
 }
 
+// setOverlapMass scores shared identifier values. Each INCOMING claim contributes
+// at most its single best match (1:1), so mass reflects the newcomer's own
+// evidence rather than the candidate's breadth — a record cannot earn extra mass
+// merely because the candidate is large (the rich-get-richer over-merge: one
+// "douglas" must not score against every "douglas" a blob accumulated).
 func setOverlapMass(av, bv []scoredClaim, p idDiffParams) float64 {
 	var shared float64
 
 	for _, ca := range av {
+		var best float64
 		for _, cb := range bv {
 			if valueMatch(ca, cb, p.TauSet) {
-				shared += math.Min(p.W(ca), p.W(cb))
+				if m := math.Min(p.W(ca), p.W(cb)); m > best {
+					best = m
+				}
 			}
 		}
+		shared += best
 	}
 
 	return shared
@@ -141,19 +150,29 @@ func functionalScore(
 	return ic, iac, veto
 }
 
+// contextualMass scores soft (contextual) overlap. Each INCOMING claim contributes
+// at most its single best match (1:1) — critical for low-discrimination attributes
+// like name parts: without it, one incoming given-name scores against EVERY given-
+// name a large candidate holds, so contextual IC grows with candidate size and a
+// bag of common first/last names accretes unrelated people into one blob. Bounding
+// to the best match makes mass reflect the newcomer's own corroboration.
 func contextualMass(av, bv []scoredClaim, p idDiffParams) float64 {
 	var mass float64
 
 	for _, ca := range av {
+		var best float64
 		for _, cb := range bv {
 			if !ca.Valid.Overlaps(cb.Valid) {
 				continue
 			}
 
 			if sim := cosineSimilarity(ca.Vec, cb.Vec); sim >= p.TauCtx {
-				mass += p.W(ca) * sim
+				if m := p.W(ca) * sim; m > best {
+					best = m
+				}
 			}
 		}
+		mass += best
 	}
 
 	return mass

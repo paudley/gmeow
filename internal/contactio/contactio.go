@@ -47,6 +47,7 @@ const (
 	xsdDate      = "http://www.w3.org/2001/XMLSchema#date"
 	xsdDateTime  = "http://www.w3.org/2001/XMLSchema#dateTime"
 	xsdInteger   = "http://www.w3.org/2001/XMLSchema#integer"
+	xsdDecimal   = "http://www.w3.org/2001/XMLSchema#decimal"
 )
 
 const relPrefix = "http://purl.org/vocab/relationship/"
@@ -1491,6 +1492,17 @@ func typedInteger(value int) string {
 	return literal(fmt.Sprintf("%d", value)) + "^^" + iri(xsdInteger)
 }
 
+// typedDateTimeStr types an already-RFC3339 string as xsd:dateTime (vs
+// typedDateTime which formats a time.Time).
+func typedDateTimeStr(value string) string {
+	return literal(value) + "^^" + iri(xsdDateTime)
+}
+
+// typedDecimal types a decimal literal (e.g. a confidence in [0,1]).
+func typedDecimal(value string) string {
+	return literal(value) + "^^" + iri(xsdDecimal)
+}
+
 func escapeLiteral(value string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 
@@ -1519,6 +1531,13 @@ func contentHash(content []byte) string {
 	sum := sha256.Sum256(content)
 
 	return hex.EncodeToString(sum[:])
+}
+
+// ContentDigest is the stable content identity of a source artifact for the
+// gmeow:Source node (four-clock model): two imports of the same bytes share it,
+// regardless of path or mtime.
+func ContentDigest(content []byte) string {
+	return "sha256:" + contentHash(content)
 }
 
 func shortHash(content []byte) string {

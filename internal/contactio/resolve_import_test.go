@@ -62,7 +62,12 @@ func TestResolveImportProducesEntitySubjectedDeltaRecords(t *testing.T) {
 	ctx := context.Background()
 	resolver := newTestResolver()
 	const threshold = 0.5
-	observedAt := time.Date(2002, 6, 30, 12, 0, 0, 0, time.UTC)
+	prov := SourceProvenance{
+		Location:      "/imports/paudley.ttl",
+		ModifiedAt:    time.Date(2002, 6, 30, 12, 0, 0, 0, time.UTC),
+		ContentDigest: "sha256:deadbeef",
+		IngestedAt:    time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC),
+	}
 
 	rooted := []byte(`@prefix gmeow: <https://blackcatinformatics.ca/gmeow/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
@@ -81,7 +86,7 @@ func TestResolveImportProducesEntitySubjectedDeltaRecords(t *testing.T) {
 		"lod",
 		rooted,
 		ImportOptions{ImportLevel: 10},
-		observedAt,
+		prov,
 	)
 	if err != nil {
 		t.Fatalf("resolve import (rooted): %v", err)
@@ -110,9 +115,20 @@ func TestResolveImportProducesEntitySubjectedDeltaRecords(t *testing.T) {
 			content,
 		)
 	}
-	if !strings.Contains(content, "observedAt") ||
-		!strings.Contains(content, "2002-06-30") {
-		t.Fatalf("delta record missing the observedAt RDF-star stamp:\n%s", content)
+	// Four-clock provenance: a gmeow:Source carries the CARRIER time (mtime), a
+	// gmeow:ImportActivity the TRANSACTION time, and claims a derived terminus-ante-
+	// quem — but NEVER the old observedAt-as-validity stamp.
+	if strings.Contains(content, "observedAt") {
+		t.Fatalf("delta still emits the conflated observedAt stamp:\n%s", content)
+	}
+	for _, want := range []string{
+		"sourceModifiedAt", "2002-06-30", // carrier time on the Source
+		"ImportActivity", "ingestedAt", "2026-06-05", // transaction time
+		"recordedNoLaterThan", // per-claim derived bound (no source assertion)
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("delta record missing four-clock term %q:\n%s", want, content)
+		}
 	}
 
 	// Re-import the exact same graph -> NOOP, nothing to persist.
@@ -125,7 +141,7 @@ func TestResolveImportProducesEntitySubjectedDeltaRecords(t *testing.T) {
 		"lod",
 		rooted,
 		ImportOptions{ImportLevel: 10},
-		observedAt,
+		prov,
 	)
 	if err != nil {
 		t.Fatalf("resolve import (re-run): %v", err)

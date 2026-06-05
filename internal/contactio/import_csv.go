@@ -196,6 +196,15 @@ func csvHeaderMap(header []string) (map[string]csvFieldMapping, string, error) {
 
 	mapping := map[string]csvFieldMapping{}
 	for _, field := range header {
+		// Canonical grounding wins over the dialect map: a personal-identity column
+		// (names/org/title/url/birthday/gender) maps to its standard schema:/foaf:
+		// predicate regardless of which CSV dialect emitted it, so the SAME person's
+		// name resolves across LinkedIn/Outlook/Yahoo/Google instead of fracturing on
+		// source-namespaced predicates (the over-split anti-pattern).
+		if canonical, found := canonicalCSVField(field); found {
+			mapping[field] = canonical
+			continue
+		}
 		if mapped, found := base[field]; found {
 			mapping[field] = mapped
 			continue
@@ -208,6 +217,39 @@ func csvHeaderMap(header []string) (map[string]csvFieldMapping, string, error) {
 	}
 
 	return mapping, schemaName, nil
+}
+
+// canonicalCSVField grounds a CSV column whose name denotes a personal-identity
+// attribute to its canonical ontology predicate, independent of dialect. It is the
+// cross-format convergence point: First Name / First / Given Name all become
+// schema:givenName, so records from different CSV exporters describing one person
+// share concepts and resolve together. Ambiguous columns (bare "Name" — a person
+// in Google but a skill in a LinkedIn section; bare "Title" — honorific vs job) are
+// deliberately NOT grounded here; they fall through to the dialect map as
+// provenance. Email/phone are already grounded in the dialect maps.
+func canonicalCSVField(field string) (csvFieldMapping, bool) {
+	switch strings.ToLower(strings.TrimSpace(field)) {
+	case "first name", "first", "given name":
+		return csvFieldMapping{Predicate: schemaPrefix + "givenName"}, true
+	case "last name", "last", "family name", "surname":
+		return csvFieldMapping{Predicate: schemaPrefix + "familyName"}, true
+	case "middle name", "middle", "additional name":
+		return csvFieldMapping{Predicate: schemaPrefix + "additionalName"}, true
+	case "nickname", "short name":
+		return csvFieldMapping{Predicate: foafPrefix + "nick"}, true
+	case "company", "current company", "company name", "organization 1 - name":
+		return csvFieldMapping{Predicate: schemaPrefix + "worksFor"}, true
+	case "job title", "current position", "position", "headline":
+		return csvFieldMapping{Predicate: schemaPrefix + "jobTitle"}, true
+	case "birthday":
+		return csvFieldMapping{Predicate: schemaPrefix + "birthDate"}, true
+	case "gender":
+		return csvFieldMapping{Predicate: schemaPrefix + "gender"}, true
+	case "url", "web page", "personal web page", "personal website", "business website":
+		return csvFieldMapping{Predicate: schemaPrefix + "url", ObjectKind: "iri"}, true
+	default:
+		return csvFieldMapping{}, false
+	}
 }
 
 var repeatedCSVFieldPatterns = []struct {

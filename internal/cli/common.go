@@ -31,6 +31,7 @@ func NewServiceCommand(name, summary string, out io.Writer) *cobra.Command {
 	root.AddCommand(newSchedulerServeCommand(out, &configPath, "scheduler-serve"))
 	root.AddCommand(newQueryServeCommand(out, &configPath, "query-serve"))
 	root.AddCommand(newEmbeddingServeCommand(out, &configPath, "embedding-serve"))
+	root.AddCommand(newEmbeddingRepairCommand(out, &configPath, "embedding-repair"))
 	root.AddCommand(newSourceServeCommand(out, &configPath, "source-serve"))
 	root.AddCommand(newMCPServeCommand(out, &configPath))
 	root.AddCommand(newMCPHTTPServeCommand(out, &configPath))
