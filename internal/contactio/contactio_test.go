@@ -217,11 +217,12 @@ func TestVCardImportSupportsQuotedPrintableContinuationAndNameExtensions(t *test
 
 	for _, snippet := range []string{
 		"first\\nsecond",
-		// Name parts canonicalize to the gmeow:surnamePart shortcut (gmeow-primary);
-		// the long-tail fastmail / legacy-fragment metadata is preserved under its
-		// source-property predicate.
-		`<https://blackcatinformatics.ca/gmeow/surnamePart> "Former Synthetic"`,
-		`<https://blackcatinformatics.ca/gmeow/surnamePart> "synthetic-pronunciation"`,
+		// Standalone vendor name parts (X-MAIDENNAME / X-PHONETIC) ground via the
+		// schema:familyName alias (a flat lexical part outside the assembled FN/N
+		// appellation); it still tokenizes for comparison. The long-tail fastmail /
+		// legacy-fragment metadata is preserved under its source-property predicate.
+		`<https://schema.org/familyName> "Former Synthetic"`,
+		`<https://schema.org/familyName> "synthetic-pronunciation"`,
 		`<https://blackcatinformatics.ca/gmeow/fastmailGDataStash> "stash-token"`,
 		`<https://blackcatinformatics.ca/gmeow/fastmailGoogleURI> "google-uri-token"`,
 		`<https://blackcatinformatics.ca/gmeow/legacyEncodedCategoryFragment> "legacy-category-fragment"`,
@@ -680,8 +681,9 @@ func TestAppleAddressBookImportProducesRDFContactBundle(t *testing.T) {
 	}
 	for _, snippet := range []string{
 		"<mailto:casey.contact@example.test>",
-		`<https://blackcatinformatics.ca/gmeow/givenNamePart> "Casey"`,
 		`<https://blackcatinformatics.ca/gmeow/PersonName>`,
+		`<https://blackcatinformatics.ca/gmeow/partText> "Casey"`,
+		`<https://blackcatinformatics.ca/gmeow/namePartType> <https://blackcatinformatics.ca/gmeow/namePartGiven>`,
 		`<https://schema.org/affiliation> "Example Org"`,
 		`<https://schema.org/email> <mailto:casey.contact@example.test>`,
 		`<https://blackcatinformatics.ca/gmeow/streetAddress> "1 Example Street"`,
@@ -789,8 +791,9 @@ func TestCSVImportSupportsLinkedInConnections(t *testing.T) {
 		"<mailto:casey.contact@example.test>",
 		// Identity columns ground to canonical standard predicates (cross-dialect
 		// convergence), not source-namespaced gmeow:linkedIn* terms.
-		`<https://blackcatinformatics.ca/gmeow/givenNamePart> "Casey"`,
-		`<https://blackcatinformatics.ca/gmeow/surnamePart> "Contact"`,
+		`<https://blackcatinformatics.ca/gmeow/partText> "Casey"`,
+		`<https://blackcatinformatics.ca/gmeow/partText> "Contact"`,
+		`<https://blackcatinformatics.ca/gmeow/namePartType> <https://blackcatinformatics.ca/gmeow/namePartSurname>`,
 		`<https://schema.org/worksFor> "Example Org"`,
 		`<https://schema.org/jobTitle> "Research Lead"`,
 	} {

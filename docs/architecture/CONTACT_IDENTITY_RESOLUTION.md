@@ -250,9 +250,18 @@ privileged "surname" slot** — a token discriminates purely by **rarity (idf)**
 Withholding IC on divergence (not merely penalising) is the anti-over-merge guard: a shared **rare**
 surname cannot by itself fuse two clearly-different full names. `KindName` keeps idf **uncapped** (rarity
 is the whole signal); the **divergence gate**, not a cap, replaces the contextual-`ω` cap as the
-blob defence. Names are emitted as a reified co-equal `gmeow:PersonName` appellation (never a bare
-property); the extractor decomposes its `fullName` / parts into `name-token` claims so the engine never
-compares whole-name strings.
+blob defence.
+
+**Emission (gmeow names model).** A name is never a bare property: each record emits a co-equal
+`gmeow:PersonName` appellation (`gmeow:hasName`) carrying a `gmeow:fullName` surface form and its
+components as **typed `gmeow:NamePart` nodes** — `gmeow:hasNamePart` → (`gmeow:namePartType`
+*given/surname/middle/nickname/honorific…* + `gmeow:partText`). This is the *only* canonical home for a
+component: the published ontology retired the flat `givenNamePart`/`surnamePart` shortcuts, so a flat
+given/family rendering exists only as a projection-layer downcast. The extractor grounds `gmeow:fullName`
+and every `gmeow:partText` to `name-token` claims (the `namePartType` is irrelevant — comparison is
+role-free; honorific/generational part texts self-strip), so the engine never compares whole-name
+strings. The projection surfaces `gmeow:fullName` as the display name and a `namePartNickname` part as an
+alias; a `gmeow:displayable false` appellation (deadname) is suppressed (`fnSelectDisplayName`).
 
 ## 5. The current implementation: state vs. target
 

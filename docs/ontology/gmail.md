@@ -19,9 +19,10 @@ identical to the file formats. Observation time comes from `metadata.sources[].u
 | People field (path) | example | predicate | object_kind | entity_role | temporal | gmeow_reason |
 |---|---|---|---|---|---|---|
 | `resourceName` (`people/c123`) | account id | (identity key) | — | identifier | — | — |
-| `names[].displayName` | "Ada Lovelace" | `schema:name` | literal | agent-denoting | — | — |
-| `names[].familyName` | "Lovelace" | `schema:familyName` | literal | agent-denoting | — | — |
-| `names[].givenName` | "Ada" | `schema:givenName` | literal | agent-denoting | — | — |
+| `names[]` (whole) | "Ada Lovelace" | `gmeow:hasName` → `gmeow:PersonName` | node | agent-denoting | — | reified co-equal appellation (names model) |
+| `names[].displayName` | "Ada Lovelace" | `gmeow:fullName` (on the PersonName) | literal | agent-denoting | — | surface form |
+| `names[].familyName` | "Lovelace" | `gmeow:hasNamePart` → `gmeow:NamePart` (`namePartType gmeow:namePartSurname` + `gmeow:partText`) | node | agent-denoting | — | typed part — no flat shortcut |
+| `names[].givenName` | "Ada" | `gmeow:hasNamePart` → `gmeow:NamePart` (`namePartType gmeow:namePartGiven` + `gmeow:partText`) | node | agent-denoting | — | typed part — no flat shortcut |
 | `emailAddresses[].value` | "ada@example.test" | `schema:email` | email | locator | — | — |
 | `phoneNumbers[].value` | "+1 555 0100" | `schema:telephone` | tel | locator | — | — |
 | `addresses[].formattedValue` | "1 Example St…" | `schema:address` → `schema:PostalAddress` | node | locator | — | — |

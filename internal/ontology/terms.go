@@ -44,12 +44,18 @@ func orderedTerms() []Term {
 			Normalize:  NormText,
 		},
 		{
-			IRI:         GivenNamePart,
-			Concept:     "given-name",
+			// gmeow:partText is the text of a typed gmeow:NamePart — the ONLY canonical
+			// home for a name component (the flat givenNamePart/surnamePart shortcuts
+			// were retired from the ontology). The part's namePartType (given/surname/…)
+			// is a sibling triple and is irrelevant here: comparison is role-free, so
+			// every part text tokenizes the same (honorific/generational parts self-strip
+			// via ontology.NameTokens).
+			IRI:         PartText,
+			Concept:     "name-part",
 			Kind:        Name,
 			ObjectKind:  ObjLiteral,
 			Normalize:   NormText,
-			GmeowReason: "gmeow-primary; flat shortcut (skos:closeMatch schema:givenName)",
+			GmeowReason: "gmeow-primary; reified NamePart text (no flat part shortcut exists)",
 		},
 		{
 			IRI:        Schema + "givenName",
@@ -57,14 +63,6 @@ func orderedTerms() []Term {
 			Kind:       Name,
 			ObjectKind: ObjLiteral,
 			Normalize:  NormText,
-		},
-		{
-			IRI:         SurnamePart,
-			Concept:     "family-name",
-			Kind:        Name,
-			ObjectKind:  ObjLiteral,
-			Normalize:   NormText,
-			GmeowReason: "gmeow-primary; flat shortcut (skos:closeMatch schema:familyName)",
 		},
 		{
 			IRI:        Schema + "familyName",

@@ -261,12 +261,14 @@ type nameInput struct {
 
 // emitName emits a reified gmeow:PersonName appellation (the names model forbids a
 // bare name datatype property): a node keyed per record, linked via gmeow:hasName,
-// carrying gmeow:fullName (composed from parts when no surface form is given) plus
-// the flat part shortcuts (givenNamePart/surnamePart/additionalName) and foaf:nick —
-// all of which ground to name tokens for idf-subsumption comparison. Honorific
-// affixes are hung off as reified gmeow:NamePart nodes (interop, not comparison) and
-// linked to their gmeow:Honorific value when recognized. The node is keyed by the
-// record subject so a card's FN + N + NICKNAME accumulate on ONE co-equal appellation.
+// carrying gmeow:fullName (the surface form, composed from parts when none is given)
+// and the structured components as TYPED gmeow:NamePart nodes — the only canonical
+// home for a name component (the flat givenNamePart/surnamePart shortcuts were
+// retired from the ontology; components are always hasNamePart + namePartType +
+// partText). The partText grounds to a role-free name token for comparison; a
+// recognized honorific also links its gmeow:Honorific value. The node is keyed by
+// the record subject so a card's FN + N + NICKNAME accumulate on ONE co-equal
+// appellation.
 func emitName(claims []Claim, subject string, n nameInput) []Claim {
 	full := strings.TrimSpace(n.Full)
 	if full == "" {
@@ -280,39 +282,42 @@ func emitName(claims []Claim, subject string, n nameInput) []Claim {
 	claims = append(
 		claims,
 		Claim{Subject: subject, Predicate: ontology.HasName, Object: termIRI(node)},
-	)
-	claims = append(
-		claims,
 		Claim{
 			Subject:   node,
 			Predicate: rdfTypePred,
 			Object:    termIRI(ontology.PersonNameClass),
 		},
 	)
-
-	literalPart := func(pred, val string) {
-		if v := strings.TrimSpace(val); v != "" {
-			claims = append(
-				claims,
-				withMappedFrom(
-					Claim{Subject: node, Predicate: pred, Object: termLiteral(v)},
-					n.Source,
-				),
-			)
-		}
-	}
 	if full != "" {
-		literalPart(ontology.FullName, full)
-	}
-	literalPart(ontology.GivenNamePart, n.Given)
-	literalPart(ontology.SurnamePart, n.Family)
-	literalPart(ontology.Schema+"additionalName", n.Middle)
-	for _, nick := range n.Nicknames {
-		literalPart(ontology.FOAF+"nick", nick)
+		claims = append(
+			claims,
+			withMappedFrom(
+				Claim{Subject: node, Predicate: ontology.FullName, Object: termLiteral(full)},
+				n.Source,
+			),
+		)
 	}
 
-	claims = emitHonorificPart(claims, node, n.Prefix, ontology.NamePartHonorificPrefix)
-	claims = emitHonorificPart(claims, node, n.Suffix, ontology.NamePartHonorificSuffix)
+	claims = emitNamePart(claims, node, ontology.NamePartGiven, n.Given, n.Source)
+	claims = emitNamePart(claims, node, ontology.NamePartSurname, n.Family, n.Source)
+	claims = emitNamePart(claims, node, ontology.NamePartMiddle, n.Middle, n.Source)
+	for _, nick := range n.Nicknames {
+		claims = emitNamePart(claims, node, ontology.NamePartNickname, nick, n.Source)
+	}
+	claims = emitNamePart(
+		claims,
+		node,
+		ontology.NamePartHonorificPrefix,
+		n.Prefix,
+		n.Source,
+	)
+	claims = emitNamePart(
+		claims,
+		node,
+		ontology.NamePartHonorificSuffix,
+		n.Suffix,
+		n.Source,
+	)
 
 	return claims
 }
@@ -331,11 +336,11 @@ func composeFullName(n nameInput) string {
 	return strings.Join(out, " ")
 }
 
-// emitHonorificPart hangs a reified gmeow:NamePart (type + partText) off the
-// appellation for an honorific affix — interop/projection only, never a comparison
-// token (gmeow:partText is ungrounded). A recognized title also links its
-// gmeow:Honorific value.
-func emitHonorificPart(claims []Claim, nameNode, value, partType string) []Claim {
+// emitNamePart hangs one reified gmeow:NamePart (hasNamePart + namePartType +
+// partText) off the appellation — the canonical form of every name component. The
+// partText grounds to a name token (honorific/generational texts self-strip in
+// comparison); an honorific affix additionally links its gmeow:Honorific value.
+func emitNamePart(claims []Claim, nameNode, partType, value, source string) []Claim {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return claims
@@ -346,16 +351,26 @@ func emitHonorificPart(claims []Claim, nameNode, value, partType string) []Claim
 		Claim{Subject: nameNode, Predicate: ontology.HasNamePart, Object: termIRI(part)},
 		Claim{Subject: part, Predicate: rdfTypePred, Object: termIRI(ontology.NamePartClass)},
 		Claim{Subject: part, Predicate: ontology.NamePartType, Object: termIRI(partType)},
-		Claim{Subject: part, Predicate: ontology.PartText, Object: termLiteral(value)},
+		withMappedFrom(
+			Claim{Subject: part, Predicate: ontology.PartText, Object: termLiteral(value)},
+			source,
+		),
 	)
-	if iri, _, ok := ontology.HonorificForValue(value); ok {
-		claims = append(
-			claims,
-			Claim{Subject: nameNode, Predicate: ontology.Honorific, Object: termIRI(iri)},
-		)
+	if isHonorificPartType(partType) {
+		if iri, _, ok := ontology.HonorificForValue(value); ok {
+			claims = append(
+				claims,
+				Claim{Subject: nameNode, Predicate: ontology.Honorific, Object: termIRI(iri)},
+			)
+		}
 	}
 
 	return claims
+}
+
+func isHonorificPartType(partType string) bool {
+	return partType == ontology.NamePartHonorificPrefix ||
+		partType == ontology.NamePartHonorificSuffix
 }
 
 // parseStructuredName parses a vCard N value (Family;Given;Additional;Prefixes;
@@ -387,9 +402,9 @@ func parseStructuredName(value, sourceProp string) nameInput {
 // name properties to the contact.
 func nameFieldForPredicate(pred string) (string, bool) {
 	switch pred {
-	case ontology.Schema + "givenName", ontology.GivenNamePart:
+	case ontology.Schema + "givenName":
 		return "given", true
-	case ontology.Schema + "familyName", ontology.SurnamePart:
+	case ontology.Schema + "familyName":
 		return "family", true
 	case ontology.Schema + "additionalName":
 		return "middle", true
@@ -428,7 +443,8 @@ func assignNameField(n *nameInput, field, value string) {
 
 // writeNameNode is the string-emitter form of emitName for importers that render
 // Turtle directly (CSV, Apple): a reified gmeow:PersonName node keyed by the record
-// subject, carrying fullName + the flat part shortcuts that ground to name tokens.
+// subject, carrying fullName plus the structured components as TYPED gmeow:NamePart
+// nodes (the only canonical form — no flat part shortcuts).
 func writeNameNode(body *strings.Builder, subject string, n nameInput) {
 	full := strings.TrimSpace(n.Full)
 	if full == "" {
@@ -442,26 +458,21 @@ func writeNameNode(body *strings.Builder, subject string, n nameInput) {
 	writeTriple(body, subject, ontology.HasName, iri(node))
 	writeTriple(body, node, rdfTypePred, iri(ontology.PersonNameClass))
 
-	part := func(pred, val string) {
-		if v := strings.TrimSpace(val); v != "" {
-			writeTriple(body, node, pred, literal(v))
-		}
-	}
 	if full != "" {
-		part(ontology.FullName, full)
+		writeTriple(body, node, ontology.FullName, literal(full))
 	}
-	part(ontology.GivenNamePart, n.Given)
-	part(ontology.SurnamePart, n.Family)
-	part(ontology.Schema+"additionalName", n.Middle)
+	writeNamePart(body, node, ontology.NamePartGiven, n.Given)
+	writeNamePart(body, node, ontology.NamePartSurname, n.Family)
+	writeNamePart(body, node, ontology.NamePartMiddle, n.Middle)
 	for _, nick := range n.Nicknames {
-		part(ontology.FOAF+"nick", nick)
+		writeNamePart(body, node, ontology.NamePartNickname, nick)
 	}
-	writeHonorificPart(body, node, n.Prefix, ontology.NamePartHonorificPrefix)
-	writeHonorificPart(body, node, n.Suffix, ontology.NamePartHonorificSuffix)
+	writeNamePart(body, node, ontology.NamePartHonorificPrefix, n.Prefix)
+	writeNamePart(body, node, ontology.NamePartHonorificSuffix, n.Suffix)
 }
 
-// writeHonorificPart is the string-emitter form of emitHonorificPart.
-func writeHonorificPart(body *strings.Builder, nameNode, value, partType string) {
+// writeNamePart is the string-emitter form of emitNamePart.
+func writeNamePart(body *strings.Builder, nameNode, partType, value string) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return
@@ -472,8 +483,10 @@ func writeHonorificPart(body *strings.Builder, nameNode, value, partType string)
 	writeTriple(body, part, rdfTypePred, iri(ontology.NamePartClass))
 	writeTriple(body, part, ontology.NamePartType, iri(partType))
 	writeTriple(body, part, ontology.PartText, literal(value))
-	if hiri, _, ok := ontology.HonorificForValue(value); ok {
-		writeTriple(body, nameNode, ontology.Honorific, iri(hiri))
+	if isHonorificPartType(partType) {
+		if hiri, _, ok := ontology.HonorificForValue(value); ok {
+			writeTriple(body, nameNode, ontology.Honorific, iri(hiri))
+		}
 	}
 }
 

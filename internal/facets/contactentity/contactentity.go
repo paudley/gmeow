@@ -223,6 +223,73 @@ func FactsForContacts(
 		facts = append(facts, fact)
 	}
 
+	facts = append(facts, nicknameAliasFacts(statements, nodeOwner, suppressed)...)
+
+	return facts
+}
+
+// nicknameAliasFacts surfaces a nickname (a typed gmeow:NamePart whose namePartType
+// is namePartNickname) as an alias of the contact bearing the appellation — the
+// two-hop entity → gmeow:PersonName → gmeow:NamePart path the one-hop sub-node
+// flattening does not reach. Given/surname/honorific parts are NOT surfaced: the
+// gmeow:fullName already carries the display name.
+func nicknameAliasFacts(
+	statements []Statement,
+	nameOwner map[string]string,
+	suppressed map[string]bool,
+) []Fact {
+	// appellation node -> [namePart nodes]; namePart -> {type, text, source/hash}.
+	isNickPart := map[string]bool{}
+	partParent := map[string]string{}
+	type partLit struct {
+		text   string
+		digest contracts.ObjectDigest
+		hash   string
+	}
+	partText := map[string]partLit{}
+
+	for _, s := range statements {
+		switch s.Predicate {
+		case gmeowPrefix + "hasNamePart":
+			if s.ObjectKind == "iri" {
+				partParent[s.Object] = s.Subject
+			}
+		case gmeowPrefix + "namePartType":
+			if s.Object == gmeowPrefix+"namePartNickname" {
+				isNickPart[s.Subject] = true
+			}
+		case gmeowPrefix + "partText":
+			partText[s.Subject] = partLit{s.Object, s.SourceDigest, s.StatementHash}
+		}
+	}
+
+	facts := []Fact{}
+	for part, lit := range partText {
+		if !isNickPart[part] {
+			continue
+		}
+		appellation := partParent[part]
+		if suppressed[appellation] {
+			continue
+		}
+		contact, ok := nameOwner[appellation]
+		if !ok {
+			continue
+		}
+		value := FactValue(lit.text, "literal", FactKindAlias)
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		facts = append(facts, Fact{
+			SourceDigest:  lit.digest,
+			StatementHash: lit.hash,
+			ContactID:     contact,
+			FactKind:      FactKindAlias,
+			Value:         value,
+			Predicate:     gmeowPrefix + "partText",
+		})
+	}
+
 	return facts
 }
 
@@ -483,9 +550,10 @@ func gmeowContactFactKind(predicate string) (string, bool, bool) {
 		return FactKindEmail, false, true
 	case "https://blackcatinformatics.ca/gmeow/historicalEmail":
 		return FactKindEmail, true, true
-	case gmeowPrefix + "fullName",
-		gmeowPrefix + "givenNamePart",
-		gmeowPrefix + "surnamePart":
+	case gmeowPrefix + "fullName":
+		// The appellation's surface form is the contact's display name. Structured
+		// components live on typed gmeow:NamePart nodes (projected separately — a
+		// nickname becomes an alias; given/surname are covered by the full name).
 		return FactKindName, false, true
 	case gmeowPrefix + "streetAddress",
 		gmeowPrefix + "extendedAddress",

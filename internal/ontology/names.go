@@ -26,9 +26,6 @@ const (
 	NamePartType  = Gmeow + "namePartType"
 	PartText      = Gmeow + "partText"
 	PartOrder     = Gmeow + "partOrder"
-	// Flat lossy shortcut predicates (convenience projections; NOT canonical).
-	GivenNamePart = Gmeow + "givenNamePart"
-	SurnamePart   = Gmeow + "surnamePart"
 
 	// namePartType VALUES we emit from contact formats (the published vocab carries
 	// 35; these are the ones vCard/CSV/Apple actually distinguish).
@@ -129,6 +126,7 @@ const NameTokenConcept = "name-token"
 // (rather than passing through as a single comparison claim).
 var nameConcepts = map[string]bool{
 	"name":            true,
+	"name-part":       true, // gmeow:partText on a typed gmeow:NamePart (role-free)
 	"given-name":      true,
 	"family-name":     true,
 	"additional-name": true,
