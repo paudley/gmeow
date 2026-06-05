@@ -654,17 +654,66 @@ func filterProjectedContactStatementsTx(
 			return nil, nil, err
 		}
 
+		// Retain a contact's own statements AND the statements of the attached gmeow
+		// sub-nodes it links (PersonName/NamePart, PostalAddress, Place), transitively
+		// — the reified name/address/coordinate literals live on those sub-nodes, and
+		// contactentity.FactsForContacts flattens them back onto the contact. Without
+		// this the sub-node literals (fullName, partText, streetAddress) are dropped
+		// and a contact projects no name/address facts at all.
+		keep := contactsAndOwnedSubNodes(sourceStatements, sourceContacts)
 		for _, statement := range sourceStatements {
-			if !sourceContacts[statement.Subject] {
+			if !keep[statement.Subject] {
 				continue
 			}
 
 			filtered = append(filtered, statement)
-			contacts[statement.Subject] = true
+			if sourceContacts[statement.Subject] {
+				contacts[statement.Subject] = true
+			}
 		}
 	}
 
 	return filtered, contacts, nil
+}
+
+// contactsAndOwnedSubNodes returns the set of subjects whose statements the contact
+// projection must retain: the contacts themselves plus every gmeow sub-node IRI
+// reachable from a contact through IRI links (a fixpoint, so the two-hop
+// contact -> PersonName -> NamePart chain is covered).
+func contactsAndOwnedSubNodes(
+	statements []contactentity.Statement,
+	contacts map[string]bool,
+) map[string]bool {
+	keep := make(map[string]bool, len(contacts))
+	for c := range contacts {
+		keep[c] = true
+	}
+
+	for {
+		added := false
+		for _, s := range statements {
+			if keep[s.Subject] && s.ObjectKind == "iri" &&
+				isAttachedGmeowSubNode(s.Object) && !keep[s.Object] {
+				keep[s.Object] = true
+				added = true
+			}
+		}
+		if !added {
+			break
+		}
+	}
+
+	return keep
+}
+
+// isAttachedGmeowSubNode reports whether an IRI is a reified gmeow sub-node whose
+// literal statements are flattened onto the contact (NamePart shares the
+// urn:gmeow:name: prefix; mailto:/tel: contact points carry their value in the IRI
+// and need no sub-node retention).
+func isAttachedGmeowSubNode(iri string) bool {
+	return strings.HasPrefix(iri, "urn:gmeow:name:") ||
+		strings.HasPrefix(iri, "urn:gmeow:addr:") ||
+		strings.HasPrefix(iri, "urn:gmeow:place:")
 }
 
 func rdfProjectedContactsForSourceStatementsTx(
@@ -874,15 +923,31 @@ func contactProjectionStatementsForContacts(
 	transaction pgx.Tx,
 	contacts []string,
 ) ([]contactentity.Statement, error) {
+	// owned: the contacts plus every gmeow sub-node (PersonName/NamePart, PostalAddress,
+	// Place) reachable from a contact via IRI links — a recursive walk, so the two-hop
+	// contact -> PersonName -> NamePart chain is included. The reified name/address
+	// literals live on those sub-nodes and are flattened back onto the contact.
 	rows, err := transaction.Query(
 		ctx,
-		`SELECT s.source_digest, s.statement_hash,
+		`WITH RECURSIVE owned(term_id) AS (
+			SELECT term_id FROM query_rdf_terms WHERE term_value = ANY($1)
+			UNION
+			SELECT obj.term_id
+			  FROM owned o
+			  JOIN query_rdf_statements s ON s.subject_term_id = o.term_id
+			  JOIN query_rdf_terms obj ON obj.term_id = s.object_term_id
+			 WHERE obj.term_kind = 'iri'
+			   AND (obj.term_value LIKE 'urn:gmeow:name:%'
+			     OR obj.term_value LIKE 'urn:gmeow:addr:%'
+			     OR obj.term_value LIKE 'urn:gmeow:place:%')
+		)
+		SELECT s.source_digest, s.statement_hash,
 		subj.term_value, pred.term_value, obj.term_value, obj.term_kind
 		FROM query_rdf_statements s
 		JOIN query_rdf_terms subj ON subj.term_id = s.subject_term_id
 		JOIN query_rdf_terms pred ON pred.term_id = s.predicate_term_id
 		JOIN query_rdf_terms obj ON obj.term_id = s.object_term_id
-		WHERE subj.term_value = ANY($1)
+		WHERE s.subject_term_id IN (SELECT term_id FROM owned)
 		ORDER BY s.statement_order, s.statement_hash`,
 		contacts,
 	)
