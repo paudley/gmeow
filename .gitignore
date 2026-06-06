@@ -48,3 +48,4 @@ gmeow.toml
 .gemini/settings.json
 .mcp.json
 logs
+.cache
