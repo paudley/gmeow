@@ -439,6 +439,146 @@ func TestResolveStrangersStaySeparate(t *testing.T) {
 	}
 }
 
+func TestResolveSharedWorkplaceAndAddressDoNotIdentifyPerson(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService()
+
+	alice, err := service.Resolve(ctx, []ClaimInput{
+		claimInput("name-token: alice", true),
+		claimInput("name-token: nguyen", true),
+		claimInput("email: alice.nguyen@personal.example", false),
+		claimInput("phone: +15550101", false),
+		claimInput("works-for: example research lab", false),
+		claimInput("job-title: engineer", false),
+		claimInput("street-address: 100 shared campus way", false),
+		claimInput("locality: victoria", false),
+		claimInput("region: bc", false),
+		claimInput("country: ca", false),
+		claimInput("postal-code: v8v 1a1", false),
+	}, 0.72, 0.88)
+	if err != nil {
+		t.Fatalf("resolve alice: %v", err)
+	}
+
+	bob, err := service.Resolve(ctx, []ClaimInput{
+		claimInput("name-token: bob", true),
+		claimInput("name-token: patel", true),
+		claimInput("email: bob.patel@personal.example", false),
+		claimInput("phone: +15550102", false),
+		claimInput("works-for: example research lab", false),
+		claimInput("job-title: engineer", false),
+		claimInput("street-address: 100 shared campus way", false),
+		claimInput("locality: victoria", false),
+		claimInput("region: bc", false),
+		claimInput("country: ca", false),
+		claimInput("postal-code: v8v 1a1", false),
+	}, 0.72, 0.88)
+	if err != nil {
+		t.Fatalf("resolve bob: %v", err)
+	}
+
+	if alice.Entity == bob.Entity {
+		t.Fatalf(
+			"shared workplace/address context merged distinct people: alice=%+v bob=%+v",
+			alice,
+			bob,
+		)
+	}
+}
+
+func TestResolveTinyOverlapInRichIdentifierSetDoesNotIdentifyPerson(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService()
+
+	alice, err := service.Resolve(ctx, []ClaimInput{
+		claimInput("name-token: alice", true),
+		claimInput("name-token: nguyen", true),
+		claimInput("email: shared-one@example.test", false),
+		claimInput("email: shared-two@example.test", false),
+		claimInput("phone: +15550101", false),
+	}, 0.72, 0.88)
+	if err != nil {
+		t.Fatalf("resolve alice: %v", err)
+	}
+
+	rich := []ClaimInput{
+		claimInput("name-token: robert", true),
+		claimInput("name-token: patel", true),
+		claimInput("email: shared-one@example.test", false),
+		claimInput("email: shared-two@example.test", false),
+		claimInput("phone: +15550200", false),
+	}
+	for i := range 30 {
+		rich = append(rich,
+			claimInput(fmt.Sprintf("email: role-%02d@example.test", i), false),
+			claimInput(fmt.Sprintf("account: https://social.example/%02d", i), false),
+		)
+	}
+
+	bob, err := service.Resolve(ctx, rich, 0.72, 0.88)
+	if err != nil {
+		t.Fatalf("resolve rich observation: %v", err)
+	}
+
+	if alice.Entity == bob.Entity {
+		t.Fatalf(
+			"tiny overlap in rich identifier set merged distinct people: alice=%+v rich=%+v",
+			alice,
+			bob,
+		)
+	}
+}
+
+func TestResolveTinyOverlapPlusSharedPhoneInRichIdentifierSetDoesNotIdentifyPerson(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	service := newTestService()
+
+	alice, err := service.Resolve(ctx, []ClaimInput{
+		claimInput("name-token: alice", true),
+		claimInput("name-token: nguyen", true),
+		claimInput("email: shared-one@example.test", false),
+		claimInput("email: shared-two@example.test", false),
+		claimInput("email: shared-three@example.test", false),
+		claimInput("phone: +15550101", false),
+		claimInput("birth-date: 1970-01-01", false),
+	}, 0.72, 0.88)
+	if err != nil {
+		t.Fatalf("resolve alice: %v", err)
+	}
+
+	rich := []ClaimInput{
+		claimInput("name-token: robert", true),
+		claimInput("name-token: patel", true),
+		claimInput("email: shared-one@example.test", false),
+		claimInput("email: shared-two@example.test", false),
+		claimInput("email: shared-three@example.test", false),
+		claimInput("phone: +15550101", false),
+		claimInput("birth-date: 1980-01-01", false),
+	}
+	for i := range 30 {
+		rich = append(rich,
+			claimInput(fmt.Sprintf("email: role-%02d@example.test", i), false),
+			claimInput(fmt.Sprintf("account: https://social.example/%02d", i), false),
+			claimInput(fmt.Sprintf("url: https://profile.example/%02d", i), false),
+		)
+	}
+
+	bob, err := service.Resolve(ctx, rich, 0.72, 0.88)
+	if err != nil {
+		t.Fatalf("resolve rich observation: %v", err)
+	}
+
+	if alice.Entity == bob.Entity {
+		t.Fatalf(
+			"tiny overlap plus shared phone in rich identifier set merged distinct people: alice=%+v rich=%+v",
+			alice,
+			bob,
+		)
+	}
+}
+
 // TestResolveMemoIdempotentReingest: an identical observation re-ingested after
 // the index has grown must resolve to the SAME entity as a NOOP and mint nothing
 // — independent of centroid drift or blocking recall (the observation memo).

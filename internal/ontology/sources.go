@@ -46,6 +46,16 @@ func KindForConcept(concept string) Kind {
 	return Contextual
 }
 
+// RoleForConcept returns the contact-domain role for a canonical concept,
+// defaulting to RoleNone for synthetic or unknown concepts.
+func RoleForConcept(concept string) Role {
+	if t, ok := conceptIndex[concept]; ok {
+		return t.Role
+	}
+
+	return RoleNone
+}
+
 var conceptIndex = func() map[string]Term {
 	out := map[string]Term{}
 	// orderedTerms defines the canonical predicate before its aliases, so

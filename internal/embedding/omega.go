@@ -11,9 +11,10 @@ import "math"
 //	ω = kindBase(kind) + idf(value) · kindScale(kind)
 //
 // so a kind carries a meaningful floor (kindBase) even at cold start when IDF is
-// uninformative, and rarity (IDF) sharpens it as the corpus grows. A name/gender
-// is decisive (high base), an identifier strong, free context weak. A ubiquitous
-// value (role mailbox, common name) decays toward its base as df → N.
+// uninformative, and rarity (IDF) sharpens it as the corpus grows. In ingest, IDF
+// is measured over source observations rather than current entities, so a shared
+// role mailbox / switchboard / common name remains common even if greedy folding
+// has collapsed earlier observations into one entity.
 const (
 	kindBaseFunctional  = 1.0
 	kindBaseSet         = 0.5
@@ -67,12 +68,11 @@ func kindScale(kind AttrKind) float64 {
 	}
 }
 
-// idf is the smoothed inverse document frequency of a value: log of (corpus
-// entity count) over (entities asserting the value), ≥ 0. It is ~0 both at cold
-// start (where ω falls back to kindBase) and for ubiquitous values, and grows
-// for rare ones.
-func idf(docFreq, entities int) float64 {
-	v := math.Log(float64(1+entities) / float64(1+docFreq))
+// idf is the smoothed inverse document frequency of a value: log of corpus
+// document count over documents asserting the value, ≥ 0. In ingest, documents
+// are source observations; repair/diagnostics may use another document basis.
+func idf(docFreq, documents int) float64 {
+	v := math.Log(float64(1+documents) / float64(1+docFreq))
 	if v < 0 {
 		return 0
 	}
@@ -83,8 +83,8 @@ func idf(docFreq, entities int) float64 {
 // omega is the identifying weight of a claim: how strongly a match on it should
 // count toward (or against) same-identity. Source-trust and a temporal-validity
 // factor are folded in as 1.0 until the importer populates them.
-func omega(kind AttrKind, docFreq, entities int) float64 {
-	d := idf(docFreq, entities)
+func omega(kind AttrKind, docFreq, documents int) float64 {
+	d := idf(docFreq, documents)
 	if kind == KindContextual && d > contextualIDFCap {
 		d = contextualIDFCap // contextual evidence stays soft/low-ω (§4.1)
 	}

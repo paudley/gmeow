@@ -4,6 +4,7 @@
 package embedding
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -98,6 +99,164 @@ func TestServiceStateSnapshotRestoreKeepsIdempotency(t *testing.T) {
 	if !again.IsNoop || again.Entity != first.Entity {
 		t.Fatalf("post-restore resolve: want NOOP on %s, got %+v", first.Entity, again)
 	}
+}
+
+func TestServiceObservationFrequencyTracksDistinctObservations(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService()
+	const threshold = 0.5
+
+	rooted := []ClaimInput{
+		claimInput("email: shared@example.test", false),
+		claimInput("phone: +15550100", false),
+		claimInput("name-token: alpha", true),
+	}
+	first, err := service.Resolve(ctx, rooted, threshold, threshold)
+	if err != nil {
+		t.Fatalf("resolve rooted: %v", err)
+	}
+	if !first.IsNew {
+		t.Fatalf("rooted: want new entity, got %+v", first)
+	}
+
+	replay, err := service.Resolve(ctx, rooted, threshold, threshold)
+	if err != nil {
+		t.Fatalf("resolve exact replay: %v", err)
+	}
+	if !replay.IsNoop || replay.Entity != first.Entity {
+		t.Fatalf("exact replay: want NOOP on %s, got %+v", first.Entity, replay)
+	}
+
+	distinctNoop := []ClaimInput{
+		claimInput("email: shared@example.test", false),
+		claimInput("phone: +15550100", false),
+	}
+	second, err := service.Resolve(ctx, distinctNoop, threshold, threshold)
+	if err != nil {
+		t.Fatalf("resolve distinct noop: %v", err)
+	}
+	if !second.IsNoop || second.Entity != first.Entity {
+		t.Fatalf("distinct observation: want NOOP on %s, got %+v", first.Entity, second)
+	}
+
+	sharedEmail := StatementHash("email: shared@example.test")
+	if got := service.ledger.observationCount(); got != 2 {
+		t.Fatalf("observation count = %d, want 2", got)
+	}
+	if got := service.ledger.observationFreq(sharedEmail); got != 2 {
+		t.Fatalf("shared email occurrence count = %d, want 2", got)
+	}
+}
+
+func TestServiceStateSnapshotRestoreKeepsObservationFrequency(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService()
+	const threshold = 0.5
+
+	claims := []ClaimInput{
+		claimInput("email: shared@example.test", false),
+		claimInput("phone: +15550100", false),
+	}
+	if _, err := service.Resolve(ctx, claims, threshold, threshold); err != nil {
+		t.Fatalf("resolve first observation: %v", err)
+	}
+	if _, err := service.Resolve(ctx, []ClaimInput{
+		claimInput("email: shared@example.test", false),
+		claimInput("phone: +15550101", false),
+	}, threshold, threshold); err != nil {
+		t.Fatalf("resolve second observation: %v", err)
+	}
+
+	blob, err := service.SnapshotState()
+	if err != nil {
+		t.Fatalf("snapshot state: %v", err)
+	}
+
+	restored := newTestService()
+	if err := restored.LoadState(blob); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+
+	sharedEmail := StatementHash("email: shared@example.test")
+	if got := restored.ledger.observationCount(); got != 2 {
+		t.Fatalf("restored observation count = %d, want 2", got)
+	}
+	if got := restored.ledger.observationFreq(sharedEmail); got != 2 {
+		t.Fatalf("restored shared email occurrence count = %d, want 2", got)
+	}
+}
+
+func TestServiceLoadPreviousStateSeedsObservationFrequency(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService()
+	const threshold = 0.5
+
+	claims := []ClaimInput{
+		claimInput("email: legacy@example.test", false),
+		claimInput("phone: +15550100", false),
+	}
+	if _, err := service.Resolve(ctx, claims, threshold, threshold); err != nil {
+		t.Fatalf("resolve legacy observation: %v", err)
+	}
+
+	blob, err := service.SnapshotState()
+	if err != nil {
+		t.Fatalf("snapshot state: %v", err)
+	}
+
+	reader := bytes.NewReader(blob[len(stateMagic):])
+	cacheBlob, err := readLenBytes(reader)
+	if err != nil {
+		t.Fatalf("read cache blob: %v", err)
+	}
+	indexBlob, err := readLenBytes(reader)
+	if err != nil {
+		t.Fatalf("read index blob: %v", err)
+	}
+	ledgerBlob, err := readLenBytes(reader)
+	if err != nil {
+		t.Fatalf("read ledger blob: %v", err)
+	}
+	memoBlob, err := readLenBytes(reader)
+	if err != nil {
+		t.Fatalf("read memo blob: %v", err)
+	}
+
+	legacyLedgerLen := len(ledgerBlob) - legacyOccurrenceStatsLen(service.ledger)
+	var legacy bytes.Buffer
+	legacy.WriteString(previousStateMagic)
+	for _, part := range [][]byte{
+		cacheBlob,
+		indexBlob,
+		ledgerBlob[:legacyLedgerLen],
+		memoBlob,
+	} {
+		if err := writeLenBytes(&legacy, part); err != nil {
+			t.Fatalf("write legacy state part: %v", err)
+		}
+	}
+
+	restored := newTestService()
+	if err := restored.LoadState(legacy.Bytes()); err != nil {
+		t.Fatalf("load previous state: %v", err)
+	}
+
+	legacyEmail := StatementHash("email: legacy@example.test")
+	if got := restored.ledger.observationCount(); got != 1 {
+		t.Fatalf("seeded observation count = %d, want 1", got)
+	}
+	if got := restored.ledger.observationFreq(legacyEmail); got != 1 {
+		t.Fatalf("seeded legacy email occurrence count = %d, want 1", got)
+	}
+}
+
+func legacyOccurrenceStatsLen(ledger *entityLedger) int {
+	size := 4 + 4 // observation count + occurrence map count
+	for hash := range ledger.occurrences {
+		size += 8 + len(hash) + 4
+	}
+
+	return size
 }
 
 func TestServiceResolveWorkedExample(t *testing.T) {

@@ -7,6 +7,8 @@ import (
 	"math"
 	"slices"
 	"sort"
+
+	"blackcat.ca/gmeow/internal/ontology"
 )
 
 // idDiffParams are the tunables of the signed comparison (see CONTACT_IDENTITY_
@@ -56,7 +58,8 @@ func idDiff(a, b []scoredClaim, p idDiffParams) idDiffResult {
 	ag := groupByAttr(frontier(a))
 	bg := groupByAttr(frontier(b))
 
-	var ic, iac float64
+	var ic, iac, anchorIC float64
+	var setICRaw, setIncoming, anchorSetICRaw float64
 
 	veto := false
 
@@ -70,8 +73,12 @@ func idDiff(a, b []scoredClaim, p idDiffParams) idDiffResult {
 		switch kindOf(av, bv) {
 		case KindSet:
 			shared := setOverlapMass(av, bv, p)
-			if shared > 0 {
-				ic += shared
+			setIncoming += shared.Incoming
+			if shared.Raw > 0 {
+				setICRaw += shared.Raw
+				if identityAnchor(av, bv) {
+					anchorSetICRaw += shared.Raw
+				}
 			} else if !p.ObservationMode && len(av) >= 2 && len(bv) >= 2 {
 				// Two populated, disjoint identifier sets => negative (set identity).
 				iac += p.SetPenalty * minMass(av, bv, p.W)
@@ -80,6 +87,7 @@ func idDiff(a, b []scoredClaim, p idDiffParams) idDiffResult {
 			fic, fiac, fveto := functionalScore(av, bv, p)
 			ic += fic
 			iac += fiac
+			anchorIC += fic
 			if fveto {
 				veto = true
 			}
@@ -87,12 +95,27 @@ func idDiff(a, b []scoredClaim, p idDiffParams) idDiffResult {
 			nic, niac := nameScore(av, bv, p)
 			ic += nic
 			iac += niac
+			anchorIC += nic
 		default: // KindContextual
 			ic += contextualMass(av, bv, p)
 		}
 	}
 
+	if iac > 0 {
+		setIC := proportionalMass(setICRaw, setIncoming)
+		ic += setIC
+		if setICRaw > 0 {
+			anchorIC += anchorSetICRaw * (setIC / setICRaw)
+		}
+	} else {
+		ic += setICRaw
+		anchorIC += anchorSetICRaw
+	}
+
 	score := ic - p.Lambda*iac
+	if p.ObservationMode && anchorIC == 0 {
+		score = 0
+	}
 
 	return idDiffResult{
 		Score:      score,
@@ -103,15 +126,50 @@ func idDiff(a, b []scoredClaim, p idDiffParams) idDiffResult {
 	}
 }
 
-// setOverlapMass scores shared identifier values. Each INCOMING claim contributes
-// at most its single best match (1:1), so mass reflects the newcomer's own
-// evidence rather than the candidate's breadth — a record cannot earn extra mass
-// merely because the candidate is large (the rich-get-richer over-merge: one
-// "douglas" must not score against every "douglas" a blob accumulated).
-func setOverlapMass(av, bv []scoredClaim, p idDiffParams) float64 {
+// identityAnchor reports whether positive overlap on this attribute is direct
+// identity evidence during greedy ingest. Workplace, relationship, notes, and
+// address-part context can corroborate an anchored match, but they do not by
+// themselves identify a person: many people legitimately share them.
+func identityAnchor(av, bv []scoredClaim) bool {
+	kind := kindOf(av, bv)
+	if kind == KindName || kind == KindFunctional {
+		return true
+	}
+	if kind != KindSet {
+		return false
+	}
+
+	role := roleOf(av, bv)
+	switch role {
+	case ontology.RoleAccount, ontology.RoleIdentifier:
+		return true
+	case ontology.RoleLocator:
+		switch attrOf(av, bv) {
+		case "email", "phone", "url":
+			return true
+		}
+	}
+
+	return false
+}
+
+type setOverlapResult struct {
+	Raw      float64
+	Incoming float64
+}
+
+// setOverlapMass scores shared identifier values by proportional identifying
+// mass. Each INCOMING claim contributes at most its single best match (1:1), so
+// mass reflects the newcomer's own evidence rather than the candidate's breadth;
+// then the shared mass is scaled by its share of the incoming set. This preserves
+// strong evidence for complete overlap while making "2 of 45 emails" weak
+// without introducing a cap or threshold.
+func setOverlapMass(av, bv []scoredClaim, p idDiffParams) setOverlapResult {
 	var shared float64
+	var incoming float64
 
 	for _, ca := range av {
+		incoming += p.W(ca)
 		var best float64
 		for _, cb := range bv {
 			if valueMatch(ca, cb, p.TauSet) {
@@ -122,8 +180,22 @@ func setOverlapMass(av, bv []scoredClaim, p idDiffParams) float64 {
 		}
 		shared += best
 	}
+	if incoming == 0 {
+		return setOverlapResult{}
+	}
 
-	return shared
+	return setOverlapResult{
+		Raw:      shared,
+		Incoming: incoming,
+	}
+}
+
+func proportionalMass(shared, incoming float64) float64 {
+	if incoming == 0 {
+		return 0
+	}
+
+	return shared * (shared / incoming)
 }
 
 // functionalScore scores a single-valued attribute: a co-valid value-match is
@@ -418,6 +490,22 @@ func kindOf(av, bv []scoredClaim) AttrKind {
 	}
 
 	return bv[0].Kind
+}
+
+func roleOf(av, bv []scoredClaim) AttrRole {
+	if len(av) > 0 {
+		return av[0].Role
+	}
+
+	return bv[0].Role
+}
+
+func attrOf(av, bv []scoredClaim) string {
+	if len(av) > 0 {
+		return av[0].Attr
+	}
+
+	return bv[0].Attr
 }
 
 func minMass(av, bv []scoredClaim, w func(scoredClaim) float64) float64 {

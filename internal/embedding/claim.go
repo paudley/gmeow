@@ -14,7 +14,10 @@ import (
 // / contextual), per docs/architecture/CONTACT_IDENTITY_RESOLUTION.md §4.1. It is
 // the ontology's Kind — there is one authority for concept→kind
 // (ontology.KindForConcept), so the engine never classifies attributes itself.
-type AttrKind = ontology.Kind
+type (
+	AttrKind = ontology.Kind
+	AttrRole = ontology.Role
+)
 
 const (
 	KindContextual = ontology.Contextual
@@ -57,6 +60,7 @@ type scoredClaim struct {
 	Value      string
 	Hash       string
 	Kind       AttrKind
+	Role       AttrRole
 	Vec        Vector
 	Valid      Interval
 	SourceKey  string

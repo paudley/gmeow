@@ -70,15 +70,19 @@ var identifierConcepts = map[string]bool{
 	"email": true, "phone": true, "account": true, "url": true,
 }
 
-// entityLedger is the materialized per-entity claim set (hash -> text) plus two
-// derived indexes: df (value hash -> # of distinct entities, for ω/IDF) and ident
-// (identifier value -> entities, for value-based blocking). Both are rebuildable
-// from the claim sets — the ledger is the source of record, the indexes are views
-// recomputed on load (never serialized).
+// entityLedger is the materialized per-entity claim set (hash -> text), the
+// source-observation occurrence basis for ω/IDF, plus two derived indexes: df
+// (value hash -> # of distinct entities, diagnostic/repair view) and ident
+// (identifier value -> entities, for value-based blocking). The claim set is the
+// folded entity view; occurrence counts are stored separately because a shared
+// value must stay common even after greedy ingest folds its observations into one
+// entity.
 type entityLedger struct {
-	claims map[string]map[string]claimEntry
-	df     map[string]int
-	ident  map[string][]string
+	claims       map[string]map[string]claimEntry
+	occurrences  map[string]int
+	observations int
+	df           map[string]int
+	ident        map[string][]string
 }
 
 // claimEntry is an entity's folded view of one claim: its text plus the VALID-time
@@ -93,9 +97,10 @@ type claimEntry struct {
 
 func newEntityLedger() *entityLedger {
 	return &entityLedger{
-		claims: make(map[string]map[string]claimEntry),
-		df:     make(map[string]int),
-		ident:  make(map[string][]string),
+		claims:      make(map[string]map[string]claimEntry),
+		occurrences: make(map[string]int),
+		df:          make(map[string]int),
+		ident:       make(map[string][]string),
 	}
 }
 
@@ -128,6 +133,22 @@ func (l *entityLedger) add(entity string, claims []ClaimInput) {
 		existing.ValidFrom = earlierBound(existing.ValidFrom, claim.ValidFrom)
 		existing.ValidUntil = laterBound(existing.ValidUntil, claim.ValidUntil)
 		set[claim.Hash] = existing
+	}
+}
+
+// observe records one distinct source observation for the occurrence-frequency
+// IDF basis. Counts are per claim hash per observation, not per entity, so a
+// shared switchboard/role/account value remains common even if greedy ingest
+// previously folded all holders into one entity.
+func (l *entityLedger) observe(claims []ClaimInput) {
+	l.observations++
+	seen := map[string]bool{}
+	for _, claim := range claims {
+		if claim.Hash == "" || seen[claim.Hash] {
+			continue
+		}
+		seen[claim.Hash] = true
+		l.occurrences[claim.Hash]++
 	}
 }
 
@@ -191,9 +212,13 @@ func (l *entityLedger) identifierCandidates(claims []scoredClaim) []string {
 	return out
 }
 
-// docFreq is the number of distinct entities asserting a value (its corpus
-// document frequency), the denominator of IDF.
+// docFreq is the number of distinct entities asserting a value. It is retained
+// for diagnostics/repair; ingest-time ω uses observationFreq instead.
 func (l *entityLedger) docFreq(hash string) int { return l.df[hash] }
+
+func (l *entityLedger) observationFreq(hash string) int { return l.occurrences[hash] }
+
+func (l *entityLedger) observationCount() int { return l.observations }
 
 // rebuild recomputes the derived df and identifier indexes from the claim sets.
 // Called after a bulk load (neither index is serialized).
@@ -204,6 +229,21 @@ func (l *entityLedger) rebuild() {
 		for hash, entry := range set {
 			l.df[hash]++
 			l.indexIdentifier(entity, entry.Text)
+		}
+	}
+}
+
+// seedObservationStatsFromEntities provides a compatibility baseline when loading
+// pre-occurrence state artifacts. Historical source-observation counts are not
+// recoverable from the folded entity ledger, so this keeps old states loadable;
+// subsequent distinct observations are tracked with the source-observation basis.
+func (l *entityLedger) seedObservationStatsFromEntities() {
+	l.occurrences = make(map[string]int)
+	l.observations = 0
+	for _, set := range l.claims {
+		l.observations++
+		for hash := range set {
+			l.occurrences[hash]++
 		}
 	}
 }
@@ -284,6 +324,7 @@ func (s *Service) Resolve(
 			Value: values[i],
 			Hash:  claim.Hash,
 			Kind:  ontology.KindForConcept(concept),
+			Role:  ontology.RoleForConcept(concept),
 			Vec:   s.residualize(vectors[i]),
 			Valid: parseValidity(claim.ValidFrom, claim.ValidUntil),
 		}
@@ -312,6 +353,8 @@ func (s *Service) Resolve(
 			newHashes = append(newHashes, claim.Hash)
 		}
 	}
+
+	s.ledger.observe(claims)
 
 	if !isNew && len(newClaims) == 0 {
 		return Resolution{Entity: entity, Similarity: similarity, IsNoop: true}, nil
@@ -444,8 +487,8 @@ func (s *Service) residualize(v Vector) Vector {
 // becomes the (stricter) functional value-match cosine — so name variants still
 // match but distinct names contradict.
 func (s *Service) idDiffParams(threshold, nameThreshold float64) idDiffParams {
-	entities := s.index.Len()
-	docFreq := s.ledger.docFreq
+	observations := s.ledger.observationCount()
+	occurrences := s.ledger.observationFreq
 
 	return idDiffParams{
 		TauSet:          threshold,
@@ -457,7 +500,7 @@ func (s *Service) idDiffParams(threshold, nameThreshold float64) idDiffParams {
 		VetoMass:        s.vetoMass,
 		ObservationMode: true,
 		W: func(c scoredClaim) float64 {
-			return omega(c.Kind, docFreq(c.Hash), entities)
+			return omega(c.Kind, occurrences(c.Hash), observations)
 		},
 	}
 }
@@ -482,6 +525,7 @@ func (s *Service) entityScoredClaims(entity string) []scoredClaim {
 			Value: value,
 			Hash:  hash,
 			Kind:  ontology.KindForConcept(concept),
+			Role:  ontology.RoleForConcept(concept),
 			Valid: parseValidity(entry.ValidFrom, entry.ValidUntil),
 		}
 		if vec, ok := s.resolver.Cache().Get(StatementHash(value)); ok {

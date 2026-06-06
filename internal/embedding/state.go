@@ -13,8 +13,12 @@ import (
 )
 
 // stateMagic versions the combined resolution-state artifact (claim-vector cache
-// + entity index + ledger + observation memo). Bump on layout change.
-const stateMagic = "GMEOWSTATE3"
+// + entity index + ledger + observation memo). Bump on layout change, but keep
+// the previous reader while live DEV states may still carry it.
+const (
+	stateMagic         = "GMEOWSTATE4"
+	previousStateMagic = "GMEOWSTATE3"
+)
 
 // SnapshotState serializes the full resolution state — the claim-vector cache,
 // the HNSW entity index, and the per-entity ledger — into one artifact the
@@ -85,7 +89,8 @@ func (s *Service) LoadState(data []byte) error {
 		return fmt.Errorf("read state magic: %w", err)
 	}
 
-	if string(magic) != stateMagic {
+	magicValue := string(magic)
+	if magicValue != stateMagic && magicValue != previousStateMagic {
 		return errors.New("unrecognized resolution-state artifact magic")
 	}
 
@@ -114,7 +119,7 @@ func (s *Service) LoadState(data []byte) error {
 		return err
 	}
 
-	ledger, err := decodeLedger(ledgerBlob)
+	ledger, err := decodeLedger(ledgerBlob, magicValue == stateMagic)
 	if err != nil {
 		return err
 	}
@@ -322,10 +327,40 @@ func encodeLedger(ledger *entityLedger) ([]byte, error) {
 		}
 	}
 
+	if err := binary.Write(
+		&buf,
+		binary.LittleEndian,
+		uint32(ledger.observations),
+	); err != nil {
+		return nil, err
+	}
+
+	hashes := make([]string, 0, len(ledger.occurrences))
+	for hash := range ledger.occurrences {
+		hashes = append(hashes, hash)
+	}
+	sort.Strings(hashes)
+
+	if err := binary.Write(&buf, binary.LittleEndian, uint32(len(hashes))); err != nil {
+		return nil, err
+	}
+	for _, hash := range hashes {
+		if err := writeLenString(&buf, hash); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(
+			&buf,
+			binary.LittleEndian,
+			uint32(ledger.occurrences[hash]),
+		); err != nil {
+			return nil, err
+		}
+	}
+
 	return buf.Bytes(), nil
 }
 
-func decodeLedger(data []byte) (*entityLedger, error) {
+func decodeLedger(data []byte, hasOccurrenceStats bool) (*entityLedger, error) {
 	reader := bytes.NewReader(data)
 	ledger := newEntityLedger()
 
@@ -375,7 +410,36 @@ func decodeLedger(data []byte) (*entityLedger, error) {
 		ledger.claims[entity] = set
 	}
 
+	if hasOccurrenceStats {
+		var observations uint32
+		if err := binary.Read(reader, binary.LittleEndian, &observations); err != nil {
+			return nil, err
+		}
+		ledger.observations = int(observations)
+
+		var occurrenceCount uint32
+		if err := binary.Read(reader, binary.LittleEndian, &occurrenceCount); err != nil {
+			return nil, err
+		}
+		for range occurrenceCount {
+			hash, err := readLenString(reader)
+			if err != nil {
+				return nil, err
+			}
+
+			var count uint32
+			if err := binary.Read(reader, binary.LittleEndian, &count); err != nil {
+				return nil, err
+			}
+
+			ledger.occurrences[hash] = int(count)
+		}
+	}
+
 	ledger.rebuild() // df + identifier index are not serialized; recompute from the claims
+	if !hasOccurrenceStats {
+		ledger.seedObservationStatsFromEntities()
+	}
 
 	return ledger, nil
 }
