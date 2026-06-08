@@ -48,7 +48,7 @@ define warn
 	@printf '  $(YELLOW)!$(RESET) %s\n' "$(1)"
 endef
 
-.PHONY: help advice install update lock doctor check quick-check test compile type-check build clean go-format go-vet go-test go-build go-check genproto python-intel-test python-intel-build release-check release-audit status submodules ethos-install restart install-bin deploy
+.PHONY: help advice install update lock doctor check quick-check test compile type-check build clean go-format go-vet go-test go-build go-check genproto python-intel-test python-intel-build release-check release-audit status submodules ethos-install restart install-bin deploy embedding-up embedding-down
 
 help: ## Show this help screen.
 	@printf '\n$(BOLD)Gmeow$(RESET) $(DIM)local Gmail MCP/REST intelligence server$(RESET)\n\n'
@@ -166,12 +166,19 @@ genproto: ## Regenerate Go protobuf and gRPC stubs from proto/gmeow/v1 (needs bi
 		--go_out=. --go_opt=module=blackcat.ca/gmeow \
 		--go-grpc_out=. --go-grpc_opt=module=blackcat.ca/gmeow \
 		proto/gmeow/v1/common.proto \
+		proto/gmeow/v1/embedding.proto \
 		proto/gmeow/v1/filestore.proto \
 		proto/gmeow/v1/query.proto \
 		proto/gmeow/v1/scheduler.proto \
 		proto/gmeow/v1/source.proto
 
 go-check: go-format go-vet go-test go-build ## Run the Go Phase 00 quality gate.
+
+embedding-up: ## Start the gmeow-controlled Ollama embedding backend (Docker) and pull the model.
+	docker compose -f deploy/embedding/docker-compose.yml up -d
+
+embedding-down: ## Stop the gmeow-controlled Ollama embedding backend (Docker).
+	docker compose -f deploy/embedding/docker-compose.yml down
 
 python-intel-test: ## Run gmeow-intel tests.
 	$(call section,Running gmeow-intel tests)

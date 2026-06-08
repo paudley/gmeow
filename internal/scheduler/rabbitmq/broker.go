@@ -459,7 +459,7 @@ func (broker *Broker) Publish(ctx context.Context, job contracts.AnalyzerJob) er
 			Priority:     clampPriority(job.Priority),
 			Headers: amqp.Table{
 				"idempotency_key": job.IdempotencyKey,
-				"attempt":         int32(job.Attempt),
+				"attempt":         contracts.ClampInt32(job.Attempt),
 			},
 			Body: body,
 		},
@@ -1279,7 +1279,7 @@ func (broker *Broker) retryPublishing(
 
 	headers := amqp.Table{
 		"idempotency_key": job.IdempotencyKey,
-		"attempt":         int32(job.Attempt),
+		"attempt":         contracts.ClampInt32(job.Attempt),
 	}
 	if backoff > 0 {
 		headers["retry_backoff_ms"] = int64(backoff / time.Millisecond)

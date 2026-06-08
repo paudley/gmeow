@@ -6,7 +6,6 @@ package sourcegrpc_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -49,10 +48,7 @@ func TestSourceGRPCSearchAndHydrateWritesThroughFilestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	endpoint := rpc.Endpoint{
-		Network: "unix",
-		Address: filepath.Join(t.TempDir(), "source.sock"),
-	}
+	endpoint := testsupport.UnixEndpoint(t, "source.sock")
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- rpc.Serve(ctx, endpoint, func(grpcServer *grpc.Server) {

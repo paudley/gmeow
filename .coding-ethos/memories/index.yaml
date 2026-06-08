@@ -1,1 +1,51 @@
-records: []
+records:
+    - id: c77664a9ea9fb786
+      provider: claude
+      source_path: ~/.claude/projects/-home-paudley-Active-gmeow/memory/MEMORY.md
+      imported_at_utc: "2026-06-06T00:02:56Z"
+      sha256: 9755e7aace3b05ba4b8e11da66c40046558b18f5b8be0eb33cf4ba0d54ed0c92
+    - id: 00cc36a80a4e6fd3
+      provider: claude
+      source_path: ~/.claude/projects/-home-paudley-Active-gmeow/memory/contact-corpus-location.md
+      imported_at_utc: "2026-06-06T00:02:56Z"
+      sha256: c32af7f6ed19d2741c9534c081602a9cc3108d01dae83df924fab6d5cc45ef0f
+    - id: 42f8d4d6c0caafc6
+      provider: claude
+      source_path: ~/.claude/projects/-home-paudley-Active-gmeow/memory/contact-identity-theory.md
+      imported_at_utc: "2026-06-06T00:02:56Z"
+      sha256: 1354bd1df836f3de7be4d0c26874cd03ea720c1319915900689e7f17d40c7de0
+    - id: cead1fe472dba6f0
+      provider: claude
+      source_path: ~/.claude/projects/-home-paudley-Active-gmeow/memory/contact-ingestion-redesign.md
+      imported_at_utc: "2026-06-06T00:02:56Z"
+      sha256: 8bc2f0f53eb82f14ef16842ee16c3274c10cd2770246b03900614b52ba37b3c6
+    - id: 4b0d252e24cc5805
+      provider: claude
+      source_path: ~/.claude/projects/-home-paudley-Active-gmeow/memory/filestore-only-import-invariant.md
+      imported_at_utc: "2026-06-06T00:02:56Z"
+      sha256: a449814d6d7e3301f49806192efdaf28c6118405003f57d6aa61f32274225013
+    - id: 55b66720ffc547d4
+      provider: claude
+      source_path: ~/.claude/projects/-home-paudley-Active-gmeow/memory/im-pseudo-email-hack.md
+      imported_at_utc: "2026-06-06T00:02:56Z"
+      sha256: 35e5a44671309423145b6ea1de98a9ce30d08255fd9c436400dfe0aa1bbf1744
+    - id: debdf1d09963c677
+      provider: claude
+      source_path: ~/.claude/projects/-home-paudley-Active-gmeow/memory/ingest-time-entity-resolution.md
+      imported_at_utc: "2026-06-06T00:02:56Z"
+      sha256: f59cfccb70a270a100ca14da2dbaf987c0a85a58811fea720c09e4e5591da544
+    - id: 816a983ec40d1fb1
+      provider: claude
+      source_path: ~/.claude/projects/-home-paudley-Active-gmeow/memory/normalize-before-compare.md
+      imported_at_utc: "2026-06-06T00:02:56Z"
+      sha256: dc12310465cfb1de73507d93cbafc77dbb1dd4aa052b5738788f1094af6b71db
+    - id: ff7cd2d90a03fbc8
+      provider: claude
+      source_path: ~/.claude/projects/-home-paudley-Active-gmeow/memory/published-gmeow-ontology.md
+      imported_at_utc: "2026-06-06T00:02:56Z"
+      sha256: 118172be57d54622a56b3831f772ccdde94f1a5a41b773d9eb833d2c8d383b73
+    - id: 4a06a96d98947498
+      provider: claude
+      source_path: ~/.claude/projects/-home-paudley-Active-gmeow/memory/repair-not-ingestion.md
+      imported_at_utc: "2026-06-06T00:02:56Z"
+      sha256: 6ba093ab2ea2883bd2ba23829d9f3242480785a71ef24536ba46250b41a58bd0

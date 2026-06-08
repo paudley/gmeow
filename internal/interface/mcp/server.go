@@ -6,6 +6,7 @@ package mcpiface
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -222,7 +223,12 @@ func New(services *appsvc.Services) (*Server, error) {
 }
 
 func (server *Server) Start(ctx context.Context) error {
-	return server.server.Run(ctx, &mcp.StdioTransport{})
+	err := server.server.Run(ctx, &mcp.StdioTransport{})
+	if err != nil {
+		return fmt.Errorf("run mcp server: %w", err)
+	}
+
+	return nil
 }
 
 func NewHTTP(

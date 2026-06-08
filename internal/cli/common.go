@@ -30,6 +30,8 @@ func NewServiceCommand(name, summary string, out io.Writer) *cobra.Command {
 	root.AddCommand(newFilestoreServeCommand(out, &configPath, "filestore-serve"))
 	root.AddCommand(newSchedulerServeCommand(out, &configPath, "scheduler-serve"))
 	root.AddCommand(newQueryServeCommand(out, &configPath, "query-serve"))
+	root.AddCommand(newEmbeddingServeCommand(out, &configPath, "embedding-serve"))
+	root.AddCommand(newEmbeddingRepairCommand(out, &configPath, "embedding-repair"))
 	root.AddCommand(newSourceServeCommand(out, &configPath, "source-serve"))
 	root.AddCommand(newMCPServeCommand(out, &configPath))
 	root.AddCommand(newMCPHTTPServeCommand(out, &configPath))
@@ -60,6 +62,7 @@ func NewAdminCommand(out io.Writer, in io.Reader) *cobra.Command {
 	root.AddCommand(newQueryCommand(out, &configPath))
 	root.AddCommand(newSchedulerCommand(out, &configPath))
 	root.AddCommand(newSourceCommand(out, &configPath))
+	root.AddCommand(newContactCommand(out, &configPath))
 
 	return root
 }

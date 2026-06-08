@@ -786,6 +786,7 @@ func dial(ctx context.Context, endpoint Endpoint) (*grpc.ClientConn, error) {
 		return nil, fmt.Errorf("unsupported rpc network %q", endpoint.Network)
 	}
 
+	//nolint:staticcheck // SA1019: grpc.DialContext retained pending a tested migration to grpc.NewClient (lazy-dial semantics differ)
 	connection, err := grpc.DialContext(ctx, target, options...)
 	if err != nil {
 		return nil, fmt.Errorf("dial grpc %s %s: %w", endpoint.Network, endpoint.Address, err)

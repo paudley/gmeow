@@ -1,0 +1,78 @@
+# gmeow-controlled embedding backend: a pinned Ollama serving nomic-embed-text.
+#
+# This is the Docker alternative to `gmeow embedding-serve --manage-model`. It
+# gives a reproducible, auto-restarting embedding endpoint that gmeow owns,
+# instead of requiring an operator-run model server (the thing that kept
+# crashing). gmeow's EMBEDDING service points its HTTP embedder at it.
+#
+#   make embedding-up      # start + pull the model
+#   make embedding-down    # stop
+#
+# Then in gmeow.toml:
+#   [analysis.embeddings]
+#   endpoint = "http://127.0.0.1:11434/v1/embeddings"
+#   model    = "nomic-embed-text"
+#
+# GPU: this file is wired for AMD ROCm (the dev box is a Strix Halo / Radeon
+# 8060S, gfx1151). It uses the `ollama/ollama:rocm` image and passes the kernel
+# fusion driver (/dev/kfd) + render node (/dev/dri) into the container, joining
+# the host's render/video groups. HSA_OVERRIDE_GFX_VERSION makes ROCm treat the
+# very-new gfx1151 as the supported gfx1100 ISA (remove it if native detection
+# works). For NVIDIA instead, use `ollama/ollama:latest` + the nvidia runtime;
+# for CPU-only, use `:latest` and drop the devices/group_add/HSA block.
+
+services:
+  embedding:
+    # ROCm build (AMD GPU). PIN to a specific tag (e.g. ollama/ollama:0.6.8-rocm)
+    # for reproducibility once a known-good version is chosen.
+    image: ollama/ollama:rocm
+    container_name: gmeow-embedding
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - gmeow-ollama-models:/root/.ollama
+    # AMD ROCm GPU passthrough (Strix Halo gfx1151):
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    # Numeric host GIDs (render, video) — the container image has no such named
+    # groups, so names fail; GIDs grant /dev/kfd + /dev/dri access. Match these to
+    # `getent group render video` on the host (here: render=987, video=983).
+    group_add:
+      - "987"
+      - "983"
+    security_opt:
+      - seccomp:unconfined
+    ipc: host
+    environment:
+      # gfx1151 is newer than ROCm's shipped gfx list; masquerade as gfx1100 so
+      # the runtime loads. Drop this if `ollama` logs show the GPU detected natively.
+      HSA_OVERRIDE_GFX_VERSION: "11.0.0"
+      # Strix Halo is an APU: Ollama drops integrated GPUs by default. Enable it —
+      # the APU's unified memory gives it the full system-RAM pool as "VRAM".
+      OLLAMA_IGPU_ENABLE: "1"
+      # Process several embedding requests concurrently so a bulk pre-warm pass can
+      # saturate the iGPU instead of round-tripping one request at a time.
+      OLLAMA_NUM_PARALLEL: "4"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # One-shot: wait for the server to be healthy, then pull the embedding model.
+  model-init:
+    image: ollama/ollama:rocm
+    container_name: gmeow-embedding-init
+    depends_on:
+      embedding:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "embedding:11434"
+    entrypoint: ["/bin/sh", "-c", "ollama pull ${GMEOW_EMBED_MODEL:-nomic-embed-text}"]
+    restart: "no"
+
+volumes:
+  gmeow-ollama-models:

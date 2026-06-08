@@ -646,7 +646,7 @@ func validateCLIDigest(digest contracts.ObjectDigest) error {
 		return fmt.Errorf("invalid object digest %q", digest)
 	}
 	for _, char := range value {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return fmt.Errorf("invalid object digest %q", digest)
 		}
 	}

@@ -8,11 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 
 	"blackcat.ca/gmeow/internal/facets/contactentity"
 )
+
+const contactEntityPrefix = "urn:gmeow:entity:"
+
+// ulidLength is the fixed character count of a Crockford base32 ULID.
+const ulidLength = 26
 
 func (index *Index) resolveContactRef(
 	ctx context.Context,
@@ -23,12 +29,15 @@ func (index *Index) resolveContactRef(
 		return "", nil
 	}
 
-	found, err := index.contactExists(ctx, value)
-	if err != nil {
-		return "", err
-	}
-	if found {
-		return value, nil
+	for _, candidate := range contactRefCandidates(value) {
+		found, err := index.contactExists(ctx, candidate)
+		if err != nil {
+			return "", err
+		}
+
+		if found {
+			return candidate, nil
+		}
 	}
 
 	alias := contactentity.NormalizeAlias(value)
@@ -37,7 +46,8 @@ func (index *Index) resolveContactRef(
 	}
 
 	var contactID string
-	err = index.pool.QueryRow(
+
+	err := index.pool.QueryRow(
 		ctx,
 		`SELECT contact_id
 		   FROM active_contact_aliases
@@ -54,6 +64,36 @@ func (index *Index) resolveContactRef(
 	}
 
 	return contactID, nil
+}
+
+func contactRefCandidates(value string) []string {
+	if value == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(value, contactEntityPrefix) {
+		return []string{value}
+	}
+
+	if looksLikeULID(value) {
+		return []string{value, contactEntityPrefix + value}
+	}
+
+	return []string{value}
+}
+
+func looksLikeULID(value string) bool {
+	if len(value) != ulidLength {
+		return false
+	}
+
+	for _, r := range value {
+		if !unicode.IsDigit(r) && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (index *Index) contactExists(ctx context.Context, contactID string) (bool, error) {
@@ -83,7 +123,16 @@ func (index *Index) resolveContactRefs(
 		return nil, nil
 	}
 
-	existing, err := index.existingContactRefs(ctx, inputs)
+	candidatesByInput := map[string][]string{}
+	candidates := []string{}
+
+	for _, value := range inputs {
+		inputCandidates := contactRefCandidates(value)
+		candidatesByInput[value] = inputCandidates
+		candidates = append(candidates, inputCandidates...)
+	}
+
+	existing, err := index.existingContactRefs(ctx, candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +140,7 @@ func (index *Index) resolveContactRefs(
 	aliases := make([]string, 0, len(inputs))
 	aliasByInput := map[string]string{}
 	for _, value := range inputs {
-		if existing[value] {
+		if firstExistingContactRef(candidatesByInput[value], existing) != "" {
 			continue
 		}
 
@@ -111,8 +160,11 @@ func (index *Index) resolveContactRefs(
 
 	resolved := make([]string, 0, len(inputs))
 	for _, value := range inputs {
-		if existing[value] {
-			resolved = append(resolved, value)
+		if candidate := firstExistingContactRef(
+			candidatesByInput[value],
+			existing,
+		); candidate != "" {
+			resolved = append(resolved, candidate)
 			continue
 		}
 
@@ -126,6 +178,16 @@ func (index *Index) resolveContactRefs(
 	}
 
 	return uniqueNonEmptyStrings(resolved), nil
+}
+
+func firstExistingContactRef(candidates []string, existing map[string]bool) string {
+	for _, candidate := range candidates {
+		if existing[candidate] {
+			return candidate
+		}
+	}
+
+	return ""
 }
 
 func (index *Index) existingContactRefs(

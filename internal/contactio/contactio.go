@@ -5,6 +5,7 @@ package contactio
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,15 +15,22 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf16"
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/facets/contactentity"
 )
 
 const (
-	FormatFOAF   = "foaf"
-	FormatNative = "native"
-	FormatVCard  = "vcard"
+	FormatAppleAddressBook      = "apple-addressbook"
+	FormatAppleAddressBookGroup = "apple-addressbook-group"
+	FormatBBDB                  = "bbdb"
+	FormatCSV                   = "csv"
+	FormatRDF                   = "rdf"
+	FormatGEDCOM                = "gedcom"
+	FormatNative                = "native"
+	FormatVCard                 = "vcard"
 
 	ImportSourceKind        = "contact_import"
 	contactImportSourceKind = ImportSourceKind
@@ -30,13 +38,34 @@ const (
 )
 
 const (
-	bcidPrefix   = "https://patrickaudley.com/lod#"
+	gmeowPrefix  = "https://blackcatinformatics.ca/gmeow/"
 	foafPrefix   = "http://xmlns.com/foaf/0.1/"
 	rdfType      = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 	schemaPrefix = "https://schema.org/"
 	timePrefix   = "http://www.w3.org/2006/time#"
 	vcardPrefix  = "http://www.w3.org/2006/vcard/ns#"
 	xsdDate      = "http://www.w3.org/2001/XMLSchema#date"
+	xsdDateTime  = "http://www.w3.org/2001/XMLSchema#dateTime"
+	xsdInteger   = "http://www.w3.org/2001/XMLSchema#integer"
+	xsdDecimal   = "http://www.w3.org/2001/XMLSchema#decimal"
+)
+
+const relPrefix = "http://purl.org/vocab/relationship/"
+
+// ErrSkipNonContactDomain marks input that parsed cleanly but is deliberately
+// out of the contact domain (e.g. an Apple smart group / saved search). Callers
+// may treat it as a skip rather than an ingestion failure.
+var ErrSkipNonContactDomain = errors.New("record is not contact-domain")
+
+const (
+	MinImportLevel = 0
+	MaxImportLevel = 10
+
+	GmeowImportanceLevel = gmeowPrefix + "importanceLevel"
+	GmeowHasAgreement    = gmeowPrefix + "hasAgreement"
+	GmeowHasMet          = gmeowPrefix + "hasMet"
+	GmeowHasUsed         = gmeowPrefix + "hasUsed"
+	GmeowHasWorkedWith   = gmeowPrefix + "hasWorkedWith"
 )
 
 type ImportObject struct {
@@ -47,19 +76,57 @@ type ImportObject struct {
 	SourceName  string
 	ExternalID  string
 	ExternalVer string
+	ImportLevel int
 	SourceHint  string
 	Facets      []contracts.Facet
 }
 
 type ImportResult struct {
-	SourceKind   string   `json:"source_kind"`
-	SourceName   string   `json:"source_name"`
-	ExternalID   string   `json:"external_id"`
-	Format       string   `json:"format"`
-	ObjectDigest string   `json:"object_digest,omitempty"`
-	Error        string   `json:"error,omitempty"`
-	Contacts     []string `json:"contacts"`
-	Created      bool     `json:"created,omitempty"`
+	SourceKind   string            `json:"source_kind"`
+	SourceName   string            `json:"source_name"`
+	ExternalID   string            `json:"external_id"`
+	Format       string            `json:"format"`
+	ImportLevel  int               `json:"import_level"`
+	ObjectDigest string            `json:"object_digest,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	Contacts     []string          `json:"contacts"`
+	Rejected     []RecordRejection `json:"rejected,omitempty"`
+	Created      bool              `json:"created,omitempty"`
+}
+
+// ContactDelta is one logical contact rendered as a standalone RDF/Turtle
+// object, keyed by its own identity. Phase 3 stores the contact — not the
+// container file — so each delta is ingested as its own FILESTORE object and
+// repeated snapshots of the same contact dedup/version by identity.
+type ContactDelta struct {
+	Identity  string
+	Content   string
+	MediaType string
+	Facets    []contracts.Facet
+}
+
+// renderedContact is the per-contact body (no @prefix header) produced by a
+// format parser, plus the logical identity it belongs to. The bundle and the
+// per-contact deltas are both assembled from these.
+type renderedContact struct {
+	identity string
+	body     string
+}
+
+// RecordRejection records a single logical record that was rejected during
+// import without failing the rest of the file — the per-record half of the
+// import-run manifest. A record is rejected when one of its source properties
+// has no mapping or the record is structurally damaged; nothing is written for
+// it, but the reason is preserved for audit.
+type RecordRejection struct {
+	Format  string `json:"format"`
+	Reason  string `json:"reason"`
+	Subject string `json:"subject,omitempty"`
+	Index   int    `json:"index"`
+}
+
+type ImportOptions struct {
+	ImportLevel int
 }
 
 type NativeBundle struct {
@@ -83,8 +150,108 @@ type NativeContact struct {
 }
 
 type vcardContact struct {
+	lines   []vcardLine
 	values  map[string][]string
 	subject string
+}
+
+type vcardLine struct {
+	name   string
+	params map[string][]string
+	value  string
+}
+
+type bbdbContact struct {
+	addresses   []bbdbAddress
+	aliases     []string
+	company     string
+	displayName string
+	emails      []string
+	phones      []bbdbPhone
+	userFields  []bbdbUserField
+	subject     string
+}
+
+type bbdbAddress struct {
+	Label    string
+	Streets  []string
+	City     string
+	State    string
+	Postcode string
+	Country  string
+}
+
+type bbdbPhone struct {
+	Label      string
+	Number     string
+	Area       string
+	Exchange   string
+	Subscriber string
+	Extension  string
+}
+
+type bbdbUserField struct {
+	name  string
+	value string
+}
+
+type providerLifecycle struct {
+	ValidUntil string
+	Confidence string
+	SourceURL  string
+	Caveat     string
+}
+
+type bbdbValue struct {
+	symbol string
+	text   string
+	items  []bbdbValue
+	quoted bool
+}
+
+type bbdbParser struct {
+	input string
+	index int
+}
+
+type csvRow struct {
+	header []string
+	values map[string]string
+}
+
+type appleScalarField struct {
+	Predicate string
+	Kind      string
+}
+
+type appleMultiValueField struct {
+	LinkPredicate      string
+	ValuePredicate     string
+	ValueKind          string
+	ComponentPredicate map[string]string
+}
+
+type gedcomLine struct {
+	level int
+	xref  string
+	tag   string
+	value string
+}
+
+type gedcomIndividual struct {
+	xref  string
+	facts map[string][]gedcomFact
+}
+
+type gedcomFamily struct {
+	xref  string
+	facts map[string][]gedcomFact
+}
+
+type gedcomFact struct {
+	tag      string
+	value    string
+	children []gedcomFact
 }
 
 func BuildImportObject(
@@ -94,17 +261,38 @@ func BuildImportObject(
 	content []byte,
 	observedAt time.Time,
 ) (ImportObject, ImportResult, error) {
+	return BuildImportObjectWithOptions(
+		format,
+		sourceName,
+		path,
+		content,
+		observedAt,
+		ImportOptions{ImportLevel: MinImportLevel},
+	)
+}
+
+func BuildImportObjectWithOptions(
+	format string,
+	sourceName string,
+	path string,
+	content []byte,
+	observedAt time.Time,
+	options ImportOptions,
+) (ImportObject, ImportResult, error) {
 	format = NormalizeFormat(format)
 
 	if sourceName = strings.TrimSpace(sourceName); sourceName == "" {
 		return ImportObject{}, ImportResult{}, errors.New("source name is required")
+	}
+	if err := ValidateImportLevel(options.ImportLevel); err != nil {
+		return ImportObject{}, ImportResult{}, err
 	}
 
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	}
 
-	rendered, contacts, err := importContent(format, content)
+	records, contacts, rejections, err := importContent(format, content)
 	if err != nil {
 		return ImportObject{}, ImportResult{}, err
 	}
@@ -115,33 +303,95 @@ func BuildImportObject(
 	}
 
 	externalVersion := contentHash(content)
-	facets := importFacets(format, contacts)
+	facets := importFacets(format, contacts, options.ImportLevel)
 
 	object := ImportObject{
 		ObservedAt:  observedAt.UTC(),
-		Content:     rendered,
+		Content:     contactBundleContent(records, contacts, options.ImportLevel),
 		MediaType:   MediaTypeTurtle,
 		SourceKind:  contactImportSourceKind,
 		SourceName:  sourceName,
 		ExternalID:  externalID,
 		ExternalVer: externalVersion,
+		ImportLevel: options.ImportLevel,
 		SourceHint:  externalID,
 		Facets:      facets,
 	}
 	result := ImportResult{
-		SourceKind: object.SourceKind,
-		SourceName: object.SourceName,
-		ExternalID: object.ExternalID,
-		Format:     format,
-		Contacts:   contacts,
+		SourceKind:  object.SourceKind,
+		SourceName:  object.SourceName,
+		ExternalID:  object.ExternalID,
+		Format:      format,
+		ImportLevel: options.ImportLevel,
+		Contacts:    contacts,
+		Rejected:    rejections,
 	}
 
 	return object, result, nil
 }
 
+// BuildContactDeltas parses one input into per-logical-contact delta objects —
+// the Phase 3 storage unit. Each delta is keyed by its contact identity so the
+// CLI can ingest it as its own FILESTORE object (deduped/versioned by identity,
+// not by container file). It shares parsing with BuildImportObjectWithOptions.
+func BuildContactDeltas(
+	format string,
+	sourceName string,
+	content []byte,
+	options ImportOptions,
+) ([]ContactDelta, ImportResult, error) {
+	format = NormalizeFormat(format)
+	if sourceName = strings.TrimSpace(sourceName); sourceName == "" {
+		return nil, ImportResult{}, errors.New("source name is required")
+	}
+	if err := ValidateImportLevel(options.ImportLevel); err != nil {
+		return nil, ImportResult{}, err
+	}
+
+	records, contacts, rejections, err := importContent(format, content)
+	if err != nil {
+		return nil, ImportResult{}, err
+	}
+
+	deltas := make([]ContactDelta, 0, len(records))
+	for _, record := range records {
+		deltas = append(deltas, ContactDelta{
+			Identity:  record.identity,
+			Content:   contactDeltaContent(record.identity, record.body, options.ImportLevel),
+			MediaType: MediaTypeTurtle,
+			// Single-contact facets so the QUERY projection recognizes the object
+			// and knows its root subject — without these it extracts no facts.
+			Facets: importFacets(format, []string{record.identity}, options.ImportLevel),
+		})
+	}
+
+	result := ImportResult{
+		SourceKind:  contactImportSourceKind,
+		SourceName:  sourceName,
+		Format:      format,
+		ImportLevel: options.ImportLevel,
+		Contacts:    contacts,
+		Rejected:    rejections,
+	}
+
+	return deltas, result, nil
+}
+
+func ValidateImportLevel(level int) error {
+	if level < MinImportLevel || level > MaxImportLevel {
+		return fmt.Errorf(
+			"contact import level must be between %d and %d",
+			MinImportLevel,
+			MaxImportLevel,
+		)
+	}
+
+	return nil
+}
+
 func Export(format string, contacts []contracts.ContactAggregate) (string, error) {
 	switch NormalizeFormat(format) {
-	case FormatFOAF:
+	case FormatRDF:
 		return ExportFOAF(contacts), nil
 	case FormatNative:
 		return ExportNative(contacts)
@@ -215,18 +465,34 @@ func ExportFOAF(contacts []contracts.ContactAggregate) string {
 			continue
 		}
 
-		builder.WriteString("\n")
-		writeTriple(&builder, subject, rdfType, iri(foafPrefix+"Person"))
-
+		claims := []Claim{
+			{Subject: subject, Predicate: rdfType, Object: termIRI(foafPrefix + "Person")},
+		}
 		for _, fact := range exportFacts(contact.Facts) {
 			predicate := predicateForFact(fact)
 			if predicate == "" {
 				continue
 			}
 
-			writeTriple(&builder, subject, predicate, objectForFact(fact))
-			writeTemporalAnnotations(&builder, subject, predicate, objectForFact(fact), fact)
+			claim := Claim{
+				Subject:   subject,
+				Predicate: predicate,
+				Object:    termRaw(objectForFact(fact)),
+			}
+			if fact.ValidFrom != "" {
+				claim = claim.withAnnotation(
+					timePrefix+"hasBeginning",
+					termTypedDate(fact.ValidFrom),
+				)
+			}
+			if fact.ValidUntil != "" {
+				claim = claim.withAnnotation(timePrefix+"hasEnd", termTypedDate(fact.ValidUntil))
+			}
+			claims = append(claims, claim)
 		}
+
+		builder.WriteString("\n")
+		builder.WriteString(BuildRDFStarDelta(claims))
 	}
 
 	return builder.String()
@@ -261,10 +527,46 @@ func ExportNative(contacts []contracts.ContactAggregate) (string, error) {
 	return string(encoded) + "\n", nil
 }
 
+// FormatForPath infers the contact import format from a file extension, for
+// importing a mixed corpus directory where each file may be a different format.
+// Returns "" for extensions that are not contact-domain inputs (callers skip).
+func FormatForPath(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".vcf", ".vcard":
+		return FormatVCard
+	case ".abcdp":
+		return FormatAppleAddressBook
+	case ".abcdg":
+		return FormatAppleAddressBookGroup
+	case ".csv":
+		return FormatCSV
+	case ".ttl", ".turtle", ".rdf":
+		return FormatRDF
+	case ".ged", ".gedcom":
+		return FormatGEDCOM
+	case ".bbdb":
+		return FormatBBDB
+	case ".json":
+		return FormatNative
+	default:
+		return ""
+	}
+}
+
 func NormalizeFormat(format string) string {
 	switch strings.ToLower(strings.TrimSpace(format)) {
-	case "foaf", "rdf", "ttl", "turtle", "text/turtle":
-		return FormatFOAF
+	case "abcdp", "abperson", "apple", "apple-addressbook", "addressbook":
+		return FormatAppleAddressBook
+	case "abcdg", "abgroup", "apple-group", "apple-addressbook-group":
+		return FormatAppleAddressBookGroup
+	case "bbdb":
+		return FormatBBDB
+	case "csv", "text/csv":
+		return FormatCSV
+	case "foaf", "rdf", "rdf/ttl", "ttl", "turtle", "text/turtle":
+		return FormatRDF
+	case "ged", "gedcom", "text/gedcom":
+		return FormatGEDCOM
 	case "json", "native", "gmeow":
 		return FormatNative
 	case "vcf", "vcard", "text/vcard", "text/x-vcard":
@@ -274,95 +576,252 @@ func NormalizeFormat(format string) string {
 	}
 }
 
-func importContent(format string, content []byte) (string, []string, error) {
+// importContent parses one file into per-contact records (each a logical contact
+// with its own RDF body), the full list of contact subjects, and any per-record
+// rejections. Each record becomes its own FILESTORE object (Phase 3); the
+// contacts list drives the ImportResult.
+func importContent(
+	format string,
+	content []byte,
+) ([]renderedContact, []string, []RecordRejection, error) {
 	switch format {
-	case FormatFOAF:
-		text := strings.TrimSpace(string(content))
+	case FormatAppleAddressBook:
+		records, rejections, err := appleAddressBookPersonToRDF(content)
+		return records, recordIdentities(records), rejections, err
+	case FormatAppleAddressBookGroup:
+		records, rejections, err := appleAddressBookGroupToRDF(content)
+		return records, recordIdentities(records), rejections, err
+	case FormatBBDB:
+		records, rejections, err := bbdbToRDF(importText(content))
+		return records, recordIdentities(records), rejections, err
+	case FormatCSV:
+		records, rejections, err := csvToRDF(importDecodedText(content))
+		return records, recordIdentities(records), rejections, err
+	case FormatRDF:
+		text := strings.TrimSpace(importText(content))
 		if text == "" {
-			return "", nil, errors.New("FOAF/RDF import is empty")
+			return nil, nil, nil, errors.New("RDF/Turtle import is empty")
 		}
 
-		return text + "\n", firstRDFContactSubjects(text), nil
+		contacts := firstRDFContactSubjects(text)
+		if len(contacts) == 0 {
+			return nil, nil, nil, errors.New("RDF/Turtle import has no contacts")
+		}
+
+		// A rooted graph is one contact; an un-rooted collection lists many but
+		// shares one graph body (the whole graph is preserved — semantic superset).
+		record := renderedContact{identity: contacts[0], body: text}
+		return []renderedContact{record}, contacts, nil, nil
+	case FormatGEDCOM:
+		records, rejections, err := gedcomToRDF(importDecodedText(content))
+		return records, recordIdentities(records), rejections, err
 	case FormatNative:
-		return nativeToRDF(content)
+		records, rejections, err := nativeToRDF(content)
+		return records, recordIdentities(records), rejections, err
 	case FormatVCard:
-		return vcardToRDF(string(content))
+		// Use the UTF-16-aware decoder (as CSV/GEDCOM do): many real vCard
+		// exports are UTF-16, which importText would mangle into NUL-separated
+		// property/parameter names.
+		records, rejections, err := vcardToRDF(importDecodedText(content))
+		return records, recordIdentities(records), rejections, err
 	default:
-		return "", nil, fmt.Errorf("unsupported contact import format %q", format)
+		return nil, nil, nil, fmt.Errorf("unsupported contact import format %q", format)
 	}
 }
 
-func importFacets(format string, contacts []string) []contracts.Facet {
+func recordIdentities(records []renderedContact) []string {
+	identities := make([]string, 0, len(records))
+	for _, record := range records {
+		identities = append(identities, record.identity)
+	}
+
+	return uniqueStrings(identities)
+}
+
+func importText(content []byte) string {
+	return strings.ToValidUTF8(string(content), "?")
+}
+
+func importDecodedText(content []byte) string {
+	if len(content) >= 2 {
+		switch {
+		case content[0] == 0xff && content[1] == 0xfe:
+			return decodeUTF16(content[2:], binary.LittleEndian)
+		case content[0] == 0xfe && content[1] == 0xff:
+			return decodeUTF16(content[2:], binary.BigEndian)
+		}
+	}
+	if looksLikeUTF16(content, binary.LittleEndian) {
+		return decodeUTF16(content, binary.LittleEndian)
+	}
+	if looksLikeUTF16(content, binary.BigEndian) {
+		return decodeUTF16(content, binary.BigEndian)
+	}
+
+	return importText(content)
+}
+
+func looksLikeUTF16(content []byte, order binary.ByteOrder) bool {
+	if len(content) < 32 {
+		return false
+	}
+	zeroes := 0
+	pairs := 0
+	for index := 0; index+1 < len(content) && pairs < 512; index += 2 {
+		var ascii, zero byte
+		if order == binary.LittleEndian {
+			ascii, zero = content[index], content[index+1]
+		} else {
+			zero, ascii = content[index], content[index+1]
+		}
+		if zero == 0 && ascii >= 9 && ascii <= 126 {
+			zeroes++
+		}
+		pairs++
+	}
+
+	return zeroes > pairs/2
+}
+
+func decodeUTF16(content []byte, order binary.ByteOrder) string {
+	units := make([]uint16, 0, len(content)/2)
+	for len(content) >= 2 {
+		units = append(units, order.Uint16(content[:2]))
+		content = content[2:]
+	}
+
+	return strings.ToValidUTF8(string(utf16.Decode(units)), "?")
+}
+
+func importanceClaim(identity string, level int) Claim {
+	return Claim{
+		Subject:   identity,
+		Predicate: GmeowImportanceLevel,
+		Object:    termTypedInteger(level),
+	}
+}
+
+func writeRecordBody(builder *strings.Builder, body string) {
+	builder.WriteString("\n")
+	builder.WriteString(body)
+	if !strings.HasSuffix(body, "\n") {
+		builder.WriteString("\n")
+	}
+}
+
+// contactBundleContent assembles the whole-file bundle: prefixes once, every
+// contact body, and a source import-level claim per contact. (Used for export
+// round-trips and back-compat; Phase 3 ingest uses per-contact deltas.)
+func contactBundleContent(
+	records []renderedContact,
+	contacts []string,
+	level int,
+) string {
+	var builder strings.Builder
+	writePrefixes(&builder)
+	for _, record := range records {
+		writeRecordBody(&builder, record.body)
+	}
+	claims := make([]Claim, 0, len(contacts))
+	for _, contact := range uniqueStrings(contacts) {
+		claims = append(claims, importanceClaim(contact, level))
+	}
+	builder.WriteString(BuildRDFStarDelta(claims))
+
+	return builder.String()
+}
+
+// contactDeltaContent renders one logical contact as a standalone Turtle object:
+// prefixes, the contact body, and its source import-level claim.
+func contactDeltaContent(identity, body string, level int) string {
+	var builder strings.Builder
+	writePrefixes(&builder)
+	writeRecordBody(&builder, body)
+	builder.WriteString(BuildRDFStarDelta([]Claim{importanceClaim(identity, level)}))
+
+	return builder.String()
+}
+
+func importFacets(format string, contacts []string, importLevel int) []contracts.Facet {
 	input := contactentity.MetadataInput{
-		Format:     MediaTypeTurtle,
-		SourceKind: contactImportSourceKind,
+		Format:         MediaTypeTurtle,
+		SourceKind:     contactImportSourceKind,
+		ImportLevel:    importLevel,
+		HasImportLevel: true,
 	}
 	if len(contacts) == 1 {
 		input.RootSubject = contacts[0]
 	}
 
+	// One facet per object: rdf_source_bundle is load-bearing (it triggers RDF
+	// statement projection in query/postgres/rdf.go and carries root_subject for
+	// contact-root detection). The former contact_entity facet was redundant (only
+	// a root-detection alternative; the ContactSourceRole content-role already marks
+	// the object a contact), and the version_set facet was dead (no consumer). Cut to
+	// reduce per-object metadata (the 4:1 metadata:content ratio from the live test).
 	return []contracts.Facet{
-		contactentity.Facet(input),
 		{
 			Kind: contracts.RDFSourceBundleFacetKind,
 			Metadata: contactentity.Metadata(contactentity.MetadataInput{
-				RootSubject: input.RootSubject,
-				Format:      MediaTypeTurtle,
-				SourceKind:  contactImportSourceKind,
-				ClaimKind:   format,
+				RootSubject:    input.RootSubject,
+				Format:         MediaTypeTurtle,
+				SourceKind:     contactImportSourceKind,
+				ClaimKind:      format,
+				ImportLevel:    importLevel,
+				HasImportLevel: true,
 			}),
 		},
 	}
 }
 
-func nativeToRDF(content []byte) (string, []string, error) {
+func nativeToRDF(content []byte) ([]renderedContact, []RecordRejection, error) {
 	var bundle NativeBundle
 	err := json.Unmarshal(content, &bundle)
 	if err != nil {
-		return "", nil, fmt.Errorf("decode native contact bundle: %w", err)
+		return nil, nil, fmt.Errorf("decode native contact bundle: %w", err)
 	}
 
 	if len(bundle.Contacts) == 0 {
-		return "", nil, errors.New("native contact bundle has no contacts")
+		return nil, nil, errors.New("native contact bundle has no contacts")
 	}
 
 	if bundle.SchemaVersion != contracts.SchemaVersionPhase00 {
-		return "", nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"unsupported native contact schema_version %d",
 			bundle.SchemaVersion,
 		)
 	}
 
-	var builder strings.Builder
-	writePrefixes(&builder)
-
-	contacts := make([]string, 0, len(bundle.Contacts))
+	records := make([]renderedContact, 0, len(bundle.Contacts))
 	for _, contact := range bundle.Contacts {
 		if strings.TrimSpace(contact.ContactID) == "" {
-			return "", nil, errors.New("native contact is missing contact_id")
+			return nil, nil, errors.New("native contact is missing contact_id")
 		}
 
-		contacts = append(contacts, contact.ContactID)
-
-		builder.WriteString("\n")
-		writeTriple(&builder, contact.ContactID, rdfType, iri(foafPrefix+"Person"))
+		claims := []Claim{
+			{
+				Subject:   contact.ContactID,
+				Predicate: rdfType,
+				Object:    termIRI(foafPrefix + "Person"),
+			},
+		}
 
 		if contact.DisplayName != "" {
-			writeTriple(
-				&builder,
-				contact.ContactID,
-				foafPrefix+"name",
-				literal(contact.DisplayName),
-			)
+			claims = append(claims, Claim{
+				Subject:   contact.ContactID,
+				Predicate: foafPrefix + "name",
+				Object:    termLiteral(contact.DisplayName),
+			})
 		}
 
 		if contact.PrimaryEmail != "" {
-			writeTriple(
-				&builder,
-				contact.ContactID,
-				schemaPrefix+"email",
-				iri("mailto:"+contactentity.NormalizeIdentity(contact.PrimaryEmail)),
-			)
+			claims = append(claims, Claim{
+				Subject:   contact.ContactID,
+				Predicate: schemaPrefix + "email",
+				Object: termIRI(
+					"mailto:" + contactentity.NormalizeIdentity(contact.PrimaryEmail),
+				),
+			})
 		}
 
 		for _, alias := range contact.Aliases {
@@ -370,12 +829,11 @@ func nativeToRDF(content []byte) (string, []string, error) {
 			if normalized == "" {
 				continue
 			}
-			writeTriple(
-				&builder,
-				contact.ContactID,
-				bcidPrefix+"contactAlias",
-				literal(normalized),
-			)
+			claims = append(claims, Claim{
+				Subject:   contact.ContactID,
+				Predicate: gmeowPrefix + "contactAlias",
+				Object:    termLiteral(normalized),
+			})
 		}
 
 		for _, fact := range contact.Facts {
@@ -385,224 +843,421 @@ func nativeToRDF(content []byte) (string, []string, error) {
 			}
 
 			object := objectForFact(fact)
-			writeTriple(&builder, contact.ContactID, predicate, object)
-			writeTemporalAnnotations(&builder, contact.ContactID, predicate, object, fact)
-		}
-	}
-
-	return builder.String(), uniqueStrings(contacts), nil
-}
-
-func vcardToRDF(content string) (string, []string, error) {
-	cards, err := parseVCards(content)
-	if err != nil {
-		return "", nil, err
-	}
-
-	if len(cards) == 0 {
-		return "", nil, errors.New("vCard import has no cards")
-	}
-
-	var builder strings.Builder
-	writePrefixes(&builder)
-
-	contacts := make([]string, 0, len(cards))
-	for _, card := range cards {
-		contacts = append(contacts, card.subject)
-		writeVCardContactRDF(&builder, card)
-	}
-
-	return builder.String(), uniqueStrings(contacts), nil
-}
-
-func writeVCardContactRDF(builder *strings.Builder, card vcardContact) {
-	builder.WriteString("\n")
-	writeTriple(builder, card.subject, rdfType, iri(foafPrefix+"Person"))
-	writeVCardValueTriples(builder, card, "FN", foafPrefix+"name", literal)
-	writeVCardValueTriples(builder, card, "NICKNAME", foafPrefix+"nick", literal)
-	writeVCardValueTriples(
-		builder,
-		card,
-		"EMAIL",
-		vcardPrefix+"hasEmail",
-		normalizedEmailIRI,
-	)
-	writeVCardValueTriples(builder, card, "TEL", vcardPrefix+"hasTelephone", literal)
-	writeVCardValueTriples(builder, card, "URL", vcardPrefix+"hasURL", iri)
-	writeVCardValueTriples(builder, card, "ORG", schemaPrefix+"affiliation", literal)
-	writeVCardValueTriples(builder, card, "TITLE", schemaPrefix+"jobTitle", literal)
-	writeVCardValueTriples(builder, card, "ADR", schemaPrefix+"address", literal)
-	writeVCardValueTriples(builder, card, "NOTE", schemaPrefix+"description", literal)
-}
-
-func writeVCardValueTriples(
-	builder *strings.Builder,
-	card vcardContact,
-	name string,
-	predicate string,
-	object func(string) string,
-) {
-	for _, value := range card.values[name] {
-		writeTriple(builder, card.subject, predicate, object(value))
-	}
-}
-
-func parseVCards(content string) ([]vcardContact, error) {
-	lines := unfoldVCardLines(content)
-	cards := []vcardContact{}
-
-	var current map[string][]string
-
-	for _, line := range lines {
-		name, value, found := strings.Cut(line, ":")
-		if !found {
-			continue
-		}
-
-		name = vcardPropertyName(name)
-		value = unescapeVCardValue(value)
-
-		switch name {
-		case "BEGIN":
-			if strings.EqualFold(value, "VCARD") {
-				current = map[string][]string{}
+			if object == "" {
+				return nil, nil, fmt.Errorf(
+					"native contact %q has invalid %s fact value %q",
+					contact.ContactID,
+					fact.FactKind,
+					fact.Value,
+				)
 			}
-		case "END":
-			if strings.EqualFold(value, "VCARD") && current != nil {
-				cards = append(cards, vcardContact{
-					subject: contactSubjectForVCard(current),
-					values:  current,
-				})
-				current = nil
+			claim := Claim{
+				Subject:   contact.ContactID,
+				Predicate: predicate,
+				Object:    termRaw(object),
 			}
-		default:
-			if current != nil && value != "" {
-				current[name] = append(current[name], value)
+			if fact.ValidFrom != "" {
+				claim = claim.withAnnotation(
+					timePrefix+"hasBeginning",
+					termTypedDate(fact.ValidFrom),
+				)
 			}
-		}
-	}
-
-	if current != nil {
-		return nil, errors.New("unterminated vCard")
-	}
-
-	return cards, nil
-}
-
-func contactSubjectForVCard(values map[string][]string) string {
-	for _, email := range values["EMAIL"] {
-		normalized := contactentity.NormalizeIdentity(email)
-		if normalized != "" {
-			return "mailto:" + normalized
-		}
-	}
-
-	key := firstNonEmpty(
-		prefixedFirstValue("UID", values["UID"]),
-		prefixedFirstValue("FN", values["FN"]),
-		prefixedFirstValue("N", values["N"]),
-	)
-	if key == "" {
-		key = stableVCardFingerprint(values)
-	}
-
-	return "urn:gmeow:contact:" + shortHash([]byte(key))
-}
-
-func prefixedFirstValue(prefix string, values []string) string {
-	if value := firstValue(values); value != "" {
-		return prefix + "=" + value
-	}
-
-	return ""
-}
-
-func stableVCardFingerprint(values map[string][]string) string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-
-	sort.Strings(keys)
-
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		parts = append(parts, key+"="+strings.Join(values[key], "|"))
-	}
-
-	return strings.Join(parts, ";")
-}
-
-func unfoldVCardLines(content string) []string {
-	rawLines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-	lines := []string{}
-
-	for _, raw := range rawLines {
-		if strings.HasPrefix(raw, " ") || strings.HasPrefix(raw, "\t") {
-			if len(lines) > 0 {
-				lines[len(lines)-1] += raw[1:]
+			if fact.ValidUntil != "" {
+				claim = claim.withAnnotation(timePrefix+"hasEnd", termTypedDate(fact.ValidUntil))
 			}
-
-			continue
+			claims = append(claims, claim)
 		}
 
-		if strings.TrimSpace(raw) != "" {
-			lines = append(lines, strings.TrimRight(raw, "\r"))
-		}
+		records = append(
+			records,
+			renderedContact{identity: contact.ContactID, body: BuildRDFStarDelta(claims)},
+		)
 	}
 
-	return lines
-}
-
-func unescapeVCardValue(value string) string {
-	replacer := strings.NewReplacer(
-		`\n`,
-		"\n",
-		`\N`,
-		"\n",
-		`\,`,
-		",",
-		`\;`,
-		";",
-		`\\`,
-		`\`,
-	)
-
-	return strings.TrimSpace(replacer.Replace(value))
-}
-
-func vcardPropertyName(value string) string {
-	property := strings.Split(value, ";")[0]
-	if _, after, found := strings.Cut(property, "."); found {
-		property = after
-	}
-
-	return strings.ToUpper(strings.TrimSpace(property))
+	return records, nil, nil
 }
 
 func firstRDFContactSubjects(content string) []string {
-	subjects := []string{}
+	detector := rdfContactRootDetector{
+		prefixes: map[string]string{
+			"rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+		},
+		subjects: map[string]bool{},
+		objects:  map[string]bool{},
+	}
 
 	for line := range strings.SplitSeq(content, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "<") {
+		detector.consume(line)
+	}
+
+	// Rooted single-contact graph: a declared primary subject
+	// (schema:mainEntity / foaf:primaryTopic) means the ENTIRE graph is one
+	// contact — embedded people/orgs/works are that contact's claims, not
+	// separate contacts. Importing it as more than one contact is an error.
+	if detector.primary != "" {
+		return []string{detector.primary}
+	}
+
+	// Otherwise it is an un-rooted collection: each contact-typed root subject
+	// is its own contact.
+	roots := make([]string, 0, len(detector.subjects))
+	subjects := make([]string, 0, len(detector.subjects))
+	for subject := range detector.subjects {
+		subjects = append(subjects, subject)
+		if !detector.objects[subject] {
+			roots = append(roots, subject)
+		}
+	}
+	sort.Strings(roots)
+	if len(roots) > 0 {
+		return roots
+	}
+
+	sort.Strings(subjects)
+	return subjects
+}
+
+type rdfContactRootDetector struct {
+	currentPredicate  rdfImportTerm
+	currentSubject    rdfImportTerm
+	prefixes          map[string]string
+	subjects          map[string]bool
+	objects           map[string]bool
+	primary           string // object of schema:mainEntity / foaf:primaryTopic, if declared
+	continuingObjects bool
+}
+
+type rdfImportTerm struct {
+	kind  string
+	value string
+}
+
+func (detector *rdfContactRootDetector) consume(raw string) {
+	indented := raw != "" && unicode.IsSpace(rune(raw[0]))
+
+	line := strings.TrimSpace(raw)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return
+	}
+	if parseImportRDFPrefix(line, detector.prefixes) {
+		return
+	}
+	if indented && detector.currentSubject.value != "" {
+		detector.recordIRIObjects(line)
+		if !detector.consumePredicate(line) {
+			detector.consumeObjectContinuation(line)
+		}
+
+		return
+	}
+
+	subject, rest, found := parseImportRDFSubjectLine(line, detector.prefixes)
+	if !found {
+		detector.recordIRIObjects(line)
+
+		return
+	}
+
+	detector.currentSubject = subject
+	detector.currentPredicate = rdfImportTerm{}
+	detector.continuingObjects = false
+	detector.recordIRIObjects(rest)
+	if strings.TrimSpace(rest) != "" {
+		detector.consumePredicate(rest)
+	}
+}
+
+func (detector *rdfContactRootDetector) consumePredicate(line string) bool {
+	predicate, statements, found := parseImportRDFPredicateObjectLine(
+		detector.currentSubject,
+		line,
+		detector.prefixes,
+	)
+	if !found {
+		return false
+	}
+
+	detector.currentPredicate = predicate
+	detector.continuingObjects = strings.HasSuffix(line, ",")
+	detector.record(statements)
+
+	return true
+}
+
+func (detector *rdfContactRootDetector) consumeObjectContinuation(line string) {
+	if detector.currentPredicate.value == "" {
+		return
+	}
+
+	statements := parseImportRDFObjectList(
+		detector.currentSubject,
+		detector.currentPredicate,
+		line,
+		detector.prefixes,
+	)
+	detector.continuingObjects = strings.HasSuffix(line, ",")
+	detector.record(statements)
+}
+
+func (detector *rdfContactRootDetector) record(statements []rdfImportStatement) {
+	for _, statement := range statements {
+		if statement.object.kind == "iri" {
+			detector.objects[statement.object.value] = true
+		}
+		if statement.predicate.value == rdfType &&
+			contactentity.IsContactEntityType(statement.object.value) {
+			detector.subjects[statement.subject.value] = true
+		}
+		// A declared primary subject (schema:mainEntity / foaf:primaryTopic)
+		// makes the whole graph one rooted contact — see firstRDFContactSubjects.
+		if detector.primary == "" && statement.object.kind == "iri" &&
+			isPrimarySubjectPredicate(statement.predicate.value) {
+			detector.primary = statement.object.value
+		}
+	}
+}
+
+// isPrimarySubjectPredicate reports whether a predicate declares the graph's
+// primary entity (the one contact a rooted single-contact graph is about).
+func isPrimarySubjectPredicate(predicate string) bool {
+	switch predicate {
+	case schemaPrefix + "mainEntity",
+		"http://schema.org/mainEntity",
+		foafPrefix + "primaryTopic":
+		return true
+	default:
+		return false
+	}
+}
+
+func (detector *rdfContactRootDetector) recordIRIObjects(line string) {
+	for {
+		token, rest := splitImportRDFFirstToken(line)
+		if token == "" {
+			return
+		}
+
+		term, ok := parseImportRDFTerm(token, detector.prefixes)
+		if ok && term.kind == "iri" && !contactentity.IsContactEntityType(term.value) {
+			detector.objects[term.value] = true
+		}
+
+		line = rest
+	}
+}
+
+type rdfImportStatement struct {
+	subject   rdfImportTerm
+	predicate rdfImportTerm
+	object    rdfImportTerm
+}
+
+func parseImportRDFPrefix(line string, prefixes map[string]string) bool {
+	if !strings.HasPrefix(line, "@prefix ") {
+		return false
+	}
+
+	fields := strings.Fields(line)
+	if len(fields) < 3 {
+		return true
+	}
+
+	name := strings.TrimSuffix(fields[1], ":")
+	value := strings.Trim(fields[2], "<>")
+	if name != "" && value != "" {
+		prefixes[name] = value
+	}
+
+	return true
+}
+
+func parseImportRDFSubjectLine(
+	line string,
+	prefixes map[string]string,
+) (rdfImportTerm, string, bool) {
+	first, rest := splitImportRDFFirstToken(line)
+	if first == "" || !looksLikeImportRDFTerm(first) {
+		return rdfImportTerm{}, "", false
+	}
+
+	subject, ok := parseImportRDFTerm(first, prefixes)
+	if !ok {
+		return rdfImportTerm{}, "", false
+	}
+
+	return subject, rest, true
+}
+
+func parseImportRDFPredicateObjectLine(
+	subject rdfImportTerm,
+	line string,
+	prefixes map[string]string,
+) (rdfImportTerm, []rdfImportStatement, bool) {
+	predicateToken, objectText := splitImportRDFFirstToken(line)
+	if predicateToken == "" || objectText == "" {
+		return rdfImportTerm{}, nil, false
+	}
+
+	predicate, ok := parseImportRDFPredicateTerm(predicateToken, prefixes)
+	if !ok {
+		return rdfImportTerm{}, nil, false
+	}
+
+	return predicate, parseImportRDFObjectList(
+		subject,
+		predicate,
+		objectText,
+		prefixes,
+	), true
+}
+
+func parseImportRDFObjectList(
+	subject rdfImportTerm,
+	predicate rdfImportTerm,
+	line string,
+	prefixes map[string]string,
+) []rdfImportStatement {
+	line = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(line), ";"), ".")
+	statements := []rdfImportStatement{}
+
+	for _, item := range splitImportRDFObjects(line) {
+		object, ok := parseImportRDFTerm(item, prefixes)
+		if !ok {
 			continue
 		}
 
-		subject, rest, found := strings.Cut(line, ">")
-		if !found {
-			continue
-		}
+		statements = append(statements, rdfImportStatement{
+			subject:   subject,
+			predicate: predicate,
+			object:    object,
+		})
+	}
 
-		if strings.Contains(rest, "foaf:Person") ||
-			strings.Contains(rest, "schema:Person") ||
-			strings.Contains(rest, "<"+foafPrefix+"Person>") ||
-			strings.Contains(rest, "<"+schemaPrefix+"Person>") {
-			subjects = append(subjects, strings.TrimPrefix(subject, "<"))
+	return statements
+}
+
+func parseImportRDFPredicateTerm(
+	token string,
+	prefixes map[string]string,
+) (rdfImportTerm, bool) {
+	if token == "a" {
+		return rdfImportTerm{kind: "iri", value: rdfType}, true
+	}
+
+	return parseImportRDFTerm(token, prefixes)
+}
+
+func parseImportRDFTerm(
+	token string,
+	prefixes map[string]string,
+) (rdfImportTerm, bool) {
+	token = cleanImportRDFToken(token)
+	if token == "" || strings.HasPrefix(token, "[") {
+		return rdfImportTerm{}, false
+	}
+	if strings.HasPrefix(token, "<") && strings.Contains(token, ">") {
+		value, _, _ := strings.Cut(strings.TrimPrefix(token, "<"), ">")
+
+		return rdfImportTerm{kind: "iri", value: value}, true
+	}
+	if strings.HasPrefix(token, "\"") {
+		return rdfImportTerm{kind: "literal", value: token}, true
+	}
+	if prefix, suffix, ok := strings.Cut(token, ":"); ok {
+		if base := prefixes[prefix]; base != "" {
+			return rdfImportTerm{kind: "iri", value: base + suffix}, true
 		}
 	}
 
-	return uniqueStrings(subjects)
+	return rdfImportTerm{}, false
+}
+
+func cleanImportRDFToken(token string) string {
+	token = strings.TrimSpace(token)
+	token = strings.TrimSuffix(token, ",")
+	token = strings.TrimSuffix(token, ";")
+	token = strings.TrimSuffix(token, ".")
+
+	return strings.TrimSpace(token)
+}
+
+func splitImportRDFFirstToken(line string) (string, string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", ""
+	}
+	if strings.HasPrefix(line, "\"") {
+		return splitImportRDFQuotedToken(line)
+	}
+
+	for index, char := range line {
+		if unicode.IsSpace(char) {
+			return line[:index], strings.TrimSpace(line[index:])
+		}
+	}
+
+	return line, ""
+}
+
+func splitImportRDFQuotedToken(line string) (string, string) {
+	escaped := false
+	for index, char := range line[1:] {
+		switch {
+		case escaped:
+			escaped = false
+		case char == '\\':
+			escaped = true
+		case char == '"':
+			end := index + 2
+			for end < len(line) && !isASCIIWhitespace(line[end]) {
+				end++
+			}
+
+			return line[:end], strings.TrimSpace(line[end:])
+		}
+	}
+
+	return line, ""
+}
+
+func isASCIIWhitespace(char byte) bool {
+	switch char {
+	case ' ', '\t', '\n', '\r', '\v', '\f':
+		return true
+	default:
+		return false
+	}
+}
+
+func splitImportRDFObjects(line string) []string {
+	items := []string{}
+	start := 0
+	inString := false
+	escaped := false
+
+	for index, char := range line {
+		switch {
+		case escaped:
+			escaped = false
+		case char == '\\':
+			escaped = true
+		case char == '"':
+			inString = !inString
+		case char == ',' && !inString:
+			items = append(items, strings.TrimSpace(line[start:index]))
+			start = index + 1
+		}
+	}
+
+	items = append(items, strings.TrimSpace(line[start:]))
+
+	return items
+}
+
+func looksLikeImportRDFTerm(token string) bool {
+	return strings.HasPrefix(token, "<") ||
+		strings.HasPrefix(token, "_:") ||
+		strings.Contains(token, ":")
 }
 
 func exportFacts(facts []contracts.ContactFact) []contracts.ContactFact {
@@ -630,8 +1285,9 @@ var factPredicates = map[string]string{
 	contactentity.FactKindAddress:      schemaPrefix + "address",
 	contactentity.FactKindAffiliation:  schemaPrefix + "affiliation",
 	contactentity.FactKindAlias:        schemaPrefix + "alternateName",
-	contactentity.FactKindContactAlias: bcidPrefix + "contactAlias",
+	contactentity.FactKindContactAlias: gmeowPrefix + "contactAlias",
 	contactentity.FactKindIdentifier:   schemaPrefix + "identifier",
+	contactentity.FactKindImportance:   GmeowImportanceLevel,
 	contactentity.FactKindName:         foafPrefix + "name",
 	contactentity.FactKindNote:         schemaPrefix + "description",
 	contactentity.FactKindPhone:        schemaPrefix + "telephone",
@@ -647,7 +1303,7 @@ func predicateForFact(fact contracts.ContactFact) string {
 
 	if fact.FactKind == contactentity.FactKindEmail {
 		if fact.Historical {
-			return bcidPrefix + "historicalEmail"
+			return gmeowPrefix + "historicalEmail"
 		}
 
 		return schemaPrefix + "email"
@@ -661,6 +1317,13 @@ func objectForFact(fact contracts.ContactFact) string {
 	switch fact.FactKind {
 	case contactentity.FactKindEmail:
 		return normalizedEmailIRI(value)
+	case contactentity.FactKindImportance:
+		level, err := parseImportLevel(value)
+		if err != nil {
+			return ""
+		}
+
+		return typedInteger(level)
 	case contactentity.FactKindURL,
 		contactentity.FactKindIdentifier,
 		contactentity.FactKindRelationship:
@@ -676,8 +1339,34 @@ func objectForFact(fact contracts.ContactFact) string {
 	return literal(value)
 }
 
+func parseImportLevel(value string) (int, error) {
+	var level int
+	if _, err := fmt.Sscanf(strings.TrimSpace(value), "%d", &level); err != nil {
+		return 0, err
+	}
+	if err := ValidateImportLevel(level); err != nil {
+		return 0, err
+	}
+
+	return level, nil
+}
+
 func normalizedEmailIRI(value string) string {
-	return iri("mailto:" + contactentity.NormalizeIdentity(value))
+	normalized := normalizeContactEmail(value)
+	if normalized == "" {
+		return ""
+	}
+
+	return iri("mailto:" + normalized)
+}
+
+func normalizeContactEmail(value string) string {
+	normalized := contactentity.NormalizeIdentity(value)
+	if !strings.Contains(normalized, "@") {
+		return ""
+	}
+
+	return normalized
 }
 
 func blankNodeOrLiteral(value string) string {
@@ -699,7 +1388,7 @@ func blankNodeOrLiteral(value string) string {
 }
 
 func writePrefixes(builder *strings.Builder) {
-	builder.WriteString("@prefix bcid: <" + bcidPrefix + "> .\n")
+	builder.WriteString("@prefix gmeow: <" + gmeowPrefix + "> .\n")
 	builder.WriteString("@prefix foaf: <" + foafPrefix + "> .\n")
 	builder.WriteString("@prefix schema: <" + schemaPrefix + "> .\n")
 	builder.WriteString("@prefix time: <" + timePrefix + "> .\n")
@@ -716,33 +1405,32 @@ func writeTriple(builder *strings.Builder, subject, predicate, object string) {
 	builder.WriteString(" .\n")
 }
 
-func writeTemporalAnnotations(
+func writeTemporalEndAnnotation(
 	builder *strings.Builder,
 	subject string,
 	predicate string,
 	object string,
-	fact contracts.ContactFact,
+	validUntil string,
 ) {
-	if fact.ValidFrom == "" && fact.ValidUntil == "" {
+	if validUntil == "" {
 		return
 	}
 
 	statement := "<< " + iri(subject) + " " + iri(predicate) + " " + object + " >> "
-	if fact.ValidFrom != "" {
-		builder.WriteString(statement)
-		builder.WriteString(iri(timePrefix + "hasBeginning"))
-		builder.WriteString(" ")
-		builder.WriteString(typedDate(fact.ValidFrom))
-		builder.WriteString(" .\n")
-	}
+	writeStatementDateAnnotation(builder, statement, timePrefix+"hasEnd", validUntil)
+}
 
-	if fact.ValidUntil != "" {
-		builder.WriteString(statement)
-		builder.WriteString(iri(timePrefix + "hasEnd"))
-		builder.WriteString(" ")
-		builder.WriteString(typedDate(fact.ValidUntil))
-		builder.WriteString(" .\n")
-	}
+func writeStatementDateAnnotation(
+	builder *strings.Builder,
+	statement string,
+	predicate string,
+	value string,
+) {
+	builder.WriteString(statement)
+	builder.WriteString(iri(predicate))
+	builder.WriteString(" ")
+	builder.WriteString(typedDate(value))
+	builder.WriteString(" .\n")
 }
 
 func writeVCardLine(builder *strings.Builder, name, value string) {
@@ -796,6 +1484,25 @@ func typedDate(value string) string {
 	return literal(value) + "^^" + iri(xsdDate)
 }
 
+func typedDateTime(value time.Time) string {
+	return literal(value.UTC().Format(time.RFC3339)) + "^^" + iri(xsdDateTime)
+}
+
+func typedInteger(value int) string {
+	return literal(fmt.Sprintf("%d", value)) + "^^" + iri(xsdInteger)
+}
+
+// typedDateTimeStr types an already-RFC3339 string as xsd:dateTime (vs
+// typedDateTime which formats a time.Time).
+func typedDateTimeStr(value string) string {
+	return literal(value) + "^^" + iri(xsdDateTime)
+}
+
+// typedDecimal types a decimal literal (e.g. a confidence in [0,1]).
+func typedDecimal(value string) string {
+	return literal(value) + "^^" + iri(xsdDecimal)
+}
+
 func escapeLiteral(value string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 
@@ -824,6 +1531,13 @@ func contentHash(content []byte) string {
 	sum := sha256.Sum256(content)
 
 	return hex.EncodeToString(sum[:])
+}
+
+// ContentDigest is the stable content identity of a source artifact for the
+// gmeow:Source node (four-clock model): two imports of the same bytes share it,
+// regardless of path or mtime.
+func ContentDigest(content []byte) string {
+	return "sha256:" + contentHash(content)
 }
 
 func shortHash(content []byte) string {

@@ -48,3 +48,7 @@ gmeow.toml
 .gemini/settings.json
 .mcp.json
 logs
+.cache
+.cache
+
+.coding-ethos/code-intel.duckdb.shm

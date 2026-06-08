@@ -271,7 +271,8 @@ func (index *Index) ContactAnalysisInputs(
 
 	rows, err := index.pool.Query(ctx, fmt.Sprintf(
 		`SELECT r.contact_id, r.display_name, r.primary_email, r.fact_count,
-		        r.first_seen_at, r.last_seen_at, r.message_count, r.participant_count
+		   r.importance_level,
+		   r.first_seen_at, r.last_seen_at, r.message_count, r.participant_count
 		   FROM query_contact_rollups r
 		  WHERE %s
 		  ORDER BY r.display_name, r.contact_id
@@ -575,6 +576,7 @@ func scanContactAnalysisInputRollup(
 		&result.DisplayName,
 		&result.PrimaryEmail,
 		&result.FactCount,
+		&result.ImportanceLevel,
 		&firstSeen,
 		&lastSeen,
 		&result.MessageCount,

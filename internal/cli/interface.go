@@ -37,7 +37,7 @@ func newMCPServeCommand(out io.Writer, configPath *string) *cobra.Command {
 
 			server, err := mcpiface.New(services)
 			if err != nil {
-				return err
+				return fmt.Errorf("create mcp server: %w", err)
 			}
 			_, _ = fmt.Fprintln(out, "mcp serve: stdio")
 
@@ -75,7 +75,7 @@ func newMCPHTTPServeCommand(out io.Writer, configPath *string) *cobra.Command {
 				mcpiface.HTTPOptions{SessionTimeout: sessionTimeout},
 			)
 			if err != nil {
-				return err
+				return fmt.Errorf("create mcp http server: %w", err)
 			}
 			_, _ = fmt.Fprintf(out, "mcp http serve: %s\n", interfaceAddress(iface))
 

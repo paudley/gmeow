@@ -75,6 +75,8 @@ func TestAdminCommandIncludesContactQuerySurface(t *testing.T) {
 	}
 
 	output := out.String()
+	// query contact hosts the QUERY-projection surface only. import/export are
+	// FILESTORE-only and live under the top-level `contact` group instead.
 	for _, commandName := range []string{
 		"search",
 		"aggregate",
@@ -88,11 +90,34 @@ func TestAdminCommandIncludesContactQuerySurface(t *testing.T) {
 		"analysis-inputs",
 		"analysis-status",
 		"analyze",
-		"import",
-		"export",
 	} {
 		if !strings.Contains(output, commandName) {
 			t.Fatalf("help output missing contact %s:\n%s", commandName, output)
+		}
+	}
+	for _, moved := range []string{"import", "export"} {
+		if strings.Contains(output, moved) {
+			t.Fatalf(
+				"query contact should no longer host %s (moved to top-level contact):\n%s",
+				moved,
+				output,
+			)
+		}
+	}
+}
+
+func TestAdminCommandHasTopLevelContactImportExport(t *testing.T) {
+	var out bytes.Buffer
+	command := NewAdminCommand(&out, strings.NewReader(""))
+	command.SetOut(&out)
+	command.SetArgs([]string{"contact", "--help"})
+
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, commandName := range []string{"import", "export"} {
+		if !strings.Contains(out.String(), commandName) {
+			t.Fatalf("top-level contact help missing %s:\n%s", commandName, out.String())
 		}
 	}
 }

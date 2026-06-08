@@ -452,32 +452,32 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
 
 	store := filestore.NewFilesystemStore(t.TempDir())
-	profile := `@prefix bcid: <https://patrickaudley.com/lod#> .
+	profile := `@prefix gmeow: <https://blackcatinformatics.ca/gmeow/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
 @prefix schema: <https://schema.org/> .
 
-<https://patrickaudley.com/#paudley> a foaf:Person, schema:Person ;
-    foaf:name "Patrick Colm Audley"@en ;
-    schema:email <mailto:paudley@blackcat.ca> ;
-    bcid:historicalEmail <mailto:paudley@gt.ca> ;
-    schema:knowsAbout <https://patrickaudley.com/#concept-linked-data> .
+<https://example.test/#synthetic-contact> a foaf:Person, schema:Person ;
+    foaf:name "Synthetic Contact"@en ;
+    schema:email <mailto:synthetic.primary@example.test> ;
+    gmeow:historicalEmail <mailto:synthetic.legacy@example.test> ;
+    schema:knowsAbout <https://example.test/#concept-linked-data> .
 `
 	profileDigest, err := store.Put(ctx, filestore.PutRequest{
 		Reader:    strings.NewReader(profile),
 		MediaType: "text/turtle",
 		Facets: []contracts.Facet{
 			contactentity.Facet(contactentity.MetadataInput{
-				RootSubject: "https://patrickaudley.com/#paudley",
+				RootSubject: "https://example.test/#synthetic-contact",
 				Format:      "text/turtle",
 				SourceKind:  "fixture",
 				IdentityHints: []string{
-					"mailto:paudley@blackcat.ca",
+					"mailto:synthetic.primary@example.test",
 				},
 			}),
 			{
 				Kind: contracts.RDFSourceBundleFacetKind,
 				Metadata: contactentity.Metadata(contactentity.MetadataInput{
-					RootSubject: "https://patrickaudley.com/#paudley",
+					RootSubject: "https://example.test/#synthetic-contact",
 					Format:      "text/turtle",
 				}),
 			},
@@ -491,10 +491,10 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	correction := `@prefix bcid: <https://patrickaudley.com/lod#> .
+	correction := `@prefix gmeow: <https://blackcatinformatics.ca/gmeow/> .
 @prefix time: <http://www.w3.org/2006/time#> .
 
-<< <https://patrickaudley.com/#paudley> bcid:historicalEmail <mailto:paudley@gt.ca> >>
+<< <https://example.test/#synthetic-contact> gmeow:historicalEmail <mailto:synthetic.legacy@example.test> >>
     time:hasEnd "2004-06-30" .
 `
 	correctionDigest, err := store.Put(ctx, filestore.PutRequest{
@@ -503,7 +503,7 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 		Facets: []contracts.Facet{{
 			Kind: contracts.RDFClaimBundleFacetKind,
 			Metadata: contactentity.Metadata(contactentity.MetadataInput{
-				TargetSubject: "https://patrickaudley.com/#paudley",
+				TargetSubject: "https://example.test/#synthetic-contact",
 				Format:        "text/turtle",
 				ClaimKind:     "correction",
 			}),
@@ -524,29 +524,36 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 	}
 
 	aggregate, err := index.ContactAggregate(ctx, contracts.ContactAggregateRequest{
-		ContactID: "https://patrickaudley.com/#paudley",
+		ContactID: "https://example.test/#synthetic-contact",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if aggregate.DisplayName != "Patrick Colm Audley" ||
-		aggregate.PrimaryEmail != "paudley@blackcat.ca" {
+	if aggregate.DisplayName != "Synthetic Contact" ||
+		aggregate.PrimaryEmail != "synthetic.primary@example.test" {
 		t.Fatalf("unexpected contact aggregate: %#v", aggregate)
 	}
-	historical := contactFactValueFor(aggregate.Facts, "email", "paudley@gt.ca")
+	historical := contactFactValueFor(
+		aggregate.Facts,
+		"email",
+		"synthetic.legacy@example.test",
+	)
 	if historical.ValidUntil != "2004-06-30" || !historical.Historical {
 		t.Fatalf("historical email correction not applied: %#v", aggregate.Facts)
 	}
 	resolved, err := index.ResolveContactIdentity(
 		ctx,
 		contracts.ContactIdentityResolveRequest{
-			Identity: "mailto:paudley@gt.ca",
+			Identity: "mailto:synthetic.legacy@example.test",
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sameStrings(resolved.ContactIDs, []string{"https://patrickaudley.com/#paudley"}) {
+	if !sameStrings(
+		resolved.ContactIDs,
+		[]string{"https://example.test/#synthetic-contact"},
+	) {
 		t.Fatalf("unexpected contact identity resolution: %#v", resolved)
 	}
 	search, err := index.ContactSearch(ctx, contracts.ContactSearchRequest{
@@ -557,7 +564,7 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 		t.Fatal(err)
 	}
 	if search.Total != 1 ||
-		search.Results[0].ContactID != "https://patrickaudley.com/#paudley" {
+		search.Results[0].ContactID != "https://example.test/#synthetic-contact" {
 		t.Fatalf("contact email was not searchable through rollup: %#v", search)
 	}
 	emptyPage, err := index.ContactSearch(ctx, contracts.ContactSearchRequest{
@@ -587,6 +594,132 @@ func TestRDFBundleProjectsContactFactsAndCorrections(t *testing.T) {
 	}
 }
 
+func TestRDFImportProjectsSingleEntryGraphAsOneContact(t *testing.T) {
+	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	migrationsDir := queryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
+
+	store := filestore.NewFilesystemStore(t.TempDir())
+	importObject, _, err := contactio.BuildImportObjectWithOptions(
+		contactio.FormatRDF,
+		"synthetic-rdf",
+		"single-entry.ttl",
+		[]byte(`@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix rel: <http://purl.org/vocab/relationship/> .
+@prefix schema: <https://schema.org/> .
+
+<https://example.test/#root> a foaf:Person, schema:Person ;
+    foaf:name "Root Contact" ;
+    rel:parentOf <https://example.test/#related> .
+
+<https://example.test/#related> a foaf:Person, schema:Person ;
+    foaf:name "Related Contact" .
+`),
+		time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+		contactio.ImportOptions{ImportLevel: 3},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:       strings.NewReader(importObject.Content),
+		MediaType:    importObject.MediaType,
+		ContentRoles: []string{contracts.RDFSourceBundleRole, contracts.ContactSourceRole},
+		Facets:       importObject.Facets,
+		Provenance: []contracts.Provenance{{
+			SourceKind: importObject.SourceKind,
+			SourceName: importObject.SourceName,
+			ExternalID: importObject.ExternalID,
+			ObservedAt: importObject.ObservedAt,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	index := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
+	projectStoredObject(t, ctx, index, store, digest)
+
+	var contacts int
+	err = index.pool.QueryRow(
+		ctx,
+		`SELECT count(DISTINCT contact_id)
+		   FROM query_contact_facts
+		  WHERE source_digest = $1`,
+		digest,
+	).Scan(&contacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contacts != 1 {
+		t.Fatalf("source projected %d contacts, want 1", contacts)
+	}
+
+	aggregate, err := index.ContactAggregate(ctx, contracts.ContactAggregateRequest{
+		ContactID: "https://example.test/#root",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregate.FactCount == 0 || aggregate.ImportanceLevel != 3 {
+		t.Fatalf("root contact was not projected with import facts: %#v", aggregate)
+	}
+}
+
+func TestRDFBundleProjectsLargeLiteralTerm(t *testing.T) {
+	ctx := context.Background()
+	dsn := queryIntegrationDSN(t)
+	migrationsDir := queryIntegrationMigrationsDir(t)
+	lock := acquireQueryIntegrationLock(t, ctx, dsn)
+	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
+
+	store := filestore.NewFilesystemStore(t.TempDir())
+	largeNote := strings.Repeat("large contact note ", 300)
+	profile := `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix schema: <https://schema.org/> .
+
+<https://example.test/#large-literal> a foaf:Person ;
+    foaf:name "Large Literal" ;
+    schema:email <mailto:large@example.test> ;
+    schema:description "` + largeNote + `" .
+`
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader(profile),
+		MediaType: "text/turtle",
+		Facets: []contracts.Facet{{
+			Kind: contracts.RDFSourceBundleFacetKind,
+			Metadata: contactentity.Metadata(contactentity.MetadataInput{
+				RootSubject: "https://example.test/#large-literal",
+				Format:      "text/turtle",
+			}),
+		}},
+		Provenance: []contracts.Provenance{{
+			SourceKind: "fixture",
+			SourceName: "rdf-large-literal",
+			ExternalID: "profile",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	index := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
+	projectStoredObject(t, ctx, index, store, digest)
+
+	aggregate, err := index.ContactAggregate(ctx, contracts.ContactAggregateRequest{
+		ContactID: "https://example.test/#large-literal",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregate.DisplayName != "Large Literal" ||
+		aggregate.PrimaryEmail != "large@example.test" {
+		t.Fatalf("large literal projection broke contact facts: %#v", aggregate)
+	}
+}
+
 func TestContactImportVCardProjectsFactsAndRollup(t *testing.T) {
 	ctx := context.Background()
 	dsn := queryIntegrationDSN(t)
@@ -595,7 +728,7 @@ func TestContactImportVCardProjectsFactsAndRollup(t *testing.T) {
 	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
 
 	store := filestore.NewFilesystemStore(t.TempDir())
-	importObject, _, err := contactio.BuildImportObject(
+	importObject, _, err := contactio.BuildImportObjectWithOptions(
 		contactio.FormatVCard,
 		"synthetic-contacts",
 		"alice.vcf",
@@ -603,6 +736,7 @@ func TestContactImportVCardProjectsFactsAndRollup(t *testing.T) {
 			"BEGIN:VCARD\nVERSION:4.0\nFN:Alice Example\nEMAIL:alice@example.test\nORG:Example Org\nEND:VCARD\n",
 		),
 		time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+		contactio.ImportOptions{ImportLevel: 8},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -634,6 +768,7 @@ func TestContactImportVCardProjectsFactsAndRollup(t *testing.T) {
 	}
 	if aggregate.DisplayName != "Alice Example" ||
 		aggregate.PrimaryEmail != "alice@example.test" ||
+		aggregate.ImportanceLevel != 8 ||
 		contactFactValueFor(aggregate.Facts, "affiliation", "Example Org").Value == "" {
 		t.Fatalf("imported vCard did not project contact rollup: %#v", aggregate)
 	}
@@ -648,12 +783,12 @@ func TestContactAliasResolvesAcrossContactQueries(t *testing.T) {
 
 	store := filestore.NewFilesystemStore(t.TempDir())
 	contactID := "urn:gmeow:test:contact:fixture-record"
-	profile := `@prefix bcid: <https://patrickaudley.com/lod#> .
+	profile := `@prefix gmeow: <https://blackcatinformatics.ca/gmeow/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
 @prefix schema: <https://schema.org/> .
 
 <urn:gmeow:test:contact:fixture-record> a foaf:Person ;
-    bcid:contactAlias "fixture handle" ;
+    gmeow:contactAlias "fixture handle" ;
     foaf:name "Fixture Entity" ;
     schema:email <mailto:fixture@example.test> .
 `
@@ -767,13 +902,13 @@ func TestContactMessagesProjectMailParticipantObservations(t *testing.T) {
 	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
 
 	store := filestore.NewFilesystemStore(t.TempDir())
-	contactID := "https://patrickaudley.com/#paudley"
+	contactID := "https://example.test/#synthetic-contact"
 	profile := `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
 @prefix schema: <https://schema.org/> .
 
-<https://patrickaudley.com/#paudley> a foaf:Person ;
-    foaf:name "Patrick Audley" ;
-    schema:email <mailto:paudley@blackcat.ca> .
+<https://example.test/#synthetic-contact> a foaf:Person ;
+    foaf:name "Synthetic Contact" ;
+    schema:email <mailto:synthetic.primary@example.test> .
 `
 	if _, err := store.Put(ctx, filestore.PutRequest{
 		Reader:    strings.NewReader(profile),
@@ -806,7 +941,7 @@ func TestContactMessagesProjectMailParticipantObservations(t *testing.T) {
 		store,
 		"<older@example.test>",
 		"Wed, 27 May 2026 09:15:00 -0600",
-		"Patrick <paudley@blackcat.ca>",
+		"Synthetic <synthetic.primary@example.test>",
 		"Apollo <apollo@example.test>",
 	)
 	newer := putMailParticipantProjectionFixture(
@@ -816,7 +951,7 @@ func TestContactMessagesProjectMailParticipantObservations(t *testing.T) {
 		"<newer@example.test>",
 		"Thu, 28 May 2026 10:30:00 -0600",
 		"Apollo <apollo@example.test>",
-		"Patrick <paudley@blackcat.ca>",
+		"Synthetic <synthetic.primary@example.test>",
 	)
 
 	index := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
@@ -835,7 +970,7 @@ func TestContactMessagesProjectMailParticipantObservations(t *testing.T) {
 		len(messages.Results) != 1 ||
 		messages.Results[0].MessageDigest != newer ||
 		messages.Results[0].Role != "to" ||
-		messages.Results[0].Token != "paudley@blackcat.ca" {
+		messages.Results[0].Token != "synthetic.primary@example.test" {
 		t.Fatalf("unexpected contact messages page: %#v", messages)
 	}
 
@@ -903,17 +1038,17 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 	t.Cleanup(func() { releaseQueryIntegrationLock(t, lock) })
 
 	store := filestore.NewFilesystemStore(t.TempDir())
-	contactID := "https://patrickaudley.com/#paudley"
+	contactID := "https://example.test/#synthetic-contact"
 	profile := `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
 @prefix schema: <https://schema.org/> .
-@prefix bcid: <https://patrickaudley.com/lod#> .
+@prefix gmeow: <https://blackcatinformatics.ca/gmeow/> .
 
-<https://patrickaudley.com/#paudley> a foaf:Person ;
-    foaf:name "Patrick Audley" ;
+<https://example.test/#synthetic-contact> a foaf:Person ;
+    foaf:name "Synthetic Contact" ;
     foaf:knows <https://example.test/#apollo> ;
     schema:affiliation "Blackcat Informatics" ;
-    schema:email <mailto:paudley@blackcat.ca> ;
-    bcid:historicalEmail <mailto:paudley@gt.ca> .
+    schema:email <mailto:synthetic.primary@example.test> ;
+    gmeow:historicalEmail <mailto:synthetic.legacy@example.test> .
 `
 	if _, err := store.Put(ctx, filestore.PutRequest{
 		Reader:    strings.NewReader(profile),
@@ -946,7 +1081,7 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 		"<contact-intelligence@example.test>",
 		"Thu, 28 May 2026 10:30:00 -0600",
 		"Apollo <apollo@example.test>",
-		"Patrick <paudley@blackcat.ca>",
+		"Synthetic <synthetic.primary@example.test>",
 	)
 
 	index := newMigratedTestIndex(t, ctx, dsn, migrationsDir, store)
@@ -965,7 +1100,7 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 	}
 	if facts.Total != 1 ||
 		len(facts.Facts) != 1 ||
-		facts.Facts[0].Value != "paudley@blackcat.ca" {
+		facts.Facts[0].Value != "synthetic.primary@example.test" {
 		t.Fatalf("unexpected current email facts: %#v", facts)
 	}
 
@@ -988,7 +1123,7 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 	identities, err := index.ContactIdentityDetails(
 		ctx,
 		contracts.ContactIdentityDetailRequest{
-			Identities: []string{"mailto:paudley@blackcat.ca"},
+			Identities: []string{"mailto:synthetic.primary@example.test"},
 			Limit:      10,
 		},
 	)
@@ -997,7 +1132,7 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 	}
 	if identities.Total != 1 ||
 		identities.Results[0].ContactID != contactID ||
-		identities.Results[0].MatchedToken != "paudley@blackcat.ca" {
+		identities.Results[0].MatchedToken != "synthetic.primary@example.test" {
 		t.Fatalf("unexpected identity details: %#v", identities)
 	}
 
@@ -1033,8 +1168,11 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 	}
 	if inputs.Total != 1 ||
 		len(inputs.Results) != 1 ||
-		!strings.Contains(inputs.Results[0].InputText, "Contact: Patrick Audley") ||
-		!strings.Contains(inputs.Results[0].InputText, "email: paudley@blackcat.ca") ||
+		!strings.Contains(inputs.Results[0].InputText, "Contact: Synthetic Contact") ||
+		!strings.Contains(
+			inputs.Results[0].InputText,
+			"email: synthetic.primary@example.test",
+		) ||
 		!strings.Contains(
 			inputs.Results[0].InputText,
 			"Counts: 5 facts, 1 messages, 1 participants",
@@ -1060,7 +1198,10 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 		filteredInputs.Results[0].InputText,
 		"affiliation: Blackcat Informatics",
 	) ||
-		strings.Contains(filteredInputs.Results[0].InputText, "email: paudley@blackcat.ca") {
+		strings.Contains(
+			filteredInputs.Results[0].InputText,
+			"email: synthetic.primary@example.test",
+		) {
 		t.Fatalf("fact kind filter was not applied to analysis input: %#v", filteredInputs)
 	}
 
@@ -1071,7 +1212,7 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 		Status:          "complete",
 		Model:           "fixture-model",
 		InputHash:       "input-pa",
-		TextPreview:     "Patrick Audley",
+		TextPreview:     "Synthetic Contact",
 		Vector:          []float32{1, 0, 0},
 	})
 	if err != nil {
@@ -1084,7 +1225,7 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 		Status:          "complete",
 		Model:           "other-model",
 		InputHash:       "aaa-other-seed",
-		TextPreview:     "Patrick Audley other model",
+		TextPreview:     "Synthetic Contact other model",
 		Vector:          []float32{0, 1, 0},
 	})
 	if err != nil {
@@ -1151,7 +1292,7 @@ func TestContactIntelligenceQueriesProjectedFacts(t *testing.T) {
 		Status:          "complete",
 		Model:           "fixture-model",
 		InputHash:       "input-pa-updated",
-		TextPreview:     "Patrick Audley updated",
+		TextPreview:     "Synthetic Contact updated",
 		Vector:          []float32{0.95, 0.05, 0},
 	})
 	if err != nil {

@@ -198,11 +198,11 @@ func sourceBackfillReportToPB(
 	return &pb.SourceBackfillResponse{
 		FinalCursor:      cursor,
 		FailedMessageIds: append([]string{}, report.FailedMessageIDs...),
-		Processed:        int32(report.Processed),
-		Created:          int32(report.Created),
-		Skipped:          int32(report.Skipped),
-		Failed:           int32(report.Failed),
-		Pages:            int32(report.Pages),
+		Processed:        contracts.ClampInt32(report.Processed),
+		Created:          contracts.ClampInt32(report.Created),
+		Skipped:          contracts.ClampInt32(report.Skipped),
+		Failed:           contracts.ClampInt32(report.Failed),
+		Pages:            contracts.ClampInt32(report.Pages),
 		Completed:        report.Completed,
 	}, nil
 }

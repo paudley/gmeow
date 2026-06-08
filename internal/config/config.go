@@ -73,6 +73,7 @@ type RPCConfig struct {
 	Filestore RPCEndpointConfig `toml:"filestore"`
 	Scheduler RPCEndpointConfig `toml:"scheduler"`
 	Query     RPCEndpointConfig `toml:"query"`
+	Embedding RPCEndpointConfig `toml:"embedding"`
 }
 
 type RPCEndpointConfig struct {
@@ -236,6 +237,7 @@ type ResolvedRPC struct {
 	Filestore ResolvedRPCEndpoint
 	Scheduler ResolvedRPCEndpoint
 	Query     ResolvedRPCEndpoint
+	Embedding ResolvedRPCEndpoint
 }
 
 type ResolvedRPCEndpoint struct {
@@ -586,6 +588,11 @@ func validateConfig(parsed Config) error {
 	}
 
 	err = validateRPCEndpoint("rpc.query", parsed.RPC.Query)
+	if err != nil {
+		return err
+	}
+
+	err = validateRPCEndpoint("rpc.embedding", parsed.RPC.Embedding)
 	if err != nil {
 		return err
 	}
@@ -974,6 +981,11 @@ func resolvedRPC(raw RPCConfig) ResolvedRPC {
 			raw.Query,
 			"unix",
 			"/run/gmeow/query.sock",
+		),
+		Embedding: resolvedRPCEndpoint(
+			raw.Embedding,
+			"unix",
+			"/run/gmeow/embedding.sock",
 		),
 	}
 }

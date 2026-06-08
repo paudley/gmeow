@@ -108,7 +108,7 @@ func (server *QueryServer) Search(
 	}
 
 	return &pb.SearchResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Results:       results,
 		Total:         int32(response.Total),
 	}, nil
@@ -226,7 +226,7 @@ func (server *QueryServer) Relationships(
 	}
 
 	return &pb.RelationshipResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Relationships: ToPBRelationships(response.Relationships),
 	}, nil
 }
@@ -251,7 +251,7 @@ func (server *QueryServer) Graph(
 	}
 
 	return &pb.GraphResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Facts:         facts,
 	}, nil
 }
@@ -299,7 +299,7 @@ func (server *QueryServer) AnalysisStatus(
 	}
 
 	return &pb.AnalysisStatusResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Statuses:      statuses,
 	}, nil
 }
@@ -334,7 +334,7 @@ func (server *QueryServer) VectorSearch(
 	}
 
 	return &pb.VectorSearchResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Results:       results,
 	}, nil
 }
@@ -367,7 +367,7 @@ func (server *QueryServer) RelatedObjects(
 	}
 
 	return &pb.RelatedObjectsResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		SeedDigest:    string(response.Seed),
 		Results:       results,
 	}, nil
@@ -395,18 +395,19 @@ func (server *QueryServer) ContactSearch(
 			FirstSeenAt:      formatTime(result.FirstSeenAt),
 			LastSeenAt:       formatTime(result.LastSeenAt),
 			Score:            result.Score,
-			FactCount:        int32(result.FactCount),
-			MessageCount:     int32(result.MessageCount),
-			ParticipantCount: int32(result.ParticipantCount),
+			FactCount:        contracts.ClampInt32(result.FactCount),
+			ImportanceLevel:  contracts.ClampInt32(result.ImportanceLevel),
+			MessageCount:     contracts.ClampInt32(result.MessageCount),
+			ParticipantCount: contracts.ClampInt32(result.ParticipantCount),
 		})
 	}
 
 	return &pb.ContactSearchResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Results:       results,
-		Total:         int32(response.Total),
-		Limit:         int32(response.Limit),
-		Offset:        int32(response.Offset),
+		Total:         contracts.ClampInt32(response.Total),
+		Limit:         contracts.ClampInt32(response.Limit),
+		Offset:        contracts.ClampInt32(response.Offset),
 	}, nil
 }
 
@@ -429,6 +430,7 @@ func (server *QueryServer) ContactAggregate(
 		FirstSeenAt:      formatTime(aggregate.FirstSeenAt),
 		LastSeenAt:       formatTime(aggregate.LastSeenAt),
 		FactCount:        int32(aggregate.FactCount),
+		ImportanceLevel:  int32(aggregate.ImportanceLevel),
 		MessageCount:     int32(aggregate.MessageCount),
 		ParticipantCount: int32(aggregate.ParticipantCount),
 		Facts:            toPBContactFacts(aggregate.Facts),
@@ -448,7 +450,7 @@ func (server *QueryServer) ResolveContactIdentity(
 	}
 
 	return &pb.ContactIdentityResolveResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		ContactIds:    append([]string{}, response.ContactIDs...),
 	}, nil
 }
@@ -472,7 +474,7 @@ func (server *QueryServer) ContactFacts(
 	}
 
 	return &pb.ContactFactResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Facts:         toPBContactFacts(response.Facts),
 		Total:         int32(response.Total),
 		Limit:         int32(response.Limit),
@@ -512,11 +514,11 @@ func (server *QueryServer) ContactIdentityDetails(
 	}
 
 	return &pb.ContactIdentityDetailResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Results:       results,
-		Total:         int32(response.Total),
-		Limit:         int32(response.Limit),
-		Offset:        int32(response.Offset),
+		Total:         contracts.ClampInt32(response.Total),
+		Limit:         contracts.ClampInt32(response.Limit),
+		Offset:        contracts.ClampInt32(response.Offset),
 	}, nil
 }
 
@@ -555,11 +557,11 @@ func (server *QueryServer) ContactNeighborhood(
 	}
 
 	return &pb.ContactNeighborhoodResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Results:       results,
-		Total:         int32(response.Total),
-		Limit:         int32(response.Limit),
-		Offset:        int32(response.Offset),
+		Total:         contracts.ClampInt32(response.Total),
+		Limit:         contracts.ClampInt32(response.Limit),
+		Offset:        contracts.ClampInt32(response.Offset),
 	}, nil
 }
 
@@ -589,18 +591,19 @@ func (server *QueryServer) ContactAnalysisInputs(
 			FirstSeenAt:      formatTime(result.FirstSeenAt),
 			LastSeenAt:       formatTime(result.LastSeenAt),
 			InputText:        result.InputText,
-			FactCount:        int32(result.FactCount),
-			MessageCount:     int32(result.MessageCount),
-			ParticipantCount: int32(result.ParticipantCount),
+			FactCount:        contracts.ClampInt32(result.FactCount),
+			ImportanceLevel:  contracts.ClampInt32(result.ImportanceLevel),
+			MessageCount:     contracts.ClampInt32(result.MessageCount),
+			ParticipantCount: contracts.ClampInt32(result.ParticipantCount),
 		})
 	}
 
 	return &pb.ContactAnalysisInputResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Results:       results,
-		Total:         int32(response.Total),
-		Limit:         int32(response.Limit),
-		Offset:        int32(response.Offset),
+		Total:         contracts.ClampInt32(response.Total),
+		Limit:         contracts.ClampInt32(response.Limit),
+		Offset:        contracts.ClampInt32(response.Offset),
 	}, nil
 }
 
@@ -637,18 +640,18 @@ func (server *QueryServer) ContactAnalysisStatus(
 			Status:          result.Status,
 			Model:           result.Model,
 			InputHash:       result.InputHash,
-			InputBytes:      int32(result.InputBytes),
+			InputBytes:      contracts.ClampInt32(result.InputBytes),
 			GeneratedAt:     formatTime(result.GeneratedAt),
 			MetadataJson:    metadata,
 		})
 	}
 
 	return &pb.ContactAnalysisStatusResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Results:       results,
-		Total:         int32(response.Total),
-		Limit:         int32(response.Limit),
-		Offset:        int32(response.Offset),
+		Total:         contracts.ClampInt32(response.Total),
+		Limit:         contracts.ClampInt32(response.Limit),
+		Offset:        contracts.ClampInt32(response.Offset),
 	}, nil
 }
 
@@ -702,7 +705,7 @@ func (server *QueryServer) ContactVectorSearch(
 	}
 
 	return &pb.ContactVectorSearchResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Results:       toPBContactVectorResults(response.Results),
 	}, nil
 }
@@ -721,7 +724,7 @@ func (server *QueryServer) SimilarContacts(
 	}
 
 	return &pb.SimilarContactsResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Results:       toPBContactVectorResults(response.Results),
 	}, nil
 }
@@ -755,11 +758,11 @@ func (server *QueryServer) ContactMessages(
 	}
 
 	return &pb.ContactMessageResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Results:       results,
-		Total:         int32(response.Total),
-		Limit:         int32(response.Limit),
-		Offset:        int32(response.Offset),
+		Total:         contracts.ClampInt32(response.Total),
+		Limit:         contracts.ClampInt32(response.Limit),
+		Offset:        contracts.ClampInt32(response.Offset),
 	}, nil
 }
 
@@ -796,7 +799,7 @@ func toPBContactVectorResults(
 			InputHash:    result.InputHash,
 			TextPreview:  result.TextPreview,
 			Distance:     result.Distance,
-			Dimensions:   int32(result.Dimensions),
+			Dimensions:   contracts.ClampInt32(result.Dimensions),
 		})
 	}
 
@@ -828,7 +831,7 @@ func (server *QueryServer) SourceCursors(
 	}
 
 	return &pb.SourceCursorResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Cursors:       cursors,
 	}, nil
 }
@@ -898,9 +901,9 @@ func (server *QueryServer) JMAPEmailQuery(
 
 	return &pb.JMAPEmailQueryResponse{
 		Ids:    ids,
-		Total:  int32(response.Total),
-		Offset: int32(response.Offset),
-		Limit:  int32(response.Limit),
+		Total:  contracts.ClampInt32(response.Total),
+		Offset: contracts.ClampInt32(response.Offset),
+		Limit:  contracts.ClampInt32(response.Limit),
 	}, nil
 }
 
@@ -913,7 +916,7 @@ func (server *QueryServer) JMAPThreads(
 		append([]string{}, request.GetIds()...),
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("jmap threads: %w", err)
 	}
 
 	converted := make([]*pb.JMAPThread, 0, len(request.GetIds()))
@@ -951,7 +954,7 @@ func (server *QueryServer) JMAPBlobLookup(
 		},
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("jmap blob lookup: %w", err)
 	}
 
 	converted := make([]*pb.JMAPBlobReferences, 0, len(blobIDs))
@@ -993,7 +996,7 @@ func (server *QueryServer) UpdateJMAPMailboxCatalog(
 		contracts.JMAPMailboxCatalogUpdate{Mailboxes: mailboxes},
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("update jmap mailbox catalog: %w", err)
 	}
 
 	converted := make([]*pb.JMAPMailbox, 0, len(updated))
@@ -1058,7 +1061,7 @@ func toPBJMAPMailbox(mailbox contracts.JMAPMailbox) *pb.JMAPMailbox {
 		Name:        mailbox.Name,
 		Role:        mailbox.Role,
 		ParentId:    mailbox.ParentID,
-		SortOrder:   int32(mailbox.SortOrder),
+		SortOrder:   contracts.ClampInt32(mailbox.SortOrder),
 		IsSystem:    mailbox.IsSystem,
 		IsDestroyed: mailbox.IsDestroyed,
 		CreatedAt:   formatTime(mailbox.CreatedAt),

@@ -14,6 +14,14 @@ const (
 	ContactEntityFacetKind = "contact_entity"
 	ContactSourceRole      = "contact_source"
 	ContactClaimRole       = "contact_claim"
+
+	// ContactIdentitySourceKind keys a per-logical-contact FILESTORE object by
+	// its contact identity (not by the container file), so re-imported snapshots
+	// of the same contact dedup via the source-object index and version through
+	// the version-set machinery — the storage analog of MailIdentitySourceKind.
+	ContactIdentitySourceKind = "contact_identity"
+	// ContactVersionSetDomain is the version-set domain for logical contacts.
+	ContactVersionSetDomain = "contact"
 )
 
 type RDFStatement struct {
@@ -49,6 +57,7 @@ type ContactAggregate struct {
 	Facts            []ContactFact `json:"facts"`
 	SchemaVersion    SchemaVersion `json:"schema_version"`
 	FactCount        int           `json:"fact_count"`
+	ImportanceLevel  int           `json:"importance_level"`
 	MessageCount     int           `json:"message_count"`
 	ParticipantCount int           `json:"participant_count"`
 }
@@ -72,6 +81,7 @@ type ContactSearchResult struct {
 	Aliases          []string  `json:"aliases,omitempty"`
 	Score            float64   `json:"score"`
 	FactCount        int       `json:"fact_count"`
+	ImportanceLevel  int       `json:"importance_level"`
 	MessageCount     int       `json:"message_count"`
 	ParticipantCount int       `json:"participant_count"`
 }
@@ -179,6 +189,7 @@ type ContactAnalysisInputResult struct {
 	PrimaryEmail     string    `json:"primary_email,omitempty"`
 	InputText        string    `json:"input_text"`
 	FactCount        int       `json:"fact_count"`
+	ImportanceLevel  int       `json:"importance_level"`
 	MessageCount     int       `json:"message_count"`
 	ParticipantCount int       `json:"participant_count"`
 }
