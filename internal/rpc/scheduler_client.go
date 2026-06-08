@@ -36,7 +36,12 @@ func (client *SchedulerClient) Close() error {
 		return nil
 	}
 
-	return client.connection.Close()
+	err := client.connection.Close()
+	if err != nil {
+		return fmt.Errorf("close scheduler client: %w", err)
+	}
+
+	return nil
 }
 
 func (client *SchedulerClient) Scan(
@@ -44,7 +49,7 @@ func (client *SchedulerClient) Scan(
 	request contracts.SchedulerScanRequest,
 ) (contracts.SchedulerScanResponse, error) {
 	response, err := client.client.Scan(ctx, &pb.SchedulerScanRequest{
-		SchemaVersion: int32(request.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(request.SchemaVersion)),
 		PriorityClass: request.PriorityClass,
 		RequestedBy:   request.RequestedBy,
 		Reason:        request.Reason,
@@ -52,7 +57,7 @@ func (client *SchedulerClient) Scan(
 		Forced:        request.Forced,
 	})
 	if err != nil {
-		return contracts.SchedulerScanResponse{}, err
+		return contracts.SchedulerScanResponse{}, fmt.Errorf("scheduler scan: %w", err)
 	}
 
 	return fromPBSchedulerScanResponse(response), nil
@@ -63,8 +68,11 @@ func (client *SchedulerClient) Enqueue(
 	job contracts.AnalyzerJob,
 ) error {
 	_, err := client.client.Enqueue(ctx, ToPBAnalyzerJob(job))
+	if err != nil {
+		return fmt.Errorf("scheduler enqueue: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 func (client *SchedulerClient) Force(
@@ -81,7 +89,7 @@ func (client *SchedulerClient) Force(
 		TraceId:       traceID,
 	})
 	if err != nil {
-		return contracts.SchedulerScanResponse{}, err
+		return contracts.SchedulerScanResponse{}, fmt.Errorf("scheduler force: %w", err)
 	}
 
 	return fromPBSchedulerScanResponse(response), nil
@@ -111,7 +119,10 @@ func (client *SchedulerClient) NotifyObjectsChanged(
 		},
 	)
 	if err != nil {
-		return contracts.SchedulerScanResponse{}, err
+		return contracts.SchedulerScanResponse{}, fmt.Errorf(
+			"scheduler notify objects changed: %w",
+			err,
+		)
 	}
 
 	return fromPBSchedulerScanResponse(response), nil
@@ -144,7 +155,7 @@ func (client *SchedulerClient) DeadLetters(
 		Limit:         contracts.ClampInt32(request.Limit),
 	})
 	if err != nil {
-		return contracts.DeadLetterResponse{}, err
+		return contracts.DeadLetterResponse{}, fmt.Errorf("scheduler dead letters: %w", err)
 	}
 
 	jobs := make([]contracts.AnalyzerJob, 0, len(response.GetJobs()))
