@@ -453,12 +453,24 @@ func writeVector(w io.Writer, vector Vector) error {
 	return binary.Write(w, binary.LittleEndian, vector)
 }
 
+// maxVectorDim bounds a deserialized vector dimension so a corrupt or hostile
+// state file cannot trigger a huge allocation (OOM DoS). It sits far above any
+// real embedding width (FullDim is 768).
+const maxVectorDim = 1 << 16
+
+// errVectorDimTooLarge guards readVector against an OOM from a corrupt dimension.
+var errVectorDimTooLarge = errors.New("vector dimension exceeds limit")
+
 func readVector(r io.Reader) (Vector, error) {
 	var dim uint32
 
 	err := binary.Read(r, binary.LittleEndian, &dim)
 	if err != nil {
 		return nil, err
+	}
+
+	if dim > maxVectorDim {
+		return nil, fmt.Errorf("%w: %d (max %d)", errVectorDimTooLarge, dim, maxVectorDim)
 	}
 
 	vector := make(Vector, dim)

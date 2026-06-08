@@ -72,12 +72,23 @@ func writeLenBytes(w io.Writer, data []byte) error {
 	return err
 }
 
+// maxLenBytes bounds a deserialized length-prefixed payload so a corrupt or
+// hostile artifact cannot trigger a huge allocation (OOM DoS).
+const maxLenBytes = 512 << 20 // 512 MiB
+
+// errLenTooLarge guards readLenBytes against an OOM from a corrupt length prefix.
+var errLenTooLarge = errors.New("length exceeds limit")
+
 func readLenBytes(r io.Reader) ([]byte, error) {
 	var n uint64
 
 	err := binary.Read(r, binary.LittleEndian, &n)
 	if err != nil {
 		return nil, err
+	}
+
+	if n > maxLenBytes {
+		return nil, fmt.Errorf("%w: %d (max %d)", errLenTooLarge, n, maxLenBytes)
 	}
 
 	data := make([]byte, n)

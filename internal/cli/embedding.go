@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/renameio"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 
@@ -284,12 +285,17 @@ func loadEmbeddingState(service *embedding.Service, path string) error {
 	return service.LoadState(data)
 }
 
+// embeddingStatePerm is the file mode for the persisted embedding state.
+const embeddingStatePerm os.FileMode = 0o600
+
 func saveEmbeddingState(out io.Writer, service *embedding.Service, path string) error {
 	data, err := service.SnapshotState()
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+
+	err = renameio.WriteFile(path, data, embeddingStatePerm)
+	if err != nil {
 		return fmt.Errorf("write embedding state %q: %w", path, err)
 	}
 	_, _ = fmt.Fprintf(
