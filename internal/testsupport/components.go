@@ -52,7 +52,7 @@ func StartFilestoreGRPCAt(
 ) *FilestoreService {
 	t.Helper()
 	store := filestore.NewFilesystemStore(root)
-	endpoint := unixEndpoint(t, "filestore.sock")
+	endpoint := UnixEndpoint(t, "filestore.sock")
 	serverCtx, cancel := context.WithCancel(ctx)
 	errc := make(chan error, 1)
 	go func() {
@@ -116,7 +116,8 @@ func StartQueryGRPC(
 		releaseQueryIntegrationLock(t, lock)
 		t.Fatal(err)
 	}
-	endpoint := unixEndpoint(t, "query.sock")
+
+	endpoint := UnixEndpoint(t, "query.sock")
 	serverCtx, cancel := context.WithCancel(ctx)
 	errc := make(chan error, 1)
 	go func() {
@@ -206,7 +207,8 @@ func StartSchedulerGRPC(
 	if err != nil {
 		t.Fatal(err)
 	}
-	endpoint := unixEndpoint(t, "scheduler.sock")
+
+	endpoint := UnixEndpoint(t, "scheduler.sock")
 	serverCtx, cancel := context.WithCancel(ctx)
 	errc := make(chan error, 1)
 	go func() {
@@ -405,7 +407,7 @@ func quoteIdent(identifier string) string {
 	return `"` + identifier + `"`
 }
 
-func unixEndpoint(t *testing.T, name string) rpc.Endpoint {
+func UnixEndpoint(t *testing.T, name string) rpc.Endpoint {
 	t.Helper()
 
 	// Keep the socket path short and independent of the (possibly long) test
