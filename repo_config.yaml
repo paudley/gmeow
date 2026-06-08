@@ -57,6 +57,10 @@ code_intel:
     - "build/**"
     - ".coding-ethos/**"
 
+sandbox:
+  network_tools:
+    - go-test
+
 filesystem:
   required_ignores:
     enabled: true

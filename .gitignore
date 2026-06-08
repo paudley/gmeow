@@ -50,3 +50,5 @@ gmeow.toml
 logs
 .cache
 .cache
+
+.coding-ethos/code-intel.duckdb.shm
