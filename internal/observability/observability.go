@@ -108,7 +108,7 @@ func (metrics *Metrics) PrometheusText() string {
 
 	var builder strings.Builder
 	for _, name := range names {
-		builder.WriteString(fmt.Sprintf("%s %g\n", name, snapshot[name]))
+		_, _ = fmt.Fprintf(&builder, "%s %g\n", name, snapshot[name])
 	}
 
 	return builder.String()

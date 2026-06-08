@@ -6,6 +6,7 @@ package sourcegrpc
 import (
 	"context"
 	"errors"
+	"math"
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/rpc"
@@ -198,13 +199,27 @@ func sourceBackfillReportToPB(
 	return &pb.SourceBackfillResponse{
 		FinalCursor:      cursor,
 		FailedMessageIds: append([]string{}, report.FailedMessageIDs...),
-		Processed:        int32(report.Processed),
-		Created:          int32(report.Created),
-		Skipped:          int32(report.Skipped),
-		Failed:           int32(report.Failed),
-		Pages:            int32(report.Pages),
+		Processed:        clampCountInt32(report.Processed),
+		Created:          clampCountInt32(report.Created),
+		Skipped:          clampCountInt32(report.Skipped),
+		Failed:           clampCountInt32(report.Failed),
+		Pages:            clampCountInt32(report.Pages),
 		Completed:        report.Completed,
 	}, nil
+}
+
+// clampCountInt32 narrows a non-negative count to the int32 proto wire type,
+// saturating rather than overflowing on the (practically unreachable) extremes.
+func clampCountInt32(count int) int32 {
+	if count < 0 {
+		return 0
+	}
+
+	if count > math.MaxInt32 {
+		return math.MaxInt32
+	}
+
+	return int32(count)
 }
 
 func mapStringAny(base, overlay map[string]string) map[string]any {

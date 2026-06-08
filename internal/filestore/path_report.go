@@ -416,11 +416,7 @@ func (store *FilesystemStore) resolveLegacyCompoundParentPath(
 func pathResolveParents(parents []compoundParentEdge) []PathResolveParent {
 	result := make([]PathResolveParent, 0, len(parents))
 	for _, parent := range parents {
-		result = append(result, PathResolveParent{
-			ParentDigest: parent.ParentDigest,
-			Role:         parent.Role,
-			UpdatedAt:    parent.UpdatedAt,
-		})
+		result = append(result, PathResolveParent(parent))
 	}
 
 	return result
@@ -478,7 +474,7 @@ func validHexShard(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return false
 		}
 	}

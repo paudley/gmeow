@@ -42,6 +42,7 @@ func NewGoogleGmailBackend(
 
 	options := []option.ClientOption{option.WithScopes(gmail.GmailModifyScope)}
 	if strings.TrimSpace(delegatedSubject) == "" {
+		//nolint:staticcheck // SA1019: WithCredentialsJSON retained pending a reviewed credentials-loading migration
 		options = append(options, option.WithCredentialsJSON(credentialsJSON))
 	} else {
 		config, err := google.JWTConfigFromJSON(credentialsJSON, gmail.GmailModifyScope)

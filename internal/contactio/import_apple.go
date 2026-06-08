@@ -172,7 +172,7 @@ func writeAppleAddressBookScalars(
 		}
 		object, err := appleObjectForValue(value, mapping.Kind)
 		if err != nil {
-			return fmt.Errorf("Apple AddressBook field %q: %w", key, err)
+			return fmt.Errorf("field %q in Apple AddressBook: %w", key, err)
 		}
 		if object == "" {
 			continue
@@ -204,7 +204,7 @@ func writeAppleAddressBookMultiValues(
 		}
 		values, err := appleMultiValue(raw)
 		if err != nil {
-			return fmt.Errorf("Apple AddressBook field %q: %w", key, err)
+			return fmt.Errorf("field %q in Apple AddressBook: %w", key, err)
 		}
 		for index, entry := range values {
 			node := appleSubresource(subject, key, index)
@@ -231,7 +231,7 @@ func writeAppleAddressBookMultiValues(
 					object, err := appleObjectForValue(entry.Components[component], "")
 					if err != nil {
 						return fmt.Errorf(
-							"Apple AddressBook component %q in field %q: %w",
+							"component %q in Apple AddressBook field %q: %w",
 							component,
 							key,
 							err,
@@ -245,7 +245,7 @@ func writeAppleAddressBookMultiValues(
 			}
 			object, err := appleObjectForValue(entry.Value, mapping.ValueKind)
 			if err != nil {
-				return fmt.Errorf("Apple AddressBook field %q value: %w", key, err)
+				return fmt.Errorf("value for field %q in Apple AddressBook: %w", key, err)
 			}
 			if object == "" {
 				continue
@@ -278,7 +278,7 @@ func writeAppleAddressBookPropertyTypes(
 		}
 		code, err := appleInteger(propertyTypes[name])
 		if err != nil {
-			return fmt.Errorf("Apple AddressBook property type %q: %w", name, err)
+			return fmt.Errorf("property type %q in Apple AddressBook: %w", name, err)
 		}
 		node := appleSubresource(subject, "ABPropertyTypes-"+name, 0)
 		writeTriple(builder, subject, gmeowPrefix+"applePropertyType", iri(node))
