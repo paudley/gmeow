@@ -5,6 +5,7 @@ package rpc
 
 import (
 	"context"
+	"fmt"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -67,7 +68,7 @@ func (server *SchedulerServer) Force(
 		request.GetTraceId(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scheduler force: %w", err)
 	}
 
 	return toPBSchedulerScanResponse(response), nil
@@ -86,8 +87,8 @@ func (server *SchedulerServer) Requeue(
 	}
 
 	return &pb.RequeueResponse{
-		SchemaVersion: int32(response.SchemaVersion),
-		Requeued:      int32(response.Requeued),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
+		Requeued:      contracts.ClampInt32(response.Requeued),
 	}, nil
 }
 
@@ -109,7 +110,7 @@ func (server *SchedulerServer) DeadLetters(
 	}
 
 	return &pb.DeadLetterResponse{
-		SchemaVersion: int32(response.SchemaVersion),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
 		Jobs:          jobs,
 	}, nil
 }
@@ -124,11 +125,11 @@ func (server *SchedulerServer) Status(
 	}
 
 	return &pb.SchedulerStatus{
-		SchemaVersion: int32(status.SchemaVersion),
-		Pending:       int32(status.Pending),
-		Retry:         int32(status.Retry),
-		Failed:        int32(status.Failed),
-		DeadLetter:    int32(status.DeadLetter),
+		SchemaVersion: contracts.ClampInt32(int(status.SchemaVersion)),
+		Pending:       contracts.ClampInt32(status.Pending),
+		Retry:         contracts.ClampInt32(status.Retry),
+		Failed:        contracts.ClampInt32(status.Failed),
+		DeadLetter:    contracts.ClampInt32(status.DeadLetter),
 	}, nil
 }
 
@@ -164,10 +165,10 @@ func toPBSchedulerScanResponse(
 	response contracts.SchedulerScanResponse,
 ) *pb.SchedulerScanResponse {
 	return &pb.SchedulerScanResponse{
-		SchemaVersion: int32(response.SchemaVersion),
-		Scanned:       int32(response.Scanned),
-		Enqueued:      int32(response.Enqueued),
-		Skipped:       int32(response.Skipped),
-		Failed:        int32(response.Failed),
+		SchemaVersion: contracts.ClampInt32(int(response.SchemaVersion)),
+		Scanned:       contracts.ClampInt32(response.Scanned),
+		Enqueued:      contracts.ClampInt32(response.Enqueued),
+		Skipped:       contracts.ClampInt32(response.Skipped),
+		Failed:        contracts.ClampInt32(response.Failed),
 	}
 }

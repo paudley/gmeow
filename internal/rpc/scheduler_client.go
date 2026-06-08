@@ -5,6 +5,7 @@ package rpc
 
 import (
 	"context"
+	"fmt"
 
 	"blackcat.ca/gmeow/internal/contracts"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
@@ -121,11 +122,11 @@ func (client *SchedulerClient) Requeue(
 	request contracts.RequeueRequest,
 ) (contracts.RequeueResponse, error) {
 	response, err := client.client.Requeue(ctx, &pb.RequeueRequest{
-		SchemaVersion: int32(request.SchemaVersion),
-		Limit:         int32(request.Limit),
+		SchemaVersion: contracts.ClampInt32(int(request.SchemaVersion)),
+		Limit:         contracts.ClampInt32(request.Limit),
 	})
 	if err != nil {
-		return contracts.RequeueResponse{}, err
+		return contracts.RequeueResponse{}, fmt.Errorf("scheduler requeue: %w", err)
 	}
 
 	return contracts.RequeueResponse{
@@ -139,8 +140,8 @@ func (client *SchedulerClient) DeadLetters(
 	request contracts.DeadLetterRequest,
 ) (contracts.DeadLetterResponse, error) {
 	response, err := client.client.DeadLetters(ctx, &pb.DeadLetterRequest{
-		SchemaVersion: int32(request.SchemaVersion),
-		Limit:         int32(request.Limit),
+		SchemaVersion: contracts.ClampInt32(int(request.SchemaVersion)),
+		Limit:         contracts.ClampInt32(request.Limit),
 	})
 	if err != nil {
 		return contracts.DeadLetterResponse{}, err
@@ -166,7 +167,7 @@ func (client *SchedulerClient) Status(
 ) (contracts.SchedulerStatus, error) {
 	response, err := client.client.Status(ctx, &pb.Empty{})
 	if err != nil {
-		return contracts.SchedulerStatus{}, err
+		return contracts.SchedulerStatus{}, fmt.Errorf("scheduler status: %w", err)
 	}
 
 	return contracts.SchedulerStatus{

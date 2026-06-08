@@ -167,7 +167,8 @@ func (source *AnalysisJobSource) ensureConsumer(ctx context.Context) error {
 		prefetch = 1
 	}
 
-	if err := channel.Qos(prefetch, 0, false); err != nil {
+	err = channel.Qos(prefetch, 0, false)
+	if err != nil {
 		_ = channel.Close()
 
 		return fmt.Errorf("set scheduler rabbitmq analysis qos: %w", err)
@@ -208,7 +209,7 @@ func (source *AnalysisJobSource) publishFailure(
 		return err
 	}
 
-	headers := amqp.Table{"attempt": int32(job.Attempt)}
+	headers := amqp.Table{"attempt": contracts.ClampInt32(job.Attempt)}
 	if cause != nil {
 		headers["failure"] = cause.Error()
 	}

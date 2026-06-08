@@ -86,14 +86,15 @@ func (broker *Broker) declareSourceImportQueues(channel *amqp.Channel) error {
 		return fmt.Errorf("declare source import failed queue: %w", err)
 	}
 
-	if _, err := channel.QueueDeclare(
+	_, err = channel.QueueDeclare(
 		broker.topology.sourceImportDeadLetterQueue,
 		true,
 		false,
 		false,
 		false,
 		nil,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("declare source import dead-letter queue: %w", err)
 	}
 
@@ -190,7 +191,7 @@ func (broker *Broker) PublishSourceImportJob(
 			Priority:     clampPriority(job.Priority),
 			Headers: amqp.Table{
 				"idempotency_key": job.IdempotencyKey,
-				"attempt":         int32(job.Attempt),
+				"attempt":         contracts.ClampInt32(job.Attempt),
 				"run_id":          job.RunID,
 			},
 			Body: body,
@@ -391,7 +392,7 @@ func (broker *Broker) sourceImportRetryPublishing(
 
 	headers := amqp.Table{
 		"idempotency_key": job.IdempotencyKey,
-		"attempt":         int32(job.Attempt),
+		"attempt":         contracts.ClampInt32(job.Attempt),
 		"run_id":          job.RunID,
 	}
 	if backoff > 0 {
@@ -548,7 +549,7 @@ func (source *SourceImportJobSource) publishFailure(
 		return err
 	}
 
-	headers := amqp.Table{"attempt": int32(job.Attempt)}
+	headers := amqp.Table{"attempt": contracts.ClampInt32(job.Attempt)}
 	if cause != nil {
 		headers["failure"] = cause.Error()
 	}

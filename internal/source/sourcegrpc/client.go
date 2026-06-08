@@ -5,6 +5,7 @@ package sourcegrpc
 
 import (
 	"context"
+	"fmt"
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/rpc"
@@ -67,7 +68,7 @@ func (client *Client) LiveSearch(
 ) ([]source.LiveSearchResult, error) {
 	response, err := client.client.LiveSearch(ctx, &pb.SourceSearchRequest{
 		Query: request.Query,
-		Limit: int32(request.Limit),
+		Limit: contracts.ClampInt32(request.Limit),
 	})
 	if err != nil {
 		return nil, err
@@ -83,10 +84,10 @@ func (client *Client) SearchAndHydrate(
 ) ([]source.LiveSearchResult, error) {
 	response, err := client.client.SearchAndHydrate(ctx, &pb.SourceSearchRequest{
 		Query: request.Query,
-		Limit: int32(request.Limit),
+		Limit: contracts.ClampInt32(request.Limit),
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("source search and hydrate: %w", err)
 	}
 
 	return sourceHitsFromPB(response.GetHits()), nil
