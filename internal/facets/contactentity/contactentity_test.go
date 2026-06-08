@@ -154,6 +154,24 @@ func TestNormalizeIdentityHandlesMailtoAndDisplayNames(t *testing.T) {
 	}
 }
 
+func TestNormalizeEmailRejectsNonEmailAndPseudoIM(t *testing.T) {
+	cases := []string{
+		"aim2.i.blackcat.ca",
+		"paudley",
+		"102998083@icq.i.blackcat.ca",
+	}
+	for _, value := range cases {
+		if got := NormalizeEmail(value); got != "" {
+			t.Fatalf("NormalizeEmail(%q) = %q, want empty", value, got)
+		}
+	}
+
+	got := NormalizeEmail("mailto:Work.With.Us@BlackcatInformatics.ca")
+	if got != "work.with.us@blackcatinformatics.ca" {
+		t.Fatalf("NormalizeEmail valid address = %q", got)
+	}
+}
+
 func TestNormalizeAliasBuildsSlugHandle(t *testing.T) {
 	got := NormalizeAlias(" Fixture_Handle.One ")
 	if got != "fixture-handle-one" {

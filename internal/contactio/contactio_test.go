@@ -563,6 +563,12 @@ func TestRDFImportRootedGraphIsOneContact(t *testing.T) {
 	}
 }
 
+func TestNormalizeFormatAcceptsAdvertisedRDFTTL(t *testing.T) {
+	if got := NormalizeFormat("rdf/ttl"); got != FormatRDF {
+		t.Fatalf("NormalizeFormat(rdf/ttl) = %q, want %q", got, FormatRDF)
+	}
+}
+
 func TestRDFImportUnrootedCollectionYieldsManyContacts(t *testing.T) {
 	// No primary-subject declaration => an un-rooted collection of co-equal
 	// agents, each its own contact.

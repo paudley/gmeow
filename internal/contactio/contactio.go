@@ -563,7 +563,7 @@ func NormalizeFormat(format string) string {
 		return FormatBBDB
 	case "csv", "text/csv":
 		return FormatCSV
-	case "foaf", "rdf", "ttl", "turtle", "text/turtle":
+	case "foaf", "rdf", "rdf/ttl", "ttl", "turtle", "text/turtle":
 		return FormatRDF
 	case "ged", "gedcom", "text/gedcom":
 		return FormatGEDCOM

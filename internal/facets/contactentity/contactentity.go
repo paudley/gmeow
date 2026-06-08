@@ -32,6 +32,7 @@ const (
 const (
 	mailtoPrefix          = "mailto:"
 	contactAliasPredicate = "https://blackcatinformatics.ca/gmeow/contactAlias"
+	imPseudoEmailSuffix   = ".i.blackcat.ca"
 	importancePredicate   = "https://blackcatinformatics.ca/gmeow/importanceLevel"
 	schemaOrgHTTPPrefix   = "http://schema.org/"
 	schemaOrgHTTPSPrefix  = "https://schema.org/"
@@ -376,13 +377,28 @@ func FactKind(predicate string) (string, bool, bool) {
 
 func FactValue(value, objectKind, factKind string) string {
 	if factKind == FactKindEmail {
-		return NormalizeIdentity(value)
+		return NormalizeEmail(value)
 	}
 	if factKind == FactKindContactAlias {
 		return NormalizeAlias(value)
 	}
 
 	return strings.TrimSpace(value)
+}
+
+func NormalizeEmail(value string) string {
+	normalized := NormalizeIdentity(value)
+
+	at := strings.LastIndex(normalized, "@")
+	if at <= 0 || at == len(normalized)-1 {
+		return ""
+	}
+
+	if strings.HasSuffix(normalized[at+1:], imPseudoEmailSuffix) {
+		return ""
+	}
+
+	return normalized
 }
 
 func NormalizeAlias(value string) string {
