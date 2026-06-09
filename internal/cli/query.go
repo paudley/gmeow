@@ -26,6 +26,7 @@ import (
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contactio"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/filestore"
 	querypg "blackcat.ca/gmeow/internal/query/postgres"
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
@@ -604,9 +605,21 @@ func newQueryContactAnalyzeCommand(out io.Writer, configPath *string) *cobra.Com
 			}
 			defer index.Close()
 
+			embeddingClient, err := rpc.NewEmbeddingClient(
+				command.Context(),
+				rpcEndpoint(loaded.Resolved.RPC.Embedding),
+			)
+			if err != nil {
+				return fmt.Errorf("connect to EMBEDDING service: %w", err)
+			}
+			defer embeddingClient.Close()
+			status, err := embeddingClient.Status(command.Context())
+			if err != nil {
+				return fmt.Errorf("inspect EMBEDDING service: %w", err)
+			}
 			analyzer, err := analysis.NewEmbeddingAnalyzer(analysis.EmbeddingConfig{
-				Endpoint: loaded.Config.Analysis.Embeddings.Endpoint,
-				Model:    loaded.Config.Analysis.Embeddings.Model,
+				Model:   status.Model,
+				Service: embeddingClient,
 			})
 			if err != nil {
 				return err
@@ -1303,8 +1316,9 @@ func newQueryProjectChangedCommand(out io.Writer, configPath *string) *cobra.Com
 
 	command := &cobra.Command{
 		Use:   "project-changed",
-		Short: "Project changed FILESTORE annotations into QUERY",
+		Short: "Queue changed FILESTORE objects for QUERY projection",
 		RunE: func(command *cobra.Command, _ []string) error {
+			started := time.Now()
 			loaded, err := config.Load(config.Options{Path: *configPath})
 			if err != nil {
 				return err
@@ -1321,18 +1335,41 @@ func newQueryProjectChangedCommand(out io.Writer, configPath *string) *cobra.Com
 			}
 			defer index.Close()
 
-			report, err := index.ProjectChangedReport(command.Context(), since)
+			store, err := openProjectionStore(command.Context(), loaded)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = store.Close() }()
+
+			schedulerClient, err := rpc.NewSchedulerClient(
+				command.Context(),
+				rpcEndpoint(loaded.Resolved.RPC.Scheduler),
+			)
+			if err != nil {
+				return err
+			}
+			defer schedulerClient.Close()
+
+			report, err := queueChangedProjectionRefreshes(
+				command.Context(),
+				store,
+				index,
+				schedulerClient,
+				since,
+				500,
+			)
 			if err != nil {
 				return err
 			}
 
 			_, err = fmt.Fprintf(
 				out,
-				"query project-changed: scanned=%d projected=%d failed=%d elapsed=%s\n",
-				report.Scanned,
-				report.Projected,
-				report.Failed,
-				report.Elapsed,
+				"query project-changed: scanned=%d enqueued=%d skipped=%d failed=%d elapsed=%s\n",
+				report.scanned,
+				report.enqueued,
+				report.skipped,
+				report.failed,
+				time.Since(started).Round(time.Millisecond),
 			)
 
 			return err
@@ -1342,6 +1379,136 @@ func newQueryProjectChangedCommand(out io.Writer, configPath *string) *cobra.Com
 		StringVar(&sinceValue, "since", "", "only project objects changed after RFC3339 timestamp")
 
 	return command
+}
+
+type changedProjectionWalker interface {
+	WalkChangedProjection(context.Context, time.Time, filestore.ProjectionFunc) error
+}
+
+type projectionRefreshNotifier interface {
+	NotifyObjectsChanged(
+		context.Context,
+		contracts.ObjectChangeRequest,
+	) (contracts.SchedulerScanResponse, error)
+}
+
+type projectionTimestampReader interface {
+	ProjectedAt(
+		context.Context,
+		[]contracts.ObjectDigest,
+	) (map[contracts.ObjectDigest]time.Time, error)
+}
+
+type changedProjectionQueueReport struct {
+	scanned  int
+	enqueued int
+	failed   int
+	skipped  int
+}
+
+type changedProjectionCandidate struct {
+	digest    contracts.ObjectDigest
+	changedAt time.Time
+}
+
+func queueChangedProjectionRefreshes(
+	ctx context.Context,
+	walker changedProjectionWalker,
+	timestamps projectionTimestampReader,
+	notifier projectionRefreshNotifier,
+	since time.Time,
+	batchSize int,
+) (changedProjectionQueueReport, error) {
+	if batchSize < 1 {
+		batchSize = 1
+	}
+
+	var report changedProjectionQueueReport
+	batch := make([]changedProjectionCandidate, 0, batchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		digests := make([]contracts.ObjectDigest, 0, len(batch))
+		for _, candidate := range batch {
+			digests = append(digests, candidate.digest)
+		}
+		projectedAt, err := timestamps.ProjectedAt(ctx, digests)
+		if err != nil {
+			return err
+		}
+		stale := digests[:0]
+		for _, candidate := range batch {
+			projected, ok := projectedAt[candidate.digest]
+			if ok && !projected.Before(candidate.changedAt) {
+				report.skipped++
+				continue
+			}
+			stale = append(stale, candidate.digest)
+		}
+		if len(stale) == 0 {
+			batch = batch[:0]
+			return nil
+		}
+		response, err := notifier.NotifyObjectsChanged(
+			ctx,
+			contracts.ObjectChangeRequest{
+				SchemaVersion:  contracts.SchemaVersionPhase00,
+				ObjectDigests:  append([]contracts.ObjectDigest{}, stale...),
+				RequestedBy:    "query.project-changed",
+				Reason:         "projection_refresh",
+				ProjectionOnly: true,
+			},
+		)
+		if err != nil {
+			return err
+		}
+		report.enqueued += response.Enqueued
+		report.skipped += response.Skipped
+		report.failed += response.Failed
+		batch = batch[:0]
+
+		return nil
+	}
+
+	err := walker.WalkChangedProjection(
+		ctx,
+		since,
+		func(object filestore.ProjectionObject) error {
+			report.scanned++
+			batch = append(batch, changedProjectionCandidate{
+				digest:    object.Digest,
+				changedAt: projectionObjectChangedAt(object),
+			})
+			if len(batch) >= batchSize {
+				return flush()
+			}
+
+			return nil
+		},
+	)
+	if err != nil {
+		return changedProjectionQueueReport{}, err
+	}
+	if err := flush(); err != nil {
+		return changedProjectionQueueReport{}, err
+	}
+
+	return report, nil
+}
+
+func projectionObjectChangedAt(object filestore.ProjectionObject) time.Time {
+	changedAt := object.Manifest.UpdatedAt
+	if object.Manifest.CreatedAt.After(changedAt) {
+		changedAt = object.Manifest.CreatedAt
+	}
+	for _, annotation := range object.Annotations {
+		if annotation.GeneratedAt.After(changedAt) {
+			changedAt = annotation.GeneratedAt
+		}
+	}
+
+	return changedAt
 }
 
 func newQueryProjectCommand(out io.Writer, configPath *string) *cobra.Command {

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/filestore"
@@ -112,28 +113,15 @@ func TestExternalTextInputUsesCompoundMailParts(t *testing.T) {
 	}
 }
 
-func TestEmbeddingUsesCompoundMailParts(t *testing.T) {
+func TestEmbeddingUsesCompoundMailBodyOnly(t *testing.T) {
 	ctx := context.Background()
 	store := filestore.NewFilesystemStore(t.TempDir())
 	digest := putCompoundMailObject(t, ctx, store)
-	endpointInputs := []string{}
-	server := httptest.NewServer(
-		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			var payload struct {
-				Input string `json:"input"`
-			}
-			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-				t.Fatal(err)
-			}
-			endpointInputs = append(endpointInputs, payload.Input)
-			_, _ = writer.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
-		}),
-	)
-	t.Cleanup(server.Close)
+	service := &recordingEmbeddingService{}
 
 	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
-		Endpoint: server.URL,
-		Model:    "test-embed",
+		Model:   "test-embed",
+		Service: service,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -148,8 +136,8 @@ func TestEmbeddingUsesCompoundMailParts(t *testing.T) {
 		t.Fatalf("expected complete embedding annotation, got %#v", annotation.Data)
 	}
 	embeddings, ok := annotation.Data["embeddings"].([]any)
-	if !ok || len(embeddings) < 2 {
-		t.Fatalf("expected multiple embedding annotation rows, got %#v", annotation.Data)
+	if !ok || len(embeddings) != 1 {
+		t.Fatalf("expected one body embedding annotation row, got %#v", annotation.Data)
 	}
 	if _, exists := annotation.Data["embedding"]; exists {
 		t.Fatalf(
@@ -157,14 +145,143 @@ func TestEmbeddingUsesCompoundMailParts(t *testing.T) {
 			annotation.Data,
 		)
 	}
-	if !containsInput(endpointInputs, "Pipeline body mentions Athena") {
-		t.Fatalf("expected embedding input from body part, got %#v", endpointInputs)
+	if !containsInput(service.texts, "Pipeline body mentions Athena") {
+		t.Fatalf("expected embedding input from body part, got %#v", service.texts)
 	}
-	if containsInput(endpointInputs, "application/vnd.gmeow.gmail-message+json") {
-		t.Fatalf("expected embedding input to avoid container JSON, got %#v", endpointInputs)
+	if containsInput(service.texts, "application/vnd.gmeow.gmail-message+json") {
+		t.Fatalf("expected embedding input to avoid container JSON, got %#v", service.texts)
 	}
-	if containsInput(endpointInputs, "gmail:primary:test-message") {
-		t.Fatalf("expected embedding input to avoid object ids, got %#v", endpointInputs)
+	if containsInput(service.texts, "gmail:primary:test-message") {
+		t.Fatalf("expected embedding input to avoid object ids, got %#v", service.texts)
+	}
+	if containsInput(service.texts, "Production Pipeline Verification") ||
+		containsInput(service.texts, "sender@example.test") {
+		t.Fatalf("expected embedding input to avoid headers, got %#v", service.texts)
+	}
+}
+
+func TestEmbeddingDeHTMLsBodyAndIgnoresAttachments(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	headerDigest, err := store.Put(ctx, filestore.PutRequest{
+		Reader: strings.NewReader(`[
+			{"name":"From","value":"sender@example.test"},
+			{"name":"Subject","value":"Ignored Header"}
+		]`),
+		MediaType:    "text/rfc822-headers",
+		ContentRoles: []string{"rfc822_headers"},
+		Facets:       []contracts.Facet{{Kind: "email_part"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyDigest, err := store.Put(ctx, filestore.PutRequest{
+		Reader: strings.NewReader(
+			`<html><head><style>.hidden{display:none}</style><script>alert("x")</script></head>` +
+				`<body><p>Hello &amp; welcome.</p><div>Visible body text.</div></body></html>`,
+		),
+		MediaType:    "text/html; charset=utf-8",
+		ContentRoles: []string{"email_body"},
+		Facets:       []contracts.Facet{{Kind: "email_part"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachmentDigest, err := store.Put(ctx, filestore.PutRequest{
+		Reader: strings.NewReader(
+			"QmFzZTY0IGF0dGFjaG1lbnQgdGhhdCBtdXN0IG5vdCBiZSBlbWJlZGRlZA==",
+		),
+		MediaType:    "application/octet-stream",
+		ContentRoles: []string{"attachment"},
+		Facets:       []contracts.Facet{{Kind: "email_part"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := store.PutCompound(ctx, filestore.CompoundPutRequest{
+		ObjectID:     "gmail:primary:html-message",
+		MediaType:    "application/vnd.gmeow.gmail-message+json",
+		SourceHint:   "HTML message",
+		ContentRoles: []string{"source", "mail_message"},
+		Facets:       []contracts.Facet{{Kind: "mail_message"}},
+		Parts: []contracts.CompoundPart{
+			{Digest: headerDigest, Role: "rfc822_headers"},
+			{Digest: bodyDigest, Role: "email_body", Order: 1},
+			{Digest: attachmentDigest, Role: "attachment", Order: 2},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &recordingEmbeddingService{}
+	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
+		Model:   "test-embed",
+		Service: service,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	annotation, err := analyzer.Analyze(ctx, store, analyzerJob(digest, analyzer.Spec()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if annotation.Data["status"] != "complete" {
+		t.Fatalf("expected complete embedding annotation, got %#v", annotation.Data)
+	}
+	if len(service.texts) != 1 {
+		t.Fatalf("expected one body embedding input, got %#v", service.texts)
+	}
+	input := service.texts[0]
+	for _, expected := range []string{"Hello & welcome.", "Visible body text."} {
+		if !strings.Contains(input, expected) {
+			t.Fatalf("expected de-HTML body text to contain %q, got %q", expected, input)
+		}
+	}
+	for _, forbidden := range []string{
+		"<p>", "display:none", "alert(", "Ignored Header", "sender@example.test", "QmFzZTY0",
+	} {
+		if strings.Contains(input, forbidden) {
+			t.Fatalf("embedding body input contained forbidden %q: %q", forbidden, input)
+		}
+	}
+}
+
+func TestEmbeddingUsesServiceNamespace(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("A message body with enough natural language content."),
+		MediaType: "text/plain",
+		Facets:    []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &recordingEmbeddingService{}
+	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
+		Model:     "test-embed",
+		Namespace: "email_segment",
+		Service:   service,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	annotation, err := analyzer.Analyze(ctx, store, analyzerJob(digest, analyzer.Spec()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if annotation.Data["status"] != "complete" {
+		t.Fatalf("expected complete embedding annotation, got %#v", annotation.Data)
+	}
+	if len(service.namespaces) != 1 || service.namespaces[0] != "email_segment" {
+		t.Fatalf("service namespaces = %#v, want email_segment", service.namespaces)
+	}
+	if len(service.texts) != 1 ||
+		!strings.Contains(service.texts[0], "natural language content") {
+		t.Fatalf("service texts = %#v", service.texts)
 	}
 }
 
@@ -180,8 +297,8 @@ func TestEmbeddingSkipsEmptyText(t *testing.T) {
 		t.Fatal(err)
 	}
 	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
-		Endpoint: "http://127.0.0.1:1/v1/embeddings",
-		Model:    "test-embed",
+		Model:   "test-embed",
+		Service: &recordingEmbeddingService{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -208,23 +325,10 @@ func TestEmbeddingTruncatesLongInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	endpointInputs := []string{}
-	server := httptest.NewServer(
-		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			var payload struct {
-				Input string `json:"input"`
-			}
-			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-				t.Fatal(err)
-			}
-			endpointInputs = append(endpointInputs, payload.Input)
-			_, _ = writer.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
-		}),
-	)
-	t.Cleanup(server.Close)
+	service := &recordingEmbeddingService{}
 	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
-		Endpoint: server.URL,
-		Model:    "test-embed",
+		Model:   "test-embed",
+		Service: service,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -234,13 +338,53 @@ func TestEmbeddingTruncatesLongInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(endpointInputs) < 2 {
-		t.Fatalf("expected long embedding input to be chunked, got %#v", endpointInputs)
+	if len(service.texts) < 2 {
+		t.Fatalf("expected long embedding input to be chunked, got %#v", service.texts)
 	}
-	for _, input := range endpointInputs {
+	for _, input := range service.texts {
 		if len([]rune(input)) > embeddingInputRuneLimit {
 			t.Fatalf("expected bounded endpoint input, got %d runes", len([]rune(input)))
 		}
+	}
+}
+
+func TestEmbeddingNormalizesInvalidUTF8BeforeServiceCall(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader: strings.NewReader(
+			"valid prefix " + string([]byte{0xff, 0xfe}) + " valid suffix",
+		),
+		MediaType: "text/plain",
+		Facets:    []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &recordingEmbeddingService{}
+	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
+		Model:   "test-embed",
+		Service: service,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := analyzer.Analyze(
+		ctx,
+		store,
+		analyzerJob(digest, analyzer.Spec()),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(service.texts) != 1 {
+		t.Fatalf("service texts = %#v, want one", service.texts)
+	}
+	if !utf8.ValidString(service.texts[0]) {
+		t.Fatalf("service text is not valid UTF-8: %q", service.texts[0])
+	}
+	if strings.ContainsRune(service.texts[0], utf8.RuneError) {
+		t.Fatalf("service text retained replacement runes: %q", service.texts[0])
 	}
 }
 
@@ -433,6 +577,38 @@ func TestSummaryModelAcceptsFencedJSON(t *testing.T) {
 	}
 }
 
+func TestSummaryModelAcceptsJSONAfterModelPreamble(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest := putCompoundMailObject(t, ctx, store)
+	server := httptest.NewServer(
+		http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write(
+				[]byte(
+					`{"choices":[{"message":{"content":"(drafting a concise operator summary)\n{\"summary\":\"The email verifies analyzer coverage.\",\"bullets\":[\"Coverage requested\"]}"}}]}`,
+				),
+			)
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	analyzer, err := NewSummaryAnalyzer(SummaryConfig{
+		Endpoint: server.URL,
+		Model:    "test-summary",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	annotation, err := analyzer.Analyze(ctx, store, analyzerJob(digest, analyzer.Spec()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if annotation.Data["summary"] != "The email verifies analyzer coverage." {
+		t.Fatalf("expected prefaced JSON summary to parse, got %#v", annotation.Data)
+	}
+}
+
 func TestSummaryModelSerializesEndpointCalls(t *testing.T) {
 	ctx := context.Background()
 	store := filestore.NewFilesystemStore(t.TempDir())
@@ -490,32 +666,15 @@ func TestSummaryModelSerializesEndpointCalls(t *testing.T) {
 	}
 }
 
-func TestEmbeddingSerializesEndpointCalls(t *testing.T) {
+func TestEmbeddingSerializesServiceCalls(t *testing.T) {
 	ctx := context.Background()
 	store := filestore.NewFilesystemStore(t.TempDir())
 	digest := putCompoundMailObject(t, ctx, store)
-	var active int32
-	var maxActive int32
-	server := httptest.NewServer(
-		http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-			current := atomic.AddInt32(&active, 1)
-			defer atomic.AddInt32(&active, -1)
-			for {
-				observed := atomic.LoadInt32(&maxActive)
-				if current <= observed ||
-					atomic.CompareAndSwapInt32(&maxActive, observed, current) {
-					break
-				}
-			}
-			time.Sleep(25 * time.Millisecond)
-			_, _ = writer.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
-		}),
-	)
-	t.Cleanup(server.Close)
+	service := &recordingEmbeddingService{delay: 25 * time.Millisecond}
 
 	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
-		Endpoint: server.URL,
-		Model:    "test-embed",
+		Model:   "test-embed",
+		Service: service,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -538,10 +697,10 @@ func TestEmbeddingSerializesEndpointCalls(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if maxActive != 1 {
+	if service.maxActive.Load() != 1 {
 		t.Fatalf(
-			"expected embedding endpoint calls to be serialized, max active=%d",
-			maxActive,
+			"expected embedding service calls to be serialized, max active=%d",
+			service.maxActive.Load(),
 		)
 	}
 }
@@ -612,4 +771,34 @@ func containsInput(inputs []string, needle string) bool {
 	}
 
 	return false
+}
+
+type recordingEmbeddingService struct {
+	namespaces []string
+	texts      []string
+	delay      time.Duration
+	active     atomic.Int32
+	maxActive  atomic.Int32
+}
+
+func (service *recordingEmbeddingService) EmbedNamespace(
+	_ context.Context,
+	namespace string,
+	texts []string,
+) ([][]float32, int, error) {
+	current := service.active.Add(1)
+	defer service.active.Add(-1)
+	for {
+		observed := service.maxActive.Load()
+		if current <= observed || service.maxActive.CompareAndSwap(observed, current) {
+			break
+		}
+	}
+	if service.delay > 0 {
+		time.Sleep(service.delay)
+	}
+	service.namespaces = append(service.namespaces, namespace)
+	service.texts = append(service.texts, texts...)
+
+	return [][]float32{{0.1, 0.2, 0.3}}, 1, nil
 }

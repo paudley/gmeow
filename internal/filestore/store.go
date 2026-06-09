@@ -390,7 +390,11 @@ func (store *FilesystemStore) writeManifestTo(
 	digest contracts.ObjectDigest,
 	manifest contracts.Manifest,
 ) error {
-	return sink.set(manifestKey(digest), manifest)
+	if err := sink.set(manifestKey(digest), manifest); err != nil {
+		return err
+	}
+
+	return store.recordProjectionChangeTo(sink, digest, manifest.UpdatedAt)
 }
 
 // ReadManifest returns a manifest from metadata storage.

@@ -127,6 +127,48 @@ func TestFilestoreClientUsesServiceForObjectAndAnnotationAccess(t *testing.T) {
 	}
 }
 
+func TestFilestoreClientWritesLargeAnalysisAnnotation(t *testing.T) {
+	ctx := context.Background()
+	store := filestore.NewFilesystemStore(t.TempDir())
+	digest, err := store.Put(ctx, filestore.PutRequest{
+		Reader:    strings.NewReader("large annotation target"),
+		MediaType: "text/plain",
+		Facets:    []contracts.Facet{{Kind: "file", Version: "1"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, cleanup := serveTestFilestore(t, store)
+	defer cleanup()
+	client, err := NewFilestoreClient(ctx, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if err := client.WriteAnnotation(ctx, contracts.Annotation{
+		SchemaVersion: contracts.SchemaVersionPhase00,
+		ObjectDigest:  digest,
+		Kind:          "analysis",
+		AnalyzerName:  "large.checked",
+		AnalyzerVer:   "v1",
+		Data: map[string]any{
+			"status":  "complete",
+			"payload": strings.Repeat("x", 5<<20),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hasAnnotation, err := client.HasAnalysisAnnotation(ctx, digest, "large.checked", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasAnnotation {
+		t.Fatal("expected large analysis annotation through gRPC client")
+	}
+}
+
 func TestFilestoreClientStorageVerifyAndPathOverGRPC(t *testing.T) {
 	ctx := context.Background()
 	store := filestore.NewFilesystemStore(t.TempDir())
@@ -314,7 +356,7 @@ func serveTestFilestore(
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := grpc.NewServer()
+	server := grpc.NewServer(defaultServerOptions()...)
 	pb.RegisterFilestoreServiceServer(server, NewFilestoreServer(store, options...))
 	done := make(chan struct{})
 	go func() {

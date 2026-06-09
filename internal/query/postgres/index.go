@@ -330,6 +330,44 @@ func (index *Index) ProjectChangedReport(
 	return report, err
 }
 
+func (index *Index) ProjectedAt(
+	ctx context.Context,
+	digests []contracts.ObjectDigest,
+) (map[contracts.ObjectDigest]time.Time, error) {
+	if len(digests) == 0 {
+		return map[contracts.ObjectDigest]time.Time{}, nil
+	}
+
+	rows, err := index.pool.Query(
+		ctx,
+		`SELECT object_digest, projected_at
+		   FROM query_objects
+		  WHERE object_digest = ANY($1)`,
+		digests,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query projection timestamps: %w", err)
+	}
+	defer rows.Close()
+
+	timestamps := make(map[contracts.ObjectDigest]time.Time, len(digests))
+	for rows.Next() {
+		var (
+			digest      contracts.ObjectDigest
+			projectedAt time.Time
+		)
+		if err := rows.Scan(&digest, &projectedAt); err != nil {
+			return nil, fmt.Errorf("scan projection timestamp: %w", err)
+		}
+		timestamps[digest] = projectedAt
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate projection timestamps: %w", err)
+	}
+
+	return timestamps, nil
+}
+
 func (index *Index) RebuildReport(ctx context.Context) (RebuildReport, error) {
 	if index.source == nil {
 		return RebuildReport{}, errors.New("projection source is required for rebuild")

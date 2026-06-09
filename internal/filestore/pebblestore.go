@@ -28,6 +28,8 @@ import (
 //	sa/<source-alias-key>                source alias -> digest
 //	cp/<child-digest>                    compound parent edges
 //	rec/<object-digest>                  recovery sidecar
+//	pc/<unix-nano>/<object-digest>       projection change index
+//	pc-latest/<object-digest>            latest projection change index key
 //
 // Large blob content remains in the file-based chunk packs; only metadata is in
 // Pebble. The metadata store is opened lazily and shared for the process; Close
@@ -231,14 +233,22 @@ func (store *FilesystemStore) metaIterPrefix(
 	prefix string,
 	fn func(key string, value []byte) error,
 ) error {
+	return store.metaIterRange(prefix, prefixUpperBound(prefix), fn)
+}
+
+func (store *FilesystemStore) metaIterRange(
+	lower string,
+	upper []byte,
+	fn func(key string, value []byte) error,
+) error {
 	db, err := store.meta()
 	if err != nil {
 		return err
 	}
 
 	iter, err := db.NewIter(&pebble.IterOptions{
-		LowerBound: []byte(prefix),
-		UpperBound: prefixUpperBound(prefix),
+		LowerBound: []byte(lower),
+		UpperBound: upper,
 	})
 	if err != nil {
 		return err

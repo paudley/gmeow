@@ -51,6 +51,10 @@ message EmbeddingVector {
 
 message EmbedRequest {
   repeated string texts = 1;
+  // namespace scopes cache keys by embedding purpose. Empty preserves the
+  // contact-claim legacy namespace for backward compatibility; email analysis
+  // uses "email_segment" so mail text never enters contact identity statistics.
+  string namespace = 2;
 }
 
 message EmbedResponse {

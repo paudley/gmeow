@@ -173,6 +173,22 @@ func TestNotifyObjectsChangedProjectionOnlyDoesNotEnqueueAnalyzers(t *testing.T)
 			status,
 		)
 	}
+	duplicate, err := schedulerService.Client.NotifyObjectsChanged(
+		ctx,
+		contracts.ObjectChangeRequest{
+			SchemaVersion:  contracts.SchemaVersionPhase00,
+			ObjectDigests:  []contracts.ObjectDigest{digest},
+			RequestedBy:    "filestore",
+			Reason:         "projection_refresh",
+			ProjectionOnly: true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.Enqueued != 0 || duplicate.Skipped != 1 {
+		t.Fatalf("duplicate projection refresh should be skipped: %#v", duplicate)
+	}
 	if _, err := schedulerService.Service.ProcessObjectChanges(ctx, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -182,6 +198,22 @@ func TestNotifyObjectsChangedProjectionOnlyDoesNotEnqueueAnalyzers(t *testing.T)
 	}
 	if status.Pending != 0 {
 		t.Fatalf("projection-only object change must not enqueue analyzers: %#v", status)
+	}
+	afterProcess, err := schedulerService.Client.NotifyObjectsChanged(
+		ctx,
+		contracts.ObjectChangeRequest{
+			SchemaVersion:  contracts.SchemaVersionPhase00,
+			ObjectDigests:  []contracts.ObjectDigest{digest},
+			RequestedBy:    "filestore",
+			Reason:         "projection_refresh",
+			ProjectionOnly: true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterProcess.Enqueued != 1 || afterProcess.Skipped != 0 {
+		t.Fatalf("processed projection refresh should queue again: %#v", afterProcess)
 	}
 }
 

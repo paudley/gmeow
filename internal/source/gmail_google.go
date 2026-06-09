@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -212,6 +213,51 @@ func (backend *GoogleGmailBackend) GetMessage(
 		return GmailMessage{}, fmt.Errorf("gmail get message %s: %w", messageID, err)
 	}
 
+	converted, rawErr := convertRawGmailMessage(message)
+	if rawErr == nil {
+		return converted, nil
+	}
+
+	log.Printf(
+		"source gmail raw canonicalization failed; falling back to structured payload message_id=%s error=%v",
+		messageID,
+		rawErr,
+	)
+
+	fullMessage, err := backend.service.Users.Messages.Get(backend.userID, messageID).
+		Format("full").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return GmailMessage{}, fmt.Errorf(
+			"gmail get structured message %s after raw failure: %w",
+			messageID,
+			errors.Join(rawErr, err),
+		)
+	}
+
+	converted, structuredErr := convertStructuredGmailMessage(
+		ctx,
+		fullMessage,
+		backend.getAttachment,
+	)
+	if structuredErr != nil {
+		return GmailMessage{}, fmt.Errorf(
+			"canonicalize gmail structured message %s after raw failure: %w",
+			messageID,
+			errors.Join(rawErr, structuredErr),
+		)
+	}
+	if converted.Metadata == nil {
+		converted.Metadata = map[string]any{}
+	}
+	converted.Metadata["gmail_raw_parse_error"] = rawErr.Error()
+	converted.Metadata["gmail_canonical_source"] = "structured_payload"
+
+	return converted, nil
+}
+
+func convertRawGmailMessage(message *gmail.Message) (GmailMessage, error) {
 	converted := GmailMessage{
 		Headers:   map[string]string{},
 		Metadata:  gmailMessageMetadata(message),
@@ -224,7 +270,7 @@ func (backend *GoogleGmailBackend) GetMessage(
 		return GmailMessage{}, fmt.Errorf(
 			"%w: %s",
 			errGmailRawMessageMissing,
-			messageID,
+			message.Id,
 		)
 	}
 
@@ -232,7 +278,7 @@ func (backend *GoogleGmailBackend) GetMessage(
 	if decodeErr != nil {
 		return GmailMessage{}, fmt.Errorf(
 			"decode gmail raw message %s: %w",
-			messageID,
+			message.Id,
 			decodeErr,
 		)
 	}
@@ -243,7 +289,7 @@ func (backend *GoogleGmailBackend) GetMessage(
 	if canonicalErr != nil {
 		return GmailMessage{}, fmt.Errorf(
 			"canonicalize gmail raw message %s: %w",
-			messageID,
+			message.Id,
 			canonicalErr,
 		)
 	}
@@ -255,6 +301,235 @@ func (backend *GoogleGmailBackend) GetMessage(
 	converted.Attachments = gmailAttachments(converted, canonical)
 
 	return converted, nil
+}
+
+type gmailAttachmentFetcher func(
+	ctx context.Context,
+	messageID string,
+	attachmentID string,
+) ([]byte, error)
+
+func (backend *GoogleGmailBackend) getAttachment(
+	ctx context.Context,
+	messageID string,
+	attachmentID string,
+) ([]byte, error) {
+	attachment, err := backend.service.Users.Messages.Attachments.Get(
+		backend.userID,
+		messageID,
+		attachmentID,
+	).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("gmail get attachment %s/%s: %w", messageID, attachmentID, err)
+	}
+
+	content, err := decodeGmailData(attachment.Data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decode gmail attachment %s/%s: %w",
+			messageID,
+			attachmentID,
+			err,
+		)
+	}
+
+	return content, nil
+}
+
+func convertStructuredGmailMessage(
+	ctx context.Context,
+	message *gmail.Message,
+	fetchAttachment gmailAttachmentFetcher,
+) (GmailMessage, error) {
+	if message == nil {
+		return GmailMessage{}, errors.New("gmail structured message is nil")
+	}
+
+	converted := GmailMessage{
+		Headers:   gmailStructuredHeaders(message.Payload),
+		Metadata:  gmailMessageMetadata(message),
+		MessageID: message.Id,
+		Version:   strconv.FormatUint(message.HistoryId, 10),
+		ThreadID:  message.ThreadId,
+		Snippet:   message.Snippet,
+	}
+
+	parts := gmailStructuredPartAccumulator{}
+	err := collectStructuredGmailPart(
+		ctx,
+		message.Id,
+		converted.Version,
+		message.Payload,
+		fetchAttachment,
+		&parts,
+	)
+	if err != nil {
+		return GmailMessage{}, err
+	}
+
+	converted.Subject = headerValue(converted.Headers, "subject")
+	converted.Body = []byte(strings.Join(parts.textBodies, "\n"))
+	converted.BodyMediaTyp = firstNonEmpty(parts.bodyMediaType, "text/plain")
+	converted.Attachments = parts.attachments
+
+	return converted, nil
+}
+
+type gmailStructuredPartAccumulator struct {
+	bodyMediaType string
+	textBodies    []string
+	attachments   []GmailAttachment
+}
+
+func gmailStructuredHeaders(payload *gmail.MessagePart) map[string]string {
+	headers := map[string]string{}
+	if payload == nil {
+		return headers
+	}
+
+	for _, header := range payload.Headers {
+		if header == nil {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(header.Name))
+		if name == "" {
+			continue
+		}
+		if existing := headers[name]; existing != "" {
+			headers[name] = existing + "\n" + header.Value
+		} else {
+			headers[name] = header.Value
+		}
+	}
+
+	return headers
+}
+
+func collectStructuredGmailPart(
+	ctx context.Context,
+	messageID string,
+	version string,
+	part *gmail.MessagePart,
+	fetchAttachment gmailAttachmentFetcher,
+	accumulator *gmailStructuredPartAccumulator,
+) error {
+	if part == nil {
+		return nil
+	}
+
+	for _, child := range part.Parts {
+		if err := collectStructuredGmailPart(
+			ctx,
+			messageID,
+			version,
+			child,
+			fetchAttachment,
+			accumulator,
+		); err != nil {
+			return err
+		}
+	}
+
+	if part.Body == nil {
+		return nil
+	}
+
+	mediaType := strings.ToLower(strings.TrimSpace(part.MimeType))
+	fileName := strings.TrimSpace(part.Filename)
+	content, hasContent, err := gmailStructuredPartContent(
+		ctx,
+		messageID,
+		part,
+		fetchAttachment,
+	)
+	if err != nil {
+		return err
+	}
+	if !hasContent && fileName == "" {
+		return nil
+	}
+
+	if fileName != "" {
+		attachmentID := strings.TrimSpace(part.Body.AttachmentId)
+		if attachmentID == "" {
+			attachmentID = part.PartId
+		}
+		accumulator.attachments = append(accumulator.attachments, GmailAttachment{
+			ID:        attachmentID,
+			FileName:  fileName,
+			MediaType: firstNonEmpty(mediaType, "application/octet-stream"),
+			Content:   content,
+			Version:   version,
+		})
+
+		return nil
+	}
+
+	if mediaType == "text/plain" || mediaType == "" {
+		if accumulator.bodyMediaType != "text/plain" {
+			accumulator.textBodies = nil
+		}
+		accumulator.bodyMediaType = "text/plain"
+		accumulator.textBodies = append(accumulator.textBodies, string(content))
+
+		return nil
+	}
+
+	if strings.HasPrefix(mediaType, "text/") &&
+		accumulator.bodyMediaType != "text/plain" {
+		if accumulator.bodyMediaType == "" {
+			accumulator.bodyMediaType = mediaType
+		}
+		if accumulator.bodyMediaType == mediaType {
+			accumulator.textBodies = append(accumulator.textBodies, string(content))
+		}
+	}
+
+	return nil
+}
+
+func gmailStructuredPartContent(
+	ctx context.Context,
+	messageID string,
+	part *gmail.MessagePart,
+	fetchAttachment gmailAttachmentFetcher,
+) ([]byte, bool, error) {
+	if part == nil || part.Body == nil {
+		return nil, false, nil
+	}
+
+	if strings.TrimSpace(part.Body.Data) != "" {
+		content, err := decodeGmailData(part.Body.Data)
+		if err != nil {
+			return nil, false, fmt.Errorf(
+				"decode gmail structured part %s/%s: %w",
+				messageID,
+				part.PartId,
+				err,
+			)
+		}
+
+		return content, true, nil
+	}
+
+	attachmentID := strings.TrimSpace(part.Body.AttachmentId)
+	if attachmentID == "" {
+		return nil, false, nil
+	}
+	if fetchAttachment == nil {
+		return nil, false, fmt.Errorf(
+			"gmail structured part %s/%s requires attachment fetcher",
+			messageID,
+			part.PartId,
+		)
+	}
+
+	content, err := fetchAttachment(ctx, messageID, attachmentID)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return content, true, nil
 }
 
 func gmailMessageMetadata(message *gmail.Message) map[string]any {

@@ -30,7 +30,11 @@ func (server *EmbeddingServer) Embed(
 	ctx context.Context,
 	request *pb.EmbedRequest,
 ) (*pb.EmbedResponse, error) {
-	vectors, misses, err := server.service.Embed(ctx, request.GetTexts())
+	vectors, misses, err := server.service.EmbedNamespace(
+		ctx,
+		request.GetNamespace(),
+		request.GetTexts(),
+	)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}

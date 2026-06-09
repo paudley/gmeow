@@ -5,8 +5,6 @@ package analysis
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,7 +42,7 @@ func TestAnalyzeContactsSkipsCurrentEmbeddingWhenNotForced(t *testing.T) {
 		)
 	}
 	if got := endpointCalls.Load(); got != 0 {
-		t.Fatalf("embedding endpoint calls = %d, want 0", got)
+		t.Fatalf("embedding service calls = %d, want 0", got)
 	}
 	if len(store.upserts) != 0 {
 		t.Fatalf("unexpected upserts for current contact: %#v", store.upserts)
@@ -86,7 +84,7 @@ func TestAnalyzeContactsForcedRecomputesCurrentEmbedding(t *testing.T) {
 		)
 	}
 	if got := endpointCalls.Load(); got != 1 {
-		t.Fatalf("embedding endpoint calls = %d, want 1", got)
+		t.Fatalf("embedding service calls = %d, want 1", got)
 	}
 	if len(store.upserts) != 1 {
 		t.Fatalf("upsert count = %d, want 1", len(store.upserts))
@@ -113,24 +111,31 @@ func testContactEmbeddingAnalyzer(
 	t.Helper()
 
 	var calls atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(
-		writer http.ResponseWriter,
-		_ *http.Request,
-	) {
-		calls.Add(1)
-		_, _ = writer.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
-	}))
-	t.Cleanup(server.Close)
-
 	analyzer, err := NewEmbeddingAnalyzer(EmbeddingConfig{
-		Endpoint: server.URL,
-		Model:    "test-contact-embed",
+		Model: "test-contact-embed",
+		Service: contactEmbeddingService{
+			calls: &calls,
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewEmbeddingAnalyzer returned error: %v", err)
 	}
 
 	return analyzer, &calls
+}
+
+type contactEmbeddingService struct {
+	calls *atomic.Int64
+}
+
+func (service contactEmbeddingService) EmbedNamespace(
+	context.Context,
+	string,
+	[]string,
+) ([][]float32, int, error) {
+	service.calls.Add(1)
+
+	return [][]float32{{0.1, 0.2, 0.3}}, 1, nil
 }
 
 type contactEmbeddingStore struct {

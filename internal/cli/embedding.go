@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -33,10 +34,6 @@ func newEmbeddingServeCommand(
 ) *cobra.Command {
 	var (
 		stateFile        string
-		manageModel      bool
-		ollamaHost       string
-		ollamaModel      string
-		ollamaModels     string
 		embedBatchSize   int
 		embedBatchTokens int
 		embedPaceMs      int
@@ -57,51 +54,29 @@ func newEmbeddingServeCommand(
 				return err
 			}
 
-			endpointURL := loaded.Config.Analysis.Embeddings.Endpoint
-			modelName := loaded.Config.Analysis.Embeddings.Model
-
-			// --manage-model: gmeow OWNS the embedding backend. Supervise our own
-			// `ollama serve` (auto-restarting on crash, which the hand-run server
-			// didn't), ensure the model is pulled, and point the embedder at it. No
-			// operator-provided endpoint required.
-			if manageModel {
-				backend, beErr := embedding.NewOllamaBackend(embedding.OllamaConfig{
-					Host:      ollamaHost,
-					Model:     ollamaModel,
-					ModelsDir: ollamaModels,
-				})
-				if beErr != nil {
-					return beErr
-				}
-				go func() { _ = backend.Run(ctx) }()
-				_, _ = fmt.Fprintf(
-					out,
-					"embedding serve: managing ollama at %s (model %s)…\n",
-					backend.Endpoint(),
-					backend.Model(),
-				)
-				if hErr := backend.WaitHealthy(ctx, 2*time.Minute); hErr != nil {
-					return hErr
-				}
-				if mErr := backend.EnsureModel(ctx); mErr != nil {
-					return mErr
-				}
-				endpointURL = backend.Endpoint()
-				modelName = backend.Model()
+			backend, beErr := embedding.NewOllamaBackend(embedding.OllamaConfig{
+				ModelsDir: managedEmbeddingModelsDir(loaded, stateFile),
+			})
+			if beErr != nil {
+				return beErr
+			}
+			go func() { _ = backend.Run(ctx) }()
+			_, _ = fmt.Fprintf(
+				out,
+				"embedding serve: managing internal backend at %s (model %s)\n",
+				backend.Endpoint(),
+				backend.Model(),
+			)
+			if hErr := backend.WaitHealthy(ctx, 2*time.Minute); hErr != nil {
+				return hErr
+			}
+			if mErr := backend.EnsureModel(ctx); mErr != nil {
+				return mErr
 			}
 
-			// Tuning: when gmeow controls the backend (--manage-model) it is a
-			// dedicated server, so default to big batches + no pacing for
-			// throughput; otherwise stay conservative for an unknown endpoint.
-			// Explicit flags override either default.
-			tuning := embedding.EmbedTuning{
-				BatchTexts:    12,
-				BatchTokenEst: 1500,
-				MinInterval:   200 * time.Millisecond,
-			}
-			if manageModel {
-				tuning = embedding.EmbedTuning{BatchTexts: 128, BatchTokenEst: 6000, MinInterval: 0}
-			}
+			// EMBEDDING owns a dedicated backend, so default to large batches and
+			// no pacing. Explicit service flags tune only the owned backend traffic.
+			tuning := embedding.EmbedTuning{BatchTexts: 128, BatchTokenEst: 6000, MinInterval: 0}
 			if command.Flags().Changed("embed-batch-size") {
 				tuning.BatchTexts = embedBatchSize
 			}
@@ -112,15 +87,20 @@ func newEmbeddingServeCommand(
 				tuning.MinInterval = time.Duration(embedPaceMs) * time.Millisecond
 			}
 
-			embedder, err := embedding.NewHTTPEmbedderTuned(endpointURL, modelName, nil, tuning)
+			embedder, err := embedding.NewHTTPEmbedderTuned(
+				backend.Endpoint(),
+				backend.Model(),
+				nil,
+				tuning,
+			)
 			if err != nil {
-				return fmt.Errorf("configure embedding endpoint: %w", err)
+				return fmt.Errorf("configure managed embedding backend: %w", err)
 			}
 
 			service := embedding.NewService(
 				embedding.NewResolver(embedding.NewMemoryCache(), embedder),
 				embedding.NewEntityIndex(embedding.FullDim, embedding.CoarseDim),
-				modelName,
+				backend.Model(),
 			)
 
 			// Restore the persisted resolution state (cache + entity index +
@@ -143,8 +123,8 @@ func newEmbeddingServeCommand(
 				"embedding serve: %s %s (endpoint %s, model %s, state %q)\n",
 				endpoint.Network,
 				endpoint.Address,
-				endpointURL,
-				modelName,
+				backend.Endpoint(),
+				backend.Model(),
 				stateFile,
 			); err != nil {
 				return err
@@ -162,19 +142,6 @@ func newEmbeddingServeCommand(
 		"path to persist the resolution state (claim cache + entity index + ledger); "+
 			"loaded at startup, snapshotted on shutdown. Empty = in-memory only",
 	)
-	command.Flags().BoolVar(
-		&manageModel,
-		"manage-model",
-		false,
-		"gmeow supervises its own ollama embedding backend (auto-restart on crash, "+
-			"auto-pull the model) instead of requiring an operator-provided endpoint",
-	)
-	command.Flags().
-		StringVar(&ollamaHost, "ollama-host", "", "OLLAMA_HOST for the managed backend (default 127.0.0.1:11434)")
-	command.Flags().
-		StringVar(&ollamaModel, "ollama-model", "", "ollama embedding model tag (default nomic-embed-text)")
-	command.Flags().
-		StringVar(&ollamaModels, "ollama-models-dir", "", "OLLAMA_MODELS dir so weights live under gmeow's control (default: ollama's own)")
 	command.Flags().
 		IntVar(&embedBatchSize, "embed-batch-size", 0, "max texts per embedding request (overrides the auto default)")
 	command.Flags().
@@ -213,24 +180,10 @@ func newEmbeddingRepairCommand(
 				return fmt.Errorf("--state-file is required")
 			}
 
-			loaded, err := config.Load(config.Options{Path: *configPath})
-			if err != nil {
-				return err
-			}
-
-			embedder, err := embedding.NewHTTPEmbedder(
-				loaded.Config.Analysis.Embeddings.Endpoint,
-				loaded.Config.Analysis.Embeddings.Model,
-				nil,
-			)
-			if err != nil {
-				return fmt.Errorf("configure embedding endpoint: %w", err)
-			}
-
 			service := embedding.NewService(
-				embedding.NewResolver(embedding.NewMemoryCache(), embedder),
+				embedding.NewResolver(embedding.NewMemoryCache(), nil),
 				embedding.NewEntityIndex(embedding.FullDim, embedding.CoarseDim),
-				loaded.Config.Analysis.Embeddings.Model,
+				embedding.DefaultModel,
 			)
 			if loadErr := loadEmbeddingState(service, stateFile); loadErr != nil {
 				return loadErr
@@ -270,6 +223,17 @@ func newEmbeddingRepairCommand(
 		IntVar(&topN, "top-n", 0, "blocking neighbours scored per entity (0 = the ingest default)")
 
 	return command
+}
+
+func managedEmbeddingModelsDir(loaded *config.Loaded, stateFile string) string {
+	if stateFile != "" {
+		return filepath.Join(filepath.Dir(stateFile), "embedding-models")
+	}
+	if loaded != nil && loaded.Config.System.DataDir != "" {
+		return filepath.Join(loaded.Config.System.DataDir, "embedding-models")
+	}
+
+	return filepath.Join("data", "embedding-models")
 }
 
 func loadEmbeddingState(service *embedding.Service, path string) error {

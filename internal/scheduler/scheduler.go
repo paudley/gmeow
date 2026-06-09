@@ -58,17 +58,18 @@ type Store interface {
 }
 
 type Service struct {
-	store          Store
-	broker         Broker
-	projector      ProjectionRefresher
-	now            func() time.Time
-	fullyAnnotated *lruCache
-	sweepPos       string
-	specs          []contracts.AnalyzerSpec
-	config         Config
-	mu             sync.Mutex
-	pressured      bool
-	writeSeen      bool
+	store             Store
+	broker            Broker
+	projector         ProjectionRefresher
+	now               func() time.Time
+	fullyAnnotated    *lruCache
+	projectionPending map[contracts.ObjectDigest]struct{}
+	sweepPos          string
+	specs             []contracts.AnalyzerSpec
+	config            Config
+	mu                sync.Mutex
+	pressured         bool
+	writeSeen         bool
 }
 
 type Option func(*Service)
@@ -99,12 +100,13 @@ func NewService(
 	}
 
 	service := &Service{
-		store:          store,
-		broker:         broker,
-		specs:          normalized,
-		config:         cfg,
-		now:            func() time.Time { return time.Now().UTC() },
-		fullyAnnotated: newLRUCache(cacheSize),
+		store:             store,
+		broker:            broker,
+		specs:             normalized,
+		config:            cfg,
+		now:               func() time.Time { return time.Now().UTC() },
+		fullyAnnotated:    newLRUCache(cacheSize),
+		projectionPending: map[contracts.ObjectDigest]struct{}{},
 	}
 
 	if service.config.ScanInterval <= 0 {
@@ -422,6 +424,19 @@ func (service *Service) NotifyObjectsChanged(
 
 		seen[digest] = struct{}{}
 
+		if request.ProjectionOnly {
+			service.mu.Lock()
+			_, pending := service.projectionPending[digest]
+			if !pending {
+				service.projectionPending[digest] = struct{}{}
+			}
+			service.mu.Unlock()
+			if pending {
+				response.Skipped++
+				continue
+			}
+		}
+
 		normalized.ObjectDigests = append(normalized.ObjectDigests, digest)
 		response.Scanned++
 	}
@@ -433,6 +448,9 @@ func (service *Service) NotifyObjectsChanged(
 	err := service.broker.PublishObjectChanges(ctx, normalized)
 	if err != nil {
 		response.Failed = response.Scanned
+		if request.ProjectionOnly {
+			service.clearPendingProjectionDigests(normalized.ObjectDigests)
+		}
 
 		return response, fmt.Errorf("publish object change notification: %w", err)
 	}
@@ -837,15 +855,33 @@ func (service *Service) processObjectChanges(
 	requests []contracts.ObjectChangeRequest,
 ) error {
 	projected := map[contracts.ObjectDigest]bool{}
+	processedProjection := []contracts.ObjectDigest{}
 
 	for _, request := range requests {
 		err := service.processObjectChangeRequest(ctx, request, projected)
 		if err != nil {
 			return err
 		}
+		if request.ProjectionOnly {
+			processedProjection = append(processedProjection, request.ObjectDigests...)
+		}
 	}
+	service.clearPendingProjectionDigests(processedProjection)
 
 	return nil
+}
+
+func (service *Service) clearPendingProjectionDigests(
+	digests []contracts.ObjectDigest,
+) {
+	if len(digests) == 0 {
+		return
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	for _, digest := range digests {
+		delete(service.projectionPending, digest)
+	}
 }
 
 func (service *Service) processObjectChangeRequest(

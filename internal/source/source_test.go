@@ -38,7 +38,8 @@ func TestIngestSourceLookupHitDoesNotReadOrRewritePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(filestoreService.Client)
+	notifier := &recordingChangeNotifier{}
+	service, err := NewServiceWithNotifier(filestoreService.Client, notifier)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +58,12 @@ func TestIngestSourceLookupHitDoesNotReadOrRewritePayload(t *testing.T) {
 
 	if digest != existing || wrote {
 		t.Fatalf("expected lookup digest without write, digest=%s wrote=%t", digest, wrote)
+	}
+	if notifier.calls != 0 {
+		t.Fatalf(
+			"expected source lookup hit to skip change notification, got %d",
+			notifier.calls,
+		)
 	}
 }
 
@@ -1108,6 +1115,19 @@ func hasRelationship(
 	}
 
 	return false
+}
+
+type recordingChangeNotifier struct {
+	calls int
+}
+
+func (notifier *recordingChangeNotifier) NotifyObjectsChanged(
+	context.Context,
+	contracts.ObjectChangeRequest,
+) (contracts.SchedulerScanResponse, error) {
+	notifier.calls++
+
+	return contracts.SchedulerScanResponse{}, nil
 }
 
 var _ io.Reader = panicReader{}

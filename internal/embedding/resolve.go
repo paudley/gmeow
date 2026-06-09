@@ -457,7 +457,8 @@ func (s *Service) maybeRebuildResidual() {
 		return
 	}
 
-	n := s.resolver.Cache().Len()
+	contactEntries := s.contactCacheEntries()
+	n := len(contactEntries)
 	if n < s.residualMinSample {
 		return
 	}
@@ -465,7 +466,7 @@ func (s *Service) maybeRebuildResidual() {
 		return
 	}
 
-	basis := computeResidualBasis(s.cacheEntries(), s.residualK)
+	basis := computeResidualBasis(contactEntries, s.residualK)
 	if basis == nil {
 		return
 	}

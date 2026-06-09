@@ -18,6 +18,8 @@ type Endpoint struct {
 	Address string
 }
 
+const internalRPCMaxMessageBytes = 64 << 20
+
 func Serve(
 	ctx context.Context,
 	endpoint Endpoint,
@@ -29,7 +31,7 @@ func Serve(
 	}
 	defer listener.Close()
 
-	server := grpc.NewServer()
+	server := grpc.NewServer(defaultServerOptions()...)
 	register(server)
 
 	done := make(chan struct{})
@@ -50,6 +52,13 @@ func Serve(
 	}
 
 	return nil
+}
+
+func defaultServerOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(internalRPCMaxMessageBytes),
+		grpc.MaxSendMsgSize(internalRPCMaxMessageBytes),
+	}
 }
 
 func listen(endpoint Endpoint) (net.Listener, error) {

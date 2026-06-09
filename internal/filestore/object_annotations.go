@@ -98,9 +98,18 @@ func (store *FilesystemStore) writePackedAnnotation(
 		entry.ExternalDigest = contentDigest
 	}
 
-	return store.metaPut(
+	sink := store.syncSink()
+	if err := sink.set(
 		annotationKey(annotation.ObjectDigest, annotation.Kind, annotation.AnalyzerName),
 		entry,
+	); err != nil {
+		return err
+	}
+
+	return store.recordProjectionChangeTo(
+		sink,
+		annotation.ObjectDigest,
+		annotation.GeneratedAt,
 	)
 }
 

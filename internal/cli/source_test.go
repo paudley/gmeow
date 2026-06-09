@@ -6,6 +6,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -26,6 +27,11 @@ func TestConfiguredSourceWorkRunsInboxRefreshWhileBackfillIsActive(t *testing.T)
 		t.Fatal(err)
 	}
 	adapter := &blockingPullAdapter{calls: make(chan string, 4)}
+	refreshQueries := []string{
+		"in:inbox newer_than:30d",
+		"from:paudley newer_than:30d",
+		"is:important newer_than:30d",
+	}
 
 	errs := make(chan error, 1)
 	go func() {
@@ -36,23 +42,35 @@ func TestConfiguredSourceWorkRunsInboxRefreshWhileBackfillIsActive(t *testing.T)
 			},
 			InboxRefresh: config.SourceInboxRefreshConfig{
 				Enabled:  true,
-				Query:    "in:inbox newer_than:30d",
+				Queries:  refreshQueries,
 				Interval: "1h",
 			},
 		})
 	}()
 
-	seen := map[string]bool{}
+	seenBackfill := false
+	seenRefreshQueries := make([]string, 0, len(refreshQueries))
 	deadline := time.After(2 * time.Second)
-	for !seen["backfill"] || !seen["inbox_refresh"] {
+	for !seenBackfill || len(seenRefreshQueries) < len(refreshQueries) {
 		select {
 		case call := <-adapter.calls:
-			seen[call] = true
+			if call == "backfill" {
+				seenBackfill = true
+			} else {
+				seenRefreshQueries = append(seenRefreshQueries, call)
+			}
 		case err := <-errs:
 			t.Fatalf("configured source work exited early: %v", err)
 		case <-deadline:
-			t.Fatalf("expected concurrent backfill and inbox refresh calls, got %#v", seen)
+			t.Fatalf(
+				"expected concurrent backfill and ordered inbox refresh calls, backfill=%t refresh=%#v",
+				seenBackfill,
+				seenRefreshQueries,
+			)
 		}
+	}
+	if !slices.Equal(seenRefreshQueries, refreshQueries) {
+		t.Fatalf("expected refresh queries %#v, got %#v", refreshQueries, seenRefreshQueries)
 	}
 
 	cancel()
@@ -146,7 +164,7 @@ func (adapter *blockingPullAdapter) Pull(
 		return nil, contracts.SourceCursor{}, ctx.Err()
 	}
 
-	adapter.calls <- "inbox_refresh"
+	adapter.calls <- query
 	cursor := cloneMap(request.Cursor)
 	cursor["completed"] = true
 

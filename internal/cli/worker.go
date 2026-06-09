@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"blackcat.ca/gmeow/internal/analysis"
 	"blackcat.ca/gmeow/internal/config"
 	"blackcat.ca/gmeow/internal/contracts"
+	"blackcat.ca/gmeow/internal/embedding"
 	"blackcat.ca/gmeow/internal/rpc"
 	schedmq "blackcat.ca/gmeow/internal/scheduler/rabbitmq"
 )
@@ -59,7 +61,27 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 			})
 			defer manager.Close()
 
-			registry, err := workerRegistryFromConfig(loaded.Config.Analysis, manager)
+			var embeddingService analysis.EmbeddingService
+			if workerNeedsAnalyzer(loaded.Config.Analysis, analysis.EmbeddingName) {
+				client, clientErr := rpc.NewEmbeddingClient(
+					command.Context(),
+					rpcEndpoint(loaded.Resolved.RPC.Embedding),
+				)
+				if clientErr != nil {
+					return fmt.Errorf("connect to EMBEDDING service: %w", clientErr)
+				}
+				defer client.Close()
+				if waitErr := waitForEmbeddingService(command.Context(), client); waitErr != nil {
+					return waitErr
+				}
+				embeddingService = client
+			}
+
+			registry, err := workerRegistryFromConfig(
+				loaded.Config.Analysis,
+				manager,
+				embeddingService,
+			)
 			if err != nil {
 				return err
 			}
@@ -112,6 +134,38 @@ func newWorkerRunCommand(out io.Writer, configPath *string) *cobra.Command {
 	}
 }
 
+type embeddingStatusClient interface {
+	Status(context.Context) (rpc.EmbeddingStatus, error)
+}
+
+func waitForEmbeddingService(
+	ctx context.Context,
+	client embeddingStatusClient,
+) error {
+	deadline := time.NewTimer(2 * time.Minute)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		if _, err := client.Status(ctx); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("wait for EMBEDDING service: %w", lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
 func analysisWorkerConcurrency(config config.AnalysisConfig) int {
 	if config.WorkerConcurrency > 0 {
 		return config.WorkerConcurrency
@@ -131,9 +185,20 @@ func analyzerWorkers(analyzer config.AnalyzerConfig, cfg config.AnalysisConfig) 
 	return analysisWorkerConcurrency(cfg)
 }
 
+func workerNeedsAnalyzer(analysisConfig config.AnalysisConfig, name string) bool {
+	for _, analyzer := range analysisConfig.Analyzers {
+		if analyzer.Name == name {
+			return true
+		}
+	}
+
+	return false
+}
+
 func workerRegistryFromConfig(
 	analysisConfig config.AnalysisConfig,
 	manager *analysis.BackendManager,
+	embeddingService analysis.EmbeddingService,
 ) (*analysis.Registry, error) {
 	defaultRegistry, err := analysis.DefaultRegistry()
 	if err != nil {
@@ -155,7 +220,13 @@ func workerRegistryFromConfig(
 		spec := analyzerSpecFromConfig(configured)
 		switch configured.WorkerKind {
 		case "", "go":
-			analyzer, err := goAnalyzerFromConfig(configured, spec, defaults, analysisConfig)
+			analyzer, err := goAnalyzerFromConfig(
+				configured,
+				spec,
+				defaults,
+				analysisConfig,
+				embeddingService,
+			)
 			if err != nil {
 				return nil, err
 			}
@@ -190,11 +261,16 @@ func goAnalyzerFromConfig(
 	spec contracts.AnalyzerSpec,
 	defaults map[string]analysis.Analyzer,
 	analysisConfig config.AnalysisConfig,
+	embeddingService analysis.EmbeddingService,
 ) (analysis.Analyzer, error) {
 	if spec.Name == analysis.EmbeddingName {
+		if embeddingService == nil {
+			return nil, errors.New("embedding service is required")
+		}
+
 		return analysis.NewEmbeddingAnalyzer(analysis.EmbeddingConfig{
-			Endpoint: analysisConfig.Embeddings.Endpoint,
-			Model:    analysisConfig.Embeddings.Model,
+			Namespace: embedding.NamespaceEmailSegment,
+			Service:   embeddingService,
 		})
 	}
 	if spec.Name == analysis.SummaryName {
