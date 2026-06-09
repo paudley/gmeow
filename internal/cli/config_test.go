@@ -5,6 +5,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,7 +27,17 @@ func testWorkerRegistry(
 	manager := analysis.NewBackendManager(analysis.BackendManagerConfig{})
 	t.Cleanup(manager.Close)
 
-	return workerRegistryFromConfig(analysisConfig, manager)
+	return workerRegistryFromConfig(analysisConfig, manager, fakeEmbeddingService{})
+}
+
+type fakeEmbeddingService struct{}
+
+func (fakeEmbeddingService) EmbedNamespace(
+	context.Context,
+	string,
+	[]string,
+) ([][]float32, int, error) {
+	return [][]float32{{0.1, 0.2, 0.3}}, 1, nil
 }
 
 func TestAdminConfigValidate(t *testing.T) {
@@ -140,10 +151,6 @@ func TestWorkerRegistryRejectsPythonAnalyzerWithoutExplicitAdapter(t *testing.T)
 
 func TestWorkerRegistryCoversPhaseFourAnalyzerSet(t *testing.T) {
 	registry, err := testWorkerRegistry(t, config.AnalysisConfig{
-		Embeddings: config.EmbeddingConfig{
-			Endpoint: "http://127.0.0.1:8090/v1/embeddings",
-			Model:    "test-embed",
-		},
 		Summary: config.SummaryConfig{
 			Endpoint: "http://127.0.0.1:8091/v1/chat/completions",
 			Model:    "test-summary",
@@ -192,18 +199,21 @@ func TestWorkerRegistryCoversPhaseFourAnalyzerSet(t *testing.T) {
 	}
 }
 
-func TestWorkerRegistryRequiresEmbeddingEndpointConfig(t *testing.T) {
-	_, err := testWorkerRegistry(t, config.AnalysisConfig{
+func TestWorkerRegistryRequiresEmbeddingService(t *testing.T) {
+	manager := analysis.NewBackendManager(analysis.BackendManagerConfig{})
+	t.Cleanup(manager.Close)
+
+	_, err := workerRegistryFromConfig(config.AnalysisConfig{
 		Analyzers: []config.AnalyzerConfig{{
 			Name:       "embedding.endpoint",
 			Version:    "phase04-email-v2",
 			WorkerKind: "go",
 		}},
-	})
+	}, manager, nil)
 	if err == nil {
-		t.Fatal("expected missing embedding endpoint config to fail")
+		t.Fatal("expected missing embedding service to fail")
 	}
-	if !strings.Contains(err.Error(), "embedding endpoint is required") {
+	if !strings.Contains(err.Error(), "embedding service is required") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

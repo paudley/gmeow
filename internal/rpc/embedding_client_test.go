@@ -109,6 +109,58 @@ func TestEmbeddingClientResolveRPCRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEmbeddingClientEmbedNamespaceIsolatesCache(t *testing.T) {
+	ctx := context.Background()
+	endpoint, service, cleanup := serveTestEmbedding(t)
+	defer cleanup()
+
+	client, err := NewEmbeddingClient(ctx, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	texts := []string{"Repeated message footer"}
+	if _, misses, err := client.EmbedNamespace(
+		ctx,
+		embedding.NamespaceEmailSegment,
+		texts,
+	); err != nil {
+		t.Fatalf("first email embed: %v", err)
+	} else if misses != 1 {
+		t.Fatalf("first email misses=%d, want 1", misses)
+	}
+	if _, misses, err := client.EmbedNamespace(
+		ctx,
+		embedding.NamespaceEmailSegment,
+		texts,
+	); err != nil {
+		t.Fatalf("repeat email embed: %v", err)
+	} else if misses != 0 {
+		t.Fatalf("repeat email misses=%d, want 0", misses)
+	}
+	if _, misses, err := client.Embed(ctx, texts); err != nil {
+		t.Fatalf("contact/default embed: %v", err)
+	} else if misses != 1 {
+		t.Fatalf("contact/default misses=%d, want 1", misses)
+	}
+
+	status := service.Status()
+	if status.Misses != 2 {
+		t.Fatalf("service misses=%d, want 2 isolated namespace misses", status.Misses)
+	}
+	if _, ok := service.Resolver().Cache().Get(embedding.StatementHash(texts[0])); !ok {
+		t.Fatal("default/contact embed should keep the legacy bare statement hash")
+	}
+	emailKey := embedding.CacheKey(
+		embedding.NamespaceEmailSegment+"\x00"+"stub-model",
+		texts[0],
+	)
+	if _, ok := service.Resolver().Cache().Get(emailKey); !ok {
+		t.Fatal("email embed should use a model-scoped namespace key")
+	}
+}
+
 func TestEmbeddingClientResolveDeltaNoopRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	endpoint, _, cleanup := serveTestEmbedding(t)

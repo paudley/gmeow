@@ -130,6 +130,23 @@ func (s *Service) Embed(ctx context.Context, texts []string) ([]Vector, int, err
 	return s.resolver.Vectors(ctx, texts)
 }
 
+func (s *Service) EmbedNamespace(
+	ctx context.Context,
+	namespace string,
+	texts []string,
+) ([]Vector, int, error) {
+	return s.resolver.VectorsForNamespace(ctx, s.cacheNamespace(namespace), texts)
+}
+
+func (s *Service) cacheNamespace(namespace string) string {
+	namespace = normalizedNamespace(namespace)
+	if namespace == NamespaceContactClaim {
+		return namespace
+	}
+
+	return namespace + "\x00" + s.model
+}
+
 func (s *Service) Pool(
 	ctx context.Context,
 	texts []string,

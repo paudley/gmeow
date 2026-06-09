@@ -106,10 +106,6 @@ worker_concurrency = 1
 backend_idle_timeout = "60m"
 backend_startup_timeout = "60s"
 
-[analysis.embeddings]
-endpoint = "http://127.0.0.1:8090/v1/embeddings"
-model = "nomic-embed-text-v1.5"
-
 [analysis.summary]
 endpoint = "http://127.0.0.1:8082/v1/chat/completions"
 model = "gemma-4-E4B-it-uncensored-Q4_K_M.gguf"
@@ -197,7 +193,7 @@ facets = ["*"]
 # resume = true
 # [sources.inbox_refresh]
 # enabled = true
-# query = "in:inbox newer_than:30d"
+# queries = ["in:inbox newer_than:30d"]
 # interval = "5m"
 # page_size = 100
 # concurrency = 4

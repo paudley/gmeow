@@ -81,7 +81,7 @@ func embeddingRowsFrom(
 				kind:       stringFromAny(item["kind"]),
 				source:     stringFromAny(item["source_digest"]),
 				ordinal:    intFromAny(item["ordinal"]),
-				preview:    stringFromAny(item["text_preview"]),
+				preview:    postgresTextFromAny(item["text_preview"]),
 				metadata:   metadata,
 				dimensions: intFromAny(item["dimensions"]),
 				vector:     vector,
@@ -90,6 +90,10 @@ func embeddingRowsFrom(
 	}
 
 	return rows
+}
+
+func postgresTextFromAny(value any) string {
+	return strings.ReplaceAll(strings.ToValidUTF8(stringFromAny(value), "?"), "\x00", "?")
 }
 
 func embeddingVectorFromSource(

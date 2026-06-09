@@ -79,8 +79,8 @@ type HTTPEmbedder struct {
 	paceMu        sync.Mutex
 }
 
-// NewHTTPEmbedder builds an embedder with conservative default tuning (small
-// batches + 200ms pacing) suited to an unknown endpoint.
+// NewHTTPEmbedder builds an embedder for the EMBEDDING service's managed
+// backend with conservative default tuning.
 func NewHTTPEmbedder(
 	endpoint, model string,
 	client *http.Client,
@@ -100,11 +100,11 @@ func NewHTTPEmbedderTuned(
 	tuning EmbedTuning,
 ) (*HTTPEmbedder, error) {
 	if endpoint == "" {
-		return nil, errors.New("embedding endpoint is required")
+		return nil, errors.New("managed embedding backend endpoint is required")
 	}
 
 	if model == "" {
-		return nil, errors.New("embedding model is required")
+		return nil, errors.New("managed embedding backend model is required")
 	}
 
 	if client == nil {
@@ -125,7 +125,7 @@ func NewHTTPEmbedderTuned(
 
 // pace serializes requests and waits out the minimum inter-request interval,
 // respecting context cancellation. This keeps the importer from overwhelming the
-// local model server (which a previous unthrottled run did).
+// managed backend server.
 func (e *HTTPEmbedder) pace(ctx context.Context) error {
 	e.paceMu.Lock()
 	defer e.paceMu.Unlock()
@@ -376,32 +376,43 @@ func (r *Resolver) Stats() (lookups, misses int64) {
 // misses are embedded together in one batch and written back. Returns the number
 // of texts that required the embedder (zero == a fully-cached, zero-cost call).
 func (r *Resolver) Vectors(ctx context.Context, texts []string) ([]Vector, int, error) {
+	return r.VectorsForNamespace(ctx, NamespaceContactClaim, texts)
+}
+
+// VectorsForNamespace returns vectors from an isolated cache namespace. Contact
+// callers use the legacy namespace; mail analysis uses NamespaceEmailSegment so
+// repeated mail text can be cached without entering contact identity statistics.
+func (r *Resolver) VectorsForNamespace(
+	ctx context.Context,
+	namespace string,
+	texts []string,
+) ([]Vector, int, error) {
 	r.lookups.Add(int64(len(texts)))
 	out := make([]Vector, len(texts))
-	hashes := make([]string, len(texts))
+	keys := make([]string, len(texts))
 
 	var (
 		missTexts     []string
 		missPositions []int
 	)
 
-	seenMiss := map[string]int{} // hash -> first miss slot, to dedup within a batch
+	seenMiss := map[string]int{} // cache key -> first miss slot, to dedup within a batch
 
 	for i, text := range texts {
-		hash := StatementHash(text)
+		key := CacheKey(namespace, text)
 
-		hashes[i] = hash
-		if v, ok := r.cache.Get(hash); ok {
+		keys[i] = key
+		if v, ok := r.cache.Get(key); ok {
 			out[i] = v
 
 			continue
 		}
 
-		if _, dup := seenMiss[hash]; dup {
+		if _, dup := seenMiss[key]; dup {
 			continue // same new claim twice in one record; embed once
 		}
 
-		seenMiss[hash] = len(missTexts)
+		seenMiss[key] = len(missTexts)
 		missTexts = append(missTexts, text)
 		missPositions = append(missPositions, i)
 	}
@@ -419,7 +430,7 @@ func (r *Resolver) Vectors(ctx context.Context, texts []string) ([]Vector, int, 
 		}
 
 		for j, v := range vectors {
-			r.cache.Put(StatementHash(missTexts[j]), v)
+			r.cache.Put(CacheKey(namespace, missTexts[j]), v)
 			out[missPositions[j]] = v
 		}
 	}
@@ -427,7 +438,7 @@ func (r *Resolver) Vectors(ctx context.Context, texts []string) ([]Vector, int, 
 	// Fill any positions that were intra-batch duplicates of a freshly-embedded claim.
 	for i, v := range out {
 		if v == nil {
-			if cached, ok := r.cache.Get(hashes[i]); ok {
+			if cached, ok := r.cache.Get(keys[i]); ok {
 				out[i] = cached
 			}
 		}

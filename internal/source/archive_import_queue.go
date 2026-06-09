@@ -30,6 +30,8 @@ var errSourceImportDeadLettered = errors.New("source import dead-lettered jobs")
 
 var errSourceImportOtherRunJob = errors.New("source import job belongs to another run")
 
+var ErrArchiveMessageRejected = errors.New("archive message rejected")
+
 type ArchiveImportJobReceipt interface {
 	Job() contracts.SourceImportJob
 	Ack(context.Context) error
@@ -138,10 +140,7 @@ func (run ArchiveImportQueuedRun) Run(
 		_ = WriteImportRunRecord(request.StateDir, record)
 
 		defer func() {
-			record.Status = ImportRunStatusCompleted
-			if len(report.Failures) > 0 {
-				record.Status = ImportRunStatusFailed
-			}
+			record.Status = archiveImportRunStatus(report)
 
 			record.FinishedAt = time.Now().UTC()
 			record.Scanned = report.Scanned
@@ -166,7 +165,7 @@ func (run ArchiveImportQueuedRun) Run(
 			&report,
 		)
 		if err != nil {
-			report.Failures = append(report.Failures, err.Error())
+			appendArchiveFatalFailure(&report, err)
 		} else {
 			state.DiscoveryDone = true
 
@@ -180,7 +179,7 @@ func (run ArchiveImportQueuedRun) Run(
 	if len(report.Failures) == 0 {
 		err := run.drain(runCtx, request, sourceName, &state, &report)
 		if err != nil {
-			report.Failures = append(report.Failures, err.Error())
+			appendArchiveFatalFailure(&report, err)
 		}
 	}
 
@@ -188,13 +187,93 @@ func (run ArchiveImportQueuedRun) Run(
 
 	err := archiveImportFailureQueueError(failureErrc)
 	if err != nil {
-		report.Failures = append(report.Failures, err.Error())
+		appendArchiveFatalFailure(&report, err)
 	}
 
-	if len(report.Failures) > 0 {
+	if len(report.FatalFailures) > 0 {
 		return report, fmt.Errorf(
-			"archive import completed with %d failure(s)",
-			len(report.Failures),
+			"archive import completed with %d fatal failure(s)",
+			len(report.FatalFailures),
+		)
+	}
+
+	return report, nil
+}
+
+func (run ArchiveImportQueuedRun) EnqueueOnly(
+	ctx context.Context,
+	request ArchiveImportRequest,
+) (ArchiveImportReport, error) {
+	if run.Importer == nil {
+		return ArchiveImportReport{}, errors.New(
+			"archive import queued run requires importer",
+		)
+	}
+
+	if request.Publisher == nil {
+		return ArchiveImportReport{}, errors.New(
+			"archive import queued run requires publisher",
+		)
+	}
+
+	sourceName := archiveImportSourceName(request)
+	runID := archiveImportRunID(request, sourceName)
+	report := ArchiveImportReport{SourceName: sourceName, RunID: runID}
+	state := archiveImportRunState{
+		RunID:      runID,
+		SourceName: sourceName,
+		LowNoise:   request.LowNoise,
+		DryRun:     request.DryRun,
+	}
+	request.RunID = runID
+
+	if !request.DryRun {
+		record := ImportRunRecord{
+			RunID:      runID,
+			SourceName: sourceName,
+			SourceKind: contracts.MailArchiveSourceKind,
+			Roots:      append([]string{}, request.Roots...),
+			Format:     request.Format,
+			Status:     ImportRunStatusRunning,
+			StartedAt:  time.Now().UTC(),
+			LowNoise:   request.LowNoise,
+		}
+		_ = WriteImportRunRecord(request.StateDir, record)
+
+		defer func() {
+			record.Status = ImportRunStatusEnqueued
+			if len(report.FatalFailures) > 0 {
+				record.Status = ImportRunStatusFailed
+			}
+			record.FinishedAt = time.Now().UTC()
+			record.Scanned = report.Scanned
+			record.Parsed = report.Parsed
+			record.Imported = report.Imported
+			record.Duplicates = report.ExactDuplicates + report.MessageIDDuplicates
+			record.Failures = len(report.Failures)
+			_ = WriteImportRunRecord(request.StateDir, record)
+		}()
+	}
+
+	if err := run.Importer.enqueueArchiveImportJobs(
+		ctx,
+		request,
+		sourceName,
+		runID,
+		&state,
+		&report,
+	); err != nil {
+		appendArchiveFatalFailure(&report, err)
+	}
+	state.DiscoveryDone = len(report.FatalFailures) == 0
+	if err := saveArchiveImportState(request.StateDir, state); err != nil {
+		return report, err
+	}
+
+	if len(report.FatalFailures) > 0 {
+		return report, fmt.Errorf(
+			"archive import enqueue completed with %d fatal failure(s)",
+			len(report.FatalFailures),
 		)
 	}
 
@@ -343,6 +422,16 @@ func (run ArchiveImportQueuedRun) drainOne(
 		report,
 	); err != nil {
 		state.Failures++
+		if errors.Is(err, ErrArchiveMessageRejected) {
+			appendArchiveFailure(report, err)
+			if ackErr := receipt.Ack(ctx); ackErr != nil {
+				return ackErr
+			}
+			report.Processed++
+			state.Processed = report.Processed
+
+			return saveArchiveImportState(request.StateDir, *state)
+		}
 
 		retryErr := receipt.Retry(ctx, err)
 		if retryErr != nil {
@@ -431,14 +520,14 @@ func (importer *ArchiveImporter) enqueueArchiveImportJobs(
 			report,
 		)
 		if err != nil {
-			report.Failures = append(report.Failures, err.Error())
+			appendArchiveFatalFailure(report, err)
 		}
 	}
 
-	if len(report.Failures) > 0 {
+	if len(report.FatalFailures) > 0 {
 		return fmt.Errorf(
 			"archive import discovery completed with %d failure(s)",
-			len(report.Failures),
+			len(report.FatalFailures),
 		)
 	}
 
@@ -480,7 +569,7 @@ func (importer *ArchiveImporter) walkArchiveJobs(
 		root,
 		func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
-				report.Failures = append(report.Failures, walkErr.Error())
+				appendArchiveFatalFailure(report, walkErr)
 
 				return nil
 			}
@@ -717,7 +806,7 @@ func (importer *ArchiveImporter) ProcessSourceImportJob(
 	if err != nil {
 		report.ParseFailures++
 
-		return err
+		return fmt.Errorf("%w: %w", ErrArchiveMessageRejected, err)
 	}
 
 	return importer.ingestArchiveMessage(ctx, sourceName, message, request, report)

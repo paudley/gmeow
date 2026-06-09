@@ -159,7 +159,7 @@ func TestValidateGmailBackfillAndInboxRefreshFlags(t *testing.T) {
 		},
 		InboxRefresh: SourceInboxRefreshConfig{
 			Enabled:  true,
-			Query:    "in:inbox newer_than:30d",
+			Queries:  []string{"in:inbox newer_than:30d", "from:paudley newer_than:30d"},
 			Interval: "5m",
 		},
 	}}

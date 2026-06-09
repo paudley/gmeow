@@ -135,6 +135,7 @@ type ArchiveImportReport struct {
 	Skipped             int      `json:"skipped"`
 	SkippedMessageIDs   []string `json:"skipped_message_ids,omitempty"`
 	Failures            []string `json:"failures,omitempty"`
+	FatalFailures       []string `json:"fatal_failures,omitempty"`
 }
 
 type ArchiveImportPublisher interface {
@@ -327,10 +328,7 @@ func (importer *ArchiveImporter) Import(
 		}
 		_ = WriteImportRunRecord(request.StateDir, record)
 		defer func() {
-			record.Status = ImportRunStatusCompleted
-			if len(report.Failures) > 0 {
-				record.Status = ImportRunStatusFailed
-			}
+			record.Status = archiveImportRunStatus(report)
 			record.FinishedAt = time.Now().UTC()
 			record.Scanned = report.Scanned
 			record.Parsed = report.Parsed
@@ -346,7 +344,7 @@ func (importer *ArchiveImporter) Import(
 		var err error
 		total, err = countArchiveImportMessages(ctx, request)
 		if err != nil {
-			report.Failures = append(report.Failures, err.Error())
+			appendArchiveFatalFailure(&report, err)
 			return report, err
 		}
 	}
@@ -363,18 +361,46 @@ func (importer *ArchiveImporter) Import(
 			&report,
 			progress,
 		); err != nil {
-			report.Failures = append(report.Failures, err.Error())
+			appendArchiveFatalFailure(&report, err)
 		}
 	}
 
-	if len(report.Failures) > 0 {
+	if len(report.FatalFailures) > 0 {
 		return report, fmt.Errorf(
-			"archive import completed with %d root failure(s)",
-			len(report.Failures),
+			"archive import completed with %d fatal failure(s)",
+			len(report.FatalFailures),
 		)
 	}
 
 	return report, nil
+}
+
+func archiveImportRunStatus(report ArchiveImportReport) string {
+	if len(report.FatalFailures) > 0 {
+		return ImportRunStatusFailed
+	}
+	if len(report.Failures) > 0 {
+		return ImportRunStatusCompletedWithFailures
+	}
+
+	return ImportRunStatusCompleted
+}
+
+func appendArchiveFailure(report *ArchiveImportReport, err error) {
+	if err == nil {
+		return
+	}
+
+	report.Failures = append(report.Failures, err.Error())
+}
+
+func appendArchiveFatalFailure(report *ArchiveImportReport, err error) {
+	if err == nil {
+		return
+	}
+
+	appendArchiveFailure(report, err)
+	report.FatalFailures = append(report.FatalFailures, err.Error())
 }
 
 func countArchiveImportMessages(
@@ -527,7 +553,9 @@ func (importer *ArchiveImporter) importRoot(
 		message, parseErr := parseArchiveFile(root, root, request.Format, 0)
 		if parseErr != nil {
 			report.ParseFailures++
-			return parseErr
+			appendArchiveFailure(report, parseErr)
+
+			return nil
 		}
 		report.Scanned++
 		report.Parsed++
@@ -536,12 +564,13 @@ func (importer *ArchiveImporter) importRoot(
 		progress.setLastPath(root)
 		ingestErr := importer.ingestArchiveMessage(ctx, sourceName, message, request, report)
 		if ingestErr != nil {
+			appendArchiveFailure(report, ingestErr)
 			progress.failures.Add(1)
 		} else {
 			progress.ingested.Add(1)
 		}
 
-		return ingestErr
+		return nil
 	}
 
 	// The directory walk is the single producer: it owns the parse-side counters
@@ -565,7 +594,7 @@ func (importer *ArchiveImporter) importRoot(
 				if err := importer.ingestArchiveMessage(
 					ctx, sourceName, message, request, local,
 				); err != nil {
-					local.Failures = append(local.Failures, err.Error())
+					appendArchiveFailure(local, err)
 					progress.failures.Add(1)
 				} else {
 					progress.ingested.Add(1)
@@ -578,7 +607,7 @@ func (importer *ArchiveImporter) importRoot(
 		root,
 		func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
-				report.Failures = append(report.Failures, walkErr.Error())
+				appendArchiveFatalFailure(report, walkErr)
 				return nil
 			}
 			if err := ctx.Err(); err != nil {
@@ -612,7 +641,7 @@ func (importer *ArchiveImporter) importRoot(
 				})
 				if parseErr != nil {
 					report.ParseFailures++
-					report.Failures = append(report.Failures, parseErr.Error())
+					appendArchiveFailure(report, parseErr)
 					return nil
 				}
 				return nil
@@ -621,7 +650,7 @@ func (importer *ArchiveImporter) importRoot(
 			message, parseErr := parseArchiveFile(path, root, format, 0)
 			if parseErr != nil {
 				report.ParseFailures++
-				report.Failures = append(report.Failures, parseErr.Error())
+				appendArchiveFailure(report, parseErr)
 				return nil
 			}
 			report.Parsed++
@@ -657,6 +686,7 @@ func mergeArchiveIngestReport(dst, src *ArchiveImportReport) {
 	dst.Collisions += src.Collisions
 	dst.SkippedMessageIDs = append(dst.SkippedMessageIDs, src.SkippedMessageIDs...)
 	dst.Failures = append(dst.Failures, src.Failures...)
+	dst.FatalFailures = append(dst.FatalFailures, src.FatalFailures...)
 }
 
 func (importer *ArchiveImporter) ingestArchiveMessage(

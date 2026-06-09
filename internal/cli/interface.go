@@ -39,7 +39,6 @@ func newMCPServeCommand(out io.Writer, configPath *string) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create mcp server: %w", err)
 			}
-			_, _ = fmt.Fprintln(out, "mcp serve: stdio")
 
 			return server.Start(command.Context())
 		},

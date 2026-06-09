@@ -32,9 +32,10 @@ type OllamaConfig struct {
 const (
 	defaultOllamaBinary = "ollama"
 	defaultOllamaHost   = "127.0.0.1:11434"
-	defaultOllamaModel  = "nomic-embed-text"
 	ollamaRestartDelay  = 3 * time.Second
 )
+
+const DefaultModel = "nomic-embed-text"
 
 func (c OllamaConfig) withDefaults() OllamaConfig {
 	if c.Binary == "" {
@@ -46,7 +47,7 @@ func (c OllamaConfig) withDefaults() OllamaConfig {
 	}
 
 	if c.Model == "" {
-		c.Model = defaultOllamaModel
+		c.Model = DefaultModel
 	}
 
 	return c

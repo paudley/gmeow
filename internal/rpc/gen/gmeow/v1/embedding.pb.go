@@ -69,8 +69,12 @@ func (x *EmbeddingVector) GetValues() []float32 {
 }
 
 type EmbedRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Texts         []string               `protobuf:"bytes,1,rep,name=texts,proto3" json:"texts,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Texts []string               `protobuf:"bytes,1,rep,name=texts,proto3" json:"texts,omitempty"`
+	// namespace scopes cache keys by embedding purpose. Empty preserves the
+	// contact-claim legacy namespace for backward compatibility; email analysis
+	// uses "email_segment" so mail text never enters contact identity statistics.
+	Namespace     string `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -110,6 +114,13 @@ func (x *EmbedRequest) GetTexts() []string {
 		return x.Texts
 	}
 	return nil
+}
+
+func (x *EmbedRequest) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
 }
 
 type EmbedResponse struct {
@@ -975,9 +986,10 @@ const file_gmeow_v1_embedding_proto_rawDesc = "" +
 	"\n" +
 	"\x18gmeow/v1/embedding.proto\x12\bgmeow.v1\x1a\x15gmeow/v1/common.proto\")\n" +
 	"\x0fEmbeddingVector\x12\x16\n" +
-	"\x06values\x18\x01 \x03(\x02R\x06values\"$\n" +
+	"\x06values\x18\x01 \x03(\x02R\x06values\"B\n" +
 	"\fEmbedRequest\x12\x14\n" +
-	"\x05texts\x18\x01 \x03(\tR\x05texts\"m\n" +
+	"\x05texts\x18\x01 \x03(\tR\x05texts\x12\x1c\n" +
+	"\tnamespace\x18\x02 \x01(\tR\tnamespace\"m\n" +
 	"\rEmbedResponse\x123\n" +
 	"\avectors\x18\x01 \x03(\v2\x19.gmeow.v1.EmbeddingVectorR\avectors\x12'\n" +
 	"\x0fembedder_misses\x18\x02 \x01(\x05R\x0eembedderMisses\"=\n" +

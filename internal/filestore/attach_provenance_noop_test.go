@@ -5,6 +5,7 @@ package filestore
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -47,6 +48,7 @@ func TestAttachProvenanceNoOpWhenAlreadySeen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	beforeMeta := metadataSnapshot(t, store)
 
 	// Re-observe the identical ref: must be a pure no-op.
 	changed, err = store.AttachProvenance(ctx, digest, prov)
@@ -67,6 +69,14 @@ func TestAttachProvenanceNoOpWhenAlreadySeen(t *testing.T) {
 			before.UpdatedAt, after.UpdatedAt,
 		)
 	}
+	afterMeta := metadataSnapshot(t, store)
+	if !reflect.DeepEqual(afterMeta, beforeMeta) {
+		t.Fatalf(
+			"no-op AttachProvenance must not write metadata keys\nbefore=%#v\nafter=%#v",
+			beforeMeta,
+			afterMeta,
+		)
+	}
 
 	// A genuinely new version is a real change.
 	changed, err = store.AttachProvenance(ctx, digest, []contracts.Provenance{{
@@ -81,4 +91,19 @@ func TestAttachProvenanceNoOpWhenAlreadySeen(t *testing.T) {
 	if !changed {
 		t.Fatal("attaching a new external version must report changed")
 	}
+}
+
+func metadataSnapshot(t *testing.T, store *FilesystemStore) map[string]string {
+	t.Helper()
+
+	snapshot := map[string]string{}
+	if err := store.metaIterRange("", nil, func(key string, value []byte) error {
+		snapshot[key] = string(append([]byte(nil), value...))
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	return snapshot
 }

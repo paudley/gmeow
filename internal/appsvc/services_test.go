@@ -161,6 +161,62 @@ func TestSummarySearchUsesLiveGmailHydration(t *testing.T) {
 	}
 }
 
+func TestMailSearchAlwaysFansOutToQueryAndGmailForEachQuery(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	queryService := testsupport.StartQueryGRPC(t, ctx, filestoreService.Store)
+	defer queryService.Close()
+	sourceService, err := source.NewService(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	query := &countingQueryReader{QueryReader: queryService.Client}
+	backend := &countingGmailBackend{}
+	gmail, err := source.NewGmailAdapter("primary", backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	services, err := appsvc.New(appsvc.Options{
+		Query:   query,
+		Objects: filestoreService.Client,
+		Sources: appsvc.NewStaticSourceRegistry(gmail),
+		Ingest:  sourceService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, searchQuery := range []string{"foo", "foo bar"} {
+		if _, err := services.MailSearch(ctx, appsvc.SearchOptions{
+			Query: searchQuery,
+			Limit: 5,
+		}); err != nil {
+			t.Fatalf("mail search %q: %v", searchQuery, err)
+		}
+	}
+
+	if got, want := query.searchQueries, []string{
+		"foo",
+		"foo bar",
+	}; !stringSlicesEqual(
+		got,
+		want,
+	) {
+		t.Fatalf("QUERY searches = %#v, want %#v", got, want)
+	}
+	if got, want := backend.searchQueries, []string{
+		"foo",
+		"foo bar",
+	}; !stringSlicesEqual(
+		got,
+		want,
+	) {
+		t.Fatalf("Gmail searches = %#v, want %#v", got, want)
+	}
+}
+
 func TestSourceActionUsesRealGmailAdapterAndRejectsWrongFacet(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
@@ -271,6 +327,19 @@ func TestForceAnalysisUsesRealSchedulerService(t *testing.T) {
 	}
 }
 
+type countingQueryReader struct {
+	appsvc.QueryReader
+	searchQueries []string
+}
+
+func (query *countingQueryReader) Search(
+	ctx context.Context,
+	request contracts.SearchRequest,
+) (contracts.SearchResponse, error) {
+	query.searchQueries = append(query.searchQueries, request.Query)
+	return query.QueryReader.Search(ctx, request)
+}
+
 type gmailExternalBackend struct {
 	hits     []source.GmailSearchHit
 	messages map[string]source.GmailMessage
@@ -278,7 +347,8 @@ type gmailExternalBackend struct {
 
 type countingGmailBackend struct {
 	gmailExternalBackend
-	searches int
+	searches      int
+	searchQueries []string
 }
 
 func (backend *countingGmailBackend) Search(
@@ -287,6 +357,7 @@ func (backend *countingGmailBackend) Search(
 	limit int,
 ) ([]source.GmailSearchHit, error) {
 	backend.searches++
+	backend.searchQueries = append(backend.searchQueries, query)
 	return backend.gmailExternalBackend.Search(ctx, query, limit)
 }
 
@@ -343,4 +414,16 @@ func hasPendingFreshResult(
 	}
 
 	return false
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

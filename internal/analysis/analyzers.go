@@ -7,12 +7,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	stdhtml "html"
 	"io"
 	"mime"
 	"net/mail"
 	"regexp"
 	"sort"
 	"strings"
+
+	nethtml "golang.org/x/net/html"
 
 	"blackcat.ca/gmeow/internal/contracts"
 )
@@ -396,7 +399,7 @@ func extractText(content []byte, mediaType string) string {
 
 	switch mediaType {
 	case "text/html":
-		return normalizeWhitespace(stripTags(text))
+		return normalizeWhitespace(stripHTML(text))
 	case "application/json":
 		var value any
 		if json.Unmarshal(content, &value) == nil {
@@ -520,13 +523,55 @@ func facetKinds(facets []contracts.Facet) []string {
 	return kinds
 }
 
-var (
-	tagPattern        = regexp.MustCompile(`<[^>]+>`)
-	whitespacePattern = regexp.MustCompile(`\s+`)
-)
+var whitespacePattern = regexp.MustCompile(`\s+`)
 
-func stripTags(value string) string {
-	return tagPattern.ReplaceAllString(value, " ")
+func stripHTML(value string) string {
+	root, err := nethtml.Parse(strings.NewReader(value))
+	if err != nil {
+		return stdhtml.UnescapeString(value)
+	}
+
+	var builder strings.Builder
+	writeHTMLText(&builder, root, false)
+
+	return builder.String()
+}
+
+func writeHTMLText(builder *strings.Builder, node *nethtml.Node, skip bool) {
+	if node.Type == nethtml.ElementNode {
+		switch strings.ToLower(node.Data) {
+		case "script", "style", "template", "noscript":
+			skip = true
+		case "br",
+			"p",
+			"div",
+			"li",
+			"tr",
+			"td",
+			"th",
+			"section",
+			"article",
+			"header",
+			"footer":
+			builder.WriteByte(' ')
+		}
+	}
+
+	if !skip && node.Type == nethtml.TextNode {
+		builder.WriteString(stdhtml.UnescapeString(node.Data))
+		builder.WriteByte(' ')
+	}
+
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		writeHTMLText(builder, child, skip)
+	}
+
+	if !skip && node.Type == nethtml.ElementNode {
+		switch strings.ToLower(node.Data) {
+		case "p", "div", "li", "tr", "td", "th", "section", "article", "header", "footer":
+			builder.WriteByte(' ')
+		}
+	}
 }
 
 func normalizeWhitespace(value string) string {

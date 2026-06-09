@@ -345,20 +345,6 @@ func (service *Service) Ingest(
 		if digest, found, err := service.lookupSourceObject(ctx, ref); err != nil {
 			return "", false, err
 		} else if found {
-			if len(provenance) > 0 {
-				if err := service.store.AttachProvenanceWithPriority(
-					ctx,
-					digest,
-					provenance,
-					object.PriorityClass,
-				); err != nil {
-					return "", false, err
-				}
-				if err := service.notifyChanged(ctx, digest); err != nil {
-					return "", false, err
-				}
-			}
-
 			return digest, false, nil
 		}
 	}
@@ -395,19 +381,6 @@ func (service *Service) Ingest(
 				return "", false, err
 			}
 			claimAcquired = false
-			if len(provenance) > 0 {
-				if err := service.store.AttachProvenanceWithPriority(
-					ctx,
-					digest,
-					provenance,
-					object.PriorityClass,
-				); err != nil {
-					return "", false, err
-				}
-				if err := service.notifyChanged(ctx, digest); err != nil {
-					return "", false, err
-				}
-			}
 
 			return digest, false, nil
 		}

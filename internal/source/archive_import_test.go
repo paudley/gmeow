@@ -136,6 +136,70 @@ func TestArchiveImportRecordsRunForListing(t *testing.T) {
 	}
 }
 
+func TestArchiveImportToleratesBadMessages(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	stateDir := t.TempDir()
+	writeTestFile(
+		t,
+		filepath.Join(root, "good.eml"),
+		"Message-ID: <good@example.test>\r\nSubject: good\r\n\r\nbody\r\n",
+	)
+	writeTestFile(
+		t,
+		filepath.Join(root, "bad.eml"),
+		"Message-ID: <bad@example.test>\r\nmalformed header line\r\n\r\nbody\r\n",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "arc",
+		Roots:      []string{root},
+		Format:     ArchiveImportFormatEMLDir,
+		StateDir:   stateDir,
+	})
+	if err != nil {
+		t.Fatalf("bad message should not fail the import run: %v", err)
+	}
+	if report.Imported != 1 || report.ParseFailures != 1 || len(report.Failures) != 1 {
+		t.Fatalf("expected one import and one tolerated parse failure, got %#v", report)
+	}
+	if len(report.FatalFailures) != 0 {
+		t.Fatalf("bad message must not be fatal: %#v", report.FatalFailures)
+	}
+
+	_, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind: contracts.MailIdentitySourceKind,
+			SourceName: contracts.MailIdentitySourceName,
+			ExternalID: "<good@example.test>",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected good message to be imported")
+	}
+
+	records, err := ListImportRunRecords(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 run record, got %d", len(records))
+	}
+	if records[0].Status != ImportRunStatusCompletedWithFailures {
+		t.Fatalf("expected completed-with-failures status, got %q", records[0].Status)
+	}
+}
+
 func TestArchiveImportMaildirReadOnlyAndGeneratedMessageID(t *testing.T) {
 	ctx := context.Background()
 	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
@@ -258,6 +322,77 @@ func TestArchiveImportExactReimportDoesNotMutateFilestore(t *testing.T) {
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf(
 			"exact reimport mutated filestore manifests\nbefore=%#v\nafter=%#v",
+			before,
+			after,
+		)
+	}
+}
+
+func TestArchiveImportSameTagDifferentMaildirsDoesNotMutateFilestore(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	message := "Message-ID: <same-tag@example.test>\n" +
+		"From: a@example.test\nTo: b@example.test\nSubject: Same Tag\n\nsame body\n"
+	for _, root := range []string{rootA, rootB} {
+		writeTestFile(t, filepath.Join(root, "tmp", ".keep"), "")
+		writeTestFile(t, filepath.Join(root, "new", ".keep"), "")
+		writeTestFile(t, filepath.Join(root, "cur", "1:2,S"), message)
+	}
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReport, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{rootA},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstReport.Imported != 1 {
+		t.Fatalf("expected first import to write one canonical message, got %#v", firstReport)
+	}
+
+	canonical, found, err := filestoreService.Client.LookupSourceObject(
+		ctx,
+		contracts.SourceObjectRef{
+			SourceKind: contracts.MailIdentitySourceKind,
+			SourceName: contracts.MailIdentitySourceName,
+			ExternalID: "<same-tag@example.test>",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected canonical message lookup")
+	}
+	before := archiveObjectManifests(t, ctx, filestoreService, canonical)
+
+	secondReport, err := importer.Import(ctx, ArchiveImportRequest{
+		SourceName: "archive",
+		Roots:      []string{rootB},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondReport.Imported != 0 ||
+		secondReport.ExactDuplicates != 0 ||
+		secondReport.MessageIDDuplicates != 1 {
+		t.Fatalf(
+			"expected same-tag import from another maildir to be a no-op, got %#v",
+			secondReport,
+		)
+	}
+
+	after := archiveObjectManifests(t, ctx, filestoreService, canonical)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf(
+			"same-tag import from another maildir mutated filestore manifests\nbefore=%#v\nafter=%#v",
 			before,
 			after,
 		)
@@ -927,6 +1062,51 @@ func TestQueuedArchiveImportReleasesForeignRunJobs(t *testing.T) {
 	}
 }
 
+func TestQueuedArchiveImportAcknowledgesBadMessages(t *testing.T) {
+	ctx := context.Background()
+	filestoreService := testsupport.StartFilestoreGRPC(t, ctx)
+	defer filestoreService.Close()
+	root := t.TempDir()
+	bad := filepath.Join(root, "bad.eml")
+	writeTestFile(
+		t,
+		bad,
+		"Message-ID: <bad@example.test>\r\nmalformed header line\r\n\r\nbody\r\n",
+	)
+
+	importer, err := NewArchiveImporter(filestoreService.Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := &memoryArchiveImportQueue{
+		jobs: []contracts.SourceImportJob{{
+			RunID:  "run",
+			Root:   root,
+			Path:   bad,
+			Format: ArchiveImportFormatEMLDir,
+		}},
+	}
+	report := ArchiveImportReport{RunID: "run"}
+	state := archiveImportRunState{RunID: "run"}
+	err = (ArchiveImportQueuedRun{
+		Importer: importer,
+		Source:   queue,
+	}).drainOne(ctx, ArchiveImportRequest{Publisher: queue}, "archive", &state, &report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queue.acked != 1 || queue.retried != 0 {
+		t.Fatalf(
+			"bad queued message should be acked, not retried: acked=%d retried=%d",
+			queue.acked,
+			queue.retried,
+		)
+	}
+	if report.Processed != 1 || report.ParseFailures != 1 || len(report.Failures) != 1 {
+		t.Fatalf("unexpected bad-message report: %#v", report)
+	}
+}
+
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -973,6 +1153,7 @@ func hasFacetKind(manifest contracts.Manifest, kind string) bool {
 type memoryArchiveImportQueue struct {
 	jobs      []contracts.SourceImportJob
 	published int
+	acked     int
 	released  int
 	retried   int
 }
@@ -1024,7 +1205,9 @@ func (receipt *memoryArchiveImportReceipt) Job() contracts.SourceImportJob {
 	return receipt.job
 }
 
-func (*memoryArchiveImportReceipt) Ack(context.Context) error {
+func (receipt *memoryArchiveImportReceipt) Ack(context.Context) error {
+	receipt.queue.acked++
+
 	return nil
 }
 

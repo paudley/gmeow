@@ -1,7 +1,7 @@
 [Unit]
 Description=Gmeow core data services
 PartOf=gmeow.target
-Wants=gmeow-filestore.service gmeow-query.service gmeow-scheduler.service
+Wants=gmeow-filestore.service gmeow-query.service gmeow-scheduler.service gmeow-embedding.service
 After=network-online.target postgresql.service rabbitmq-server.service
 
 [Install]

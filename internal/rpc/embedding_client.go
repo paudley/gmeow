@@ -46,7 +46,18 @@ func (client *EmbeddingClient) Embed(
 	ctx context.Context,
 	texts []string,
 ) ([]embedding.Vector, int, error) {
-	response, err := client.client.Embed(ctx, &pb.EmbedRequest{Texts: texts})
+	return client.EmbedNamespace(ctx, "", texts)
+}
+
+func (client *EmbeddingClient) EmbedNamespace(
+	ctx context.Context,
+	namespace string,
+	texts []string,
+) ([]embedding.Vector, int, error) {
+	response, err := client.client.Embed(
+		ctx,
+		&pb.EmbedRequest{Namespace: namespace, Texts: texts},
+	)
 	if err != nil {
 		return nil, 0, err
 	}

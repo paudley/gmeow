@@ -213,6 +213,18 @@ func (s *Service) cacheEntries() map[string]Vector {
 	return nil
 }
 
+func (s *Service) contactCacheEntries() map[string]Vector {
+	entries := s.cacheEntries()
+	contactEntries := make(map[string]Vector, len(entries))
+	for key, vector := range entries {
+		if cacheKeyNamespace(key) == NamespaceContactClaim {
+			contactEntries[key] = vector
+		}
+	}
+
+	return contactEntries
+}
+
 func encodeCache(entries map[string]Vector) ([]byte, error) {
 	var buf bytes.Buffer
 

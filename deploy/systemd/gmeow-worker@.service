@@ -2,8 +2,8 @@
 Description=Gmeow analysis worker (%i)
 Documentation=man:systemd.service(5) man:systemd.exec(5)
 PartOf=gmeow.target gmeow-workers.target
-Requires=gmeow-filestore.service gmeow-scheduler.service
-After=network-online.target rabbitmq-server.service gmeow-filestore.service gmeow-scheduler.service
+Requires=gmeow-filestore.service gmeow-scheduler.service gmeow-embedding.service
+After=network-online.target rabbitmq-server.service gmeow-filestore.service gmeow-scheduler.service gmeow-embedding.service
 StartLimitIntervalSec=5min
 StartLimitBurst=5
 

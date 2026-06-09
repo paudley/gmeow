@@ -35,7 +35,7 @@ func TestOllamaConfigDefaultsAndEndpoint(t *testing.T) {
 		cfg:     OllamaConfig{}.withDefaults(),
 		baseURL: "http://127.0.0.1:11434",
 	}
-	if b.cfg.Model != defaultOllamaModel || b.cfg.Host != defaultOllamaHost {
+	if b.cfg.Model != DefaultModel || b.cfg.Host != defaultOllamaHost {
 		t.Fatalf("defaults not applied: %+v", b.cfg)
 	}
 	if b.Endpoint() != "http://127.0.0.1:11434/v1/embeddings" {

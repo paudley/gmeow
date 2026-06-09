@@ -87,6 +87,62 @@ func TestResolverCacheIsNewInfoDetector(t *testing.T) {
 	}
 }
 
+func TestResolverNamespacesIsolateEmailFromContactCache(t *testing.T) {
+	embedder := &stubEmbedder{dim: FullDim}
+	cache := NewMemoryCache()
+	resolver := NewResolver(cache, embedder)
+	ctx := context.Background()
+	text := "shared footer text"
+
+	_, contactMisses, err := resolver.Vectors(ctx, []string{text})
+	if err != nil {
+		t.Fatalf("contact Vectors: %v", err)
+	}
+	_, emailMisses, err := resolver.VectorsForNamespace(
+		ctx,
+		NamespaceEmailSegment,
+		[]string{text},
+	)
+	if err != nil {
+		t.Fatalf("email Vectors: %v", err)
+	}
+	if contactMisses != 1 || emailMisses != 1 || embedder.calls != 2 {
+		t.Fatalf(
+			"misses contact/email/calls = %d/%d/%d, want 1/1/2",
+			contactMisses,
+			emailMisses,
+			embedder.calls,
+		)
+	}
+
+	_, contactMisses, err = resolver.Vectors(ctx, []string{text})
+	if err != nil {
+		t.Fatalf("repeat contact Vectors: %v", err)
+	}
+	_, emailMisses, err = resolver.VectorsForNamespace(
+		ctx,
+		NamespaceEmailSegment,
+		[]string{text},
+	)
+	if err != nil {
+		t.Fatalf("repeat email Vectors: %v", err)
+	}
+	if contactMisses != 0 || emailMisses != 0 || embedder.calls != 2 {
+		t.Fatalf(
+			"repeat misses contact/email/calls = %d/%d/%d, want 0/0/2",
+			contactMisses,
+			emailMisses,
+			embedder.calls,
+		)
+	}
+	if _, ok := cache.Get(StatementHash(text)); !ok {
+		t.Fatal("contact cache should keep the legacy bare statement hash")
+	}
+	if _, ok := cache.Get(CacheKey(NamespaceEmailSegment, text)); !ok {
+		t.Fatal("email cache should use a namespaced key")
+	}
+}
+
 func TestMeanPoolIsUnitLength(t *testing.T) {
 	a := deterministicVector("a", 16)
 	b := deterministicVector("b", 16)

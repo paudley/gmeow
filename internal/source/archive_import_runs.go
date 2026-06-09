@@ -23,10 +23,12 @@ const archiveImportRunFile = "run.json"
 
 // Import run lifecycle statuses.
 const (
-	ImportRunStatusRunning   = "running"
-	ImportRunStatusCompleted = "completed"
-	ImportRunStatusFailed    = "failed"
-	ImportRunStatusDeleted   = "deleted"
+	ImportRunStatusRunning               = "running"
+	ImportRunStatusEnqueued              = "enqueued"
+	ImportRunStatusCompleted             = "completed"
+	ImportRunStatusCompletedWithFailures = "completed_with_failures"
+	ImportRunStatusFailed                = "failed"
+	ImportRunStatusDeleted               = "deleted"
 )
 
 // ImportRunRecord is the persisted summary of a single archive import run.

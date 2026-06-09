@@ -156,26 +156,21 @@ type SourceBackfillConfig struct {
 }
 
 type SourceInboxRefreshConfig struct {
-	Enabled     bool   `toml:"enabled"`
-	Query       string `toml:"query"`
-	Interval    string `toml:"interval"`
-	PageSize    int    `toml:"page_size"`
-	MaxPages    int    `toml:"max_pages"`
-	Concurrency int    `toml:"concurrency"`
+	Enabled     bool     `toml:"enabled"`
+	Query       string   `toml:"query"`
+	Queries     []string `toml:"queries"`
+	Interval    string   `toml:"interval"`
+	PageSize    int      `toml:"page_size"`
+	MaxPages    int      `toml:"max_pages"`
+	Concurrency int      `toml:"concurrency"`
 }
 
 type AnalysisConfig struct {
-	Embeddings            EmbeddingConfig  `toml:"embeddings"`
 	Summary               SummaryConfig    `toml:"summary"`
 	Analyzers             []AnalyzerConfig `toml:"analyzers"`
 	WorkerConcurrency     int              `toml:"worker_concurrency"`
 	BackendIdleTimeout    string           `toml:"backend_idle_timeout"`
 	BackendStartupTimeout string           `toml:"backend_startup_timeout"`
-}
-
-type EmbeddingConfig struct {
-	Endpoint string `toml:"endpoint"`
-	Model    string `toml:"model"`
 }
 
 type SummaryConfig struct {

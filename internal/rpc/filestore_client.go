@@ -768,6 +768,10 @@ func dial(ctx context.Context, endpoint Endpoint) (*grpc.ClientConn, error) {
 	options := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithUnaryInterceptor(retryUnaryClientInterceptor),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(internalRPCMaxMessageBytes),
+			grpc.MaxCallSendMsgSize(internalRPCMaxMessageBytes),
+		),
 	}
 
 	target := endpoint.Address

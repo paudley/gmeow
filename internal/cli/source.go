@@ -6,12 +6,14 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/tabwriter"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	"blackcat.ca/gmeow/internal/contracts"
 	"blackcat.ca/gmeow/internal/rpc"
 	pb "blackcat.ca/gmeow/internal/rpc/gen/gmeow/v1"
+	schedmq "blackcat.ca/gmeow/internal/scheduler/rabbitmq"
 	"blackcat.ca/gmeow/internal/source"
 	"blackcat.ca/gmeow/internal/source/sourcegrpc"
 )
@@ -90,6 +93,7 @@ func newSourceCommand(out io.Writer, configPath *string) *cobra.Command {
 	}
 	command.AddCommand(newSourceBackfillCommand(out, configPath))
 	command.AddCommand(newSourceImportCommand(out, configPath))
+	command.AddCommand(newSourceImportWorkerCommand(out, configPath))
 	command.AddCommand(newSourceListImportsCommand(out, configPath))
 	command.AddCommand(newSourceDeleteImportCommand(out, configPath))
 	command.AddCommand(newSourceServeCommand(out, configPath, "serve"))
@@ -264,7 +268,9 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 		stateDir        string
 		dryRun          bool
 		lowNoise        bool
+		enqueueOnly     bool
 		concurrency     int
+		queueHighWater  int
 		quiet           bool
 	)
 
@@ -313,6 +319,11 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 				LowNoise:   lowNoise,
 				StateDir:   archiveImportStateDir(loaded, stateDir),
 			}
+			if queueHighWater > 0 {
+				request.QueueHighWater = queueHighWater
+			} else if enqueueOnly {
+				request.QueueHighWater = 250000
+			}
 			// Live progress goes to stderr so --json stdout stays clean.
 			if !quiet {
 				request.Progress = func(progress source.ArchiveImportProgress) {
@@ -329,7 +340,24 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 					)
 				}
 			}
-			report, err := importer.Import(ctx, request)
+			var report source.ArchiveImportReport
+			if enqueueOnly {
+				broker, brokerErr := schedmq.New(ctx, schedmq.ConfigFromResolved(
+					loaded.Resolved.RabbitMQ,
+					loaded.Resolved.Scheduler,
+					loaded.Config.Analysis.Analyzers,
+				))
+				if brokerErr != nil {
+					return brokerErr
+				}
+				defer broker.Close()
+				request.Publisher = broker
+				report, err = (source.ArchiveImportQueuedRun{
+					Importer: importer,
+				}).EnqueueOnly(ctx, request)
+			} else {
+				report, err = importer.Import(ctx, request)
+			}
 			if !quiet {
 				// Terminate the in-place progress line before the report prints.
 				fmt.Fprintln(os.Stderr)
@@ -350,9 +378,13 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 	command.Flags().
 		BoolVar(&lowNoise, "low-noise", false, "skip Message-ID/body-line matches and trivial archive differences without per-message writes")
 	command.Flags().
+		BoolVar(&enqueueOnly, "enqueue-only", false, "scan archive roots, enqueue source-import jobs, and exit without processing them")
+	command.Flags().
 		StringVar(&stateDir, "state-dir", "", "local import run state directory; defaults to system.data_dir/import-runs")
 	command.Flags().
 		IntVar(&concurrency, "concurrency", 8, "object Puts run in parallel across messages and their parts")
+	command.Flags().
+		IntVar(&queueHighWater, "queue-high-water", 0, "source-import queue high-water mark before enqueue waits; enqueue-only defaults high")
 	command.Flags().
 		BoolVar(&quiet, "quiet", false, "suppress the live progress line on stderr")
 	command.Flags().StringVar(
@@ -363,6 +395,295 @@ func newSourceImportCommand(out io.Writer, configPath *string) *cobra.Command {
 	)
 
 	return command
+}
+
+func newSourceImportWorkerCommand(out io.Writer, configPath *string) *cobra.Command {
+	var (
+		confirmInstance string
+		stateDir        string
+		maxJobs         int
+		prefetch        int
+		workers         int
+		quiet           bool
+	)
+
+	command := &cobra.Command{
+		Use:   "import-worker",
+		Short: "Process queued archive source-import jobs",
+		RunE: func(command *cobra.Command, _ []string) error {
+			ctx := command.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			loaded, err := config.Load(config.Options{Path: *configPath})
+			if err != nil {
+				return err
+			}
+			if err := requireInstanceConfirmation(
+				loaded,
+				"source import-worker",
+				confirmInstance,
+			); err != nil {
+				return err
+			}
+
+			filestoreClient, err := rpc.NewFilestoreClient(
+				ctx,
+				rpcEndpoint(loaded.Resolved.RPC.Filestore),
+			)
+			if err != nil {
+				return err
+			}
+			defer filestoreClient.Close()
+
+			importer, err := source.NewArchiveImporter(filestoreClient)
+			if err != nil {
+				return err
+			}
+
+			jobSource, err := schedmq.NewSourceImportJobSource(
+				ctx,
+				schedmq.SourceImportJobSourceConfig{
+					URL:         loaded.Resolved.RabbitMQ.URL,
+					QueuePrefix: loaded.Resolved.Scheduler.QueuePrefix,
+					Prefetch:    prefetch,
+				},
+			)
+			if err != nil {
+				return err
+			}
+			defer jobSource.Close()
+
+			broker, err := schedmq.New(ctx, schedmq.ConfigFromResolved(
+				loaded.Resolved.RabbitMQ,
+				loaded.Resolved.Scheduler,
+				loaded.Config.Analysis.Analyzers,
+			))
+			if err != nil {
+				return err
+			}
+			defer broker.Close()
+
+			report, err := runSourceImportWorker(
+				ctx,
+				importer,
+				sourceImportJobSourceAdapter{source: jobSource},
+				broker,
+				archiveImportStateDir(loaded, stateDir),
+				maxJobs,
+				workers,
+				quiet,
+			)
+			if printErr := printArchiveImportReport(out, report); printErr != nil {
+				return printErr
+			}
+
+			return err
+		},
+	}
+	command.Flags().
+		IntVar(&maxJobs, "jobs", 0, "maximum jobs to process before exiting; 0 runs until interrupted")
+	command.Flags().
+		IntVar(&prefetch, "prefetch", 8, "RabbitMQ source-import prefetch count")
+	command.Flags().
+		IntVar(&workers, "workers", 4, "concurrent source-import workers in this process")
+	command.Flags().
+		StringVar(&stateDir, "state-dir", "", "local import run state directory; defaults to system.data_dir/import-runs")
+	command.Flags().
+		BoolVar(&quiet, "quiet", false, "suppress progress logs on stderr")
+	command.Flags().StringVar(
+		&confirmInstance,
+		"confirm-instance",
+		"",
+		"required production-like instance id confirmation",
+	)
+
+	return command
+}
+
+type sourceImportJobSourceAdapter struct {
+	source *schedmq.SourceImportJobSource
+}
+
+func (adapter sourceImportJobSourceAdapter) Receive(
+	ctx context.Context,
+) (source.ArchiveImportJobReceipt, error) {
+	return adapter.source.Receive(ctx)
+}
+
+func runSourceImportWorker(
+	ctx context.Context,
+	importer *source.ArchiveImporter,
+	jobSource source.ArchiveImportJobSource,
+	publisher source.ArchiveImportPublisher,
+	stateDir string,
+	maxJobs int,
+	workers int,
+	quiet bool,
+) (source.ArchiveImportReport, error) {
+	if workers < 1 {
+		workers = 1
+	}
+	report := source.ArchiveImportReport{}
+	start := time.Now()
+	var (
+		mu      sync.Mutex
+		claimed atomic.Int64
+		joined  error
+		group   sync.WaitGroup
+	)
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for {
+				if maxJobs > 0 && claimed.Add(1) > int64(maxJobs) {
+					return
+				}
+				err := runSourceImportWorkerJob(
+					workerCtx,
+					importer,
+					jobSource,
+					publisher,
+					stateDir,
+					&report,
+					&mu,
+					start,
+					quiet,
+				)
+				if err == nil {
+					continue
+				}
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				mu.Lock()
+				joined = errors.Join(joined, err)
+				mu.Unlock()
+				cancel()
+
+				return
+			}
+		}()
+	}
+	group.Wait()
+
+	return report, joined
+}
+
+func runSourceImportWorkerJob(
+	ctx context.Context,
+	importer *source.ArchiveImporter,
+	jobSource source.ArchiveImportJobSource,
+	publisher source.ArchiveImportPublisher,
+	stateDir string,
+	report *source.ArchiveImportReport,
+	mu *sync.Mutex,
+	start time.Time,
+	quiet bool,
+) error {
+	receipt, err := jobSource.Receive(ctx)
+	if err != nil {
+		return err
+	}
+	job := receipt.Job()
+	mu.Lock()
+	report.SourceName = job.SourceName
+	report.RunID = job.RunID
+	mu.Unlock()
+	request := source.ArchiveImportRequest{
+		SourceName: job.SourceName,
+		Format:     job.Format,
+		RunID:      job.RunID,
+		DryRun:     job.DryRun,
+		LowNoise:   job.LowNoise,
+		StateDir:   stateDir,
+	}
+	local := source.ArchiveImportReport{SourceName: job.SourceName, RunID: job.RunID}
+	err = importer.ProcessSourceImportJob(
+		ctx,
+		job.SourceName,
+		job,
+		request,
+		&local,
+	)
+	if err != nil {
+		if errors.Is(err, source.ErrArchiveMessageRejected) {
+			if ackErr := receipt.Ack(ctx); ackErr != nil {
+				return ackErr
+			}
+			mu.Lock()
+			report.ParseFailures += local.ParseFailures
+			report.Failures = append(report.Failures, err.Error())
+			report.Processed++
+			if !quiet {
+				logSourceImportWorkerProgress(*report, start)
+			}
+			mu.Unlock()
+
+			return nil
+		}
+		if retryErr := receipt.Retry(ctx, err); retryErr != nil {
+			return retryErr
+		}
+		mu.Lock()
+		report.Failures = append(report.Failures, err.Error())
+		if !quiet {
+			logSourceImportWorkerProgress(*report, start)
+		}
+		mu.Unlock()
+		_, processErr := publisher.ProcessSourceImportFailures(
+			ctx,
+			sourceImportFailureProcessLimitForCLI(),
+		)
+
+		return processErr
+	}
+	if ackErr := receipt.Ack(ctx); ackErr != nil {
+		return ackErr
+	}
+	mu.Lock()
+	report.Processed++
+	report.Imported += local.Imported
+	report.ExactDuplicates += local.ExactDuplicates
+	report.MessageIDDuplicates += local.MessageIDDuplicates
+	report.GeneratedMessageIDs += local.GeneratedMessageIDs
+	report.LowNoiseSkipped += local.LowNoiseSkipped
+	report.TrivialSkipped += local.TrivialSkipped
+	report.MinorVersions += local.MinorVersions
+	report.MajorVersions += local.MajorVersions
+	report.Promoted += local.Promoted
+	report.Collisions += local.Collisions
+	if !quiet {
+		logSourceImportWorkerProgress(*report, start)
+	}
+	mu.Unlock()
+
+	return nil
+}
+
+func sourceImportFailureProcessLimitForCLI() int {
+	return 100
+}
+
+func logSourceImportWorkerProgress(report source.ArchiveImportReport, start time.Time) {
+	elapsed := time.Since(start).Round(time.Second)
+	rate := 0.0
+	if seconds := time.Since(start).Seconds(); seconds > 0 {
+		rate = float64(report.Processed) / seconds
+	}
+	fmt.Fprintf(
+		os.Stderr,
+		"\rimport-worker: processed=%d imported=%d duplicates=%d failures=%d %.0f msg/s elapsed=%s   ",
+		report.Processed,
+		report.Imported,
+		report.ExactDuplicates+report.MessageIDDuplicates,
+		len(report.Failures),
+		rate,
+		elapsed,
+	)
 }
 
 func archiveImportStateDir(loaded *config.Loaded, override string) string {
@@ -744,56 +1065,58 @@ func runConfiguredInboxRefresh(
 	sourceConfig config.SourceConfig,
 ) {
 	interval := sourceRefreshInterval(sourceConfig.InboxRefresh.Interval)
+	queries := inboxRefreshQueries(sourceConfig.InboxRefresh)
+refreshLoop:
 	for {
-		query := firstNonEmpty(
-			sourceConfig.InboxRefresh.Query,
-			"in:inbox newer_than:30d",
-		)
-		fmt.Printf(
-			"source inbox refresh: started source=%s/%s query=%q\n",
-			pull.Kind(),
-			pull.Name(),
-			query,
-		)
-		report, err := service.RunBackfill(ctx, pull, source.BackfillRequest{
-			Cursor: map[string]any{
-				"mode":  "full",
-				"query": query,
-			},
-			// Inbox refresh is high priority and runs at full speed: it never pauses
-			// under analysis backpressure, and its analysis preempts backfill's.
-			PriorityClass: contracts.PriorityFreshIngest,
-			CursorKey:     "inbox_refresh",
-			PageSize:      sourceConfig.InboxRefresh.PageSize,
-			MaxPages:      sourceConfig.InboxRefresh.MaxPages,
-			Concurrency:   sourceConfig.InboxRefresh.Concurrency,
-			Resume:        false,
-		})
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
+		for index, query := range queries {
 			fmt.Printf(
-				"source inbox refresh: failed source=%s/%s error=%v\n",
+				"source inbox refresh: started source=%s/%s query=%q\n",
 				pull.Kind(),
 				pull.Name(),
-				err,
+				query,
 			)
-			if !waitConfiguredSourceRetry(ctx) {
-				return
-			}
+			report, err := service.RunBackfill(ctx, pull, source.BackfillRequest{
+				Cursor: map[string]any{
+					"mode":  "full",
+					"query": query,
+				},
+				// Inbox refresh is high priority and runs at full speed: it never pauses
+				// under analysis backpressure, and its analysis preempts backfill's.
+				PriorityClass: contracts.PriorityFreshIngest,
+				CursorKey:     inboxRefreshCursorKey(index),
+				PageSize:      sourceConfig.InboxRefresh.PageSize,
+				MaxPages:      sourceConfig.InboxRefresh.MaxPages,
+				Concurrency:   sourceConfig.InboxRefresh.Concurrency,
+				Resume:        false,
+			})
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				fmt.Printf(
+					"source inbox refresh: failed source=%s/%s query=%q error=%v\n",
+					pull.Kind(),
+					pull.Name(),
+					query,
+					err,
+				)
+				if !waitConfiguredSourceRetry(ctx) {
+					return
+				}
 
-			continue
+				continue refreshLoop
+			}
+			fmt.Printf(
+				"source inbox refresh: completed source=%s/%s query=%q processed=%d created=%d skipped=%d completed=%t\n",
+				pull.Kind(),
+				pull.Name(),
+				query,
+				report.Processed,
+				report.Created,
+				report.Skipped,
+				report.Completed,
+			)
 		}
-		fmt.Printf(
-			"source inbox refresh: completed source=%s/%s processed=%d created=%d skipped=%d completed=%t\n",
-			pull.Kind(),
-			pull.Name(),
-			report.Processed,
-			report.Created,
-			report.Skipped,
-			report.Completed,
-		)
 
 		timer := time.NewTimer(interval)
 		select {
@@ -804,6 +1127,34 @@ func runConfiguredInboxRefresh(
 		case <-timer.C:
 		}
 	}
+}
+
+func inboxRefreshQueries(refreshConfig config.SourceInboxRefreshConfig) []string {
+	configuredQueries := refreshConfig.Queries
+	if len(configuredQueries) == 0 {
+		configuredQueries = []string{refreshConfig.Query}
+	}
+
+	queries := make([]string, 0, len(configuredQueries))
+	for _, query := range configuredQueries {
+		query = strings.TrimSpace(query)
+		if query != "" {
+			queries = append(queries, query)
+		}
+	}
+	if len(queries) == 0 {
+		return []string{"in:inbox newer_than:30d"}
+	}
+
+	return queries
+}
+
+func inboxRefreshCursorKey(index int) string {
+	if index == 0 {
+		return "inbox_refresh"
+	}
+
+	return fmt.Sprintf("inbox_refresh_%d", index+1)
 }
 
 func waitConfiguredSourceRetry(ctx context.Context) bool {

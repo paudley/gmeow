@@ -20,6 +20,7 @@ import (
 	"errors"
 	"maps"
 	"math"
+	"strings"
 	"sync"
 )
 
@@ -29,6 +30,14 @@ import (
 type Vector = []float32
 
 const (
+	// NamespaceContactClaim is the legacy/default cache namespace for contact
+	// identity claim values. It intentionally uses bare StatementHash keys so
+	// existing persisted resolution states remain warm after this change.
+	NamespaceContactClaim = "contact_claim"
+	// NamespaceEmailSegment isolates email body/header segment embeddings from
+	// contact claim vectors. Email text has a different distribution and must not
+	// feed the contact residual basis used by identity resolution.
+	NamespaceEmailSegment = "email_segment"
 	// FullDim is the native dimensionality of nomic-embed-text-v1.5.
 	FullDim = 768
 	// CoarseDim is the Matryoshka prefix used for cheap coarse blocking. Slicing
@@ -44,6 +53,35 @@ func StatementHash(text string) string {
 	sum := sha256.Sum256([]byte(text))
 
 	return hex.EncodeToString(sum[:])
+}
+
+// CacheKey scopes a text embedding to a purpose namespace. The default/contact
+// namespace deliberately preserves the historical key format for state
+// compatibility; all other namespaces are prefixed.
+func CacheKey(namespace, text string) string {
+	hash := StatementHash(text)
+	if normalizedNamespace(namespace) == NamespaceContactClaim {
+		return hash
+	}
+
+	return normalizedNamespace(namespace) + "\x00" + hash
+}
+
+func normalizedNamespace(namespace string) string {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return NamespaceContactClaim
+	}
+
+	return namespace
+}
+
+func cacheKeyNamespace(key string) string {
+	if before, _, found := strings.Cut(key, "\x00"); found {
+		return before
+	}
+
+	return NamespaceContactClaim
 }
 
 // VectorFromFloat64 converts an endpoint vector to the float32 form used

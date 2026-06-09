@@ -10,10 +10,13 @@ through `FilestoreService` gRPC, check whether the exact analyzer name/version
 annotation already exists, and run only missing work. Results are written back
 to FILESTORE as annotations, and jobs are acked only after durable writes.
 
-Workers are concurrent but analyzer-specific endpoint calls are constrained
-where required. Summary and embedding endpoint calls are serialized per worker
-instance, use a 60s timeout, and route endpoint failures back through SCHEDULER
-retry handling.
+Workers are concurrent but analyzer-specific model calls are constrained where
+required. Summary endpoint calls are serialized per worker instance. All
+embedding work routes through the EMBEDDING gRPC service; analyzers, importers,
+QUERY commands, and interfaces must never call an embedding HTTP endpoint
+directly. EMBEDDING owns its managed embedding backend, batching, and the
+model-scoped `email_segment` cache namespace. Model failures route back through
+SCHEDULER retry handling.
 
 Each analyzer drains its own SCHEDULER work queue through a dedicated consumer
 pool, so a slow model-backed analyzer never head-of-line-blocks a fast
@@ -33,9 +36,9 @@ The email cutover analyzer versions are `phase04-email-v2` for Go analyzers and
 validation passes.
 
 Go analyzers include text extraction, RFC822/header parsing, metadata
-extraction, graph fact extraction, endpoint embeddings, and model-backed
-summaries. NER and categorization remain explicit `gmeow-intel` external
-adapters when Go parity is not proven.
+extraction, graph fact extraction, EMBEDDING-service-backed email embeddings,
+and model-backed summaries. NER and categorization remain explicit
+`gmeow-intel` external adapters when Go parity is not proven.
 
 ## Quality Rules
 

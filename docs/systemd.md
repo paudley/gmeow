@@ -12,8 +12,8 @@ RabbitMQ access, and analyzers only read and write FILESTORE.
 
 - `gmeow.target` is the umbrella unit for the whole deployment.
 - `gmeow-core.target` groups core services:
-  `gmeow-filestore.service`, `gmeow-query.service`, and
-  `gmeow-scheduler.service`.
+  `gmeow-filestore.service`, `gmeow-query.service`,
+  `gmeow-scheduler.service`, and `gmeow-embedding.service`.
 - `gmeow-backends.target` groups source/backend services such as
   `gmeow-source@primary.service`.
 - `gmeow-workers.target` groups analysis workers such as
@@ -113,7 +113,8 @@ These defaults fit the current production shape:
 - Gmail source services call Gmail APIs and FILESTORE-facing ingest contracts.
 - QUERY is the only service that needs PostgreSQL access.
 - SCHEDULER is the only service that needs RabbitMQ access.
-- Analysis workers talk to FILESTORE and SCHEDULER job delivery only.
+- Analysis workers talk to FILESTORE, SCHEDULER job delivery, and the
+  EMBEDDING gRPC service for email embedding vectors.
 - Worker units set `UV_CACHE_DIR`, `UV_PROJECT_ENVIRONMENT`, and
   `XDG_CACHE_HOME` under `/var/lib/gmeow` so Python analyzer environments and
   caches stay inside the writable state directory.

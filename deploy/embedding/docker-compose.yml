@@ -1,17 +1,11 @@
 # gmeow-controlled embedding backend: a pinned Ollama serving nomic-embed-text.
 #
-# This is the Docker alternative to `gmeow embedding-serve --manage-model`. It
-# gives a reproducible, auto-restarting embedding endpoint that gmeow owns,
-# instead of requiring an operator-run model server (the thing that kept
-# crashing). gmeow's EMBEDDING service points its HTTP embedder at it.
+# This is an operator diagnostic escape hatch for an Ollama-compatible backend.
+# Production Gmeow embedding callers must not use it directly; they use only the
+# EMBEDDING gRPC service, and EMBEDDING owns its managed backend.
 #
 #   make embedding-up      # start + pull the model
 #   make embedding-down    # stop
-#
-# Then in gmeow.toml:
-#   [analysis.embeddings]
-#   endpoint = "http://127.0.0.1:11434/v1/embeddings"
-#   model    = "nomic-embed-text"
 #
 # GPU: this file is wired for AMD ROCm (the dev box is a Strix Halo / Radeon
 # 8060S, gfx1151). It uses the `ollama/ollama:rocm` image and passes the kernel

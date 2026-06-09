@@ -176,7 +176,7 @@ func (analyzer *SummaryAnalyzer) summarize(
 
 	var summary summaryPayload
 	content := strings.TrimSpace(decoded.Choices[0].Message.Content)
-	if err := json.Unmarshal([]byte(stripJSONFence(content)), &summary); err != nil {
+	if err := json.Unmarshal([]byte(summaryJSONContent(content)), &summary); err != nil {
 		return summaryPayload{}, fmt.Errorf(
 			"summary endpoint returned non-json content: %w",
 			err,
@@ -204,6 +204,27 @@ func stripJSONFence(content string) string {
 	}
 
 	return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
+}
+
+func summaryJSONContent(content string) string {
+	content = stripJSONFence(content)
+	if strings.HasPrefix(strings.TrimSpace(content), "{") {
+		return content
+	}
+
+	for index, char := range content {
+		if char != '{' {
+			continue
+		}
+
+		var raw json.RawMessage
+		decoder := json.NewDecoder(strings.NewReader(content[index:]))
+		if err := decoder.Decode(&raw); err == nil && len(raw) > 0 {
+			return string(raw)
+		}
+	}
+
+	return content
 }
 
 func validateSummary(summary summaryPayload, input string) error {

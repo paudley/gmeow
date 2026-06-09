@@ -223,10 +223,13 @@ Python/model analyzers must be configured as explicit persistent external adapte
 `gmeow-intel serve ner.spacy` or `gmeow-intel serve categories.sklearn`; commandless Python
 analyzers fail closed at startup. Configured analyzers must produce real FILESTORE annotations:
 spaCy NER uses `en_core_web_sm`, categorization uses the sklearn/main-branch category engine, and
-model-backed summary/embedding endpoints fail closed when dependencies, endpoints, or quality
-checks are missing. Model-backed summary and embedding calls are serialized per worker instance,
-time out after 60s, and failed jobs return through SCHEDULER retry handling with exponential
-backoff.
+model-backed summaries fail closed when dependencies, endpoints, or quality
+checks are missing. Summary calls are serialized per worker instance. All Gmeow
+embedding callers use the EMBEDDING gRPC service; no worker, importer, QUERY
+command, or interface is allowed to call an embedding HTTP endpoint directly.
+The EMBEDDING service owns its managed embedding backend, batching, and the
+namespaced embedding cache. Model calls time out after 60s, and failed jobs
+return through SCHEDULER retry handling with exponential backoff.
 
 The email production cutover analyzer versions are `phase04-email-v2` for Go analyzers and
 `python-email-v1` for Python analyzers. Older `phase04` and `python-current` annotations are stale

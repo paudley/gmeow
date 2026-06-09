@@ -22,6 +22,7 @@ import (
 //     dominant cost when bulk-importing millions of small mail objects.
 type metaSink interface {
 	set(key string, value any) error
+	delete(key string) error
 }
 
 // syncSink commits each write immediately, preserving the pre-batch behaviour
@@ -36,6 +37,10 @@ func (store *FilesystemStore) syncSink() syncSink {
 
 func (sink syncSink) set(key string, value any) error {
 	return sink.store.metaPut(key, value)
+}
+
+func (sink syncSink) delete(key string) error {
+	return sink.store.metaDelete(key)
 }
 
 // commitBatch coalesces all metadata writes and pack fsyncs for a single object
@@ -86,6 +91,10 @@ func (cb *commitBatch) set(key string, value any) error {
 	}
 
 	return cb.batch.Set([]byte(key), encoded, nil)
+}
+
+func (cb *commitBatch) delete(key string) error {
+	return cb.batch.Delete([]byte(key), nil)
 }
 
 // commit fsyncs every pack the object's chunks were appended to (and the pack

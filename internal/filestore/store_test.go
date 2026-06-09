@@ -897,6 +897,60 @@ func TestWalkChangedProjectionFiltersByManifestAndAnnotationTimes(t *testing.T) 
 	if !changed[older] || !changed[newer] {
 		t.Fatalf("expected changed manifest and annotation objects, got %#v", changed)
 	}
+	if countMetaPrefix(t, store, "pc/") == 0 {
+		t.Fatal("expected projection change index entries")
+	}
+}
+
+func TestWalkChangedProjectionSeedsMissingChangeIndex(t *testing.T) {
+	store := NewFilesystemStore(t.TempDir())
+	ctx := context.Background()
+	digest, err := store.Put(ctx, PutRequest{
+		Reader: strings.NewReader("legacy indexed later"),
+		Facets: []contracts.Facet{{Kind: "file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := store.ReadManifest(ctx, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutoff := manifest.CreatedAt.Add(-time.Millisecond)
+	deleteProjectionChangeIndex(t, store)
+
+	first := []contracts.ObjectDigest{}
+	if err := store.WalkChangedProjection(
+		ctx,
+		cutoff,
+		func(object ProjectionObject) error {
+			first = append(first, object.Digest)
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0] != digest {
+		t.Fatalf("fallback changed projection = %#v, want %s", first, digest)
+	}
+	if countMetaPrefix(t, store, "pc/") == 0 {
+		t.Fatal("fallback did not seed projection change index")
+	}
+
+	second := []contracts.ObjectDigest{}
+	if err := store.WalkChangedProjection(
+		ctx,
+		cutoff,
+		func(object ProjectionObject) error {
+			second = append(second, object.Digest)
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0] != digest {
+		t.Fatalf("indexed changed projection = %#v, want %s", second, digest)
+	}
 }
 
 func TestWalkSourceCursorsReadsSourceState(t *testing.T) {
@@ -932,6 +986,22 @@ func TestWalkSourceCursorsReadsSourceState(t *testing.T) {
 	}
 	if !found || cursor.Cursor["history_id"] != "42" {
 		t.Fatalf("expected direct source cursor read, found=%t cursor=%#v", found, cursor)
+	}
+}
+
+func deleteProjectionChangeIndex(t *testing.T, store *FilesystemStore) {
+	t.Helper()
+	keys := []string{}
+	for _, prefix := range []string{"pc/", "pc-latest/"} {
+		if err := store.metaIterPrefix(prefix, func(key string, _ []byte) error {
+			keys = append(keys, key)
+			return nil
+		}); err != nil {
+			t.Fatalf("iterate %s: %v", prefix, err)
+		}
+	}
+	if err := store.metaDeleteKeys(keys); err != nil {
+		t.Fatalf("delete projection change index: %v", err)
 	}
 }
 
